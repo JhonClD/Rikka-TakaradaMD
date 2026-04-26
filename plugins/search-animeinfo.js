@@ -14,8 +14,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   } catch {
     tradutor = { 
       texto1: 'Por favor, ingresa el nombre de un anime.', 
-      texto3: '[❗] OCURRIÓ UN ERROR, INTÉNTALO DE NUEVO',
-      texto_procesando: '⏳ Buscando información...'
+      texto3: 'No Se Encontro Información Del Anime',
+      texto_procesando: '⏳ Buscando Información...'
     };
   }
 
@@ -155,7 +155,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       .map(g => TRADUCCIONES.generos[g] || g)
       .join(', ');
 
-    const AnimeInfo = `✨ *INFORMACIÓN DEL ANIME* ✨
+    const AnimeInfo = `✨*INFORMACIÓN DEL ANIME*✨
 
 🈺 *Título:* ${titulo}${tituloIngles}${tituloNativo}
 🏦 *Estudio:* ${estudios}
