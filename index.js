@@ -1,121 +1,144 @@
-import { spawn } from 'child_process';
+import { join, dirname } from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import path from 'path';
-import fs from 'fs';
-import chalk from 'chalk';
+import { setupMaster, fork } from 'cluster';
+import cfonts from 'cfonts';
+import readline from 'readline';
+import yargs from 'yargs';
+import chalk from 'chalk'; 
+import fs from 'fs'; 
+import './config.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(__dirname);
+const { say } = cfonts;
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+let isRunning = false;
+let childProcess = null;
 
-async function getMemoryLimitMB() {
-  try {
-    const cgroupV2 = '/sys/fs/cgroup/memory.max';
-    const cgroupV1 = '/sys/fs/cgroup/memory/memory.limit_in_bytes';
+const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
-    if (fs.existsSync(cgroupV2)) {
-      const val = fs.readFileSync(cgroupV2, 'utf8').trim();
-      if (val !== 'max') return Math.floor(parseInt(val) / 1024 / 1024);
-    }
-    if (fs.existsSync(cgroupV1)) {
-      const val = parseInt(fs.readFileSync(cgroupV1, 'utf8').trim());
-      if (val > 0 && val < Number.MAX_SAFE_INTEGER) return Math.floor(val / 1024 / 1024);
-    }
-    const meminfo = fs.readFileSync('/proc/meminfo', 'utf8');
-    const match = meminfo.match(/MemTotal:\s+(\d+)\s+kB/);
-    if (match) return Math.floor(parseInt(match[1]) / 1024);
-  } catch {}
-  return 512;
+console.log(chalk.yellow.bold('—◉ㅤIniciando sistema...'));
+
+function verificarOCrearCarpetaAuth() {
+  const authPath = join(__dirname, global.authFile);
+  if (!fs.existsSync(authPath)) {
+    fs.mkdirSync(authPath, { recursive: true });
+  }
 }
 
-const totalMB = await getMemoryLimitMB();
-const limitMB = Math.floor(totalMB * 0.85);
-const alreadyLaunched = process.env.KANA_LAUNCHED === '1';
-
-if (!alreadyLaunched) {
-  console.log(chalk.cyan(`\n[ 📊 ] RAM total: ${totalMB}MB | Límite Node: ${limitMB}MB\n`));
+function verificarCredsJson() {
+  const credsPath = join(__dirname, global.authFile, 'creds.json');
+  return fs.existsSync(credsPath);
 }
 
-const MAIN_SCRIPT = path.join(__dirname, 'index-main.js');
-const MAX_RESTARTS = 10;
-const RESTART_WINDOW = 120_000;
+function formatearNumeroTelefono(numero) {
+  let formattedNumber = numero.replace(/[^\d+]/g, '');
+  if (formattedNumber.startsWith('+52') && !formattedNumber.startsWith('+521')) {
+    formattedNumber = formattedNumber.replace('+52', '+521');
+  } else if (formattedNumber.startsWith('52') && !formattedNumber.startsWith('521')) {
+    formattedNumber = `+521${formattedNumber.slice(2)}`;
+  } else if (formattedNumber.startsWith('52') && formattedNumber.length >= 12) {
+    formattedNumber = `+${formattedNumber}`;
+  } else if (!formattedNumber.startsWith('+')) {
+    formattedNumber = `+${formattedNumber}`;
+  }
+  return formattedNumber;
+}
 
-let child = null;
-let restartCount = 0;
-let firstRestartAt = null;
-let restarting = false;
+function esNumeroValido(numeroTelefono) {
+  const regex = /^\+\d{7,15}$/;
+  return regex.test(numeroTelefono);
+}
 
-function startChild() {
-  if (restarting) return;
+async function start(file) {
+  if (isRunning) return;
+  isRunning = true;
 
-  child = spawn(
-    'node',
-    [
-      `--max-old-space-size=${limitMB}`,
-      '--expose-gc',
-      MAIN_SCRIPT,
-      ...process.argv.slice(2),
-    ],
-    {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        KANA_LAUNCHED: '1',
-        NODE_ENV: process.env.NODE_ENV || 'production',
-      },
-    }
-  );
-
-  child.on('exit', (code, signal) => {
-    if (signal === 'SIGINT' || code === 0) {
-      process.exit(code || 0);
-    }
-
-    const now = Date.now();
-    if (!firstRestartAt || now - firstRestartAt > RESTART_WINDOW) {
-      firstRestartAt = now;
-      restartCount = 0;
-    }
-    restartCount++;
-
-    if (restartCount >= MAX_RESTARTS) {
-      console.error(
-        chalk.red(`\n[ ❌ ] ${MAX_RESTARTS} reinicios en 2 min. Deteniendo para evitar loop.\n`)
-      );
-      process.exit(1);
-    }
-
-    console.log(
-      chalk.yellow(`\n[ 🔄 ] Reiniciando... (${restartCount}/${MAX_RESTARTS})\n`)
-    );
-
-    setTimeout(() => {
-      restarting = false;
-      startChild();
-    }, 3000);
+  say('The Mystic\nBot', {
+    font: 'chrome',
+    align: 'center',
+    gradient: ['red', 'magenta'],
   });
 
-  child.on('error', err => {
-    console.error(chalk.red('[ ❌ ] Error en proceso:'), err.message);
-    setTimeout(() => startChild(), 5000);
+  say(`Bot creado por Bruno Sobrino`, {
+    font: 'console',
+    align: 'center',
+    gradient: ['red', 'magenta'],
   });
+
+  verificarOCrearCarpetaAuth();
+
+  if (verificarCredsJson()) {
+    const args = [join(__dirname, file), ...process.argv.slice(2)];
+    setupMaster({ exec: args[0], args: args.slice(1) });
+    forkProcess(file);
+    return;
+  }
+
+  const opcion = await question(chalk.yellowBright.bold('—◉ㅤSeleccione una opción (solo el numero):\n') + chalk.white.bold('1. Con código QR\n2. Con código de texto de 8 dígitos\n—> '));
+
+  if (opcion === '2') {
+    const phoneNumber = await question(chalk.yellowBright.bold('\n—◉ㅤEscriba su número de WhatsApp:\n') + chalk.white.bold('◉ㅤEjemplo: +5219992095479\n—> '));
+    const numeroTelefono = formatearNumeroTelefono(phoneNumber);
+    
+    if (!esNumeroValido(numeroTelefono)) {
+      console.log(chalk.bgRed(chalk.white.bold('[ ERROR ] Número inválido. Asegúrese de haber escrito su numero en formato internacional y haber comenzado con el código de país.\n—◉ㅤEjemplo:\n◉ +5219992095479\n')));
+      process.exit(0);
+    }
+    
+    process.argv.push('--phone=' + numeroTelefono);
+    process.argv.push('--method=code');
+  } else if (opcion === '1') {
+    process.argv.push('--method=qr');
+  }
+  
+  const args = [join(__dirname, file), ...process.argv.slice(2)];
+  setupMaster({ exec: args[0], args: args.slice(1) });
+  forkProcess(file);
 }
 
-process.on('SIGINT', () => {
-  if (child) child.kill('SIGINT');
-  process.exit(0);
-});
+function forkProcess(file) {
+  childProcess = fork();
 
-process.on('SIGTERM', () => {
-  if (child) child.kill('SIGTERM');
-  process.exit(0);
-});
+  childProcess.on('message', (data) => {
+    console.log(chalk.green.bold('—◉ㅤRECIBIDO:'), data);
+    switch (data) {
+      case 'reset':
+        console.log(chalk.yellow.bold('—◉ㅤSolicitud de reinicio recibida...'));
+        childProcess.removeAllListeners();
+        childProcess.kill('SIGTERM');
+        isRunning = false;
+        setTimeout(() => start(file), 1000);
+        break;
+      case 'uptime':
+        childProcess.send(process.uptime());
+        break;
+    }
+  });
 
-process.on('uncaughtException', e => {
-  console.error(chalk.red('[ ❌ ] UncaughtException:'), e.message);
-});
+  childProcess.on('exit', (code, signal) => {
+    console.log(chalk.yellow.bold(`—◉ㅤProceso secundario terminado (${code || signal})`));
+    isRunning = false;
+    childProcess = null;
+    
+    if (code !== 0 || signal === 'SIGTERM') {
+      console.log(chalk.yellow.bold('—◉ㅤReiniciando proceso...'));
+      setTimeout(() => start(file), 1000);
+    }
+  });
 
-process.on('unhandledRejection', r => {
-  console.error(chalk.red('[ ❌ ] UnhandledRejection:'), r);
-});
+  const opts = yargs(process.argv.slice(2)).argv;
+  if (!opts.test) {
+    rl.on('line', (line) => {
+      childProcess.emit('message', line.trim());
+    });
+  }
+}
 
-startChild();
+try {
+  start('main.js');
+} catch (error) {
+  console.error(chalk.red.bold('[ ERROR CRÍTICO ]:'), error);
+  process.exit(1);
+}

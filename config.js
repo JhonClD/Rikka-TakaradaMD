@@ -36,7 +36,7 @@ global.wait = '*_[ ⏳ ] Cargando..._*';
 
 
 
-try { global.imagen1 = fs.readFileSync('./src/menu/menu.png'); } catch { global.imagen1 = null; }
+global.imagen1 = fs.readFileSync('./src/assets/images/menu.png');
 
 global.mods = [];
 
