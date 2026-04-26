@@ -1,85 +1,54 @@
-import { simpleGit } from 'simple-git';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
+import fs from 'fs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, '..');
-
-const handler = async (m, { conn, usedPrefix }) => {
-  const isOwner =
-    (global.owner || []).some(([num]) => m.sender.startsWith(num)) ||
-    m.sender.startsWith(global.nomorown || '');
-
-  if (!isOwner) return m.reply('❌ Solo el *owner* puede actualizar el bot.');
-
-  const wait = await conn.sendMessage(m.chat, {
-    text: `⏳ *Buscando actualizaciones...*`,
-  }, { quoted: m });
+const handler = async (m, { conn, text }) => {
+  const idioma = global.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
+  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`));
+  const tradutor = _translate.plugins.propietario_actualizar;
 
   try {
-    const git = simpleGit(ROOT);
+    const stdout = execSync('git pull' + (m.fromMe && text ? ' ' + text : ''));
+    let messager = stdout.toString();
+    if (messager.includes('Already up to date.')) messager = tradutor.texto1;
+    if (messager.includes('Updating')) messager = tradutor.texto2 + stdout.toString();
+    conn.reply(m.chat, messager, m);
+  } catch {
+    try {
+      const status = execSync('git status --porcelain');
+      if (status.length > 0) {
+        const conflictedFiles = status
+          .toString()
+          .split('\n')
+          .filter(line => line.trim() !== '')
+          .map(line => {
+            if (
+              line.includes('.npm/') ||
+              line.includes('.cache/') ||
+              line.includes('tmp/') ||
+              line.includes('RikkaSession/') ||
+              line.includes('npm-debug.log')
+            ) return null;
+            return '*→ ' + line.slice(3) + '*';
+          })
+          .filter(Boolean);
 
-    // Info del remote antes del pull
-    const statusBefore = await git.log({ maxCount: 1 });
-    const commitAntes = statusBefore.latest;
-
-    // Fetch para ver si hay cambios
-    await git.fetch();
-    const status = await git.status();
-
-    if (status.behind === 0) {
-      return conn.sendMessage(m.chat, {
-        text:
-          `🔮 *El bot ya está actualizado*\n\n` +
-          ` 📌 *Commit actual:*\n` +
-          `┊ \`${commitAntes?.hash?.slice(0, 7)}\` ${commitAntes?.message || ''}`,
-        edit: wait.key,
-      });
+        if (conflictedFiles.length > 0) {
+          const errorMessage = `${tradutor.texto3}\n\n${conflictedFiles.join('\n')}.*`;
+          await conn.reply(m.chat, errorMessage, m);
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      let errorMessage2 = tradutor.texto4;
+      if (error.message) errorMessage2 += '\n*- Mensaje de error:* ' + error.message;
+      await conn.reply(m.chat, errorMessage2, m);
     }
-
-    // Hay commits nuevos — hacer pull
-    const pull = await git.pull('origin', undefined, { '--rebase': 'false' });
-
-    const statusAfter = await git.log({ maxCount: 1 });
-    const commitDespues = statusAfter.latest;
-
-    const filesChanged = pull.files.length
-      ? pull.files.slice(0, 10).map(f => `┊ 📄 ${f}`).join('\n') +
-        (pull.files.length > 10 ? `\n┊ _...y ${pull.files.length - 10} más_` : '')
-      : '┊ _Sin archivos detallados_';
-
-    await conn.sendMessage(m.chat, {
-      text:
-        `✅ *Bot actualizado correctamente*\n\n` +
-        `📦 *Resumen*\n` +
-        `🔼 *Commits nuevos:* ${status.behind}\n` +
-        `➕ *Inserciones:* ${pull.insertions || 0}\n` +
-        `➖ *Eliminaciones:* ${pull.deletions || 0}\n` +
-        `\n\n` +
-        `📄 *Archivos modificados*\n` +
-        `${filesChanged}\n` +
-        `\n\n` +
-        `*Commits*\n` +
-        `*Antes:* \`${commitAntes?.hash?.slice(0, 7)}\` ${commitAntes?.message || ''}\n` +
-        `*Ahora:* \`${commitDespues?.hash?.slice(0, 7)}\` ${commitDespues?.message || ''}\n` +
-        `\n\n`
-      edit: wait.key,
-    });
-
-  } catch (err) {
-    await conn.sendMessage(m.chat, {
-      text:
-        `❌ *Error al actualizar*\n\n` +
-        `╰┈➤ ${err.message || err}`,
-      edit: wait.key,
-    });
   }
 };
 
 handler.help = ['update'];
 handler.tags = ['owner'];
 handler.command = /^(update|actualizar|gitpull)$/i;
-handler.owner = true;
+handler.rowner = true;
 
 export default handler;
-      
