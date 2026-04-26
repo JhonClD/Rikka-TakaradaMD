@@ -2,9 +2,12 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 
 const handler = async (m, { conn, text }) => {
-  const idioma = global.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
-  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`));
-  const tradutor = _translate.plugins.propietario_actualizar;
+  const tradutor = {
+    texto1: "_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*",
+    texto2: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Actualización finalizada exitosamente.*\n\n",
+    texto3: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Se han hecho cambios locales en archivos del bot que entran en conflicto con las actualizaciones del repositorio. Para actualizar, reinstala el bot o realiza las actualizaciones manualmente.*\n\n*Archivos en conflicto:*",
+    texto4: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Ocurrió un error. Por favor, inténtalo de nuevo más tarde.*"
+  };
 
   try {
     const stdout = execSync('git pull' + (m.fromMe && text ? ' ' + text : ''));
