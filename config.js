@@ -6,7 +6,7 @@ import moment from 'moment-timezone';
 
 global.botnumber = ""
 global.confirmCode = ""
-global.authFile = `KanaSession`;
+global.authFile = `RikkaSession`;
 
 // Cambiar a true si el Bot responde a sus comandos con otros comandos.
 // Cambiar a false para usar el Bot desde el mismo numero del Bot.
@@ -26,12 +26,12 @@ global.prems = ['84796064576'];
 // Base Rest Api
 global.BASE_API_DELIRIUS = "https://delirius-apiofc.vercel.app";
 
-global.packname = 'Kana';
+global.packname = 'Rikka';
 global.author = '᭄🅜֟፝ıηͨσ‍ͥяͩυ🧸⃝꙰ཻུ⸙͎';
-global.wm = 'Kana Arima - Bot';
-global.titulowm = 'Kana Bot';
-global.titulowm2 = `Kana Bot`
-global.igfg = 'Kana Arima';
+global.wm = 'Rikka Takarada - Bot';
+global.titulowm = 'Takarada MD';
+global.titulowm2 = `Rikka MD`
+global.igfg = 'Rikka Takarada';
 global.wait = '*_[ ⏳ ] Cargando..._*';
 
 
@@ -49,12 +49,12 @@ global.mes = d.toLocaleDateString('es', {month: 'long'});
 global.año = d.toLocaleDateString('es', {year: 'numeric'});
 global.tiempo = d.toLocaleString('en-US', {hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true});
 //* ****************************
-global.wm2 = `${dia} ${fecha}\nKana Arima-MD`;
-global.gt = 'Kana Arima-MD';
-global.kanaarima = 'Kana Arima-MD';
+global.wm2 = `${dia} ${fecha}\nRikka Takarada-MD`;
+global.gt = 'Rikka Takarada-MD';
+global.rikka = 'Rikka Takarada-MD';
 global.channel = '';
 global.md = '';
-global.mysticbot = '';
+global.rikkabot = '';
 global.waitt = '*_[ ⏳ ] Cargando..._*';
 global.waittt = '*_[ ⏳ ] Cargando..._*';
 global.waitttt = '*_[ ⏳ ] Cargando..._*';
