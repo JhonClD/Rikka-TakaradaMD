@@ -1,4 +1,4 @@
-# 🌸 Kana Arima MD — Bot de WhatsApp
+# 🔮 Rikka Takarada—MD Bot de WhatsApp
 
 Bot multifunción para WhatsApp basado en Node.js y Baileys.
 
