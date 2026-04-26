@@ -1,5 +1,4 @@
 import moment from 'moment-timezone';
-import { proto, generateWAMessageFromContent, prepareWAMessageMedia } from '@whiskeysockets/baileys';
 
 const TIMEZONE = 'America/Lima';
 
@@ -19,13 +18,11 @@ const CAT_ICONS = {
 };
 const getIcon = cat => CAT_ICONS[cat.toLowerCase()] || '📌';
 
-// Lee todos los plugins de global.plugins y agrupa por tag automáticamente
 function buildCategories() {
   const cats = {};
   for (const [, plugin] of Object.entries(global.plugins || {})) {
     if (!plugin?.command) continue;
     const tag = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
-    // Obtener nombres de comandos
     let cmds = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : []);
     if (!cmds.length) {
       cmds = plugin.command instanceof RegExp
@@ -52,102 +49,43 @@ const handler = async (m, { conn, usedPrefix }) => {
   const categories = buildCategories();
   const totalCmds  = Object.values(categories).flat().length;
 
-  // ── Texto del cuerpo ──────────────────────────────────────────
-  const bodyText =
-    `‹—────୨ৎ────˙ . ꒷🪼 . 𖦹˙—꒷꒦︶꒷꒦︶\n\n` +
-    `◉— *${botName}* —◉\n\n` +
-    `╰┈➤ 👤 *Usuario:* @${userNum}\n` +
-    `╰┈➤ 🤖 *Owner:* +${ownerNum}\n` +
-    `╰┈➤ 🕐 *Hora:* ${time}\n` +
-    `╰┈➤ 📅 *Fecha:* ${date}\n` +
-    `╰┈➤ ⏔ *Uptime:* ${uptime}\n` +
-    `╰┈➤ 🔰 *Prefix:* ${prefix}\n` +
-    `╰┈➤ 📋 *Comandos:* ${totalCmds} disponibles\n\n` +
-    `˖ ݁𖥔 ݁˖  𐙚  ˖ ݁𖥔 ݁˖  ᯓᡣ𐭩  𖤐⭒๋࣭ ⭑\n\n` +
-    `_Toca_ *☰ Lista menú* _para ver todos los comandos_`;
+  const header =
+    `┌─────────────────────┐\n` +
+    `│  ✨ *${botName}* ✨\n` +
+    `├─────────────────────┤\n` +
+    `│ 👤 *Usuario:* ${pushname}\n` +
+    `│ 🕐 *Hora:* ${time}\n` +
+    `│ 📅 *Fecha:* ${date}\n` +
+    `│ ⏱️ *Uptime:* ${uptime}\n` +
+    `│ 🤖 *Owner:* +${ownerNum}\n` +
+    `│ 🔰 *Prefix:* ${prefix}\n` +
+    `│ 📋 *Comandos:* ${totalCmds}\n` +
+    `└─────────────────────┘`;
 
-  const footerText = `${botName} • ${totalCmds} comandos`;
-
-  // ── Secciones de la lista (una por categoría, filas = comandos) ─
-  const sections = Object.entries(categories)
+  const body = Object.entries(categories)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([cat, cmds]) => ({
-      title: `${getIcon(cat)} ${cat.toUpperCase()}`,
-      rows: cmds.slice(0, 10).map(c => ({    // WA limita ~10 rows por sección
-        title:       `${prefix}${c}`,
-        description: `Comando ${prefix}${c}`,
-        id:          `${prefix}${c}`,
-      })),
-    }))
-    .filter(s => s.rows.length > 0);
+    .map(([cat, cmds]) => {
+      const icon  = getIcon(cat);
+      const title = cat.charAt(0).toUpperCase() + cat.slice(1);
+      const list  = cmds.map(c => `┊✦ ${prefix}${c}`).join('\n');
+      return `❖––––––『${icon} *${title}*\n${list}\n╰━═┅═━––––––๑`;
+    })
+    .join('\n\n');
 
-  // ── Botones ───────────────────────────────────────────────────
-  const channelUrl = global.channelUrl || 'https://whatsapp.com/channel/0029VaRikka';
+  const footer = `\n_Usa_ *${prefix}menu* _para ver esta lista_`;
+  const fullMenu = `${header}\n\n${body}${footer}`;
 
-  const buttons = [
-    {
-      name: 'single_select',
-      buttonParamsJson: JSON.stringify({
-        title: '☰ Lista menú 📋',
-        sections,
-      }),
-    },
-    {
-      name: 'cta_url',
-      buttonParamsJson: JSON.stringify({
-        display_text: 'Canal de WhatsApp',
-        url: channelUrl,
-        merchant_url: channelUrl,
-      }),
-    },
-    {
-      name: 'cta_copy',
-      buttonParamsJson: JSON.stringify({
-        display_text: 'Copiar Código',
-        copy_code: `${prefix}menu`,
-      }),
-    },
-  ];
-
-  // ── Header con imagen si hay ──────────────────────────────────
-  let header = { title: '', hasMediaAttachment: false };
   const menuImage = global.imagen1 || null;
+
   if (menuImage) {
-    try {
-      const media = await prepareWAMessageMedia(
-        { image: Buffer.isBuffer(menuImage) ? menuImage : { url: menuImage } },
-        { upload: conn.waUploadToServer }
-      );
-      if (media?.imageMessage) {
-        header = { title: '', hasMediaAttachment: true, imageMessage: media.imageMessage };
-      }
-    } catch { /* sin imagen si falla */ }
+    await conn.sendMessage(m.chat, {
+      image: menuImage,
+      caption: fullMenu,
+      mentions: [sender],
+    }, { quoted: m });
+  } else {
+    await m.reply(fullMenu);
   }
-
-  // ── Armar y enviar ────────────────────────────────────────────
-  const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
-    body:   { text: bodyText },
-    footer: { text: footerText },
-    header,
-    nativeFlowMessage: { buttons, messageParamsJson: '' },
-  });
-
-  const msgContent = {
-    viewOnceMessage: {
-      message: {
-        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-        interactiveMessage,
-      },
-    },
-  };
-
-  const fullMsg = generateWAMessageFromContent(m.chat, msgContent, {
-    userJid:  conn.user.jid,
-    quoted:   m,
-    mentions: [sender],
-  });
-
-  await conn.relayMessage(m.chat, fullMsg.message, { messageId: fullMsg.key.id });
 };
 
 handler.help = ['menu'];
