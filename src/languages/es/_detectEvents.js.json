@@ -1,41 +1,133 @@
-{
-    "_detectevents": {
-        "promote": {
-            "header": "*Recientemente se ha promovido un miembro a administrador*",
-            "group": "*◦ Grupo:* @group",
-            "new_admin": "*◦ Nuevo admin:* @user",
-            "executed_by": "*◦ Ejecutado por:* @user"
-        },
-        "demote": {
-            "header": "*Recientemente se ha degradado un administrador a miembro*",
-            "group": "*◦ Grupo:* @group",
-            "removed_admin": "*◦ Se quitó a:* @user",
-            "executed_by": "*◦ Ejecutado por:* @user"
-        },
-        "member_add": {
-            "header": "*Recientemente se ha incorporado un nuevo miembro*",
-            "group": "*◦ Grupo:* @group",
-            "added_user": "*◦ Se añadió a:* @user",
-            "added_by": "*◦ Añadido por:* @user",
-            "self_added": "*◦ Se unió:* @user"
-        },
-        "member_remove": {
-            "header": "*Recientemente se ha eliminado un miembro del grupo*",
-            "group": "*◦ Grupo:* @group",
-            "removed_user": "*◦ Se eliminó a:* @user",
-            "removed_by": "*◦ Eliminado por:* @user",
-            "self_removed": "*◦ Se salió:* @user"
-        },
-        "group_settings": {
-            "header": "*Recientemente se han modificado los ajustes del grupo*",
-            "group": "*◦ Grupo:* @group",
-            "action": "*◦ El grupo se ha:* @action",
-            "executed_by": "*◦ Ejecutado por:* @user"
-        },
-        "group_name": {
-            "header": "*Recientemente se ha cambiado el nombre del grupo*",
-            "new_name": "*◦ Nuevo nombre:* @name",
-            "executed_by": "*◦ Ejecutado por:* @user"
-        }
+import { IBaileysAdapter } from '@adapter/IBaileysAdapter.js';
+import { logger } from '@infra/logger.js';
+import { GroupMetadata, ParticipantAction } from '@whiskeysockets/baileys';
+
+export class EventHandler {
+  private detectEvents = { /* tu JSON de arriba */ };
+
+  constructor(private adapter: IBaileysAdapter) {}
+
+  async init() {
+    // Luna-Baileys 8 emite estos eventos igual que Baileys normal
+    this.adapter.onEvent('group-participants.update', (u) => this.handleParticipantsUpdate(u));
+    this.adapter.onEvent('groups.update', (u) => u.forEach(this.handleGroupUpdate.bind(this)));
+  }
+
+  private async handleParticipantsUpdate(update: {
+    id: string;
+    participants: string[];
+    action: ParticipantAction;
+    author?: string | null;
+  }) {
+    const { id, participants, action } = update;
+    let author = update.author || participants[0]; // Luna fix: author null si se sale solo
+    const ev = this.detectEvents._detectevents;
+    let text = '';
+    let mentions: string[] = [];
+
+    try {
+      const { subject: groupName } = await this.getGroupMetadata(id);
+
+      const fmt = (jid: string) => jid? `@${jid.split('@')[0]}` : '@desconocido';
+
+      if (action === 'promote') {
+        text = [
+          ev.promote.header,
+          ev.promote.group.replace('@group', groupName),
+          ev.promote.new_admin.replace('@user', fmt(participants[0])),
+          ev.promote.executed_by.replace('@user', fmt(author))
+        ].join('\n');
+        mentions = [participants[0], author].filter(Boolean);
+      }
+
+      if (action === 'demote') {
+        text = [
+          ev.demote.header,
+          ev.demote.group.replace('@group', groupName),
+          ev.demote.removed_admin.replace('@user', fmt(participants[0])),
+          ev.demote.executed_by.replace('@user', fmt(author))
+        ].join('\n');
+        mentions = [participants[0], author].filter(Boolean);
+      }
+
+      if (action === 'add') {
+        const self = author === participants[0] ||!update.author;
+        text = [
+          ev.member_add.header,
+          ev.member_add.group.replace('@group', groupName),
+          self
+          ? ev.member_add.self_added.replace('@user', fmt(participants[0]))
+            : ev.member_add.added_user.replace('@user', fmt(participants[0])) + '\n' +
+              ev.member_add.added_by.replace('@user', fmt(author))
+        ].join('\n');
+        mentions = self? [participants[0]] : [participants[0], author];
+      }
+
+      if (action === 'remove') {
+        const self = author === participants[0] ||!update.author;
+        text = [
+          ev.member_remove.header,
+          ev.member_remove.group.replace('@group', groupName),
+          self
+          ? ev.member_remove.self_removed.replace('@user', fmt(participants[0]))
+            : ev.member_remove.removed_user.replace('@user', fmt(participants[0])) + '\n' +
+              ev.member_remove.removed_by.replace('@user', fmt(author))
+        ].join('\n');
+        mentions = self? [participants[0]] : [participants[0], author];
+      }
+
+      if (text) await this.adapter.sendText(id, text, mentions);
+
+    } catch (e) {
+      logger.error({ err: e, update }, 'Error group-participants.update');
     }
+  }
+
+  private async handleGroupUpdate(update: Partial<GroupMetadata>) {
+    const ev = this.detectEvents._detectevents;
+    const id = update.id!;
+    let text = '';
+
+    try {
+      const { subject: groupName } = await this.getGroupMetadata(id);
+
+      if (update.subject) {
+        text = [
+          ev.group_name.header,
+          ev.group_name.new_name.replace('@name', update.subject)
+        ].join('\n');
+      }
+
+      if (update.announce!== undefined) {
+        const action = update.announce
+        ? 'cerrado: solo admins pueden enviar mensajes'
+          : 'abierto: todos pueden enviar mensajes';
+        text = [
+          ev.group_settings.header,
+          ev.group_settings.group.replace('@group', groupName),
+          ev.group_settings.action.replace('@action', action)
+        ].join('\n');
+      }
+
+      if (update.restrict!== undefined) {
+        const action = update.restrict
+        ? 'restringido: solo admins pueden editar info'
+          : 'libre: todos pueden editar info';
+        text = [
+          ev.group_settings.header,
+          ev.group_settings.group.replace('@group', groupName),
+          ev.group_settings.action.replace('@action', action)
+        ].join('\n');
+      }
+
+      if (text) await this.adapter.sendText(id, text);
+
+    } catch (e) {
+      logger.error({ err: e, update }, 'Error groups.update');
+    }
+  }
+
+  private async getGroupMetadata(id: string): Promise<GroupMetadata> {
+    return await (this.adapter as any).sock.groupMetadata(id);
+  }
 }
