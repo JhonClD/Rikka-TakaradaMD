@@ -30,8 +30,8 @@ const handler = async (m, { conn, usedPrefix }) => {
     if (status.behind === 0) {
       return conn.sendMessage(m.chat, {
         text:
-          `✅ *El bot ya está actualizado*\n\n` +
-          `╰┈➤ 📌 *Commit actual:*\n` +
+          `🔮 *El bot ya está actualizado*\n\n` +
+          ` 📌 *Commit actual:*\n` +
           `┊ \`${commitAntes?.hash?.slice(0, 7)}\` ${commitAntes?.message || ''}`,
         edit: wait.key,
       });
@@ -51,19 +51,18 @@ const handler = async (m, { conn, usedPrefix }) => {
     await conn.sendMessage(m.chat, {
       text:
         `✅ *Bot actualizado correctamente*\n\n` +
-        `❖––––––『📦 *Resumen*\n` +
-        `┊ 🔼 *Commits nuevos:* ${status.behind}\n` +
-        `┊ ➕ *Inserciones:* ${pull.insertions || 0}\n` +
-        `┊ ➖ *Eliminaciones:* ${pull.deletions || 0}\n` +
-        `╰━═┅═━––––––๑\n\n` +
-        `❖––––––『📄 *Archivos modificados*\n` +
+        `📦 *Resumen*\n` +
+        `🔼 *Commits nuevos:* ${status.behind}\n` +
+        `➕ *Inserciones:* ${pull.insertions || 0}\n` +
+        `➖ *Eliminaciones:* ${pull.deletions || 0}\n` +
+        `\n\n` +
+        `📄 *Archivos modificados*\n` +
         `${filesChanged}\n` +
-        `╰━═┅═━––––––๑\n\n` +
-        `❖––––––『🔖 *Commits*\n` +
-        `┊ *Antes:* \`${commitAntes?.hash?.slice(0, 7)}\` ${commitAntes?.message || ''}\n` +
-        `┊ *Ahora:* \`${commitDespues?.hash?.slice(0, 7)}\` ${commitDespues?.message || ''}\n` +
-        `╰━═┅═━––––––๑\n\n` +
-        `_Usa_ *${usedPrefix}reiniciar* _para aplicar los cambios_`,
+        `\n\n` +
+        `*Commits*\n` +
+        `*Antes:* \`${commitAntes?.hash?.slice(0, 7)}\` ${commitAntes?.message || ''}\n` +
+        `*Ahora:* \`${commitDespues?.hash?.slice(0, 7)}\` ${commitDespues?.message || ''}\n` +
+        `\n\n`
       edit: wait.key,
     });
 
