@@ -12,6 +12,11 @@ function getDate() {
   return moment.tz(TIMEZONE).format('DD/MM/YYYY');
 }
 
+function getWeekday() {
+  const days = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+  return days[moment.tz(TIMEZONE).day()];
+}
+
 function getUptime(since) {
   if (!since) return 'Recién iniciado';
   const ms = Date.now() - since;
@@ -22,9 +27,9 @@ function getUptime(since) {
   return [d && `${d}d`, `${h % 24}h`, `${m % 60}m`, `${s % 60}s`].filter(Boolean).join(' ');
 }
 
-function buildCategorySections() {
+function buildCategoryMap() {
   const categories = {};
-  for (const [name, plugin] of Object.entries(global.plugins || {})) {
+  for (const [, plugin] of Object.entries(global.plugins || {})) {
     if (!plugin || !plugin.command) continue;
     const tag = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
     const helps = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : []);
@@ -42,56 +47,87 @@ function buildCategorySections() {
   return categories;
 }
 
-const CATEGORY_ICONS = {
-  descargas: '📥',
-  downloads: '📥',
-  anime: '🌸',
-  buscadores: '🔍',
-  search: '🔍',
-  ia: '🤖',
-  tools: '🛠️',
-  herramientas: '🛠️',
-  nsfw: '🔞',
-  grupos: '👥',
-  group: '👥',
-  owner: '👑',
-  stickers: '🎭',
-  fun: '🎉',
-  info: 'ℹ️',
-  otros: '📌',
+// Iconos y nombres bonitos de categorías (del es.json del bot)
+const CAT_DISPLAY = {
+  info:       { icon: '𓍢ִ໋☕️✧', label: 'INFORMACIÓN' },
+  tools:      { icon: '🛠️',       label: 'HERRAMIENTAS' },
+  search:     { icon: '🔍',       label: 'BÚSQUEDAS' },
+  downloader: { icon: '📥',       label: 'DESCARGAS' },
+  converter:  { icon: '🪄',       label: 'CONVERTIDORES' },
+  effects:    { icon: '🎧',       label: 'EFECTOS DE AUDIO' },
+  game:       { icon: '🧩',       label: 'JUEGOS' },
+  group:      { icon: '🏯',       label: 'GRUPOS' },
+  nsfw:       { icon: '🔞',       label: 'ADULTOS' },
+  owner:      { icon: '💎',       label: 'PROPIETARIOS' },
+  sticker:    { icon: '🎭',       label: 'STICKERS' },
+  img:        { icon: '🌸',       label: 'IMÁGENES' },
+  ai:         { icon: '🤖',       label: 'IA' },
+  internet:   { icon: '☁️',       label: 'INTERNET' },
+  maker:      { icon: '👑',       label: 'CREADOR' },
+  anime:      { icon: '🎐',       label: 'ANIME' },
+  xp:         { icon: '🔮',       label: 'XP / ECONOMÍA' },
+  random:     { icon: '⭐',       label: 'ALEATORIO' },
+  otros:      { icon: '📌',       label: 'OTROS' },
 };
 
-function getCategoryIcon(cat) {
-  return CATEGORY_ICONS[cat.toLowerCase()] || '📌';
+function getCatDisplay(cat) {
+  return CAT_DISPLAY[cat.toLowerCase()] || { icon: '📌', label: cat.toUpperCase() };
 }
 
-function buildMenuSection(cat, cmds, prefix) {
-  const icon = getCategoryIcon(cat);
-  const title = cat.charAt(0).toUpperCase() + cat.slice(1);
-  const list = cmds.map(c => `${global.cmenub || '┊✦ '}${prefix}${c}`).join('\n');
-  return `${global.cmenut || '❖––––––『'}${icon} *${title}*\n${list}\n${global.cmenuf || '╰━═┅═━––––––๑'}`;
+function normalize(str = '') {
+  return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z]/g, '');
 }
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+// Construye el texto de una categoría para mandar como detalle
+function buildCategoryDetail(cat, cmds, prefix) {
+  const { icon, label } = getCatDisplay(cat);
+  const list = cmds.map(c => `╰┈➤ □ ${prefix}${c}`).join('\n');
+  return (
+    `✦•┈๑⋅⋯ ⋯⋅๑┈•✦\n` +
+    `⪼ ꒰ ${icon} *${label}* ꒱\n` +
+    `✦•┈๑⋅⋯ ⋯⋅๑┈•✦\n\n` +
+    `${list}\n\n` +
+    `｡ ﾟ ꒰ঌ ✦໒꒱ ༘*.ﾟ`
+  );
+}
+
+// Construye el resumen de todas las categorías (texto sin botones)
+function buildFullMenuText(categories, prefix) {
+  return Object.entries(categories)
+    .map(([cat, cmds]) => {
+      const { icon, label } = getCatDisplay(cat);
+      return (
+        `✦•┈๑⋅⋯ ⋯⋅๑┈•✦\n` +
+        `⪼ ꒰ ${icon} *${label}* ꒱\n` +
+        `✦•┈๑⋅⋯ ⋯⋅๑┈•✦\n` +
+        cmds.map(c => `╰┈➤ □ ${prefix}${c}`).join('\n') +
+        `\n｡ ﾟ ꒰ঌ ✦໒꒱ ༘*.ﾟ`
+      );
+    })
+    .join('\n\n');
+}
+
+const handler = async (m, { conn, text, usedPrefix }) => {
   const prefix = usedPrefix || '.';
   const sender = m.sender;
   const senderNum = sender.replace(/@.+/, '');
   const pushname = m.pushName || senderNum;
 
-  const ownerNum = (global.owner?.[0]?.[0] || global.nomorown || '');
+  const ownerNum = global.owner?.[0]?.[0] || global.nomorown || '';
   const botName = global.kanaarima || global.titulowm || 'Kana Arima-MD';
   const time = getTime();
   const date = getDate();
+  const week = getWeekday();
   const uptime = getUptime(global.botUptime);
 
-  const categories = buildCategorySections();
+  const categories = buildCategoryMap();
   const catNames = Object.keys(categories);
 
-  const normalize = (str = '') =>
-    str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z]/g, '');
-
+  // --- Modo: categoría específica solicitada ---
   const input = normalize(text?.split(/\s+/)[0] || '');
-  const matched = catNames.find(k => normalize(k) === input || normalize(k).startsWith(input));
+  const matched = input
+    ? catNames.find(k => normalize(k) === input || normalize(k).startsWith(input))
+    : null;
 
   if (text && !matched) {
     const available = catNames.join(', ');
@@ -104,49 +140,84 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     );
   }
 
-  const header = `
-┌─────────────────────┐
-│  ✨ *${botName}* ✨
-├─────────────────────┤
-│ 👤 *Usuario:* ${pushname}
-│ 🕐 *Hora:* ${time}
-│ 📅 *Fecha:* ${date}
-│ ⏱️ *Uptime:* ${uptime}
-│ 🤖 *Owner:* +${ownerNum}
-│ 🔰 *Prefix:* ${prefix}
-└─────────────────────┘
-`.trim();
+  // Header decorado (mismo estilo del es.json)
+  const headerText =
+    `\n‹—────୨ৎ────˙ . ꒷🪼 . 𖦹˙—꒷꒦︶꒷꒦︶\n\n` +
+    `◉— *${botName}* —◉\n\n` +
+    `୨ৎ ‧₊˚ 🍓 ⋅ ☆｡𖦹°‧⋆\n\n` +
+    `𖦹˙—˙ . ꒷🪼 . ╰┈➤ *Hola,* ${pushname}\n` +
+    `╰┈➤ *Owner:* +${ownerNum}\n` +
+    `╰┈➤ *Fecha:* ${week}, ${date}\n` +
+    `╰┈➤ *⏔ Activo:* ${uptime}\n\n` +
+    `˖ ݁𖥔 ݁˖  𐙚  ˖ ݁𖥔 ݁˖  ᯓᡣ𐭩  𖤐⭒๋࣭ ⭑`;
 
-  const footer = `\n${global.cmenua || ''}_Usa_ *${prefix}menu [categoría]* _para filtrar_`;
-
-  let body;
-  if (matched) {
-    const cmds = categories[matched] || [];
-    body = buildMenuSection(matched, cmds, prefix);
-  } else {
-    const sections = catNames
-      .map(cat => buildMenuSection(cat, categories[cat], prefix))
-      .join('\n\n');
-    body = sections;
-  }
-
-  const fullMenu = `${header}\n\n${body}${footer}`;
+  const footerText = `_Usa_ *${prefix}menu [categoría]* _para filtrar_`;
 
   const menuImage = global.imagen1 || null;
 
-  if (menuImage) {
-    await conn.sendMessage(
+  // --- Modo categoría específica ---
+  if (matched) {
+    const cmds = categories[matched] || [];
+    const { icon, label } = getCatDisplay(matched);
+    const bodyText = buildCategoryDetail(matched, cmds, prefix);
+
+    // Botones: hasta 3 comandos de ejemplo de esa categoría
+    const sampleCmds = cmds.slice(0, 3);
+    const buttons = sampleCmds.map(c => [`${prefix}${c}`, `${prefix}${c}`]);
+    // Si no hay suficientes, agrega botón de menú principal
+    if (buttons.length < 1) buttons.push([`${prefix}menu`, `${prefix}menu`]);
+
+    return await conn.sendButton(
       m.chat,
-      {
-        image: menuImage,
-        caption: fullMenu,
-        mentions: [sender],
-      },
-      { quoted: m }
+      `${headerText}\n\n${bodyText}`,
+      footerText,
+      menuImage || null,
+      buttons,
+      null,   // copy
+      null,   // urls
+      m
     );
-  } else {
-    await m.reply(fullMenu);
   }
+
+  // --- Modo menú principal con botones de categorías ---
+  // Construimos hasta 3 botones con las categorías más importantes
+  const priorityOrder = ['anime', 'downloader', 'search', 'tools', 'ai', 'info', 'sticker', 'game'];
+  const topCats = [
+    ...priorityOrder.filter(c => catNames.includes(c)),
+    ...catNames.filter(c => !priorityOrder.includes(c)),
+  ].slice(0, 3);
+
+  const catButtons = topCats.map(cat => {
+    const { icon, label } = getCatDisplay(cat);
+    return [`${icon} ${label}`, `${prefix}menu ${cat}`];
+  });
+
+  // Body: resumen compacto de todas las categorías
+  const allCatList = catNames
+    .map(cat => {
+      const { icon, label } = getCatDisplay(cat);
+      const count = (categories[cat] || []).length;
+      return `╰┈➤ ${icon} *${label}* — ${count} cmds`;
+    })
+    .join('\n');
+
+  const bodyText =
+    `${headerText}\n\n` +
+    `‹—────୨ৎ────˙ . ꒷🪼 . 𖦹˙—꒷꒦︶꒷꒦︶\n\n` +
+    `*📋 Categorías disponibles:*\n\n` +
+    `${allCatList}\n\n` +
+    `˖ ݁𖥔 ݁˖  𐙚  ˖ ݁𖥔 ݁˖`;
+
+  await conn.sendButton(
+    m.chat,
+    bodyText,
+    footerText,
+    menuImage || null,
+    catButtons,
+    null,   // copy
+    null,   // urls
+    m
+  );
 };
 
 handler.help = ['menu', 'menu [categoría]'];
@@ -154,3 +225,4 @@ handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help|start|comandos)$/i;
 
 export default handler;
+      
