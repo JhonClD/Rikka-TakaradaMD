@@ -1,12 +1,11 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from 'fs';
 import { join } from 'path';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 const PLUGINS_DIR = './plugins';
 
-// ─── Helpers ────────────────────────────────────────────────
 const fixName = (n) => n.endsWith('.js') ? n : n + '.js';
 
 function getPluginList() {
@@ -19,16 +18,27 @@ function pluginStatus(filename) {
   return disabled ? '⏸️' : loaded ? '✅' : '⚠️';
 }
 
-// ─── Subcomandos ────────────────────────────────────────────
+function getSysPackageManager() {
+  if (process.env.PREFIX?.includes('com.termux')) return { i: 'pkg install -y', u: 'pkg uninstall -y' };
+  
+  try { execSync('apt-get --version', { stdio: 'ignore' }); return { i: 'DEBIAN_FRONTEND=noninteractive apt-get install -y', u: 'DEBIAN_FRONTEND=noninteractive apt-get remove -y' }; } catch {}
+  try { execSync('apk --version', { stdio: 'ignore' }); return { i: 'apk add', u: 'apk del' }; } catch {}
+  try { execSync('pacman --version', { stdio: 'ignore' }); return { i: 'pacman -S --noconfirm', u: 'pacman -Rs --noconfirm' }; } catch {}
+  try { execSync('dnf --version', { stdio: 'ignore' }); return { i: 'dnf install -y', u: 'dnf remove -y' }; } catch {}
+  try { execSync('yum --version', { stdio: 'ignore' }); return { i: 'yum install -y', u: 'yum remove -y' }; } catch {}
+  
+  return null;
+}
+
 const CMDS = {
-
-  // .mgr help
   help: async (m, conn) => {
-    const txt = `🛠️ *Plugin Manager*
+    const txt = `🛠️ *Plugin & Package Manager*
 
-*📦 npm*
+*📦 Paquetes (NPM & Sistema)*
 • \`.mgr install <paquete>\` — instala paquete npm
-• \`.mgr uninstall <paquete>\` — desinstala paquete
+• \`.mgr install sys <paquete>\` — instala paquete del OS (apt, pkg, apk)
+• \`.mgr uninstall <paquete>\` — desinstala de npm
+• \`.mgr uninstall sys <paquete>\` — desinstala del OS
 
 *🔌 Plugins*
 • \`.mgr list\` — lista todos los plugins
@@ -48,51 +58,88 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: txt }, { quoted: m });
   },
 
-  // .mgr install axios
   install: async (m, conn, args) => {
-    if (!args.length) throw '⚠️ Indica el paquete. Ej: `.mgr install axios`';
-    const pkg = args.join(' ');
-    await conn.sendMessage(m.chat, { text: `📦 _Instalando *${pkg}*..._` }, { quoted: m });
-    const runInstall = async (flags = '') => {
-      return execAsync(`npm install ${pkg} --save ${flags}`.trim(), { timeout: 120000 });
-    };
-    try {
-      let result;
+    if (!args.length) throw '⚠️ Indica el paquete. Ej: `.mgr install axios` o `.mgr install sys ffmpeg`';
+    
+    const isSys = args[0].toLowerCase() === 'sys';
+    const pkg = isSys ? args.slice(1).join(' ') : args.join(' ');
+    
+    if (isSys && !pkg) throw '⚠️ Indica el paquete del sistema. Ej: `.mgr install sys neofetch`';
+
+    if (isSys) {
+      const pm = getSysPackageManager();
+      if (!pm) throw '❌ No se pudo detectar un gestor de paquetes soportado en este entorno (apt, pkg, apk, pacman). Puede que no tengas permisos (root).';
+      
+      await conn.sendMessage(m.chat, { text: `🖥️ _Instalando paquete del sistema *${pkg}*..._\n_Esto puede tardar unos minutos._` }, { quoted: m });
       try {
-        result = await runInstall();
-      } catch (e1) {
-        const out1 = ((e1.stdout || '') + (e1.stderr || '')).trim();
-        if (out1.includes('ERESOLVE') || out1.includes('peer dep')) {
-          await conn.sendMessage(m.chat, { text: `⚠️ _Conflicto de dependencias, reintentando con --legacy-peer-deps..._` }, { quoted: m });
-          result = await runInstall('--legacy-peer-deps');
-        } else {
-          throw e1;
-        }
+        const { stdout, stderr } = await execAsync(`${pm.i} ${pkg}`, { timeout: 300000 });
+        const out = ((stdout || '') + (stderr || '')).trim().slice(-1500);
+        await conn.sendMessage(m.chat, { text: `✅ *Instalado en el SO:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
+      } catch (e) {
+        const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-2000);
+        throw `❌ Error instalando en el sistema *${pkg}*:\n\`\`\`${out || e.message}\`\`\``;
       }
-      const out = ((result.stdout || '') + (result.stderr || '')).trim().slice(-1500);
-      await conn.sendMessage(m.chat, { text: `✅ *Instalado:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
-    } catch (e) {
-      const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-2000);
-      throw `❌ Error instalando *${pkg}*:\n\`\`\`${out || e.message}\`\`\``;
+    } else {
+      await conn.sendMessage(m.chat, { text: `📦 _Instalando en NPM *${pkg}*..._` }, { quoted: m });
+      const runInstall = async (flags = '') => {
+        return execAsync(`npm install ${pkg} --save ${flags}`.trim(), { timeout: 120000 });
+      };
+      try {
+        let result;
+        try {
+          result = await runInstall();
+        } catch (e1) {
+          const out1 = ((e1.stdout || '') + (e1.stderr || '')).trim();
+          if (out1.includes('ERESOLVE') || out1.includes('peer dep')) {
+            await conn.sendMessage(m.chat, { text: `⚠️ _Conflicto de dependencias en NPM, reintentando con --legacy-peer-deps..._` }, { quoted: m });
+            result = await runInstall('--legacy-peer-deps');
+          } else {
+            throw e1;
+          }
+        }
+        const out = ((result.stdout || '') + (result.stderr || '')).trim().slice(-1500);
+        await conn.sendMessage(m.chat, { text: `✅ *Instalado en NPM:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
+      } catch (e) {
+        const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-2000);
+        throw `❌ Error instalando npm *${pkg}*:\n\`\`\`${out || e.message}\`\`\``;
+      }
     }
   },
 
-  // .mgr uninstall axios
   uninstall: async (m, conn, args) => {
-    if (!args.length) throw '⚠️ Indica el paquete.';
-    const pkg = args.join(' ');
-    await conn.sendMessage(m.chat, { text: `🗑️ _Desinstalando *${pkg}*..._` }, { quoted: m });
-    try {
-      const { stdout, stderr } = await execAsync(`npm uninstall ${pkg} --save`, { timeout: 60000 });
-      const out = (stdout + stderr).trim().slice(-800);
-      await conn.sendMessage(m.chat, { text: `✅ *Desinstalado:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
-    } catch (e) {
-      const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-1000);
-      throw `❌ Error:\n\`\`\`${out || e.message}\`\`\``;
+    if (!args.length) throw '⚠️ Indica el paquete. Ej: `.mgr uninstall axios` o `.mgr uninstall sys ffmpeg`';
+    
+    const isSys = args[0].toLowerCase() === 'sys';
+    const pkg = isSys ? args.slice(1).join(' ') : args.join(' ');
+    
+    if (isSys && !pkg) throw '⚠️ Indica el paquete del sistema.';
+
+    if (isSys) {
+      const pm = getSysPackageManager();
+      if (!pm) throw '❌ Gestor de paquetes no detectado o sin permisos.';
+      
+      await conn.sendMessage(m.chat, { text: `🗑️ _Eliminando del sistema *${pkg}*..._` }, { quoted: m });
+      try {
+        const { stdout, stderr } = await execAsync(`${pm.u} ${pkg}`, { timeout: 120000 });
+        const out = ((stdout || '') + (stderr || '')).trim().slice(-800);
+        await conn.sendMessage(m.chat, { text: `✅ *Eliminado del SO:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
+      } catch (e) {
+        const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-1000);
+        throw `❌ Error eliminando:\n\`\`\`${out || e.message}\`\`\``;
+      }
+    } else {
+      await conn.sendMessage(m.chat, { text: `🗑️ _Desinstalando de NPM *${pkg}*..._` }, { quoted: m });
+      try {
+        const { stdout, stderr } = await execAsync(`npm uninstall ${pkg} --save`, { timeout: 60000 });
+        const out = ((stdout || '') + (stderr || '')).trim().slice(-800);
+        await conn.sendMessage(m.chat, { text: `✅ *Desinstalado de NPM:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
+      } catch (e) {
+        const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-1000);
+        throw `❌ Error:\n\`\`\`${out || e.message}\`\`\``;
+      }
     }
   },
 
-  // .mgr list
   list: async (m, conn) => {
     const files = getPluginList();
     if (!files.length) return conn.sendMessage(m.chat, { text: '📂 No hay plugins.' }, { quoted: m });
@@ -101,7 +148,6 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: txt }, { quoted: m });
   },
 
-  // .mgr view Tiktok-DL
   view: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const name = fixName(args[0]);
@@ -112,7 +158,6 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: `📄 *${name}*\n\n\`\`\`${preview}\`\`\`` }, { quoted: m });
   },
 
-  // .mgr reload Tiktok-DL
   reload: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const name = fixName(args[0]);
@@ -126,7 +171,6 @@ Responde a un mensaje con el nuevo código:
     }
   },
 
-  // .mgr disable Tiktok-DL
   disable: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const name = fixName(args[0]);
@@ -138,7 +182,6 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: `⏸️ *${name}* desactivado.` }, { quoted: m });
   },
 
-  // .mgr enable Tiktok-DL
   enable: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const base = fixName(args[0]);
@@ -150,7 +193,6 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: `✅ *${base}* activado y cargado.` }, { quoted: m });
   },
 
-  // .mgr del Tiktok-DL
   del: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const name = fixName(args[0]);
@@ -161,25 +203,21 @@ Responde a un mensaje con el nuevo código:
     await conn.sendMessage(m.chat, { text: `🗑️ *${name}* eliminado.` }, { quoted: m });
   },
 
-  // .mgr new mi-plugin  (respondiendo un mensaje con el código JS)
   new: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre. Ej: `.mgr new mi-plugin`\nResponde un mensaje con el código JS.';
     const name = fixName(args[0]);
     const path = join(PLUGINS_DIR, name);
     if (existsSync(path)) throw `❌ Ya existe *${name}*. Usa \`.mgr edit ${name}\` para editarlo.`;
 
-    // Obtener código del mensaje citado
     const quoted = m.quoted;
     const code = quoted?.text || quoted?.caption || null;
     if (!code) throw '⚠️ Responde un mensaje que contenga el código JS del plugin.';
 
     writeFileSync(path, code, 'utf8');
-    // El watcher lo carga automáticamente, pero forzamos por si acaso
     setTimeout(() => global.reload(null, name).catch(() => {}), 500);
     await conn.sendMessage(m.chat, { text: `✅ Plugin *${name}* creado y cargado.` }, { quoted: m });
   },
 
-  // .mgr edit Tiktok-DL  (respondiendo un mensaje con el nuevo código)
   edit: async (m, conn, args) => {
     if (!args.length) throw '⚠️ Indica el nombre del plugin.';
     const name = fixName(args[0]);
@@ -196,7 +234,6 @@ Responde a un mensaje con el nuevo código:
   },
 };
 
-// ─── Handler principal ───────────────────────────────────────
 const handler = async (m, { conn, args }) => {
   const sub = args[0]?.toLowerCase();
   const rest = args.slice(1);
@@ -212,4 +249,4 @@ handler.command = /^(mgr|manager|pluginmgr)$/i;
 handler.owner = true;
 
 export default handler;
-      
+                                                   
