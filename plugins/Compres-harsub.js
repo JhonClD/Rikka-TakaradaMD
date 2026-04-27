@@ -9,76 +9,18 @@ let handler = async (m, { conn, text, command, args }) => {
     if (!fs.existsSync('./temp')) fs.mkdirSync('./temp', { recursive: true });
 
     const flags = {
-        // Español
-        'spa': '🇲🇽', 'es': '🇲🇽', 'lat': '🌎', 'es-419': '🌎',
-        // Inglés
-        'eng': '🇺🇸', 'en': '🇺🇸',
-        // Japonés
-        'jpn': '🇯🇵', 'ja': '🇯🇵',
-        // Portugués
-        'por': '🇧🇷', 'pt': '🇧🇷',
-        // Árabe
-        'ara': '🇸🇦', 'ar': '🇸🇦',
-        // Francés
-        'fre': '🇫🇷', 'fra': '🇫🇷', 'fr': '🇫🇷',
-        // Alemán
-        'ger': '🇩🇪', 'deu': '🇩🇪', 'de': '🇩🇪',
-        // Italiano
-        'ita': '🇮🇹', 'it': '🇮🇹',
-        // Ruso
-        'rus': '🇷🇺', 'ru': '🇷🇺',
-        // Chino
-        'chi': '🇨🇳', 'zho': '🇨🇳', 'zh': '🇨🇳', 'cmn': '🇨🇳',
-        // Coreano
-        'kor': '🇰🇷', 'ko': '🇰🇷',
-        // Holandés
-        'dut': '🇳🇱', 'nld': '🇳🇱', 'nl': '🇳🇱',
-        // Polaco
-        'pol': '🇵🇱', 'pl': '🇵🇱',
-        // Turco
-        'tur': '🇹🇷', 'tr': '🇹🇷',
-        // Checo
-        'cze': '🇨🇿', 'ces': '🇨🇿', 'cs': '🇨🇿',
-        // Húngaro
-        'hun': '🇭🇺', 'hu': '🇭🇺',
-        // Rumano
-        'rum': '🇷🇴', 'ron': '🇷🇴', 'ro': '🇷🇴',
-        // Sueco
-        'swe': '🇸🇪', 'sv': '🇸🇪',
-        // Noruego
-        'nor': '🇳🇴', 'nob': '🇳🇴', 'nb': '🇳🇴', 'no': '🇳🇴',
-        // Danés
-        'dan': '🇩🇰', 'da': '🇩🇰',
-        // Finlandés
-        'fin': '🇫🇮', 'fi': '🇫🇮',
-        // Griego
-        'gre': '🇬🇷', 'ell': '🇬🇷', 'el': '🇬🇷',
-        // Tailandés
-        'tha': '🇹🇭', 'th': '🇹🇭',
-        // Vietnamita
-        'vie': '🇻🇳', 'vi': '🇻🇳',
-        // Indonesio
-        'ind': '🇮🇩', 'id': '🇮🇩',
-        // Malayo
-        'may': '🇲🇾', 'msa': '🇲🇾', 'ms': '🇲🇾',
-        // Hindi
-        'hin': '🇮🇳', 'hi': '🇮🇳',
-        // Ucraniano
-        'ukr': '🇺🇦', 'uk': '🇺🇦',
-        // Hebreo
-        'heb': '🇮🇱', 'he': '🇮🇱',
-        // Búlgaro
-        'bul': '🇧🇬', 'bg': '🇧🇬',
-        // Serbio
-        'srp': '🇷🇸', 'sr': '🇷🇸',
-        // Croata
-        'hrv': '🇭🇷', 'hr': '🇭🇷',
-        // Eslovaco
-        'slk': '🇸🇰', 'sk': '🇸🇰',
-        // Esloveno
-        'slv': '🇸🇮', 'sl': '🇸🇮',
-        // Desconocido
-        'und': '🏳️'
+        'spa': '🇲🇽', 'es': '🇲🇽', 'lat': '🌎', 'es-419': '🌎', 'eng': '🇺🇸', 'en': '🇺🇸', 'jpn': '🇯🇵', 'ja': '🇯🇵',
+        'por': '🇧🇷', 'pt': '🇧🇷', 'ara': '🇸🇦', 'ar': '🇸🇦', 'fre': '🇫🇷', 'fra': '🇫🇷', 'fr': '🇫🇷',
+        'ger': '🇩🇪', 'deu': '🇩🇪', 'de': '🇩🇪', 'ita': '🇮🇹', 'it': '🇮🇹', 'rus': '🇷🇺', 'ru': '🇷🇺',
+        'chi': '🇨🇳', 'zho': '🇨🇳', 'cmn': '🇨🇳', 'zh': '🇨🇳', 'kor': '🇰🇷', 'ko': '🇰🇷',
+        'dut': '🇳🇱', 'nld': '🇳🇱', 'nl': '🇳🇱', 'pol': '🇵🇱', 'pl': '🇵🇱', 'tur': '🇹🇷', 'tr': '🇹🇷',
+        'cze': '🇨🇿', 'ces': '🇨🇿', 'cs': '🇨🇿', 'hun': '🇭🇺', 'hu': '🇭🇺', 'rum': '🇷🇴', 'ron': '🇷🇴', 'ro': '🇷🇴',
+        'swe': '🇸🇪', 'sv': '🇸🇪', 'nor': '🇳🇴', 'nob': '🇳🇴', 'nb': '🇳🇴', 'no': '🇳🇴', 'dan': '🇩🇰', 'da': '🇩🇰',
+        'fin': '🇫🇮', 'fi': '🇫🇮', 'gre': '🇬🇷', 'ell': '🇬🇷', 'el': '🇬🇷', 'tha': '🇹🇭', 'th': '🇹🇭',
+        'vie': '🇻🇳', 'vi': '🇻🇳', 'ind': '🇮🇩', 'id': '🇮🇩', 'may': '🇲🇾', 'msa': '🇲🇾', 'ms': '🇲🇾',
+        'hin': '🇮🇳', 'hi': '🇮🇳', 'ukr': '🇺🇦', 'uk': '🇺🇦', 'heb': '🇮🇱', 'he': '🇮🇱',
+        'bul': '🇧🇬', 'bg': '🇧🇬', 'srp': '🇷🇸', 'sr': '🇷🇸', 'hrv': '🇭🇷', 'hr': '🇭🇷',
+        'slk': '🇸🇰', 'sk': '🇸🇰', 'slv': '🇸🇮', 'sl': '🇸🇮', 'und': '🏳️'
     };
 
     const downloadMediaStream = async (quoted, outputPath) => {
@@ -151,8 +93,17 @@ let handler = async (m, { conn, text, command, args }) => {
     };
 
     // ─── Watermark ───────────────────────────────────────────────────────────────
-    const WM = `drawtext=fontfile='/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf':text='By\\:CID':fontcolor=white:fontsize=w*0.04:x=20:y=20:borderw=2:bordercolor=black:alpha='if(lt(t,4),1,if(lt(t,5),5-t,0))'`;
-    const withWM = (vf) => `${vf},${WM}`;
+    const FONT_PATHS = [
+        '/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf',
+        '/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf',
+        '/data/data/com.termux/files/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf',
+    ];
+    const FONT_FILE = FONT_PATHS.find(p => fs.existsSync(p)) || '';
+    const WM = FONT_FILE
+        ? `drawtext=fontfile='${FONT_FILE}':text='By\\:CID':fontcolor=white:fontsize=w*0.04:x=20:y=20:borderw=2:bordercolor=black:alpha='if(lt(t,4),1,if(lt(t,5),5-t,0))'`
+        : null;
+    const withWM = (vf) => WM ? `${vf},${WM}` : vf;
 
     // ✅ Padding par (de compressO): elimina errores "not divisible by 2" con
     //    vídeos de dimensiones impares. Va siempre después del scale.
@@ -213,17 +164,32 @@ let handler = async (m, { conn, text, command, args }) => {
                 r += `> Peso: \`${(data.format.size / 1024 / 1024).toFixed(2)} MB\`\n\n`;
                 const audios = data.streams.filter(s => s.codec_type === 'audio');
                 r += '> *Audios disponibles*\n';
+                const audiosSinBandera = [];
                 audios.forEach((a, i) => {
                     const lang = (a.tags?.language || 'und').toLowerCase();
-                    r += `- Pista ${i + 1}: \`${a.codec_name}\` ${flags[lang] || '🏳️'} (\`${lang}\`)\n`;
+                    if (flags[lang]) {
+                        r += `- Pista ${i + 1}: \`${a.codec_name}\` ${flags[lang]} (\`${lang}\`)\n`;
+                    } else {
+                        audiosSinBandera.push(`- Pista ${i + 1}: \`${a.codec_name}\` (\`${lang}\`)`);
+                    }
                 });
+                if (audiosSinBandera.length) r += audiosSinBandera.join('\n') + '\n';
+
                 const subs = data.streams.filter(s => s.codec_type === 'subtitle');
                 r += '\n> *Subtítulos disponibles*\n';
                 if (subs.length === 0) r += '- `Ninguno`\n';
-                else subs.forEach((s, i) => {
-                    const lang = (s.tags?.language || 'und').toLowerCase();
-                    r += `- Pista ${i + 1}: \`${s.codec_name}\` ${flags[lang] || '🏳️'} (\`${lang}\`)\n`;
-                });
+                else {
+                    const subsSinBandera = [];
+                    subs.forEach((s, i) => {
+                        const lang = (s.tags?.language || 'und').toLowerCase();
+                        if (flags[lang]) {
+                            r += `- Pista ${i + 1}: \`${s.codec_name}\` ${flags[lang]} (\`${lang}\`)\n`;
+                        } else {
+                            subsSinBandera.push(`- Pista ${i + 1}: \`${s.codec_name}\` (\`${lang}\`)`);
+                        }
+                    });
+                    if (subsSinBandera.length) r += subsSinBandera.join('\n') + '\n';
+                }
                 r += '\n_*.dw2 [res] (doc)*_\n_*.dw3 [res] [audio] [sub] (doc)*_\n_*.dw4 (doc)*_\n_*.mi [res] [pesoMB] (doc)*_';
                 reply(r);
             });
@@ -270,15 +236,21 @@ let handler = async (m, { conn, text, command, args }) => {
             const pass1Args = [
                 '-i', input, '-vf', sf,
                 '-c:v', 'libx264', '-b:v', `${videoBitrateK}k`, '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
-                '-pix_fmt', 'yuv420p',          // ✅ compatibilidad móvil (compressO)
+                '-pix_fmt', 'yuv420p',
                 '-pass', '1', '-passlogfile', logPrefix, '-preset', 'ultrafast',
                 '-tune', 'fastdecode',
                 '-threads', '0', '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2', '-f', 'null', '-y', '/dev/null'
             ];
             await new Promise((resolve, reject) => {
                 const p1 = spawn('ffmpeg', pass1Args);
-                p1.stderr.on('data', (d) => logFFmpegProgress(`${label} - PASS 1/2`, d, totalFrames));
-                p1.on('close', (code) => { process.stdout.write('\n\n'); code === 0 ? resolve() : reject(new Error(`pass1 code ${code}`)); });
+                let errBuf = '';
+                p1.stderr.on('data', (d) => { errBuf += d; logFFmpegProgress(`${label} - PASS 1/2`, d, totalFrames); });
+                p1.on('close', (code) => {
+                    process.stdout.write('\n\n');
+                    if (code === 0) return resolve();
+                    const lastLines = errBuf.split('\n').filter(Boolean).slice(-5).join('\n');
+                    reject(new Error(`pass1 code ${code}\n${lastLines}`));
+                });
             });
 
             // PASS 2 — FAST (salida + watermark)
@@ -292,8 +264,14 @@ let handler = async (m, { conn, text, command, args }) => {
             ];
             await new Promise((resolve, reject) => {
                 const p2 = spawn('ffmpeg', pass2Args);
-                p2.stderr.on('data', (d) => logFFmpegProgress(`${label} - PASS 2/2`, d, totalFrames));
-                p2.on('close', (code) => { process.stdout.write('\n\n'); code === 0 ? resolve() : reject(new Error(`pass2 code ${code}`)); });
+                let errBuf = '';
+                p2.stderr.on('data', (d) => { errBuf += d; logFFmpegProgress(`${label} - PASS 2/2`, d, totalFrames); });
+                p2.on('close', (code) => {
+                    process.stdout.write('\n\n');
+                    if (code === 0) return resolve();
+                    const lastLines = errBuf.split('\n').filter(Boolean).slice(-5).join('\n');
+                    reject(new Error(`pass2 code ${code}\n${lastLines}`));
+                });
             });
 
             const finalSizeMB = fs.statSync(output).size / 1024 / 1024;
@@ -377,38 +355,44 @@ let handler = async (m, { conn, text, command, args }) => {
 
             await new Promise((resolve, reject) => {
                 const proc = spawn('ffmpeg', ffmpegArgs);
-                proc.stderr.on('data', (data) => logFFmpegProgress(label, data, totalFrames));
+                let errBuf = '';
+                proc.stderr.on('data', (data) => { errBuf += data; logFFmpegProgress(label, data, totalFrames); });
                 proc.on('close', async (code) => {
                     process.stdout.write('\n\n');
-                    if (code !== 0) { reject(new Error(`FFmpeg salió con código ${code}`)); return; }
-
-                    if (isDw4) {
-                        const fileSizeMB = fs.statSync(output).size / 1024 / 1024;
-                        if (fileSizeMB > 60) {
-                            const optOut = `${output}_opt.mp4`;
-                            // ✅ promisified: el finally no borra output antes de que termine
-                            await new Promise((res2, rej2) => {
-                                exec(
-                                    `ffmpeg -i "${output}" -c:v libx264 -crf 32 -preset superfast -pix_fmt yuv420p -c:a aac -b:a 64k -y "${optOut}"`,
-                                    (err) => err ? rej2(err) : res2()
-                                );
-                            });
-                            const finalFile    = fs.existsSync(optOut) ? optOut : output;
-                            const mediaOptions = asDocument
-                                ? { document: fs.createReadStream(finalFile), fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
-                                : { video: fs.createReadStream(finalFile), mimetype: 'video/mp4' };
-                            await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
-                            if (fs.existsSync(optOut)) fs.unlinkSync(optOut);
-                            resolve();
-                            return;
-                        }
+                    if (code !== 0) {
+                        const lastLines = errBuf.split('\n').filter(Boolean).slice(-5).join('\n');
+                        return reject(new Error(`FFmpeg código ${code}\n${lastLines}`));
                     }
-
-                    const mediaOptions = asDocument
-                        ? { document: fs.createReadStream(output), fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
-                        : { video: fs.createReadStream(output), mimetype: 'video/mp4' };
-                    await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
-                    resolve();
+                    try {
+                        if (isDw4) {
+                            const fileSizeMB = fs.statSync(output).size / 1024 / 1024;
+                            if (fileSizeMB > 60) {
+                                const optOut = `${output}_opt.mp4`;
+                                await new Promise((res2, rej2) => {
+                                    exec(
+                                        `ffmpeg -i "${output}" -c:v libx264 -crf 32 -preset superfast -pix_fmt yuv420p -c:a aac -b:a 64k -y "${optOut}"`,
+                                        (err) => err ? rej2(err) : res2()
+                                    );
+                                });
+                                const finalFile    = fs.existsSync(optOut) ? optOut : output;
+                                const mediaOptions = asDocument
+                                    ? { document: fs.readFileSync(finalFile), fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
+                                    : { video: fs.readFileSync(finalFile), mimetype: 'video/mp4' };
+                                await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
+                                if (fs.existsSync(optOut)) fs.unlinkSync(optOut);
+                                return resolve();
+                            }
+                        }
+                        // ✅ readFileSync para evitar race entre createReadStream y finally
+                        const buf          = fs.readFileSync(output);
+                        const mediaOptions = asDocument
+                            ? { document: buf, fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
+                            : { video: buf, mimetype: 'video/mp4' };
+                        await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
+                        resolve();
+                    } catch (e) {
+                        reject(e);
+                    }
                 });
             });
         } catch (e) {
