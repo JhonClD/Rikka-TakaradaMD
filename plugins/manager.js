@@ -53,12 +53,25 @@ Responde a un mensaje con el nuevo código:
     if (!args.length) throw '⚠️ Indica el paquete. Ej: `.mgr install axios`';
     const pkg = args.join(' ');
     await conn.sendMessage(m.chat, { text: `📦 _Instalando *${pkg}*..._` }, { quoted: m });
+    const runInstall = async (flags = '') => {
+      return execAsync(`npm install ${pkg} --save ${flags}`.trim(), { timeout: 120000 });
+    };
     try {
-      const { stdout, stderr } = await execAsync(`npm install ${pkg} --save`, { timeout: 120000 });
-      const out = (stdout + stderr).trim().slice(-1500);
+      let result;
+      try {
+        result = await runInstall();
+      } catch (e1) {
+        const out1 = ((e1.stdout || '') + (e1.stderr || '')).trim();
+        if (out1.includes('ERESOLVE') || out1.includes('peer dep')) {
+          await conn.sendMessage(m.chat, { text: `⚠️ _Conflicto de dependencias, reintentando con --legacy-peer-deps..._` }, { quoted: m });
+          result = await runInstall('--legacy-peer-deps');
+        } else {
+          throw e1;
+        }
+      }
+      const out = ((result.stdout || '') + (result.stderr || '')).trim().slice(-1500);
       await conn.sendMessage(m.chat, { text: `✅ *Instalado:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
     } catch (e) {
-      // e.stdout y e.stderr tienen el output real cuando el proceso falla
       const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-2000);
       throw `❌ Error instalando *${pkg}*:\n\`\`\`${out || e.message}\`\`\``;
     }
