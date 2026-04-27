@@ -1,25 +1,42 @@
-const handler = async (m, { conn, text, args }) => {
-  if (!args[0]) return conn.reply(m.chat, "📎 Ingresa la URL del sitio web.", m);
+import fetch from 'node-fetch';
 
-  try {
-    // HD: fullpage + width 1920
-    const ss = await (await fetch(`https://image.thum.io/get/width/1920/fullpage/${args[0]}`)).arrayBuffer();
-    const buffer = Buffer.from(ss);
-    conn.sendMessage(m.chat, { image: buffer }, { quoted: m });
-  } catch {
+const handler = async (m, { conn, text, args }) => {
+  if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web.*", m);
+
+  const url = args[0].startsWith("http") ? args[0] : "https://" + args[0];
+
+  const apis = [
+    `https://image.thum.io/get/width/1920/fullpage/${url}`,
+    `https://api.screenshotmachine.com/?key=c04d3a&url=${url}&dimension=1920x1080`,
+    `https://api.microlink.io?url=${encodeURIComponent(url)}&screenshot=true&meta=false&embed=screenshot.url`,
+    `https://api.lolhuman.xyz/api/SSWeb?apikey=${global.lolkeysapi}&url=${url}`
+  ];
+
+  let success = false;
+
+  for (const api of apis) {
     try {
-      // HD: dimension 1920x1080
-      const ss2 = `https://api.screenshotmachine.com/?key=c04d3a&url=${args[0]}&dimension=1920x1080`;
-      conn.sendMessage(m.chat, { image: { url: ss2 } }, { quoted: m });
-    } catch {
-      try {
-        const ss3 = `https://api.lolhuman.xyz/api/SSWeb?apikey=${lolkeysapi}&url=${text}`;
-        conn.sendMessage(m.chat, { image: { url: ss3 } }, { quoted: m });
-      } catch {
-        const ss4 = `https://api.lolhuman.xyz/api/SSWeb2?apikey=${lolkeysapi}&url=${text}`;
-        conn.sendMessage(m.chat, { image: { url: ss4 } }, { quoted: m });
-      }
+      const res = await fetch(api);
+      if (!res.ok) continue;
+
+      const buffer = Buffer.from(await res.arrayBuffer());
+
+      if (buffer.length < 10000) continue;
+
+      await conn.sendMessage(m.chat, { 
+        image: buffer, 
+        caption: `𓂃 ࣪˖ 📸 *Captura de:* ${url}` 
+      }, { quoted: m });
+      
+      success = true;
+      break; 
+    } catch (e) {
+      continue;
     }
+  }
+
+  if (!success) {
+    m.reply("𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. La página puede tener protección o las APIs están saturadas.");
   }
 };
 
