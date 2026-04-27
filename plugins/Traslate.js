@@ -1,10 +1,6 @@
-import pkg from '@vitalets/google-translate-api';
-const { translate } = pkg;
-
 const handler = async (m, { args, usedPrefix, command }) => {
   const msg = `📖 Uso: _${usedPrefix + command} (idioma) (texto)_\n*Ejemplo:* _${usedPrefix + command} en Hola mundo_\n\n*Idiomas:* https://cloud.google.com/translate/docs/languages`;
 
-  // Detectar idioma y texto
   let lang = 'es';
   let text = '';
 
@@ -17,28 +13,27 @@ const handler = async (m, { args, usedPrefix, command }) => {
     }
   }
 
-  // Si no hay texto, buscar en mensaje citado (permite .trad respondiendo sin args)
   if (!text && m.quoted?.text) text = m.quoted.text;
   if (!text) return m.reply(msg);
 
   let translated = null;
 
-  // Proveedor 1: @vitalets/google-translate-api
+  // Proveedor 1: Google Translate API pública (sin key, muy confiable)
   try {
-    const result = await translate(text, { to: lang, autoCorrect: true });
-    if (result?.text) translated = result.text;
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${lang}&dt=t&q=${encodeURIComponent(text)}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    translated = json?.[0]?.map(i => i?.[0]).filter(Boolean).join('');
   } catch (e) {
     console.log('[Translate P1 Error]', e.message);
   }
 
-  // Proveedor 2: MyMemory (gratuito, sin key)
+  // Proveedor 2: MyMemory
   if (!translated) {
     try {
       const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=auto|${lang}`);
       const json = await res.json();
-      if (json?.responseStatus === 200 && json?.responseData?.translatedText) {
-        translated = json.responseData.translatedText;
-      }
+      if (json?.responseStatus === 200) translated = json.responseData?.translatedText;
     } catch (e) {
       console.log('[Translate P2 Error]', e.message);
     }
@@ -64,4 +59,3 @@ handler.help = ['translate <idioma> <texto>'];
 handler.tags = ['herramientas'];
 handler.command = /^(translate|traducir|trad)$/i;
 export default handler;
-                
