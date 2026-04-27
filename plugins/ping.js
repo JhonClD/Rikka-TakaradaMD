@@ -162,7 +162,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
     "vnd.openxmlformats-officedocument.wordprocessingml.document",
   ];
   const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
-  const repoUrl = "wa.me/51925092348";
+  const repoUrl = "https://github.com/JhonClD/KanaArima-MD";
 
   await conn.sendMessage(m.chat, {
     document: { url: repoUrl },
@@ -191,4 +191,4 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
-  
+    
