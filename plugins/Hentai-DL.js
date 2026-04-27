@@ -269,9 +269,28 @@ async function buscarPorFetch(query) {
 // ─── Búsqueda con Puppeteer (fallback final) ──────────────────────────────
 
 async function buscarConPuppeteer(query) {
+    // Detectar Chromium del sistema (necesario en VPS/Docker con Pelican)
+    const chromiumPaths = [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/data/data/com.termux/files/usr/bin/chromium-browser',
+        '/data/data/com.termux/files/usr/bin/chromium',
+    ]
+    let execPath = null
+    for (const p of chromiumPaths) {
+        if (fs.existsSync(p)) { execPath = p; break }
+    }
+    if (!execPath) {
+        console.error('[puppeteer] Chromium no encontrado. Instálalo con: apt install chromium-browser')
+        throw new Error('Chromium no disponible en el sistema (instala con: apt install chromium-browser)')
+    }
+
     const browser = await puppeteerExtra.launch({
         headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+        executablePath: execPath,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
     })
     const page = await browser.newPage()
     await page.setUserAgent(UA)
