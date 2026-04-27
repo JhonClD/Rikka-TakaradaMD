@@ -179,7 +179,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
         previewType: "pdf",
         title: "Rikka Takarada - MD",
         body: "Rikka Takarada Bot",
-        thumbnail,
+        thumbnail: menuImage,
         sourceUrl: linkUrl,
       },
     },
@@ -191,4 +191,4 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
-  
+    
