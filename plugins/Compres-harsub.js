@@ -253,8 +253,8 @@ let handler = async (m, { conn, text, command, args }) => {
 
             const finalSizeMB = fs.statSync(output).size / 1024 / 1024;
             const mediaOptions = asDocument
-                ? { document: fs.createReadStream(output), fileName: `video_${res}p_${targetMB}mb.mp4`, mimetype: 'video/mp4' }
-                : { video: fs.createReadStream(output), caption: `✅ *${res}p* | ${finalSizeMB.toFixed(1)} MB`, mimetype: 'video/mp4' };
+                ? { document: { url: output }, fileName: `video_${res}p_${targetMB}mb.mp4`, mimetype: 'video/mp4' }
+                : { video: { url: output }, caption: `✅ *${res}p* | ${finalSizeMB.toFixed(1)} MB`, mimetype: 'video/mp4' };
             await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
         } catch (e) {
             console.error(e);
@@ -353,31 +353,29 @@ let handler = async (m, { conn, text, command, args }) => {
                                 });
                                 const finalFile    = fs.existsSync(optOut) ? optOut : output;
                                 const mediaOptions = asDocument
-                                    ? { document: fs.readFileSync(finalFile), fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
-                                    : { video: fs.readFileSync(finalFile), mimetype: 'video/mp4' };
+                                    ? { document: { url: finalFile }, fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
+                                    : { video: { url: finalFile }, mimetype: 'video/mp4' };
                                 await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
                                 if (fs.existsSync(optOut)) fs.unlinkSync(optOut);
                                 return resolve();
                             }
                         }
-                        // ✅ readFileSync para evitar race entre createReadStream y finally
-                        const buf          = fs.readFileSync(output);
                         const mediaOptions = asDocument
-                            ? { document: buf, fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
-                            : { video: buf, mimetype: 'video/mp4' };
+                            ? { document: { url: output }, fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
+                            : { video: { url: output }, mimetype: 'video/mp4' };
                         await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
                         resolve();
                     } catch (e) {
                         reject(e);
+                    } finally {
+                        if (fs.existsSync(input))  fs.unlinkSync(input);
+                        if (fs.existsSync(output)) fs.unlinkSync(output);
                     }
                 });
             });
         } catch (e) {
             reply(`❌ Error de proceso:\n\`${e.message}\``);
             console.error(e);
-        } finally {
-            if (fs.existsSync(input))  fs.unlinkSync(input);
-            if (fs.existsSync(output)) fs.unlinkSync(output);
         }
     }
 };
