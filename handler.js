@@ -687,9 +687,12 @@ export async function handler(chatUpdate) {
       console.error(e);
     }
 
-    const idioma = global.db.data.users[m.sender]?.language || global.defaultLenguaje; // is null? np the operator ?? fix that (i hope)
-    const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`))
-    const tradutor = _translate.handler.handler
+    const tradutor = {
+      texto1: ["_*< USUARIO SUSPENDIDO />*_\n", "▢ *Aviso:*", "\n▢ *Motivo:*", "▢ *Motivo:* Sin especificar", "*[ ℹ️ ] Si consideras que esto es un error y cuentas con pruebas, puedes comunicarte con el propietario(a) del bot para apelar la suspensión.*"],
+      texto2: "*[ ℹ️ ] Sus diamantes se han agotado, puede adquirir más con el comando:*",
+      texto3: ["*[ ℹ️ ] Se require tener el nivel", "para poder utilizar el comando. Tú nivel actual es", "usa el comando", "para subir tu nivel con XP.*"],
+      texto4: ["*[ ℹ️ ] Se utilizaron", "diamante(s) (limites).*"]
+    }
 
     if (opts['nyimak']) {
       return;
@@ -1151,9 +1154,16 @@ ${tradutor.texto1[1]} ${messageNumber}/3
  * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>['group-participants.update']} groupsUpdate
  */
 export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
-  const idioma = global?.db?.data?.chats[id]?.language || global.defaultLenguaje;
-  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`))
-  const tradutor = _translate.handler.participantsUpdate
+  const tradutor = {
+    texto1: "👋 ¡Bienvenido/a!\n@user",
+    texto2: "👋 ¡Hasta luego!\n@user",
+    texto3: "*[ ℹ️ ] @user Fue promovido a administrador.*",
+    texto4: "*[ ℹ️ ] @user Fue degradado de administrador.*",
+    texto5: "*[ ℹ️ ] La descripción del grupo ha sido modificada.*",
+    texto6: "*[ ℹ️ ] El nombre del grupo ha sido modificado.*",
+    texto7: "*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*",
+    texto8: "*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*"
+  }
 
   const m = mconn
   if (opts['self']) return;
@@ -1239,9 +1249,16 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
  */
 
 export async function groupsUpdate(groupsUpdate) {
-  const idioma = global.db.data.chats[groupsUpdate[0].id]?.language || global.defaultLenguaje;
-  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`))
-  const tradutor = _translate.handler.participantsUpdate
+  const tradutor = {
+    texto1: "👋 ¡Bienvenido/a!\n@user",
+    texto2: "👋 ¡Hasta luego!\n@user",
+    texto3: "*[ ℹ️ ] @user Fue promovido a administrador.*",
+    texto4: "*[ ℹ️ ] @user Fue degradado de administrador.*",
+    texto5: "*[ ℹ️ ] La descripción del grupo ha sido modificada.*",
+    texto6: "*[ ℹ️ ] El nombre del grupo ha sido modificado.*",
+    texto7: "*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*",
+    texto8: "*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*"
+  }
 
   if (opts['self']) {
     return;
@@ -1283,9 +1300,9 @@ export async function callUpdate(callUpdate) {
 export async function deleteUpdate(message) {
   const datas = global
   const id = message?.participant 
-  const idioma = datas.db.data.users[id]?.language || global.defaultLenguaje;
-  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`))
-  const tradutor = _translate.handler.deleteUpdate
+  const tradutor = {
+    texto1: ["_*< ANTI-DELETE />*_\n", " ▢ *Usuario:*", " ▢ *Hora:*", "▢ *Fecha:*", "▢ *Enviando el mensaje eliminado...*\n", "*[ ℹ️ ] Para desactivar la función* _antidelete_*, envia el siguiente comando:* _/disable antidelete_"]
+  }
 
   let d = new Date(new Date + 3600000)
   let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -1313,9 +1330,19 @@ ${tradutor.texto1[5]}`.trim();
 
 global.dfail = (type, m, conn) => {
   const datas = global
-  const idioma = datas.db.data.users[m.sender].language || global.defaultLenguaje;
-  const _translate = JSON.parse(fs.readFileSync(`./src/languages/${idioma}.json`))
-  const tradutor = _translate.handler.dfail
+  const tradutor = {
+    texto1:  "*[ ℹ️ ] Este comando solo puede ser utilizado por el propietario del bot.*",
+    texto2:  "*[ ℹ️ ] Este comando solo puede ser utilizado por el propietario del bot.*",
+    texto3:  "*[ ℹ️ ] Este comando solo puede ser utilizado por moderadores y el propietario del bot.*",
+    texto4:  "*[ ℹ️ ] Este comando solo puede ser utilizado por usurios premium y el propietario del bot.*",
+    texto5:  "*[ ℹ️ ] Este comando solo puede ser utilizado en grupos.*",
+    texto6:  "*[ ℹ️ ] Este comando solo puede ser utilizado en el chat privado del bot.*",
+    texto7:  "*[ ℹ️ ] Este comando solo puede ser usado por administradores del grupo.*",
+    texto8:  "*[ ℹ️ ] Para utilizar este comando es necesario que el bot sea administrador del grupo.*",
+    texto9:  "*[ ℹ️ ] Para utilizar este comando debes estar registrado.*\n\n*[ 💡 ] Utiliza el comando:* _/verificar nombre.edad_ *para registrarte.*",
+    texto10: "*[ ℹ️ ] Este comando fue desactivado por el propietario del bot.*",
+    texto11: ["*[ ⚠ ] Advertencia*", "*[ ⚠ ] Advertencia*", "https://github.com/BrunoSobrino/TheMystic-Bot-MD"]
+  }
 
   const msg = {
     rowner: tradutor.texto1,
