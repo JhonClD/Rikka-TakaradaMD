@@ -110,37 +110,48 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const on  = (v) => (v ? "✅ activo"   : "❌ desactivado");
   const onP = (v) => (v ? "✅ activado" : "❌ desactivado");
 
-  const info = `*< INFO - ESTADO />*
+  const info = `𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-  ▢ *Prop.:* Jhon Cid
-  ▢ *WA:* +51925092348
+𓂃 ࣪˖ *Propietario*
+  ˖ *Nombre:* Jhon Cid
+  ˖ *WA:* +51925092348
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-  ▢ *Ping:* ${rtime} ms
-  ▢ *Uptime:* ${uptime}
-  ▢ *Servidor:* ${servidor}
+𓂃 ࣪˖ *Sistema*
+  ˖ *Ping:* ${rtime} ms
+  ˖ *Uptime:* ${uptime}
+  ˖ *Servidor:* ${servidor}
+  ˖ *CPU:* ${cpuModel}
+  ˖ *Uso CPU:* ${cpuPct}%
+  ˖ *RAM:* ${formatBytes(ramUsed)} / ${formatBytes(ramTotal)} (${ramPct}%)
+  ˖ *Disco:* ${formatBytes(disk.used)} / ${formatBytes(disk.total)} (${diskPct}%)
+  ˖ *Libre:* ${formatBytes(disk.free)}
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-  ▢ *Procesador:* ${cpuModel}
-  ▢ *CPU:* ${cpuPct}%
-  ▢ *RAM:* ${formatBytes(ramUsed)} / ${formatBytes(ramTotal)} (${ramPct}%)
-  ▢ *Disco:* ${formatBytes(disk.used)} / ${formatBytes(disk.total)} (${diskPct}%) — libre: ${formatBytes(disk.free)}
+𓂃 ࣪˖ *Bot*
+  ˖ *Prefijo:* ${usedPrefix}
+  ˖ *Modo:* ${self ? "privado" : "público"}
+  ˖ *Usuarios reg.:* ${totalusrReg}
+  ˖ *Total usuarios:* ${totalusr}
+  ˖ *Sub-bot:* ${subBotLine}
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-  ▢ *Prefijo:* ${usedPrefix}
-  ▢ *Modo:* ${self ? "privado" : "público"}
-  ▢ *Usuarios reg.:* ${totalusrReg}
-  ▢ *Total usuarios:* ${totalusr}
-  ▢ *Sub-bot:* ${subBotLine}
+𓂃 ࣪˖ *Chats*
+  ˖ *Privados:* ${privados}
+  ˖ *Grupos:* ${groups.length}
+  ˖ *Total:* ${allChats.length}
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-  ▢ *Chats privados:* ${privados}
-  ▢ *Grupos:* ${groups.length}
-  ▢ *Total chats:* ${allChats.length}
-
-  ▢ *Autoread:* ${on(autoread)}
-  ▢ *Restrict:* ${on(restrict)}
-  ▢ *Solo PC:* ${onP(pconly)}
-  ▢ *Solo GC:* ${onP(gconly)}
-  ▢ *Anti privado:* ${onP(antiprivado)}
-  ▢ *Anti llamadas:* ${onP(antiCall)}
-  ▢ *Modo bot:* ${onP(modejadibot)}`.trim();
+𓂃 ࣪˖ *Configuración*
+  ˖ *Autoread:* ${on(autoread)}
+  ˖ *Restrict:* ${on(restrict)}
+  ˖ *Solo PC:* ${onP(pconly)}
+  ˖ *Solo GC:* ${onP(gconly)}
+  ˖ *Anti privado:* ${onP(antiprivado)}
+  ˖ *Anti llamadas:* ${onP(antiCall)}
+  ˖ *Modo bot:* ${onP(modejadibot)}
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const thumbnail = global.imagen1 ?? Buffer.alloc(0);
   const mimeTypes = [
@@ -180,4 +191,4 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
-    
+  
