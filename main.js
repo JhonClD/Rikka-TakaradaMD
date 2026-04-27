@@ -83,22 +83,37 @@ loadDatabase();
 class LidDataManager {
   constructor(cacheFile = './src/lidsresolve.json') {
     this.cacheFile = cacheFile;
+    this._memCache = null;      // caché en memoria
+    this._lastMtime = 0;        // mtime del archivo en último load
   }
 
   /**
-   * Cargar datos del archivo JSON
+   * Cargar datos del archivo JSON (con caché en memoria)
+   * Solo re-lee el disco cuando el archivo cambia realmente.
    */
   loadData() {
     try {
       if (fs.existsSync(this.cacheFile)) {
-        const data = fs.readFileSync(this.cacheFile, 'utf8');
-        return JSON.parse(data);
+        const mtime = fs.statSync(this.cacheFile).mtimeMs;
+        if (this._memCache && mtime === this._lastMtime) {
+          return this._memCache; // hit de caché — sin I/O
+        }
+        const data = JSON.parse(fs.readFileSync(this.cacheFile, 'utf8'));
+        this._memCache = data;
+        this._lastMtime = mtime;
+        return data;
       }
-      return {};
+      return this._memCache || {};
     } catch (error) {
       console.error('❌ Error cargando cache LID:', error.message);
-      return {};
+      return this._memCache || {};
     }
+  }
+
+  /** Invalida el caché en memoria (llamar tras escribir el archivo) */
+  invalidateCache() {
+    this._memCache = null;
+    this._lastMtime = 0;
   }
 
   /**
@@ -865,31 +880,8 @@ global.reloadHandler = async function (restatConn) {
         //console.log(`🔄 Procesando ${chatUpdate.messages.length} mensajes...`);
         
         // Interceptar y procesar mensajes para resolver LIDs
+        // (interceptMessages ya llama processMessageForDisplay internamente)
         chatUpdate.messages = await interceptMessages(chatUpdate.messages, lidResolver);
-
-        // Procesamiento adicional específico para LIDs en grupos
-        for (let i = 0; i < chatUpdate.messages.length; i++) {
-          const message = chatUpdate.messages[i];
-          
-          if (message?.key?.remoteJid?.endsWith('@g.us')) {
-            try {
-              // Procesar mensaje completo una vez más para asegurar que todo esté resuelto
-              const fullyProcessedMessage = await processMessageForDisplay(message, lidResolver);
-              chatUpdate.messages[i] = fullyProcessedMessage;
-              
-              // DEBUG: Verificar si hay menciones LID sin resolver
-              const messageText = extractAllText(fullyProcessedMessage);
-              if (messageText && messageText.includes('@') && /(@\d{8,20})/.test(messageText)) {
-                const lidMatches = messageText.match(/@(\d{8,20})/g);
-                if (lidMatches) {
-                  //console.log(`⚠️ Posibles LIDs sin resolver: ${lidMatches.join(', ')}`);
-                }
-              }
-            } catch (error) {
-              console.error('❌ Error en procesamiento final de mensaje:', error);
-            }
-          }
-        }
       }
       
       return await originalHandler(chatUpdate);
@@ -1144,7 +1136,7 @@ setInterval(async () => {
   const uptime = clockString(_uptime);
   const bio = `• Activo: ${uptime} | TheMystic-Bot-MD`;
   await conn?.updateProfileStatus(bio).catch((_) => _);
-}, 60000);
+}, 10 * 60 * 1000); // cada 10 minutos (antes: 60s)
 
 // Limpiar y optimizar caché LID cada 30 minutos
 setInterval(async () => {
