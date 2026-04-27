@@ -1,17 +1,9 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 
-const tradutor = {
-  texto1: "📎 Ingresa un enlace de TikTok.",
-  texto2: "❌ El enlace no parece ser de TikTok.",
-  texto9: "❌ No se pudo descargar el video. Inténtalo de nuevo."
-};
-
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `${tradutor.texto1}\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
-  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw tradutor.texto2;
-
-  await m.reply(tradutor.texto3);
+  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/ _`;
+  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
 
   try {
     let videoUrl = null;
@@ -41,14 +33,13 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    if (!videoUrl) throw new Error('No se pudo obtener el enlace HD del video.');
+    if (!videoUrl) throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
 
-    const cap = `✅ *Video descargado*\n💡 Responde con _${usedPrefix}tomp3_ para convertirlo en audio.`;
-    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: cap }, { quoted: m });
+    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: '✅ *Video descargado*' }, { quoted: m });
 
   } catch (e) {
     console.error(e);
-    throw tradutor.texto9;
+    throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
   }
 };
 
@@ -57,8 +48,6 @@ handler.tags = ['downloader'];
 handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio)$/i;
 
 export default handler;
-
-// --- FUNCIONES DE APOYO ---
 
 async function fetchDownloadLinks(text, platform) {
   try {
@@ -90,5 +79,5 @@ async function fetchDownloadLinks(text, platform) {
   } catch {
     return null;
   }
-      }
-
+}
+  
