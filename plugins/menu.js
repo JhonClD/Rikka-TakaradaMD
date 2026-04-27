@@ -50,17 +50,16 @@ const handler = async (m, { conn, usedPrefix }) => {
   const totalCmds  = Object.values(categories).flat().length;
 
   const header =
-    `┌─────────────────────┐\n` +
-    `│  ✨ *${botName}* ✨\n` +
-    `├─────────────────────┤\n` +
-    `│ 👤 *Usuario:* ${pushname}\n` +
-    `│ 🕐 *Hora:* ${time}\n` +
-    `│ 📅 *Fecha:* ${date}\n` +
-    `│ ⏱️ *Uptime:* ${uptime}\n` +
-    `│ 🤖 *Owner:* +${ownerNum}\n` +
-    `│ 🔰 *Prefix:* ${prefix}\n` +
-    `│ 📋 *Comandos:* ${totalCmds}\n` +
-    `└─────────────────────┘`;
+    `✨ *${botName}* ✨\n` +
+    
+    `👤 *Usuario:* ${pushname}\n` +
+    `🕐 *Hora:* ${time}\n` +
+    `📅 *Fecha:* ${date}\n` +
+    `⏱️ *Uptime:* ${uptime}\n` +
+    `🤖 *Owner:* +${ownerNum}\n` +
+    `🔰 *Prefix:* ${prefix}\n` +
+    `📋 *Comandos:* ${totalCmds}\n` +
+    `𝐑𝐢𝐤𝐤𝐚 𝐓𝐚𝐫𝐚𝐤𝐚𝐫𝐚𝐝𝐚`;
 
   const body = Object.entries(categories)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -93,3 +92,4 @@ handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help|start|comandos)$/i;
 
 export default handler;
+                 
