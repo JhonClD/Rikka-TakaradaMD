@@ -738,17 +738,25 @@ export async function handler(chatUpdate) {
 
     let usedPrefix;
     const _user = global.db.data && global.db.data.users && global.db.data.users[m.sender];
-    // Siempre hacer fetch fresco para tener admins actualizados (evita problemas de cache desactualizado)
+    // Cache de groupMetadata con TTL de 5 minutos para evitar llamadas de red en cada mensaje
+    const _GROUP_META_TTL = 5 * 60 * 1000;
+    if (!global._groupMetaCache) global._groupMetaCache = {};
     let _cachedMeta = conn.chats[m.chat]?.metadata || null;
     let _freshMeta = null;
     if (m.isGroup) {
-      try { _freshMeta = await this.groupMetadata(m.chat); } catch (_) {}
+      const _gc = global._groupMetaCache[m.chat];
+      const _now = Date.now();
+      if (_gc && (_now - _gc.ts) < _GROUP_META_TTL) {
+        _freshMeta = _gc.data; // hit de caché — sin llamada de red
+      } else {
+        try {
+          _freshMeta = await this.groupMetadata(m.chat);
+          global._groupMetaCache[m.chat] = { data: _freshMeta, ts: _now };
+          if (conn.chats[m.chat]) conn.chats[m.chat].metadata = _freshMeta;
+        } catch (_) {}
+      }
     }
     const _rawMeta = m.isGroup ? (_freshMeta || _cachedMeta || {}) : {};
-    // Actualizar cache con datos frescos
-    if (_freshMeta && m.isGroup && conn.chats[m.chat]) {
-      conn.chats[m.chat].metadata = _freshMeta;
-    }
     const _rawParticipants = (_rawMeta.participants || []).map(p => ({
       ...p,
       id: p.id || p.jid,
@@ -1167,6 +1175,10 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
 
   const m = mconn
   if (opts['self']) return;
+  // Invalidar caché de groupMetadata cuando cambian participantes o admins
+  if (global._groupMetaCache && global._groupMetaCache[id]) {
+    delete global._groupMetaCache[id];
+  }
   if (global.db.data == null) await loadDatabase();
   const chat = global.db.data.chats[id] || {};
   const botTt = global.db.data.settings[mconn?.conn?.user?.jid] || {};
