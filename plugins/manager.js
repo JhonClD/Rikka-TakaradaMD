@@ -21,11 +21,11 @@ function pluginStatus(filename) {
 function getSysPackageManager() {
   if (process.env.PREFIX?.includes('com.termux')) return { i: 'pkg install -y', u: 'pkg uninstall -y' };
   
-  try { execSync('apt-get --version', { stdio: 'ignore' }); return { i: 'DEBIAN_FRONTEND=noninteractive apt-get install -y', u: 'DEBIAN_FRONTEND=noninteractive apt-get remove -y' }; } catch {}
-  try { execSync('apk --version', { stdio: 'ignore' }); return { i: 'apk add', u: 'apk del' }; } catch {}
-  try { execSync('pacman --version', { stdio: 'ignore' }); return { i: 'pacman -S --noconfirm', u: 'pacman -Rs --noconfirm' }; } catch {}
-  try { execSync('dnf --version', { stdio: 'ignore' }); return { i: 'dnf install -y', u: 'dnf remove -y' }; } catch {}
-  try { execSync('yum --version', { stdio: 'ignore' }); return { i: 'yum install -y', u: 'yum remove -y' }; } catch {}
+  try { execSync('apt-get --version', { stdio: 'ignore' }); return { i: 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y', u: 'sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y' }; } catch {}
+  try { execSync('apk --version', { stdio: 'ignore' }); return { i: 'sudo apk add', u: 'sudo apk del' }; } catch {}
+  try { execSync('pacman --version', { stdio: 'ignore' }); return { i: 'sudo pacman -S --noconfirm', u: 'sudo pacman -Rs --noconfirm' }; } catch {}
+  try { execSync('dnf --version', { stdio: 'ignore' }); return { i: 'sudo dnf install -y', u: 'sudo dnf remove -y' }; } catch {}
+  try { execSync('yum --version', { stdio: 'ignore' }); return { i: 'sudo yum install -y', u: 'sudo yum remove -y' }; } catch {}
   
   return null;
 }
@@ -68,7 +68,7 @@ Responde a un mensaje con el nuevo código:
 
     if (isSys) {
       const pm = getSysPackageManager();
-      if (!pm) throw '❌ No se pudo detectar un gestor de paquetes soportado en este entorno (apt, pkg, apk, pacman). Puede que no tengas permisos (root).';
+      if (!pm) throw '❌ No se pudo detectar un gestor de paquetes soportado en este entorno (apt, pkg, apk, pacman).';
       
       await conn.sendMessage(m.chat, { text: `🖥️ _Instalando paquete del sistema *${pkg}*..._\n_Esto puede tardar unos minutos._` }, { quoted: m });
       try {
@@ -116,7 +116,7 @@ Responde a un mensaje con el nuevo código:
 
     if (isSys) {
       const pm = getSysPackageManager();
-      if (!pm) throw '❌ Gestor de paquetes no detectado o sin permisos.';
+      if (!pm) throw '❌ Gestor de paquetes no detectado.';
       
       await conn.sendMessage(m.chat, { text: `🗑️ _Eliminando del sistema *${pkg}*..._` }, { quoted: m });
       try {
@@ -249,4 +249,4 @@ handler.command = /^(mgr|manager|pluginmgr)$/i;
 handler.owner = true;
 
 export default handler;
-                                                   
+      
