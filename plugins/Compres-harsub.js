@@ -28,6 +28,12 @@ let handler = async (m, { conn, text, command, args }) => {
         } catch (e) { return false; }
     };
 
+    // ✅ Descarga fallback sin cargar buffer completo en RAM
+    const downloadFallback = async (quoted, outputPath) => {
+        const buf = await quoted.download();
+        await fs.promises.writeFile(outputPath, buf);
+    };
+
     // Colores ANSI
     const colors = {
         reset: '\x1b[0m', cyan: '\x1b[36m', green: '\x1b[32m',
@@ -181,7 +187,7 @@ let handler = async (m, { conn, text, command, args }) => {
         try {
             reply(`⚙️ *Comprimiendo video*\n> Resolución: \`${res}p\`\n> Peso objetivo: \`${targetMB} MB\`\n> Modo: \`${asDocument ? 'Documento' : 'Video'}\`\n\nProcesando...`);
             let success = await downloadMediaStream(m.quoted, input);
-            if (!success) fs.writeFileSync(input, await m.quoted.download());
+            if (!success) await downloadFallback(m.quoted, input);
 
             // ✅ Duración real desde ffprobe (no asumir 30fps)
             const { totalFrames, durationSec } = getVideoMeta(input);
@@ -226,8 +232,8 @@ let handler = async (m, { conn, text, command, args }) => {
 
             const finalSizeMB = fs.statSync(output).size / 1024 / 1024;
             const mediaOptions = asDocument
-                ? { document: fs.readFileSync(output), fileName: `video_${res}p_${targetMB}mb.mp4`, mimetype: 'video/mp4' }
-                : { video: fs.readFileSync(output), caption: `✅ *${res}p* | ${finalSizeMB.toFixed(1)} MB` };
+                ? { document: fs.createReadStream(output), fileName: `video_${res}p_${targetMB}mb.mp4`, mimetype: 'video/mp4' }
+                : { video: fs.createReadStream(output), caption: `✅ *${res}p* | ${finalSizeMB.toFixed(1)} MB`, mimetype: 'video/mp4' };
             await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
         } catch (e) {
             console.error(e);
@@ -256,7 +262,7 @@ let handler = async (m, { conn, text, command, args }) => {
         try {
             reply(`⚙️ Procesando \`${command}\` a \`${res}p\`...\nModo: \`${asDocument ? 'Documento' : 'Video'}\``);
             let success = await downloadMediaStream(m.quoted, input);
-            if (!success) fs.writeFileSync(input, await m.quoted.download());
+            if (!success) await downloadFallback(m.quoted, input);
 
             const { totalFrames } = getVideoMeta(input);
             let ffmpegArgs = ['-i', input];
@@ -314,23 +320,27 @@ let handler = async (m, { conn, text, command, args }) => {
                         const fileSizeMB = fs.statSync(output).size / 1024 / 1024;
                         if (fileSizeMB > 60) {
                             const optOut = `${output}_opt.mp4`;
-                            // ✅ pix_fmt yuv420p también en recompresión de emergencia
-                            exec(`ffmpeg -i "${output}" -c:v libx264 -crf 32 -preset superfast -pix_fmt yuv420p -c:a aac -b:a 64k -y "${optOut}"`, async () => {
-                                const finalFile    = fs.existsSync(optOut) ? optOut : output;
-                                const mediaOptions = asDocument
-                                    ? { document: fs.readFileSync(finalFile), fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
-                                    : { video: fs.readFileSync(finalFile) };
-                                await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
-                                [input, output, optOut].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
-                                resolve();
+                            // ✅ promisified: el finally no borra output antes de que termine
+                            await new Promise((res2, rej2) => {
+                                exec(
+                                    `ffmpeg -i "${output}" -c:v libx264 -crf 32 -preset superfast -pix_fmt yuv420p -c:a aac -b:a 64k -y "${optOut}"`,
+                                    (err) => err ? rej2(err) : res2()
+                                );
                             });
+                            const finalFile    = fs.existsSync(optOut) ? optOut : output;
+                            const mediaOptions = asDocument
+                                ? { document: fs.createReadStream(finalFile), fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
+                                : { video: fs.createReadStream(finalFile), mimetype: 'video/mp4' };
+                            await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
+                            if (fs.existsSync(optOut)) fs.unlinkSync(optOut);
+                            resolve();
                             return;
                         }
                     }
 
                     const mediaOptions = asDocument
-                        ? { document: fs.readFileSync(output), fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
-                        : { video: fs.readFileSync(output) };
+                        ? { document: fs.createReadStream(output), fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
+                        : { video: fs.createReadStream(output), mimetype: 'video/mp4' };
                     await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
                     resolve();
                 });
@@ -347,3 +357,4 @@ let handler = async (m, { conn, text, command, args }) => {
 
 handler.command = /^(dw|dw2|dw3|dw4|mi)$/i;
 export default handler;
+            
