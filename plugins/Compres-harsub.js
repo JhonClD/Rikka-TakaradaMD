@@ -213,7 +213,6 @@ let handler = async (m, { conn, text, command, args }) => {
         const timestamp = Date.now();
         const input     = path.resolve(`./temp/mi_in_${timestamp}`);
         const output    = path.resolve(`./temp/mi_out_${timestamp}.mp4`);
-        const logPrefix = path.resolve(`./temp/ffmpeg2pass_${timestamp}`);
         const label     = `MI ${res}p → ${targetMB}MB`;
 
         try {
@@ -228,49 +227,27 @@ let handler = async (m, { conn, text, command, args }) => {
             const videoBitrateK = calcVideoBitrate(durationSec, targetMB, AUDIO_KBPS);
             const maxrateK      = Math.floor(videoBitrateK * 1.2);
             const bufsizeK      = Math.floor(videoBitrateK * 2);
+            const sf            = scaleFast(res);
 
-            // ✅ scale fast_bilinear + pad (sin watermark en pass 1)
-            const sf = scaleFast(res);
-
-            // PASS 1 — ULTRAFAST (análisis, sin audio)
-            const pass1Args = [
-                '-i', input, '-vf', sf,
-                '-c:v', 'libx264', '-b:v', `${videoBitrateK}k`, '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
-                '-pix_fmt', 'yuv420p',
-                '-pass', '1', '-passlogfile', logPrefix, '-preset', 'ultrafast',
-                '-tune', 'fastdecode',
-                '-threads', '0', '-an', '-f', 'null', '-y', '/dev/null'
-            ];
+            // Single-pass CBR — two-pass falla en builds Android de FFmpeg (EINVAL -22)
             await new Promise((resolve, reject) => {
-                const p1 = spawn('ffmpeg', pass1Args);
+                const args = [
+                    '-i', input, '-vf', withWM(sf),
+                    '-c:v', 'libx264', '-b:v', `${videoBitrateK}k`, '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
+                    '-pix_fmt', 'yuv420p',
+                    '-preset', 'fast', '-tune', 'fastdecode',
+                    '-threads', '0',
+                    '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2',
+                    '-movflags', '+faststart', '-y', output
+                ];
+                const proc = spawn('ffmpeg', args);
                 let errBuf = '';
-                p1.stderr.on('data', (d) => { errBuf += d; logFFmpegProgress(`${label} - PASS 1/2`, d, totalFrames); });
-                p1.on('close', (code) => {
+                proc.stderr.on('data', (d) => { errBuf += d; logFFmpegProgress(label, d, totalFrames); });
+                proc.on('close', (code) => {
                     process.stdout.write('\n\n');
                     if (code === 0) return resolve();
                     const lastLines = errBuf.split('\n').filter(Boolean).slice(-5).join('\n');
-                    reject(new Error(`pass1 code ${code}\n${lastLines}`));
-                });
-            });
-
-            // PASS 2 — FAST (salida + watermark)
-            const pass2Args = [
-                '-i', input, '-vf', withWM(sf),
-                '-c:v', 'libx264', '-b:v', `${videoBitrateK}k`, '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
-                '-pix_fmt', 'yuv420p',
-                '-pass', '2', '-passlogfile', logPrefix, '-preset', 'fast',
-                '-tune', 'fastdecode',
-                '-threads', '0', '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2', '-movflags', '+faststart', '-y', output
-            ];
-            await new Promise((resolve, reject) => {
-                const p2 = spawn('ffmpeg', pass2Args);
-                let errBuf = '';
-                p2.stderr.on('data', (d) => { errBuf += d; logFFmpegProgress(`${label} - PASS 2/2`, d, totalFrames); });
-                p2.on('close', (code) => {
-                    process.stdout.write('\n\n');
-                    if (code === 0) return resolve();
-                    const lastLines = errBuf.split('\n').filter(Boolean).slice(-5).join('\n');
-                    reject(new Error(`pass2 code ${code}\n${lastLines}`));
+                    reject(new Error(`mi code ${code}\n${lastLines}`));
                 });
             });
 
@@ -283,7 +260,7 @@ let handler = async (m, { conn, text, command, args }) => {
             console.error(e);
             reply(`❌ Error al comprimir:\n\`${e.message}\``);
         } finally {
-            [input, output, `${logPrefix}-0.log`, `${logPrefix}-0.log.mbtree`].forEach(f => {
+            [input, output].forEach(f => {
                 if (fs.existsSync(f)) fs.unlinkSync(f);
             });
         }
