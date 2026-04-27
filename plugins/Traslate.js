@@ -1,4 +1,5 @@
-import { translate } from '@vitalets/google-translate-api';
+import pkg from '@vitalets/google-translate-api';
+const { translate } = pkg;
 
 const handler = async (m, { args, usedPrefix, command }) => {
   const msg = `📖 Uso: _${usedPrefix + command} (idioma) (texto)_\n*Ejemplo:* _${usedPrefix + command} en Hola mundo_\n\n*Idiomas:* https://cloud.google.com/translate/docs/languages`;
@@ -61,4 +62,3 @@ handler.help = ['translate <idioma> <texto>'];
 handler.tags = ['herramientas'];
 handler.command = /^(translate|traducir|trad)$/i;
 export default handler;
-        
