@@ -1,44 +1,105 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 
+/** Detecta si una URL apunta a audio (por extensión o Content-Type) */
+async function isAudioUrl(url) {
+  if (/\.(mp3|m4a|aac|ogg|wav)(\?|$)/i.test(url)) return true;
+  try {
+    const { headers } = await axios.head(url, { timeout: 5000 });
+    const ct = headers['content-type'] || '';
+    return ct.startsWith('audio/');
+  } catch {
+    return false;
+  }
+}
+
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
-  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
+  if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
 
   try {
+    const encoded = encodeURIComponent(args[0]);
     let videoUrl = null;
-    const links = await fetchDownloadLinks(args[0], 'tiktok');
+    let audioUrl = null;
+    let isSlideshow = false;
+    let slideshowImages = [];
 
-    if (links && links.length > 0) {
-      videoUrl = links.find(link => /hdplay/i.test(link)) || links.find(link => /download/i.test(link)) || links[0];
+    // --- 1. tikwm (más completo: devuelve type, images, music) ---
+    try {
+      const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`);
+      const d = json?.data;
+      if (d) {
+        isSlideshow = d.images && Array.isArray(d.images) && d.images.length > 0;
+        if (isSlideshow) {
+          slideshowImages = d.images;
+          audioUrl = d.music;
+        } else {
+          videoUrl = d.hdplay || d.play || null;
+          audioUrl = d.music || null;
+        }
+      }
+    } catch (err) {
+      console.log('[tikwm error]', err.message);
     }
 
-    if (!videoUrl) {
-      const encoded = encodeURIComponent(args[0]);
-      const apis = [
-        `https://www.tikwm.com/api/?url=${encoded}&hd=1`,
+    // --- 2. Scraper instatiktok (fallback) ---
+    if (!videoUrl && !isSlideshow) {
+      const links = await fetchDownloadLinks(args[0], 'tiktok');
+      if (links && links.length > 0) {
+        videoUrl = links.find(l => /hdplay/i.test(l)) || links.find(l => /download/i.test(l)) || links[0];
+      }
+    }
+
+    // --- 3. APIs adicionales de fallback ---
+    if (!videoUrl && !isSlideshow) {
+      const fallbackApis = [
         `https://api.vreden.my.id/api/tiktok?url=${encoded}`,
         `https://luminai.my.id/api/download/tiktok?url=${encoded}`
       ];
-
-      for (const api of apis) {
+      for (const api of fallbackApis) {
         try {
           const { data: json } = await axios.get(api);
-          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url || (Array.isArray(json.data) ? json.data[0].url : null);
+          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url
+                     || (Array.isArray(json.data) ? json.data[0]?.url : null);
           if (videoUrl) break;
         } catch (err) {
-          console.log(`[API Fallback Error] ${api}:`, err.message);
-          continue;
+          console.log(`[Fallback error] ${api}:`, err.message);
         }
       }
     }
 
-    if (!videoUrl) throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
+    // --- Enviar según tipo de contenido ---
+    if (isSlideshow) {
+      await conn.sendMessage(m.chat, { text: `🖼️ *Slideshow de ${slideshowImages.length} imagen(es)*` }, { quoted: m });
+      for (const imgUrl of slideshowImages) {
+        await conn.sendMessage(m.chat, { image: { url: imgUrl } });
+      }
+      if (audioUrl) {
+        await conn.sendMessage(m.chat, { audio: { url: audioUrl }, mimetype: 'audio/mp4', ptt: false });
+      }
+      return;
+    }
 
-    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: '✅ *Video descargado*' }, { quoted: m });
+    if (!videoUrl) throw "no_url";
+
+    // Verificar si lo que obtuvimos es audio en lugar de video
+    const esAudio = await isAudioUrl(videoUrl);
+    if (esAudio) {
+      await conn.sendMessage(m.chat, {
+        audio: { url: videoUrl },
+        mimetype: 'audio/mp4',
+        ptt: false
+      }, { quoted: m });
+      await conn.sendMessage(m.chat, { text: '🎵 *Solo se encontró el audio de este TikTok*' });
+    } else {
+      await conn.sendMessage(m.chat, {
+        video: { url: videoUrl },
+        caption: '✅ *Video descargado*'
+      }, { quoted: m });
+    }
 
   } catch (e) {
-    console.error(e);
+    if (e !== "no_url") console.error(e);
     throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
   }
 };
@@ -80,4 +141,3 @@ async function fetchDownloadLinks(text, platform) {
     return null;
   }
 }
-
