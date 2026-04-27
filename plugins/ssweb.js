@@ -2,12 +2,14 @@ const handler = async (m, { conn, text, args }) => {
   if (!args[0]) return conn.reply(m.chat, "📎 Ingresa la URL del sitio web.", m);
 
   try {
-    const ss = await (await fetch(`https://image.thum.io/get/fullpage/${args[0]}`)).arrayBuffer();
+    // HD: fullpage + width 1920
+    const ss = await (await fetch(`https://image.thum.io/get/width/1920/fullpage/${args[0]}`)).arrayBuffer();
     const buffer = Buffer.from(ss);
     conn.sendMessage(m.chat, { image: buffer }, { quoted: m });
   } catch {
     try {
-      const ss2 = `https://api.screenshotmachine.com/?key=c04d3a&url=${args[0]}&dimension=720x720`;
+      // HD: dimension 1920x1080
+      const ss2 = `https://api.screenshotmachine.com/?key=c04d3a&url=${args[0]}&dimension=1920x1080`;
       conn.sendMessage(m.chat, { image: { url: ss2 } }, { quoted: m });
     } catch {
       try {
@@ -26,4 +28,3 @@ handler.tags = ["internet"];
 handler.command = /^ss(web)?f?$/i;
 
 export default handler;
-      
