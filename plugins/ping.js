@@ -162,7 +162,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
     "vnd.openxmlformats-officedocument.wordprocessingml.document",
   ];
   const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
-  const repoUrl = "https://github.com/JhonClD/KanaArima-MD";
+  const repoUrl = "wa.me/51925092348";
 
   await conn.sendMessage(m.chat, {
     document: { url: repoUrl },
