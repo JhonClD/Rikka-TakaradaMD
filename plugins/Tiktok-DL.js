@@ -2,7 +2,7 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/ _`;
+  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
   if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
 
   try {
