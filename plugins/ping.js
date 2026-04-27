@@ -142,16 +142,6 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   ˖ *Privados:* ${privados}
   ˖ *Grupos:* ${groups.length}
   ˖ *Total:* ${allChats.length}
-﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
-
-𓂃 ࣪˖ *Configuración*
-  ˖ *Autoread:* ${on(autoread)}
-  ˖ *Restrict:* ${on(restrict)}
-  ˖ *Solo PC:* ${onP(pconly)}
-  ˖ *Solo GC:* ${onP(gconly)}
-  ˖ *Anti privado:* ${onP(antiprivado)}
-  ˖ *Anti llamadas:* ${onP(antiCall)}
-  ˖ *Modo bot:* ${onP(modejadibot)}
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
