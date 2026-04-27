@@ -129,9 +129,25 @@ Responde a un mensaje con el nuevo código:
       }
     } else {
       await conn.sendMessage(m.chat, { text: `🗑️ _Desinstalando de NPM *${pkg}*..._` }, { quoted: m });
+      
+      const runUninstall = async (flags = '') => {
+        return execAsync(`npm uninstall ${pkg} --save ${flags}`.trim(), { timeout: 60000 });
+      };
+
       try {
-        const { stdout, stderr } = await execAsync(`npm uninstall ${pkg} --save`, { timeout: 60000 });
-        const out = ((stdout || '') + (stderr || '')).trim().slice(-800);
+        let result;
+        try {
+          result = await runUninstall();
+        } catch (e1) {
+          const out1 = ((e1.stdout || '') + (e1.stderr || '')).trim();
+          if (out1.includes('ERESOLVE') || out1.includes('peer dep')) {
+            await conn.sendMessage(m.chat, { text: `⚠️ _Conflicto detectado. Forzando desinstalación con --legacy-peer-deps..._` }, { quoted: m });
+            result = await runUninstall('--legacy-peer-deps');
+          } else {
+            throw e1;
+          }
+        }
+        const out = ((result.stdout || '') + (result.stderr || '')).trim().slice(-800);
         await conn.sendMessage(m.chat, { text: `✅ *Desinstalado de NPM:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
       } catch (e) {
         const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-1000);
@@ -249,4 +265,4 @@ handler.command = /^(mgr|manager|pluginmgr)$/i;
 handler.owner = true;
 
 export default handler;
-      
+  
