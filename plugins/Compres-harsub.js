@@ -9,15 +9,81 @@ let handler = async (m, { conn, text, command, args }) => {
     if (!fs.existsSync('./temp')) fs.mkdirSync('./temp', { recursive: true });
 
     const flags = {
-        'spa': '🇲🇽', 'es': '🇲🇽', 'eng': '🇺🇸', 'en': '🇺🇸', 'jpn': '🇯🇵', 'ja': '🇯🇵',
-        'por': '🇧🇷', 'pt': '🇧🇷', 'ara': '🇸🇦', 'ar': '🇸🇦', 'fre': '🇫🇷', 'fra': '🇫🇷', 'fr': '🇫🇷',
-        'ger': '🇩🇪', 'de': '🇩🇪', 'ita': '🇮🇹', 'it': '🇮🇹', 'rus': '🇷🇺', 'ru': '🇷🇺',
-        'chi': '🇨🇳', 'zh': '🇨🇳', 'kor': '🇰🇷', 'ko': '🇰🇷', 'und': '🏳️'
+        // Español
+        'spa': '🇲🇽', 'es': '🇲🇽', 'lat': '🌎', 'es-419': '🌎',
+        // Inglés
+        'eng': '🇺🇸', 'en': '🇺🇸',
+        // Japonés
+        'jpn': '🇯🇵', 'ja': '🇯🇵',
+        // Portugués
+        'por': '🇧🇷', 'pt': '🇧🇷',
+        // Árabe
+        'ara': '🇸🇦', 'ar': '🇸🇦',
+        // Francés
+        'fre': '🇫🇷', 'fra': '🇫🇷', 'fr': '🇫🇷',
+        // Alemán
+        'ger': '🇩🇪', 'deu': '🇩🇪', 'de': '🇩🇪',
+        // Italiano
+        'ita': '🇮🇹', 'it': '🇮🇹',
+        // Ruso
+        'rus': '🇷🇺', 'ru': '🇷🇺',
+        // Chino
+        'chi': '🇨🇳', 'zho': '🇨🇳', 'zh': '🇨🇳', 'cmn': '🇨🇳',
+        // Coreano
+        'kor': '🇰🇷', 'ko': '🇰🇷',
+        // Holandés
+        'dut': '🇳🇱', 'nld': '🇳🇱', 'nl': '🇳🇱',
+        // Polaco
+        'pol': '🇵🇱', 'pl': '🇵🇱',
+        // Turco
+        'tur': '🇹🇷', 'tr': '🇹🇷',
+        // Checo
+        'cze': '🇨🇿', 'ces': '🇨🇿', 'cs': '🇨🇿',
+        // Húngaro
+        'hun': '🇭🇺', 'hu': '🇭🇺',
+        // Rumano
+        'rum': '🇷🇴', 'ron': '🇷🇴', 'ro': '🇷🇴',
+        // Sueco
+        'swe': '🇸🇪', 'sv': '🇸🇪',
+        // Noruego
+        'nor': '🇳🇴', 'nob': '🇳🇴', 'nb': '🇳🇴', 'no': '🇳🇴',
+        // Danés
+        'dan': '🇩🇰', 'da': '🇩🇰',
+        // Finlandés
+        'fin': '🇫🇮', 'fi': '🇫🇮',
+        // Griego
+        'gre': '🇬🇷', 'ell': '🇬🇷', 'el': '🇬🇷',
+        // Tailandés
+        'tha': '🇹🇭', 'th': '🇹🇭',
+        // Vietnamita
+        'vie': '🇻🇳', 'vi': '🇻🇳',
+        // Indonesio
+        'ind': '🇮🇩', 'id': '🇮🇩',
+        // Malayo
+        'may': '🇲🇾', 'msa': '🇲🇾', 'ms': '🇲🇾',
+        // Hindi
+        'hin': '🇮🇳', 'hi': '🇮🇳',
+        // Ucraniano
+        'ukr': '🇺🇦', 'uk': '🇺🇦',
+        // Hebreo
+        'heb': '🇮🇱', 'he': '🇮🇱',
+        // Búlgaro
+        'bul': '🇧🇬', 'bg': '🇧🇬',
+        // Serbio
+        'srp': '🇷🇸', 'sr': '🇷🇸',
+        // Croata
+        'hrv': '🇭🇷', 'hr': '🇭🇷',
+        // Eslovaco
+        'slk': '🇸🇰', 'sk': '🇸🇰',
+        // Esloveno
+        'slv': '🇸🇮', 'sl': '🇸🇮',
+        // Desconocido
+        'und': '🏳️'
     };
 
     const downloadMediaStream = async (quoted, outputPath) => {
         try {
-            const { downloadContentFromMessage } = await import('baileys');
+            const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
             const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
             const type = Object.keys(message)[0];
             const media = message[type];
@@ -104,7 +170,7 @@ let handler = async (m, { conn, text, command, args }) => {
     if (command === 'dw') {
         if (!m.quoted) return reply('Responde a un video o documento.');
         try {
-            const { downloadContentFromMessage } = await import('baileys');
+            const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
             const quoted  = m.quoted;
             const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
             const type    = Object.keys(message)[0];
@@ -357,4 +423,3 @@ let handler = async (m, { conn, text, command, args }) => {
 
 handler.command = /^(dw|dw2|dw3|dw4|mi)$/i;
 export default handler;
-            
