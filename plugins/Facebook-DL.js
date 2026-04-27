@@ -4,8 +4,6 @@ let handler = async (m, { args, command, conn }) => {
   const fbLink = args[0]
   if (!/facebook\.com|fb\.watch/g.test(fbLink)) throw '*❌ El enlace no parece ser de Facebook.*'
 
-  await m.reply('*[⏳] Descargando video de Facebook...*')
-
   try {
     const encoded = encodeURIComponent(fbLink)
 
