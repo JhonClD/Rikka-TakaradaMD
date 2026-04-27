@@ -8,51 +8,77 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|t\.)?tiktok\.com\/([^\s&]+)/gi.test(text))
     throw "❌ El enlace no parece ser de TikTok.";
 
-  let videoUrl = null;
+  let hdUrl = null;
+  let sdUrl = null;
 
   // 1. Intentar con instatiktok
   const links = await fetchDownloadLinks(args[0], 'tiktok');
   if (links?.length) {
-    videoUrl = links.find(l => /hdplay/i.test(l)) || links.find(l => /download/i.test(l)) || links[0];
+    hdUrl = links.find(l => /hdplay/i.test(l));
+    sdUrl = links.find(l => /download/i.test(l)) || links[0];
   }
 
-  // 2. Fallback a APIs externas
-  if (!videoUrl) {
+  // 2. Fallback a tikwm (devuelve HD y SD por separado)
+  if (!hdUrl && !sdUrl) {
+    try {
+      const encoded = encodeURIComponent(args[0]);
+      const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`);
+      hdUrl = json.data?.hdplay || null;
+      sdUrl = json.data?.play || null;
+    } catch { /* continúa */ }
+  }
+
+  // 3. Fallback a otras APIs
+  if (!hdUrl && !sdUrl) {
     const encoded = encodeURIComponent(args[0]);
-    const apis = [
-      `https://www.tikwm.com/api/?url=${encoded}&hd=1`,
+    for (const api of [
       `https://api.vreden.my.id/api/tiktok?url=${encoded}`,
       `https://luminai.my.id/api/download/tiktok?url=${encoded}`
-    ];
-    for (const api of apis) {
+    ]) {
       try {
         const { data: json } = await axios.get(api);
-        videoUrl = json.data?.hdplay || json.data?.play || json.data?.url
-                || json.result?.url || (Array.isArray(json.data) ? json.data[0].url : null);
-        if (videoUrl) break;
+        sdUrl = json.data?.url || json.result?.url || (Array.isArray(json.data) ? json.data[0].url : null);
+        if (sdUrl) break;
       } catch { continue; }
     }
   }
 
-  if (!videoUrl) throw "❌ No se pudo obtener el video. Inténtalo de nuevo.";
+  if (!hdUrl && !sdUrl) throw "❌ No se pudo obtener el video. Inténtalo de nuevo.";
 
-  // 3. Descargar buffer para verificar tamaño
-  const response = await axios.get(videoUrl, { responseType: 'arraybuffer' });
-  const buffer = Buffer.from(response.data);
-  const sizeMB = buffer.length / (1024 * 1024);
+  // 4. Verificar tamaño con HEAD (sin descargar)
+  const checkSize = async (url) => {
+    try {
+      const { headers } = await axios.head(url, { timeout: 5000 });
+      const bytes = parseInt(headers['content-length'] || '0');
+      return bytes / (1024 * 1024); // MB
+    } catch { return 999; } // Si falla, asumir grande
+  };
 
+  // Preferir HD, pero si es muy grande intentar SD
+  let videoUrl = hdUrl || sdUrl;
+  let sizeMB = await checkSize(videoUrl);
+
+  if (sizeMB > MAX_VIDEO_MB && hdUrl && sdUrl) {
+    // Probar SD como alternativa
+    const sdSize = await checkSize(sdUrl);
+    if (sdSize < sizeMB) {
+      videoUrl = sdUrl;
+      sizeMB = sdSize;
+    }
+  }
+
+  // 5. Enviar según tamaño — sin descargar buffer en el bot
   if (sizeMB > MAX_VIDEO_MB) {
-    // Enviar como documento si es muy grande
     await conn.sendMessage(m.chat, {
-      document: buffer,
+      document: { url: videoUrl },
       mimetype: 'video/mp4',
       fileName: 'tiktok_video.mp4',
-      caption: `✅ *Video descargado* (${sizeMB.toFixed(1)} MB)\n_Enviado como documento por superar ${MAX_VIDEO_MB} MB_`
+      caption: `✅ *Video descargado* (${sizeMB > 0 ? sizeMB.toFixed(1) + ' MB' : 'tamaño desconocido'})\n_Enviado como documento por superar ${MAX_VIDEO_MB} MB_`
     }, { quoted: m });
   } else {
     await conn.sendMessage(m.chat, {
-      video: buffer,
-      caption: `✅ *Video descargado* (${sizeMB.toFixed(1)} MB)`
+      video: { url: videoUrl },
+      caption: `✅ *Video descargado*`
     }, { quoted: m });
   }
 };
@@ -90,4 +116,4 @@ async function fetchDownloadLinks(text, platform) {
     });
     return links;
   } catch { return null; }
-  }
+      }
