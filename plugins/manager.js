@@ -54,11 +54,13 @@ Responde a un mensaje con el nuevo código:
     const pkg = args.join(' ');
     await conn.sendMessage(m.chat, { text: `📦 _Instalando *${pkg}*..._` }, { quoted: m });
     try {
-      const { stdout, stderr } = await execAsync(`npm install ${pkg} --save 2>&1`, { timeout: 120000 });
-      const out = (stdout + stderr).slice(-1500);
+      const { stdout, stderr } = await execAsync(`npm install ${pkg} --save`, { timeout: 120000 });
+      const out = (stdout + stderr).trim().slice(-1500);
       await conn.sendMessage(m.chat, { text: `✅ *Instalado:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
     } catch (e) {
-      throw `❌ Error instalando:\n\`\`\`${String(e.message).slice(0, 1000)}\`\`\``;
+      // e.stdout y e.stderr tienen el output real cuando el proceso falla
+      const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-2000);
+      throw `❌ Error instalando *${pkg}*:\n\`\`\`${out || e.message}\`\`\``;
     }
   },
 
@@ -68,10 +70,12 @@ Responde a un mensaje con el nuevo código:
     const pkg = args.join(' ');
     await conn.sendMessage(m.chat, { text: `🗑️ _Desinstalando *${pkg}*..._` }, { quoted: m });
     try {
-      const { stdout } = await execAsync(`npm uninstall ${pkg} --save 2>&1`, { timeout: 60000 });
-      await conn.sendMessage(m.chat, { text: `✅ *Desinstalado:* ${pkg}\n\n\`\`\`${stdout.slice(-800)}\`\`\`` }, { quoted: m });
+      const { stdout, stderr } = await execAsync(`npm uninstall ${pkg} --save`, { timeout: 60000 });
+      const out = (stdout + stderr).trim().slice(-800);
+      await conn.sendMessage(m.chat, { text: `✅ *Desinstalado:* ${pkg}\n\n\`\`\`${out}\`\`\`` }, { quoted: m });
     } catch (e) {
-      throw `❌ Error:\n\`${String(e.message).slice(0, 800)}\``;
+      const out = ((e.stdout || '') + (e.stderr || '')).trim().slice(-1000);
+      throw `❌ Error:\n\`\`\`${out || e.message}\`\`\``;
     }
   },
 
