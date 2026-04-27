@@ -38,11 +38,21 @@ let handler = async (m, { args, command, conn }) => {
 
     if (!videoUrl) throw '*[ ❌ ] No se pudo extraer el video. Las APIs podrían estar caídas.*'
 
-    await conn.sendFile(m.chat, videoUrl, 'fb_video.mp4', `✅ *Video de Facebook descargado*`, m)
+    // Descargar como buffer directo, sin guardar en disco
+    const videoRes = await fetch(videoUrl)
+    if (!videoRes.ok) throw '*[ ❌ ] No se pudo descargar el video.*'
+    const buffer = Buffer.from(await videoRes.arrayBuffer())
+
+    await conn.sendMessage(m.chat, {
+      video: buffer,
+      caption: '✅ *Video de Facebook descargado*',
+      fileName: 'fb_video.mp4',
+      mimetype: 'video/mp4'
+    }, { quoted: m })
 
   } catch (e) {
     console.error(e)
-    m.reply(`❌ *Error:* ${e.message || 'Ocurrió un problema inesperado.'}`)
+    m.reply(`❌ *Error:* ${e.message || e || 'Ocurrió un problema inesperado.'}`)
   }
 }
 
