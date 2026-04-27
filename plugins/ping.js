@@ -79,7 +79,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   await conn.sendPresenceUpdate("composing", m.chat).catch(() => {});
   const rtime = (performance.now() - pingStart).toFixed(2);
 
-  if (/^p$/i.test(command)) return m.reply(`✨ *Pong:* > ${rtime} ms`);
+  if (/^p$/i.test(command)) return m.reply(`✨ *Pong:* > `${rtime} ms`)`;
 
   const uptime   = clockString(process.uptime() * 1000);
   const ramTotal = os.totalmem();
