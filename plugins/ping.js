@@ -115,7 +115,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
 𓂃 ࣪˖ *Propietario*
-  ˖ *Nombre:* Jhon Cid
+  ˖ *Nombre:* ᭄🅜֟፝ıηͨσ‍ͥяͩυ🧸⃝꙰ཻུ⸙͎
   ˖ *WA:* +51925092348
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
