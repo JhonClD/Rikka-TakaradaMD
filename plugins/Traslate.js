@@ -1,5 +1,5 @@
 const handler = async (m, { args, usedPrefix, command }) => {
-  const msg = `📖 Uso: _${usedPrefix + command} (idioma) (texto)_\n*Ejemplo:* _${usedPrefix + command} en Hola mundo_\n\n*Idiomas:* https://cloud.google.com/translate/docs/languages`;
+  const msg = `📖 Uso: _${usedPrefix + command} (idioma) (texto)_\n*Ejemplo:* _${usedPrefix + command} en Hola mundo_`;
 
   let lang = 'es';
   let text = '';
