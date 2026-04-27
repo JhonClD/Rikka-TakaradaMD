@@ -3,7 +3,7 @@ import cheerio from 'cheerio';
 
 const tradutor = {
   texto1: "📎 Ingresa un enlace de TikTok.",
-  texto2: "❌ El enlace no parece ser de TikTok."
+  texto2: "❌ El enlace no parece ser de TikTok.",
   texto9: "❌ No se pudo descargar el video. Inténtalo de nuevo."
 };
 
