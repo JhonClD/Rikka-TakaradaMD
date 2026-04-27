@@ -8,7 +8,7 @@ const tradutor = {
 };
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `${tradutor.texto1}\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/ _`;
+  if (!text) throw `${tradutor.texto1}\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
   if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw tradutor.texto2;
 
   await m.reply(tradutor.texto3);
