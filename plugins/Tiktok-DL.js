@@ -24,25 +24,38 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     let isSlideshow = false;
     let slideshowImages = [];
 
-    // --- 1. tikwm (más completo: devuelve type, images, music) ---
+    // --- 1. API Principal: alyacore (Máxima Prioridad) ---
     try {
-      const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`);
-      const d = json?.data;
-      if (d) {
-        isSlideshow = d.images && Array.isArray(d.images) && d.images.length > 0;
-        if (isSlideshow) {
-          slideshowImages = d.images;
-          audioUrl = d.music;
-        } else {
-          videoUrl = d.hdplay || d.play || null;
-          audioUrl = d.music || null;
-        }
-      }
+      const alyaApi = `https://api.alyacore.xyz/dl/tiktok?url=${encoded}&apikey=Nakano-123`;
+      const { data: json } = await axios.get(alyaApi);
+      // Extraer video según las posibles respuestas estándar de APIs
+      videoUrl = json.data?.hdplay || json.data?.play || json.data?.video || json.data?.url || json.result?.url 
+                 || (Array.isArray(json.data) ? json.data[0]?.url : null);
     } catch (err) {
-      console.log('[tikwm error]', err.message);
+      console.log('[alyacore error]', err.message);
     }
 
-    // --- 2. Scraper instatiktok (fallback) ---
+    // --- 2. Fallback: tikwm (Excelente para detectar imágenes/slideshows) ---
+    if (!videoUrl && !isSlideshow) {
+      try {
+        const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`);
+        const d = json?.data;
+        if (d) {
+          isSlideshow = d.images && Array.isArray(d.images) && d.images.length > 0;
+          if (isSlideshow) {
+            slideshowImages = d.images;
+            audioUrl = d.music;
+          } else {
+            videoUrl = d.hdplay || d.play || null;
+            audioUrl = d.music || null;
+          }
+        }
+      } catch (err) {
+        console.log('[tikwm error]', err.message);
+      }
+    }
+
+    // --- 3. Scraper instatiktok ---
     if (!videoUrl && !isSlideshow) {
       const links = await fetchDownloadLinks(args[0], 'tiktok');
       if (links && links.length > 0) {
@@ -50,7 +63,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    // --- 3. APIs adicionales de fallback ---
+    // --- 4. APIs adicionales de emergencia ---
     if (!videoUrl && !isSlideshow) {
       const fallbackApis = [
         `https://api.vreden.my.id/api/tiktok?url=${encoded}`,
@@ -59,7 +72,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       for (const api of fallbackApis) {
         try {
           const { data: json } = await axios.get(api);
-          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url
+          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url || json.data?.video
                      || (Array.isArray(json.data) ? json.data[0]?.url : null);
           if (videoUrl) break;
         } catch (err) {
