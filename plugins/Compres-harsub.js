@@ -211,9 +211,9 @@ let handler = async (m, { conn, text, command, args }) => {
         if (!targetMB || isNaN(targetMB)) return reply('❌ Especifica el peso objetivo. Ej: `.mi 720 200mb`');
 
         const timestamp = Date.now();
-        const input     = `./temp/mi_in_${timestamp}`;
-        const output    = `./temp/mi_out_${timestamp}.mp4`;
-        const logPrefix = `./temp/ffmpeg2pass_${timestamp}`;
+        const input     = path.resolve(`./temp/mi_in_${timestamp}`);
+        const output    = path.resolve(`./temp/mi_out_${timestamp}.mp4`);
+        const logPrefix = path.resolve(`./temp/ffmpeg2pass_${timestamp}`);
         const label     = `MI ${res}p → ${targetMB}MB`;
 
         try {
@@ -232,14 +232,14 @@ let handler = async (m, { conn, text, command, args }) => {
             // ✅ scale fast_bilinear + pad (sin watermark en pass 1)
             const sf = scaleFast(res);
 
-            // PASS 1 — ULTRAFAST (análisis)
+            // PASS 1 — ULTRAFAST (análisis, sin audio)
             const pass1Args = [
                 '-i', input, '-vf', sf,
                 '-c:v', 'libx264', '-b:v', `${videoBitrateK}k`, '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
                 '-pix_fmt', 'yuv420p',
                 '-pass', '1', '-passlogfile', logPrefix, '-preset', 'ultrafast',
                 '-tune', 'fastdecode',
-                '-threads', '0', '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2', '-f', 'null', '-y', '/dev/null'
+                '-threads', '0', '-an', '-f', 'null', '-y', '/dev/null'
             ];
             await new Promise((resolve, reject) => {
                 const p1 = spawn('ffmpeg', pass1Args);
