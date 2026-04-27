@@ -153,7 +153,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   ˖ *Modo bot:* ${onP(modejadibot)}
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
-  const thumbnail = global.imagen1 ?? Buffer.alloc(0);
+  const menuImage = global.imagen1 ?? Buffer.alloc(0);
   const mimeTypes = [
     "pdf",
     "zip",
@@ -191,4 +191,4 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
-            
+  
