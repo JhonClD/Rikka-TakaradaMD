@@ -62,9 +62,10 @@ function getServerName() {
   if (process.env.GOOGLE_CLOUD_PROJECT)     return "☁️ Google Cloud";
   if (process.env.WEBSITE_SITE_NAME)        return "☁️ Azure";
   if (os.platform() === "android" || process.env.PREFIX?.includes("com.termux")) return "📱 Termux (Android)";
-  const hostname = os.hostname() || "desconocido";
+  
+  // Se eliminó os.hostname() para evitar que se filtre la IP del servidor
   const platMap  = { linux: "🐧 Linux", win32: "🪟 Windows", darwin: "🍎 macOS" };
-  return `${platMap[os.platform()] || "🖥️ " + os.platform()} (${hostname})`;
+  return `${platMap[os.platform()] || "🖥️ " + os.platform()}`;
 }
 
 function clockString(ms) {
