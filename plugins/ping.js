@@ -166,14 +166,14 @@ const handler = async (m, { conn, usedPrefix, command }) => {
         mediaUrl: repoUrl,
         mediaType: 2,
         previewType: "pdf",
-        title: "Kana Arima - MD",
+        title: "Rikka Takarada - MD",
         body: "Repositorio - GitHub",
         thumbnail,
         sourceUrl: repoUrl,
       },
     },
     caption: info,
-    footer: "Kana Arima-MD",
+    footer: "Rikka Takarada-MD",
     headerType: 6,
   }, { quoted: m });
 };
