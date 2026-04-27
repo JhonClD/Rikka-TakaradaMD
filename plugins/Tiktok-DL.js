@@ -1,6 +1,21 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 
+/** Expande URLs cortas de TikTok (vt.tiktok.com, vm.tiktok.com, etc.) */
+async function expandUrl(url) {
+  try {
+    const res = await axios.get(url, {
+      maxRedirects: 5,
+      timeout: 8000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    return res.request?.res?.responseUrl || res.config?.url || url;
+  } catch (e) {
+    // axios lanza error en redirects con algunos servidores, la URL final queda en el error
+    return e?.request?._redirectable?._currentUrl || url;
+  }
+}
+
 /** Detecta si una URL apunta a audio (por extensión o Content-Type) */
 async function isAudioUrl(url) {
   if (/\.(mp3|m4a|aac|ogg|wav)(\?|$)/i.test(url)) return true;
@@ -18,52 +33,57 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
 
   try {
-    const encoded = encodeURIComponent(args[0]);
+    // ── PASO 1: Expandir URL corta antes de pasarla a las APIs ──
+    const rawUrl = args[0];
+    const resolvedUrl = await expandUrl(rawUrl);
+    const encoded = encodeURIComponent(resolvedUrl);
+
     let videoUrl = null;
     let audioUrl = null;
     let isSlideshow = false;
     let slideshowImages = [];
 
-    // --- 1. API Principal: alyacore (Máxima Prioridad) ---
+    // --- 1. tikwm (más estable, soporta slideshows) ---
     try {
-      const alyaApi = `https://api.alyacore.xyz/dl/tiktok?url=${encoded}&apikey=Nakano-123`;
-      const { data: json } = await axios.get(alyaApi);
-      // Extraer video según las posibles respuestas estándar de APIs
-      videoUrl = json.data?.hdplay || json.data?.play || json.data?.video || json.data?.url || json.result?.url 
-                 || (Array.isArray(json.data) ? json.data[0]?.url : null);
+      const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`, { timeout: 10000 });
+      const d = json?.data;
+      if (d) {
+        isSlideshow = Array.isArray(d.images) && d.images.length > 0;
+        if (isSlideshow) {
+          slideshowImages = d.images;
+          audioUrl = d.music;
+        } else {
+          videoUrl = d.hdplay || d.play || null;
+          audioUrl = d.music || null;
+        }
+      }
     } catch (err) {
-      console.log('[alyacore error]', err.message);
+      console.log('[tikwm error]', err.message);
     }
 
-    // --- 2. Fallback: tikwm (Excelente para detectar imágenes/slideshows) ---
+    // --- 2. alyacore ---
     if (!videoUrl && !isSlideshow) {
       try {
-        const { data: json } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`);
-        const d = json?.data;
-        if (d) {
-          isSlideshow = d.images && Array.isArray(d.images) && d.images.length > 0;
-          if (isSlideshow) {
-            slideshowImages = d.images;
-            audioUrl = d.music;
-          } else {
-            videoUrl = d.hdplay || d.play || null;
-            audioUrl = d.music || null;
-          }
-        }
+        const { data: json } = await axios.get(
+          `https://api.alyacore.xyz/dl/tiktok?url=${encoded}&apikey=Nakano-123`,
+          { timeout: 10000 }
+        );
+        videoUrl = json.data?.hdplay || json.data?.play || json.data?.video || json.data?.url
+                   || json.result?.url || (Array.isArray(json.data) ? json.data[0]?.url : null);
       } catch (err) {
-        console.log('[tikwm error]', err.message);
+        console.log('[alyacore error]', err.message);
       }
     }
 
     // --- 3. Scraper instatiktok ---
     if (!videoUrl && !isSlideshow) {
-      const links = await fetchDownloadLinks(args[0], 'tiktok');
+      const links = await fetchDownloadLinks(resolvedUrl, 'tiktok');
       if (links && links.length > 0) {
         videoUrl = links.find(l => /hdplay/i.test(l)) || links.find(l => /download/i.test(l)) || links[0];
       }
     }
 
-    // --- 4. APIs adicionales de emergencia ---
+    // --- 4. APIs de emergencia ---
     if (!videoUrl && !isSlideshow) {
       const fallbackApis = [
         `https://api.vreden.my.id/api/tiktok?url=${encoded}`,
@@ -71,8 +91,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       ];
       for (const api of fallbackApis) {
         try {
-          const { data: json } = await axios.get(api);
-          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url || json.data?.video
+          const { data: json } = await axios.get(api, { timeout: 10000 });
+          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url
+                     || json.result?.url || json.data?.video
                      || (Array.isArray(json.data) ? json.data[0]?.url : null);
           if (videoUrl) break;
         } catch (err) {
@@ -81,7 +102,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    // --- Enviar según tipo de contenido ---
+    // --- Enviar slideshow ---
     if (isSlideshow) {
       await conn.sendMessage(m.chat, { text: `🖼️ *Slideshow de ${slideshowImages.length} imagen(es)*` }, { quoted: m });
       for (const imgUrl of slideshowImages) {
@@ -95,7 +116,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw "no_url";
 
-    // Verificar si lo que obtuvimos es audio en lugar de video
+    // --- Enviar video o audio ---
     const esAudio = await isAudioUrl(videoUrl);
     if (esAudio) {
       await conn.sendMessage(m.chat, {
@@ -135,7 +156,7 @@ async function fetchDownloadLinks(text, platform) {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         'Origin': SITE_URL,
         'Referer': SITE_URL,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'X-Requested-With': 'XMLHttpRequest'
       }
     });
