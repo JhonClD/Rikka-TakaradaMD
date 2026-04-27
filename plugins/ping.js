@@ -162,10 +162,10 @@ const handler = async (m, { conn, usedPrefix, command }) => {
     "vnd.openxmlformats-officedocument.wordprocessingml.document",
   ];
   const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
-  const repoUrl = "https://github.com/JhonClD/KanaArima-MD";
+  const linkUrl = "https://wa.me/51925092348";
 
   await conn.sendMessage(m.chat, {
-    document: { url: repoUrl },
+    document: menuImage,
     mimetype: `application/${randomMime}`,
     fileName: "Documento",
     fileLength: 99999999999999,
@@ -174,13 +174,13 @@ const handler = async (m, { conn, usedPrefix, command }) => {
       forwardingScore: 200,
       isForwarded: true,
       externalAdReply: {
-        mediaUrl: repoUrl,
+        mediaUrl: linkUrl,
         mediaType: 2,
         previewType: "pdf",
         title: "Rikka Takarada - MD",
-        body: "Repositorio - GitHub",
+        body: "Rikka Takarada Bot",
         thumbnail,
-        sourceUrl: repoUrl,
+        sourceUrl: linkUrl,
       },
     },
     caption: info,
@@ -191,4 +191,4 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
-    
+            
