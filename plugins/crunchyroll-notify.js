@@ -238,10 +238,18 @@ const isNewsletter = jid => typeof jid === 'string' && jid.endsWith('@newsletter
 // ─── Envío ────────────────────────────────────────────────────────────────────
 async function sendItem(conn, jid, ep, quoted = null) {
   const caption = formatCaption(ep)
-  // Los canales (@newsletter) no soportan quoted ni ciertos tipos de mensaje
-  const opts = (!isNewsletter(jid) && quoted) ? { quoted } : {}
+  const newsletter = isNewsletter(jid)
+  // Los canales no soportan quoted — y requieren la flag newsletter: true
+  const opts = newsletter ? { newsletter: true } : (quoted ? { quoted } : {})
+
   if (ep.image) {
-    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch { /* fallback texto */ }
+    try {
+      await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts)
+      return
+    } catch (err) {
+      console.error(`[CR-Notify] sendMessage imagen falló (${jid}):`, err.message)
+      // Fallback a texto plano
+    }
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
@@ -425,4 +433,4 @@ handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify)$/i
 })()
 
 export default handler
-  
+    
