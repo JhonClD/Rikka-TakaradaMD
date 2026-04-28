@@ -87,4 +87,4 @@ async function fetchDownloadLinks(text, platform) {
   } catch {
     return null;
   }
-          }
+}
