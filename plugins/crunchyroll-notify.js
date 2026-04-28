@@ -232,10 +232,14 @@ async function getLatestEpisodes(limit = 10) {
   return rows.map(normalizeEpisode).filter(i => ALLOWED_LOCALES.has(i.audioLocale)).slice(0, limit)
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const isNewsletter = jid => typeof jid === 'string' && jid.endsWith('@newsletter')
+
 // ─── Envío ────────────────────────────────────────────────────────────────────
 async function sendItem(conn, jid, ep, quoted = null) {
   const caption = formatCaption(ep)
-  const opts    = quoted ? { quoted } : {}
+  // Los canales (@newsletter) no soportan quoted ni ciertos tipos de mensaje
+  const opts = (!isNewsletter(jid) && quoted) ? { quoted } : {}
   if (ep.image) {
     try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch { /* fallback texto */ }
   }
@@ -297,25 +301,28 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   if (conn) storedConn = conn
   if (!cronTimer) startCron(conn)
 
+  // Los canales no soportan quoted — usamos null en ese caso
+  const q = isNewsletter(m.chat) ? null : m
+
   // ── .crlogin ──────────────────────────────────────────────────────────────
   if (command === 'crlogin') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: q })
     const [email, pass] = args
-    if (!email || !pass) return conn.sendMessage(m.chat, { text: '💡 Uso: *.crlogin email contraseña*' }, { quoted: m })
-    await conn.sendMessage(m.chat, { text: '🔐 Conectando con Crunchyroll...' }, { quoted: m })
+    if (!email || !pass) return conn.sendMessage(m.chat, { text: '💡 Uso: *.crlogin email contraseña*' }, { quoted: q })
+    await conn.sendMessage(m.chat, { text: '🔐 Conectando con Crunchyroll...' }, { quoted: q })
     try {
       await loginWithAccount(email, pass)
       startCron(conn)
       const cfg = loadCfg()
       return conn.sendMessage(m.chat, {
         text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 5} min\n🔁 Refresh automático habilitado`,
-      }, { quoted: m })
-    } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
+      }, { quoted: q })
+    } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: q }) }
   }
 
   // ── .crlogout ─────────────────────────────────────────────────────────────
   if (command === 'crlogout') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: q })
     const cfg = loadCfg()
     // Borrar solo credenciales, conservar la lista de grupos
     delete cfg.accessToken; delete cfg.refreshToken; delete cfg.tokenExp
@@ -324,26 +331,26 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     _token = null; _tokenExp = 0
     return conn.sendMessage(m.chat, {
       text: `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
-    }, { quoted: m })
+    }, { quoted: q })
   }
 
   // ── .crset — Añade este chat a la lista de grupos ─────────────────────────
   if (command === 'crset') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: q })
     const cfg = loadCfg()
     if (cfg.targetJids.includes(m.chat)) {
-      return conn.sendMessage(m.chat, { text: `ℹ️ Este chat ya está en la lista.\n📋 Grupos: *${cfg.targetJids.length}*` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `ℹ️ Este chat ya está en la lista.\n📋 Grupos: *${cfg.targetJids.length}*` }, { quoted: q })
     }
     cfg.targetJids.push(m.chat)
     saveCfg(cfg)
     return conn.sendMessage(m.chat, {
       text: `✅ *Grupo añadido al notificador*\n\`${m.chat}\`\n\n📋 Total grupos: *${cfg.targetJids.length}*`,
-    }, { quoted: m })
+    }, { quoted: q })
   }
 
   // ── .crrem — Elimina este chat de la lista de grupos ──────────────────────
   if (command === 'crrem') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: q })
     const cfg = loadCfg()
     const before = cfg.targetJids.length
     cfg.targetJids = cfg.targetJids.filter(j => j !== m.chat)
@@ -352,7 +359,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
       text: before !== cfg.targetJids.length
         ? `🗑️ *Grupo eliminado del notificador*\n\`${m.chat}\`\n📋 Quedan: *${cfg.targetJids.length}*`
         : `⚠️ Este chat no estaba en la lista.`,
-    }, { quoted: m })
+    }, { quoted: q })
   }
 
   // ── .crstatus ─────────────────────────────────────────────────────────────
@@ -373,28 +380,28 @@ let handler = async (m, { conn, command, args, isOwner }) => {
             `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
             `💾 IDs caché: *${seen.length}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
-    }, { quoted: m })
+    }, { quoted: q })
   }
 
   // ── .crlist ───────────────────────────────────────────────────────────────
   if (command === 'crlist') {
-    await conn.sendMessage(m.chat, { text: '🔍 Obteniendo los 10 lanzamientos más recientes...' }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: '🔍 Obteniendo los 10 lanzamientos más recientes...' }, { quoted: q })
     try {
       const episodes = await getLatestEpisodes(10)
-      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios recientes.' }, { quoted: m })
+      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios recientes.' }, { quoted: q })
       for (const ep of episodes) { await sendItem(conn, m.chat, ep, m); await delay(2000) }
-    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
+    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: q }) }
     return
   }
 
   // ── .crnotify ─────────────────────────────────────────────────────────────
   if (command === 'crnotify') {
-    await conn.sendMessage(m.chat, { text: '🔍 Buscando episodios recientes...' }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: '🔍 Buscando episodios recientes...' }, { quoted: q })
     try {
       const episodes = await getLatestEpisodes(10)
-      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
+      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: q })
       for (const ep of episodes) { await sendItem(conn, m.chat, ep, m); await delay(2000) }
-    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
+    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: q }) }
   }
 }
 
@@ -418,3 +425,4 @@ handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify)$/i
 })()
 
 export default handler
+  
