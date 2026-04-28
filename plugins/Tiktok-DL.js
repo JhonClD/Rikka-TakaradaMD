@@ -77,8 +77,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw '❌ No se pudo descargar el video con ninguna fuente.';
 
+    const res    = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000 });
+    const buffer = Buffer.from(res.data);
+
     await conn.sendMessage(m.chat, {
-      video  : { url: videoUrl },
+      video  : buffer,
       caption: `✅ *TikTok descargado*`,
     }, { quoted: m });
 
@@ -126,4 +129,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-}
+      }
