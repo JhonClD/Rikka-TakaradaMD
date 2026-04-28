@@ -87,22 +87,33 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw '❌ No se pudo descargar el video con ninguna fuente.';
 
-    // Descargar video a archivo temporal
+    console.log('[TikTok-DL] Descargando desde:', videoUrl);
+
     const res = await axios.get(videoUrl, {
       responseType     : 'arraybuffer',
       timeout          : 120000,
       maxContentLength : Infinity,
       maxBodyLength    : Infinity,
     });
-    writeFileSync(tmpInput, Buffer.from(res.data));
 
-    // Remuxear con ffmpeg sin perder calidad (solo reempaqueta el contenedor)
-    await execAsync(
-      `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
-      { timeout: 120000 }
-    );
+    const rawBuffer = Buffer.from(res.data);
+    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    const buffer = readFileSync(tmpOutput);
+    let buffer = rawBuffer;
+
+    // Intentar remuxear con ffmpeg
+    try {
+      writeFileSync(tmpInput, rawBuffer);
+      await execAsync(
+        `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
+        { timeout: 120000 }
+      );
+      buffer = readFileSync(tmpOutput);
+      console.log('[TikTok-DL] ffmpeg OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+    } catch (ffErr) {
+      console.error('[TikTok-DL] ffmpeg falló, usando buffer directo:', ffErr.message);
+      buffer = rawBuffer; // fallback al buffer sin procesar
+    }
 
     await conn.sendMessage(m.chat, {
       video  : buffer,
@@ -113,7 +124,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     console.error('[TikTok-DL]', e);
     throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
   } finally {
-    // Limpiar archivos temporales
     if (existsSync(tmpInput))  unlinkSync(tmpInput);
     if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
   }
@@ -157,4 +167,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-}
+      }
