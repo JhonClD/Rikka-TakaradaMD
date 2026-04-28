@@ -94,7 +94,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     await conn.sendMessage(m.chat, {
       video  : { url: videoUrl },
-      caption: `✅ *TikTok descargado*\n📎 *Fuente:* ${usedApi}`,
+      caption: `✅ *TikTok descargado*`,
     }, { quoted: m });
 
   } catch (e) {
