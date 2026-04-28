@@ -1,20 +1,24 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 
+const tradutor = {
+  texto1: "📎 Ingresa un enlace de TikTok.",
+  texto2: "❌ El enlace no parece ser de TikTok.",
+  texto9: "❌ No se pudo descargar el video. Inténtalo de nuevo."
+};
+
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/ _`;
-  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
+  if (!text) throw `${tradutor.texto1}\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/ _`;
+  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw tradutor.texto2;
 
   try {
     let videoUrl = null;
-
-    // Intento 1: scraping (solo enlaces hdplay)
     const links = await fetchDownloadLinks(args[0], 'tiktok');
+
     if (links && links.length > 0) {
-      videoUrl = links.find(link => /hdplay/i.test(link));
+      videoUrl = links.find(link => /hdplay/i.test(link)) || links.find(link => /download/i.test(link)) || links[0];
     }
 
-    // Intento 2: APIs, solo hdplay — nunca SD (play)
     if (!videoUrl) {
       const encoded = encodeURIComponent(args[0]);
       const apis = [
@@ -26,8 +30,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       for (const api of apis) {
         try {
           const { data: json } = await axios.get(api);
-          // Solo acepta hdplay, nunca play (SD)
-          videoUrl = json.data?.hdplay || json.data?.hd || null;
+          videoUrl = json.data?.hdplay || json.data?.play || json.data?.url || json.result?.url || (Array.isArray(json.data) ? json.data[0].url : null);
           if (videoUrl) break;
         } catch (err) {
           console.log(`[API Fallback Error] ${api}:`, err.message);
@@ -36,45 +39,23 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    if (!videoUrl) throw "❌ No se encontró versión HD del video. Inténtalo de nuevo.";
+    if (!videoUrl) throw new Error('No se pudo obtener el enlace HD del video.');
 
-    // Descargar como buffer para medir tamaño
-    const videoRes = await fetch(videoUrl);
-    if (!videoRes.ok) throw '❌ No se pudo descargar el video.';
-    const buffer = Buffer.from(await videoRes.arrayBuffer());
-    const sizeMB = buffer.length / (1024 * 1024);
-
-    // Intentar obtener nombre del video desde la URL
-    const videoName = videoUrl.split('/').pop()?.split('?')[0] || 'tiktok_video.mp4';
-
-    if (sizeMB > 10) {
-      // Más de 10MB → documento
-      await conn.sendMessage(m.chat, {
-        document: buffer,
-        mimetype: 'video/mp4',
-        fileName: videoName.endsWith('.mp4') ? videoName : videoName + '.mp4',
-        caption: '✅ *Video descargado*'
-      }, { quoted: m });
-    } else {
-      // Menos de 10MB → video normal
-      await conn.sendMessage(m.chat, {
-        video: buffer,
-        mimetype: 'video/mp4',
-        caption: '✅ *Video descargado*'
-      }, { quoted: m });
-    }
+    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: '✅ *Video descargado*' }, { quoted: m });
 
   } catch (e) {
     console.error(e);
-    throw typeof e === 'string' ? e : "❌ No se pudo descargar el video. Inténtalo de nuevo.";
+    throw tradutor.texto9;
   }
 };
 
 handler.help = ['tiktok'];
 handler.tags = ['downloader'];
-handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio)$/i;
+handler.command = /^(tiktok|tt|ttdl)$/i;
 
 export default handler;
+
+// --- FUNCIONES DE APOYO ---
 
 async function fetchDownloadLinks(text, platform) {
   try {
@@ -106,4 +87,4 @@ async function fetchDownloadLinks(text, platform) {
   } catch {
     return null;
   }
-}
+          }
