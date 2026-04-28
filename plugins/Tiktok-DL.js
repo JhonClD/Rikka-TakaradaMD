@@ -2,11 +2,10 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `*⚠️ Ingresa un enlace de TikTok.*\n\n*Ejemplo:* .${command} https://vt.tiktok.com/ZS12345/`;
-  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw '*❌ El enlace no parece ser de TikTok.*';
+  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
+  if (!/(?:https:?\/{2})?(?:w{3}|vm|vt|t)?\.?tiktok.com\/([^\s&]+)/gi.test(text)) throw "❌ El enlace no parece ser de TikTok.";
 
   try {
-    // INTENTO 1: Scraping instatiktok.com
     let videoUrl = null;
     const links = await fetchDownloadLinks(args[0], 'tiktok');
 
@@ -14,7 +13,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       videoUrl = links.find(link => /hdplay/i.test(link)) || links.find(link => /download/i.test(link)) || links[0];
     }
 
-    // INTENTO 2: Fallback con APIs estables (Forzando calidad HD)
     if (!videoUrl) {
       const encoded = encodeURIComponent(args[0]);
       const apis = [
@@ -35,14 +33,13 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    if (!videoUrl) throw new Error('Sin resultados');
+    if (!videoUrl) throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
 
-    const cap = `✅ *Video descargado*`;
-    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: cap }, { quoted: m });
+    await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: '✅ *Video descargado*' }, { quoted: m });
 
   } catch (e) {
     console.error(e);
-    throw '*❌ Ocurrió un error al descargar el video. Inténtalo de nuevo más tarde.*';
+    throw "❌ No se pudo descargar el video. Inténtalo de nuevo.";
   }
 };
 
@@ -51,8 +48,6 @@ handler.tags = ['downloader'];
 handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio)$/i;
 
 export default handler;
-
-// --- FUNCIONES DE APOYO ---
 
 async function fetchDownloadLinks(text, platform) {
   try {
@@ -84,4 +79,5 @@ async function fetchDownloadLinks(text, platform) {
   } catch {
     return null;
   }
-        }
+}
+
