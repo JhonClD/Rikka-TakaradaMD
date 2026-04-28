@@ -37,7 +37,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw new Error('Sin resultados');
 
-    const cap = `✅ *TikTok descargado en alta calidad*\n💡 Responde este video con _${usedPrefix}tomp3_ para convertirlo en audio.`;
+    const cap = `✅ *Video descargado*`;
     await conn.sendMessage(m.chat, { video: { url: videoUrl }, caption: cap }, { quoted: m });
 
   } catch (e) {
