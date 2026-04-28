@@ -322,9 +322,10 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
       m.chat,
       {
         text:
-          `*_< PINTEREST />_*\n\n` +
-          `🔎 *Buscar:* ${usedPrefix + command} gatos aesthetic\n` +
-          `⬇️ *Descargar:* ${usedPrefix + command} https://pin.it/xxxxx`
+          `✦ ˚  ₊ · 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 · ₊  ˚ ✦\n\n` +
+          `◦ ❝ *Buscar* ❞ ⌁ ${usedPrefix + command} gatos aesthetic\n` +
+          `◦ ❝ *Descargar* ❞ ⌁ ${usedPrefix + command} https://pin.it/xxxxx\n\n` +
+          `˗ˏˋ 📌 Encuentra lo que imaginas ˎˊ˗`
       },
       { quoted: m }
     );
@@ -339,21 +340,21 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
       await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } });
       return conn.sendMessage(
         m.chat,
-        { text: `*_< PINTEREST />_*\n\n[❗] No pude obtener el contenido de ese pin.` },
+        { text: `✦ ˚ 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 ˚ ✦\n\n⌁ No pude obtener el contenido de ese pin.\n˗ˏˋ Verifica el enlace e intenta de nuevo ˎˊ˗` },
         { quoted: m }
       );
     }
 
     const meta =
-      `*_< PINTEREST - Download />_*\n\n` +
-      (pin.title      ? `□ *Título* › ${pin.title}\n`      : '') +
-      (pin.author     ? `□ *Autor* › ${pin.author}\n`      : '') +
-      (pin.username   ? `□ *Usuario* › ${pin.username}\n`  : '') +
-      (pin.uploadDate ? `□ *Fecha* › ${pin.uploadDate}\n`  : '') +
-      (pin.likes      ? `□ *Likes* › ${pin.likes}\n`       : '') +
-      (pin.views      ? `□ *Vistas* › ${pin.views}\n`      : '') +
-      (pin.comments   ? `□ *Comentarios* › ${pin.comments}\n` : '') +
-      `□ *Enlace* › ${text}`;
+      `✦ ˚  ₊ · 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 · ₊  ˚ ✦\n\n` +
+      (pin.title      ? `⌁ *Título*      › ${pin.title}\n`      : '') +
+      (pin.author     ? `⌁ *Autor*       › ${pin.author}\n`      : '') +
+      (pin.username   ? `⌁ *Usuario*     › @${pin.username}\n`   : '') +
+      (pin.uploadDate ? `⌁ *Fecha*       › ${pin.uploadDate}\n`  : '') +
+      (pin.likes      ? `⌁ *Likes*       › ${pin.likes}\n`       : '') +
+      (pin.views      ? `⌁ *Vistas*      › ${pin.views}\n`       : '') +
+      (pin.comments   ? `⌁ *Comentarios* › ${pin.comments}\n`    : '') +
+      `\n˗ˏˋ 📌 ${text} ˎˊ˗`;
 
     if (pin.video) {
       await conn.sendMessage(
@@ -381,7 +382,7 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
     await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } });
     return conn.sendMessage(
       m.chat,
-      { text: `*_< PINTEREST />_*\n\n[❗] No se encontraron resultados para: *${text}*` },
+      { text: `✦ ˚ 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 ˚ ✦\n\n⌁ Sin resultados para: *${text}*\n˗ˏˋ Intenta con otras palabras ˎˊ˗` },
       { quoted: m }
     );
   }
@@ -411,13 +412,13 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
 
     cards.push({
       body: proto.Message.InteractiveMessage.Body.fromObject({
-        text: images[i].title?.trim() || `□ Resultado ${i + 1} de ${images.length}`
+        text: images[i].title?.trim() || `✦ Resultado ${i + 1} de ${images.length}`
       }),
       footer: proto.Message.InteractiveMessage.Footer.fromObject({
-        text: global.botName ?? 'KanaArima-MD'
+        text: `˗ˏˋ 📌 ${global.botName ?? 'Rikka-TakaradaMD'} ˎˊ˗`
       }),
       header: proto.Message.InteractiveMessage.Header.fromObject({
-        title: '*_< PINTEREST - Search />_*',
+        title: '𖡼.𖤣𖥧 ᴘɪɴᴛᴇʀᴇsᴛ 𖡼.𖤣𖥧',
         hasMediaAttachment: true,
         imageMessage
       }),
@@ -425,7 +426,7 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
         buttons: [{
           name: 'cta_url',
           buttonParamsJson: JSON.stringify({
-            display_text: 'Ver en Pinterest 📌',
+            display_text: '✦ Ver en Pinterest',
             url: images[i].pin || `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(text)}`,
             merchant_url: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(text)}`
           })
@@ -443,10 +444,10 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
             messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
             interactiveMessage: proto.Message.InteractiveMessage.fromObject({
               body: proto.Message.InteractiveMessage.Body.create({
-                text: '*_< PINTEREST - Search />_*'
+                text: '✦ ˚ 𖡼.𖤣𖥧 ᴘɪɴᴛᴇʀᴇsᴛ 𖡼.𖤣𖥧 ˚ ✦'
               }),
               footer: proto.Message.InteractiveMessage.Footer.create({
-                text: `□ *Búsqueda:* ${text}\n□ *Solicitante:* ${userName}`
+                text: `⌁ *Búsqueda* › ${text}\n⌁ *Solicitante* › ${userName}`
               }),
               header: proto.Message.InteractiveMessage.Header.create({ hasMediaAttachment: false }),
               carouselMessage: proto.Message.InteractiveMessage.CarouselMessage.fromObject({ cards })
@@ -465,7 +466,7 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
       try {
         await conn.sendMessage(
           m.chat,
-          { image: { url: img.image }, caption: sent === 0 ? `*_< PINTEREST - Search />_*\n\n□ *Búsqueda:* ${text}` : img.title?.trim() || '' },
+          { image: { url: img.image }, caption: sent === 0 ? `✦ ˚ 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 ˚ ✦\n\n⌁ *Búsqueda* › ${text}` : img.title?.trim() || '' },
           { quoted: sent === 0 ? m : undefined }
         );
         sent++;
@@ -480,7 +481,7 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
     try {
       await conn.sendMessage(
         m.chat,
-        { video: { url: video.video }, caption: `🎬 ${video.title?.trim() || 'Video - Pinterest'}` },
+        { video: { url: video.video }, caption: `✦ 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧\n\n⌁ ${video.title?.trim() || 'Video'}` },
         { quoted: m }
       );
     } catch {}
@@ -489,7 +490,7 @@ const handler = async (m, { conn, usedPrefix, command, text }) => {
   if (!cards.length && images.length === 0 && !video)
     return conn.sendMessage(
       m.chat,
-      { text: `*_< PINTEREST />_*\n\n[❗] No se pudieron cargar los resultados. Intenta de nuevo.` },
+      { text: `✦ ˚ 𖡼.𖤣𖥧 *ᴘɪɴᴛᴇʀᴇsᴛ* 𖡼.𖤣𖥧 ˚ ✦\n\n⌁ No se pudieron cargar los resultados.\n˗ˏˋ Intenta de nuevo ˎˊ˗` },
       { quoted: m }
     );
 
