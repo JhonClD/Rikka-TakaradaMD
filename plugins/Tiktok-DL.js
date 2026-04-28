@@ -106,7 +106,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) {
       console.error('[TikTok] Todos fallaron:\n' + errors.join('\n'));
-      throw `❌ Todas las APIs fallaron.\n\`\`\`\n${errors.slice(0, 5).join('\n')}\n\`\`\``;
+      throw `❌ Todas las APIs fallaron.`
     }
 
     await conn.sendMessage(m.chat, {
