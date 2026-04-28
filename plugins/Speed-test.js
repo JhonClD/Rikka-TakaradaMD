@@ -104,4 +104,3 @@ handler.tags    = ['tools'];
 handler.command = /^(speedtest|speed|velocidad|netspeed)$/i;
 
 export default handler;
-          
