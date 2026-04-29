@@ -119,14 +119,14 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     }
 
     await conn.sendMessage(m.chat, asDoc ? {
-      document : buffer,
-      mimetype : 'video/mp4',
-      fileName : `tiktok_${Date.now()}.mp4`,
-      caption  : `✅ *TikTok descargado*`,
-    } : {
-      video  : buffer,
-      caption: `✅ *TikTok descargado*`,
-    }, { quoted: m });
+  document : buffer,
+  mimetype : 'application/octet-stream',
+  fileName : `tiktok_${Date.now()}.mp4`,
+  caption  : `✅ *TikTok descargado*`,
+} : {
+  video  : buffer,
+  caption: `✅ *TikTok descargado*`,
+}, { quoted: m });
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
