@@ -1,9 +1,28 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 import fs from 'fs';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+const TARGET_MB  = 60;
+const AUDIO_KBPS = 96;
+
+const getVideoDuration = (filePath) => {
+  try {
+    const raw = execSync(
+      `ffprobe -v error -show_entries format=duration -of csv=p=0 "${filePath}"`,
+      { encoding: 'utf8' }
+    );
+    return parseFloat(raw.trim()) || 0;
+  } catch { return 0; }
+};
+
+const calcVideoBitrate = (durationSec, targetMB, audioBitrateK = AUDIO_KBPS) => {
+  if (!durationSec || durationSec <= 0) return 800;
+  const videoBits = targetMB * 8 * 1024 * 1024 - audioBitrateK * 1000 * durationSec;
+  return Math.max(100, Math.floor(videoBits / durationSec / 1000));
+};
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
@@ -87,31 +106,56 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     console.log('[TikTok-DL] Descargando:', videoUrl);
 
-    // Descargar en RAM como arraybuffer
     const res = await axios.get(videoUrl, {
       responseType     : 'arraybuffer',
       timeout          : 120000,
       maxContentLength : Infinity,
       maxBodyLength    : Infinity,
     });
-    const rawBuffer = Buffer.from(res.data);
-    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    // Escribir a disco para ffmpeg
+    const rawBuffer = Buffer.from(res.data);
+    const sizeMB    = rawBuffer.length / 1024 / 1024;
+    console.log('[TikTok-DL] Descargado:', sizeMB.toFixed(2), 'MB');
+
     fs.writeFileSync(tmpInput, rawBuffer);
 
-    // Remuxear con ffmpeg usando spawn
-    await new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', [
-        '-y',
-        '-i', tmpInput,
+    // Calcular si necesita compresión
+    const needsCompress = sizeMB > TARGET_MB;
+    let ffmpegArgs;
+
+    if (needsCompress) {
+      const duration     = getVideoDuration(tmpInput);
+      const videoBitrate = calcVideoBitrate(duration, TARGET_MB);
+      const maxrate      = Math.floor(videoBitrate * 1.5);
+      const bufsize      = videoBitrate * 2;
+      console.log(`[TikTok-DL] Comprimiendo: ${sizeMB.toFixed(1)}MB → ~${TARGET_MB}MB | bitrate: ${videoBitrate}k | dur: ${duration.toFixed(1)}s`);
+
+      ffmpegArgs = [
+        '-y', '-i', tmpInput,
+        '-c:v', 'libx264',
+        '-b:v', `${videoBitrate}k`,
+        '-maxrate', `${maxrate}k`,
+        '-bufsize', `${bufsize}k`,
+        '-pix_fmt', 'yuv420p',
+        '-preset', 'faster',
+        '-tune', 'fastdecode',
+        '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2',
+        '-movflags', '+faststart',
+        '-y', tmpOutput,
+      ];
+    } else {
+      // Solo remuxear sin perder calidad
+      ffmpegArgs = [
+        '-y', '-i', tmpInput,
         '-c:v', 'copy',
         '-c:a', 'copy',
-        '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
         tmpOutput,
-      ]);
+      ];
+    }
 
+    await new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', ffmpegArgs);
       let errBuf = '';
       proc.stderr.on('data', (d) => { errBuf += d.toString(); });
       proc.on('close', (code) => {
@@ -121,11 +165,12 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       });
     });
 
-    console.log('[TikTok-DL] ffmpeg OK, enviando...');
+    const finalMB = (fs.statSync(tmpOutput).size / 1024 / 1024).toFixed(1);
+    console.log('[TikTok-DL] Enviando:', finalMB, 'MB');
 
     await conn.sendMessage(m.chat, {
       video   : { url: tmpOutput },
-      caption : `✅ *TikTok descargado*`,
+      caption : `✅ *TikTok descargado*${needsCompress ? `\n📦 Comprimido a ${finalMB} MB` : ''}`,
       mimetype: 'video/mp4',
     }, { quoted: m });
 
@@ -176,4 +221,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-              }
+        }
