@@ -1,12 +1,10 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
-import { exec } from 'child_process';
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import fs from 'fs';
+import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import { pipeline } from 'stream/promises';
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
@@ -70,8 +68,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     },
   ];
 
-  const tmpInput  = join(tmpdir(), `tiktok_in_${Date.now()}.mp4`);
-  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mp4`);
+  const ts        = Date.now();
+  const tmpInput  = join(tmpdir(), `tiktok_in_${ts}.mp4`);
+  const tmpOutput = join(tmpdir(), `tiktok_out_${ts}.mp4`);
 
   try {
     let videoUrl = null;
@@ -87,45 +86,56 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw '❌ No se pudo descargar el video con ninguna fuente.';
 
-    console.log('[TikTok-DL] Descargando desde:', videoUrl);
+    console.log('[TikTok-DL] Descargando:', videoUrl);
 
-    const res = await axios.get(videoUrl, {
-      responseType     : 'arraybuffer',
+    // Descargar directo a archivo (stream → disco, no RAM)
+    const response = await axios.get(videoUrl, {
+      responseType     : 'stream',
       timeout          : 120000,
       maxContentLength : Infinity,
       maxBodyLength    : Infinity,
     });
+    await pipeline(response.data, fs.createWriteStream(tmpInput));
 
-    const rawBuffer = Buffer.from(res.data);
-    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
+    const sizeMB = (fs.statSync(tmpInput).size / 1024 / 1024).toFixed(2);
+    console.log('[TikTok-DL] Descargado:', sizeMB, 'MB');
 
-    let buffer = rawBuffer;
+    // Remuxear con ffmpeg usando spawn (igual que el ejemplo)
+    await new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', [
+        '-y',
+        '-i', tmpInput,
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        tmpOutput,
+      ]);
 
-    // Intentar remuxear con ffmpeg
-    try {
-      writeFileSync(tmpInput, rawBuffer);
-      await execAsync(
-        `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
-        { timeout: 120000 }
-      );
-      buffer = readFileSync(tmpOutput);
-      console.log('[TikTok-DL] ffmpeg OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
-    } catch (ffErr) {
-      console.error('[TikTok-DL] ffmpeg falló, usando buffer directo:', ffErr.message);
-      buffer = rawBuffer; // fallback al buffer sin procesar
-    }
+      let errBuf = '';
+      proc.stderr.on('data', (d) => { errBuf += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) return resolve();
+        console.error('[TikTok ffmpeg]', errBuf.split('\n').slice(-5).join('\n'));
+        reject(new Error(`ffmpeg salió con código ${code}`));
+      });
+    });
 
+    console.log('[TikTok-DL] ffmpeg OK, enviando...');
+
+    // Enviar con { url: ruta } igual que el ejemplo
     await conn.sendMessage(m.chat, {
-      video  : buffer,
-      caption: `✅ *TikTok descargado*`,
+      video   : { url: tmpOutput },
+      caption : `✅ *TikTok descargado*`,
+      mimetype: 'video/mp4',
     }, { quoted: m });
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
     throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
   } finally {
-    if (existsSync(tmpInput))  unlinkSync(tmpInput);
-    if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
+    if (fs.existsSync(tmpInput))  fs.unlinkSync(tmpInput);
+    if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
   }
 };
 
@@ -167,4 +177,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-      }
+    }
