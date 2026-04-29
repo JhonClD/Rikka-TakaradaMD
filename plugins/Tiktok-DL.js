@@ -118,15 +118,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
     }
 
-    await conn.sendMessage(m.chat, asDoc ? {
-  document : buffer,
-  mimetype : 'application/octet-stream',
-  fileName : `tiktok_${Date.now()}.mp4`,
-  caption  : `✅ *TikTok descargado*`,
-} : {
-  video  : buffer,
-  caption: `✅ *TikTok descargado*`,
-}, { quoted: m });
+    
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
@@ -152,7 +144,16 @@ async function fetchInstatiktok(url) {
     form.append('platform', 'tiktok');
 
     const res = await axios.post(`${SITE_URL}api`, form.toString(), {
-      headers: {
+      headers: await conn.sendMessage(m.chat, asDoc ? {
+  document : buffer,
+  mimetype : 'video/x-matroska',
+  fileName : `tiktok_${Date.now()}.mkv`,
+  caption  : `✅ *TikTok descargado*`,
+} : {
+  video  : buffer,
+  caption: `✅ *TikTok descargado*`,
+}, { quoted: m });{
+      
         'Content-Type'    : 'application/x-www-form-urlencoded; charset=UTF-8',
         'Origin'          : SITE_URL,
         'Referer'         : SITE_URL,
