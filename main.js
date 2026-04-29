@@ -503,7 +503,7 @@ async function interceptMessages(messages, lidResolver) {
 }
 
 const { state, saveCreds } = await useMultiFileAuthState(global.authFile);
-const version22 = await fetchLatestBaileysVersion();
+const version22 = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1033893291] }));
 console.log(version22)
 const version = version22?.version || [2, 3000, 1033893291]; 
 let phoneNumber = global.botnumber || process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
@@ -561,7 +561,7 @@ const connectionOptions = {
     keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
   },
   markOnlineOnConnect: false,
-  generateHighQualityLinkPreview: true,
+  generateHighQualityLinkPreview: false,
   syncFullHistory: false,
   getMessage: async (key) => {
     try {
@@ -574,10 +574,10 @@ const connectionOptions = {
   },
   msgRetryCounterCache: msgRetryCounterCache || new Map(),
   userDevicesCache: userDevicesCache || new Map(),
-  defaultQueryTimeoutMs: undefined,
-  cachedGroupMetadata: (jid) => global.conn.chats[jid] ?? {},
-  keepAliveIntervalMs: 55000,
-  maxIdleTimeMs: 60000,
+  defaultQueryTimeoutMs: 20000,
+  cachedGroupMetadata: (jid) => global.conn.chats[jid]?.metadata ?? {},
+  keepAliveIntervalMs: 30000,
+  maxIdleTimeMs: 120000,
   version,
 };
 
