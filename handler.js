@@ -738,17 +738,23 @@ export async function handler(chatUpdate) {
 
     let usedPrefix;
     const _user = global.db.data && global.db.data.users && global.db.data.users[m.sender];
-    // Siempre hacer fetch fresco para tener admins actualizados (evita problemas de cache desactualizado)
+    // Cache groupMetadata con TTL de 5 minutos — evita llamada a WA en cada mensaje
+    const _META_TTL = 5 * 60 * 1000;
     let _cachedMeta = conn.chats[m.chat]?.metadata || null;
-    let _freshMeta = null;
+    let _freshMeta  = null;
     if (m.isGroup) {
-      try { _freshMeta = await this.groupMetadata(m.chat); } catch (_) {}
+      const _lastFetch = conn.chats[m.chat]?._metaFetchedAt || 0;
+      if (!_cachedMeta || (Date.now() - _lastFetch) > _META_TTL) {
+        try {
+          _freshMeta = await this.groupMetadata(m.chat);
+          if (_freshMeta && conn.chats[m.chat]) {
+            conn.chats[m.chat].metadata       = _freshMeta;
+            conn.chats[m.chat]._metaFetchedAt = Date.now();
+          }
+        } catch (_) {}
+      }
     }
     const _rawMeta = m.isGroup ? (_freshMeta || _cachedMeta || {}) : {};
-    // Actualizar cache con datos frescos
-    if (_freshMeta && m.isGroup && conn.chats[m.chat]) {
-      conn.chats[m.chat].metadata = _freshMeta;
-    }
     const _rawParticipants = (_rawMeta.participants || []).map(p => ({
       ...p,
       id: p.id || p.jid,
@@ -811,12 +817,7 @@ export async function handler(chatUpdate) {
               await m.reply(`*[ ⚠️ 𝚁𝙴𝙿𝙾𝚁𝚃𝙴 𝙳𝙴 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 𝙲𝙾𝙽 𝙵𝙰𝙻𝙻𝙾𝚂 ⚠️ ]*\n\n*—◉ 𝙿𝙻𝚄𝙶𝙸𝙽:* ${name}\n*—◉ 𝚄𝚂𝚄𝙰𝚁𝙸𝙾:* ${m.sender}\n*—◉ 𝙲𝙾𝙼𝙰𝙽𝙳𝙾:* ${m.text}\n\n*—◉ 𝙴𝚁𝚁𝙾𝚁:*\n\`\`\`${format(e)}\`\`\`\n\n*[❗] 𝚁𝙴𝙿𝙾𝚁𝚃𝙴𝙻𝙾 𝙰𝙻 𝙲𝚁𝙴𝙰𝙳𝙾𝚁 𝙳𝙴𝙻 𝙱𝙾𝚃 𝙿𝙰𝚁𝙰 𝙳𝙰𝚁𝙻𝙴 𝚄𝙽𝙰 𝚂𝙾𝙻𝚄𝙲𝙸𝙾𝙽, 𝙿𝚄𝙴𝙳𝙴 𝚄𝚂𝙰𝚁 𝙴𝙻 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 #reporte*`.trim(), data.jid);
             }
           }*/
-          const md5c = fs.readFileSync('./plugins/' + m.plugin);
-          /*fetch('https://themysticbot.cloud:2083/error', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ number: conn.user.jid, plugin: m.plugin, command: `${m.text}`, reason: format(e), md5: mddd5(md5c) }),
-          });*/
+          // md5 report eliminado (fetch comentado)
         }
       }
       if (!opts['restrict']) {
@@ -1059,16 +1060,7 @@ ${tradutor.texto1[1]} ${messageNumber}/3
                   await m.reply(`*[ ⚠️ 𝚁𝙴𝙿𝙾𝚁𝚃𝙴 𝙳𝙴 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 𝙲𝙾𝙽 𝙵𝙰𝙻𝙻𝙾𝚂 ⚠️ ]*\n\n*—◉ 𝙿𝙻𝚄𝙶𝙸𝙽:* ${m.plugin}\n*—◉ 𝚄𝚂𝚄𝙰𝚁𝙸𝙾:* ${m.sender}\n*—◉ 𝙲𝙾𝙼𝙰𝙽𝙳𝙾:* ${usedPrefix}${command} ${args.join(' ')}\n\n\`\`\`${text}\`\`\`\n\n*[❗] 𝚁𝙴𝙿𝙾𝚁𝚃𝙴𝙻𝙾 𝙰𝙻 𝙲𝚁𝙴𝙰𝙳𝙾𝚁 𝙳𝙴𝙻 𝙱𝙾𝚃 𝙿𝙰𝚁𝙰 𝙳𝙰𝚁𝙻𝙴 𝚄𝙽𝙰 𝚂𝙾𝙻𝚄𝙲𝙸𝙾𝙽, 𝙿𝚄𝙴𝙳𝙴 𝚄𝚂𝙰𝚁 𝙴𝙻 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 #reporte*`.trim(), data.jid);
                 }
               }*/
-              const md5c = fs.readFileSync('./plugins/' + m.plugin);
-              /*fetch('https://themysticbot.cloud:2083/error', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ number: conn.user.jid, plugin: m.plugin, command: `${usedPrefix}${command} ${args.join(' ')}`, reason: text, md5: mddd5(md5c) }),
-              }).then((res) => res.json()).then((json) => {
-                console.log(json);
-              }).catch((err) => {
-                console.error(err);
-              });*/
+              // md5 report eliminado (fetch comentado)
             }
             await m.reply(text);
           }
