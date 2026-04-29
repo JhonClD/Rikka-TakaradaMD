@@ -1,5 +1,12 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
+import { exec } from 'child_process';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
@@ -8,6 +15,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
   const url     = args[0];
   const encoded = encodeURIComponent(url);
+  const asDoc   = /^(tiktok2|tt2)$/i.test(command);
 
   const APIs = [
     async () => {
@@ -63,6 +71,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     },
   ];
 
+  const tmpInput  = join(tmpdir(), `tiktok_in_${Date.now()}.mp4`);
+  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mp4`);
+
   try {
     let videoUrl = null;
 
@@ -86,10 +97,26 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       maxBodyLength    : Infinity,
     });
 
-    const buffer = Buffer.from(res.data);
-    console.log('[TikTok-DL] Descargado:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+    const rawBuffer = Buffer.from(res.data);
+    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    const asDoc = /^(tiktok2|tt2)$/i.test(command);
+    let buffer = rawBuffer;
+
+    // Remuxear con ffmpeg solo para modo documento
+    if (asDoc) {
+      try {
+        writeFileSync(tmpInput, rawBuffer);
+        await execAsync(
+          `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
+          { timeout: 120000 }
+        );
+        buffer = readFileSync(tmpOutput);
+        console.log('[TikTok-DL] ffmpeg OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+      } catch (ffErr) {
+        console.error('[TikTok-DL] ffmpeg falló, usando buffer directo:', ffErr.message);
+        buffer = rawBuffer;
+      }
+    }
 
     await conn.sendMessage(m.chat, asDoc ? {
       document : buffer,
@@ -104,6 +131,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   } catch (e) {
     console.error('[TikTok-DL]', e);
     throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
+  } finally {
+    if (existsSync(tmpInput))  unlinkSync(tmpInput);
+    if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
   }
 };
 
@@ -145,4 +175,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-}
+                      }
