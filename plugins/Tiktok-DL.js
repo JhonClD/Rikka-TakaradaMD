@@ -1,28 +1,5 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
-import fs from 'fs';
-import { spawn, execSync } from 'child_process';
-import { tmpdir } from 'os';
-import { join } from 'path';
-
-const TARGET_MB  = 60;
-const AUDIO_KBPS = 96;
-
-const getVideoDuration = (filePath) => {
-  try {
-    const raw = execSync(
-      `ffprobe -v error -show_entries format=duration -of csv=p=0 "${filePath}"`,
-      { encoding: 'utf8' }
-    );
-    return parseFloat(raw.trim()) || 0;
-  } catch { return 0; }
-};
-
-const calcVideoBitrate = (durationSec, targetMB, audioBitrateK = AUDIO_KBPS) => {
-  if (!durationSec || durationSec <= 0) return 800;
-  const videoBits = targetMB * 8 * 1024 * 1024 - audioBitrateK * 1000 * durationSec;
-  return Math.max(100, Math.floor(videoBits / durationSec / 1000));
-};
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
@@ -86,10 +63,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     },
   ];
 
-  const ts        = Date.now();
-  const tmpInput  = join(tmpdir(), `tiktok_in_${ts}.mp4`);
-  const tmpOutput = join(tmpdir(), `tiktok_out_${ts}.mp4`);
-
   try {
     let videoUrl = null;
 
@@ -104,7 +77,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     if (!videoUrl) throw '❌ No se pudo descargar el video con ninguna fuente.';
 
-    console.log('[TikTok-DL] Descargando:', videoUrl);
+    console.log('[TikTok-DL] Descargando desde:', videoUrl);
 
     const res = await axios.get(videoUrl, {
       responseType     : 'arraybuffer',
@@ -113,79 +86,30 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       maxBodyLength    : Infinity,
     });
 
-    const rawBuffer = Buffer.from(res.data);
-    const sizeMB    = rawBuffer.length / 1024 / 1024;
-    console.log('[TikTok-DL] Descargado:', sizeMB.toFixed(2), 'MB');
+    const buffer = Buffer.from(res.data);
+    console.log('[TikTok-DL] Descargado:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    fs.writeFileSync(tmpInput, rawBuffer);
+    const asDoc = /^(tiktok2|tt2)$/i.test(command);
 
-    // Calcular si necesita compresión
-    const needsCompress = sizeMB > TARGET_MB;
-    let ffmpegArgs;
-
-    if (needsCompress) {
-      const duration     = getVideoDuration(tmpInput);
-      const videoBitrate = calcVideoBitrate(duration, TARGET_MB);
-      const maxrate      = Math.floor(videoBitrate * 1.5);
-      const bufsize      = videoBitrate * 2;
-      console.log(`[TikTok-DL] Comprimiendo: ${sizeMB.toFixed(1)}MB → ~${TARGET_MB}MB | bitrate: ${videoBitrate}k | dur: ${duration.toFixed(1)}s`);
-
-      ffmpegArgs = [
-        '-y', '-i', tmpInput,
-        '-c:v', 'libx264',
-        '-b:v', `${videoBitrate}k`,
-        '-maxrate', `${maxrate}k`,
-        '-bufsize', `${bufsize}k`,
-        '-pix_fmt', 'yuv420p',
-        '-preset', 'faster',
-        '-tune', 'fastdecode',
-        '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2',
-        '-movflags', '+faststart',
-        '-y', tmpOutput,
-      ];
-    } else {
-      // Solo remuxear sin perder calidad
-      ffmpegArgs = [
-        '-y', '-i', tmpInput,
-        '-c:v', 'copy',
-        '-c:a', 'copy',
-        '-movflags', '+faststart',
-        tmpOutput,
-      ];
-    }
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', ffmpegArgs);
-      let errBuf = '';
-      proc.stderr.on('data', (d) => { errBuf += d.toString(); });
-      proc.on('close', (code) => {
-        if (code === 0) return resolve();
-        console.error('[TikTok ffmpeg]', errBuf.split('\n').slice(-5).join('\n'));
-        reject(new Error(`ffmpeg salió con código ${code}`));
-      });
-    });
-
-    const finalMB = (fs.statSync(tmpOutput).size / 1024 / 1024).toFixed(1);
-    console.log('[TikTok-DL] Enviando:', finalMB, 'MB');
-
-    await conn.sendMessage(m.chat, {
-      video   : { url: tmpOutput },
-      caption : `✅ *TikTok descargado*${needsCompress ? `\n📦 Comprimido a ${finalMB} MB` : ''}`,
-      mimetype: 'video/mp4',
+    await conn.sendMessage(m.chat, asDoc ? {
+      document : buffer,
+      mimetype : 'video/mp4',
+      fileName : `tiktok_${Date.now()}.mp4`,
+      caption  : `✅ *TikTok descargado*`,
+    } : {
+      video  : buffer,
+      caption: `✅ *TikTok descargado*`,
     }, { quoted: m });
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
     throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
-  } finally {
-    if (fs.existsSync(tmpInput))  fs.unlinkSync(tmpInput);
-    if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
   }
 };
 
-handler.help    = ['tiktok'];
+handler.help    = ['tiktok', 'tiktok2'];
 handler.tags    = ['downloader'];
-handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio)$/i;
+handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio|tiktok2|tt2)$/i;
 
 export default handler;
 
@@ -221,4 +145,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-        }
+}
