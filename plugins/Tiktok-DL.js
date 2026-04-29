@@ -4,7 +4,6 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { pipeline } from 'stream/promises';
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
@@ -88,19 +87,20 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     console.log('[TikTok-DL] Descargando:', videoUrl);
 
-    // Descargar directo a archivo (stream → disco, no RAM)
-    const response = await axios.get(videoUrl, {
-      responseType     : 'stream',
+    // Descargar en RAM como arraybuffer
+    const res = await axios.get(videoUrl, {
+      responseType     : 'arraybuffer',
       timeout          : 120000,
       maxContentLength : Infinity,
       maxBodyLength    : Infinity,
     });
-    await pipeline(response.data, fs.createWriteStream(tmpInput));
+    const rawBuffer = Buffer.from(res.data);
+    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    const sizeMB = (fs.statSync(tmpInput).size / 1024 / 1024).toFixed(2);
-    console.log('[TikTok-DL] Descargado:', sizeMB, 'MB');
+    // Escribir a disco para ffmpeg
+    fs.writeFileSync(tmpInput, rawBuffer);
 
-    // Remuxear con ffmpeg usando spawn (igual que el ejemplo)
+    // Remuxear con ffmpeg usando spawn
     await new Promise((resolve, reject) => {
       const proc = spawn('ffmpeg', [
         '-y',
@@ -123,7 +123,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     console.log('[TikTok-DL] ffmpeg OK, enviando...');
 
-    // Enviar con { url: ruta } igual que el ejemplo
     await conn.sendMessage(m.chat, {
       video   : { url: tmpOutput },
       caption : `✅ *TikTok descargado*`,
@@ -177,4 +176,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-    }
+              }
