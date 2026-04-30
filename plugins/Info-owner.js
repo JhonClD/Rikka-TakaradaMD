@@ -7,7 +7,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   ˖ *WA:* wa.me/51925092348
 
 𓂃 ࣪˖ *Colaborador*
-  ˖ *WA:* wa.me/584262212498
+  ˖ *WA:* wa.me/51997149670
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const mimeTypes = [
