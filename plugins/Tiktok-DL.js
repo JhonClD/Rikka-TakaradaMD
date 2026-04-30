@@ -8,11 +8,10 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-const TARGET_MB   = 60;  // objetivo de compresión
 const MAX_RAW_MB  = 10;  // si supera esto → comprimir
 const WA_LIMIT_MB = 64;  // límite real de WhatsApp para video reproducible
 
-async function compressForWhatsApp(inputPath, outputPath) {
+async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   const { stdout } = await execAsync(
     `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
     { timeout: 30000 }
@@ -20,13 +19,13 @@ async function compressForWhatsApp(inputPath, outputPath) {
   const duration = parseFloat(stdout.trim());
   if (!duration || isNaN(duration)) throw new Error('No se pudo obtener la duración del video');
 
-  const targetBits   = TARGET_MB * 1024 * 1024 * 8;
+  const targetBits   = targetMB * 1024 * 1024 * 8;
   const audioBitrate = 96;
   const videoBitrate = Math.floor(targetBits / duration / 1000) - audioBitrate;
 
   if (videoBitrate < 100) throw new Error('Video demasiado largo para comprimir con calidad mínima');
 
-  console.log(`[TikTok-DL] Comprimiendo: duración=${duration.toFixed(1)}s, vbitrate=${videoBitrate}k, abitrate=${audioBitrate}k`);
+  console.log(`[TikTok-DL] Comprimiendo: duración=${duration.toFixed(1)}s, target=${targetMB} MB, vbitrate=${videoBitrate}k, abitrate=${audioBitrate}k`);
 
   await execAsync(
     `ffmpeg -y -i "${inputPath}" \
@@ -169,15 +168,21 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }, { quoted: m });
     }
 
-    // Supera 10 MB → comprimir apuntando a 60 MB
-    console.log(`[TikTok-DL] Video grande (${rawMB.toFixed(2)} MB), comprimiendo...`);
+    // Supera MAX_RAW_MB → comprimir con target dinámico
+    // Si cabe en WA → reducir 10% del peso original
+    // Si no cabe  → apuntar a 60 MB
+    const dynamicTarget = rawMB <= WA_LIMIT_MB
+      ? Math.floor(rawMB * 0.90)
+      : 60;
+
+    console.log(`[TikTok-DL] Video (${rawMB.toFixed(2)} MB), comprimiendo a ~${dynamicTarget} MB...`);
     writeFileSync(tmpInput, buffer);
 
     let compBuffer;
     let compressed = false;
 
     try {
-      compBuffer = await compressForWhatsApp(tmpInput, tmpComp);
+      compBuffer = await compressForWhatsApp(tmpInput, tmpComp, dynamicTarget);
       compressed = true;
     } catch (compErr) {
       console.error('[TikTok-DL] Compresión falló:', compErr.message);
@@ -252,4 +257,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-    }
+                                           }
