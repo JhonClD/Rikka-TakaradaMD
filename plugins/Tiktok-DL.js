@@ -99,47 +99,50 @@ async function sendVideo(conn, m, buffer) {
 // ─── Handler principal ─────────────────────────────────────────────────────────
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
-  // ── Capturar respuesta de texto al menú pendiente ─────────────────────────
-  if (pendingTikTok.has(m.sender)) {
-    const reply = (text || '').trim();
-    if (/^1$/i.test(reply) || /imagen/i.test(reply)) {
-      const { imageUrls } = pendingTikTok.get(m.sender);
-      clearTimeout(pendingTikTok.get(m.sender).timer);
+  // ── Capturar respuesta de botón nativo (interactiveResponseMessage) ────────
+  if (m.mtype === 'interactiveResponseMessage') {
+    try {
+      const paramsJson = m.msg?.nativeFlowResponseMessage?.paramsJson || '{}';
+      const { id }     = JSON.parse(paramsJson);
+
+      if (!id || !pendingTikTok.has(m.sender)) return;
+
+      const pending = pendingTikTok.get(m.sender);
+      clearTimeout(pending.timer);
       pendingTikTok.delete(m.sender);
 
-      for (let i = 0; i < imageUrls.length; i++) {
-        try {
-          const { data } = await axios.get(imageUrls[i], {
-            responseType     : 'arraybuffer',
-            timeout          : 30000,
-            maxContentLength : Infinity,
-          });
-          await conn.sendMessage(m.chat, {
-            image  : Buffer.from(data),
-            caption: i === 0 ? `✅ *TikTok descargado* (${imageUrls.length} imágenes)` : '',
-          }, { quoted: i === 0 ? m : undefined });
-        } catch (e) {
-          console.error(`[TikTok-DL] Error imagen ${i + 1}:`, e.message);
+      if (id === 'tt_images') {
+        const { imageUrls } = pending;
+        for (let i = 0; i < imageUrls.length; i++) {
+          try {
+            const { data } = await axios.get(imageUrls[i], {
+              responseType     : 'arraybuffer',
+              timeout          : 30000,
+              maxContentLength : Infinity,
+            });
+            await conn.sendMessage(m.chat, {
+              image  : Buffer.from(data),
+              caption: i === 0 ? `✅ *TikTok descargado* (${imageUrls.length} imágenes)` : '',
+            }, { quoted: i === 0 ? m : undefined });
+          } catch (e) {
+            console.error(`[TikTok-DL] Error imagen ${i + 1}:`, e.message);
+          }
         }
+        return;
       }
-      return;
+
+      if (id === 'tt_video') {
+        const { data } = await axios.get(pending.videoUrl, {
+          responseType     : 'arraybuffer',
+          timeout          : 120000,
+          maxContentLength : Infinity,
+          maxBodyLength    : Infinity,
+        });
+        return await sendVideo(conn, m, Buffer.from(data));
+      }
+    } catch (e) {
+      console.error('[TikTok-DL] Error procesando respuesta botón:', e.message);
     }
-
-    if (/^2$/i.test(reply) || /video/i.test(reply)) {
-      const { videoUrl } = pendingTikTok.get(m.sender);
-      clearTimeout(pendingTikTok.get(m.sender).timer);
-      pendingTikTok.delete(m.sender);
-
-      const { data } = await axios.get(videoUrl, {
-        responseType     : 'arraybuffer',
-        timeout          : 120000,
-        maxContentLength : Infinity,
-        maxBodyLength    : Infinity,
-      });
-      return await sendVideo(conn, m, Buffer.from(data));
-    }
-
-    // Si no respondió 1 ni 2, ignorar y dejar el estado activo
     return;
   }
 
@@ -163,9 +166,22 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         const timer = setTimeout(() => pendingTikTok.delete(m.sender), 120000);
         pendingTikTok.set(m.sender, { imageUrls: images, videoUrl, timer });
 
-        return await conn.sendMessage(m.chat, {
-          text: `🖼️ Este post contiene *${images.length} imágenes*.\n\nResponde con:\n*1* — 🖼️ Descargar imágenes\n*2* — 🎬 Descargar video`,
-        }, { quoted: m });
+        // sendNCarousel(jid, text, footer, buffer, buttons, copy, urls, list, quoted, options)
+        await conn.sendNCarousel(
+          m.chat,
+          `🖼️ Este post contiene *${images.length} imágenes*.\n¿Qué deseas descargar?`,
+          '⏱️ Expira en 2 minutos',
+          null,
+          [
+            ['🖼️ Imágenes', 'tt_images'],
+            ['🎬 Video',    'tt_video' ],
+          ],
+          null,  // copy
+          null,  // urls
+          null,  // list
+          m,     // quoted
+        );
+        return;
       }
     } catch (e) {
       console.log('[TikTok-DL] Detección slideshow falló, continuando normal:', e.message);
@@ -326,3 +342,4 @@ async function fetchInstatiktok(url) {
     return null;
   }
 }
+  
