@@ -11,10 +11,10 @@ const execAsync = promisify(exec);
 const MAX_RAW_MB  = 10;
 const WA_LIMIT_MB = 64;
 
-// ─── Estado pendiente por usuario ────────────────────────────────────────────
-const pendingTikTok = new Map();
+// ─── Estado pendiente por usuario ─────────────────────────────────────────────
+const pendingTikTok = new Map(); // sender → { imageUrls, videoUrl, timer }
 
-// ─── Compresión dinámica ──────────────────────────────────────────────────────
+// ─── Compresión dinámica ───────────────────────────────────────────────────────
 async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   const { stdout } = await execAsync(
     `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
@@ -45,7 +45,7 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   return compressed;
 }
 
-// ─── Enviar video procesado ───────────────────────────────────────────────────
+// ─── Enviar video procesado ────────────────────────────────────────────────────
 async function sendVideo(conn, m, buffer) {
   const ts       = Date.now();
   const tmpInput = join(tmpdir(), `tiktok_in_${ts}.mp4`);
@@ -96,17 +96,17 @@ async function sendVideo(conn, m, buffer) {
   }
 }
 
-// ─── Handler principal ────────────────────────────────────────────────────────
+// ─── Handler principal ─────────────────────────────────────────────────────────
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
-  // ── Capturar respuesta de lista ───────────────────────────────────────────
-  const listResponse = m?.message?.listResponseMessage?.singleSelectReply?.selectedRowId;
+  // ── Capturar respuesta de texto al menú pendiente ─────────────────────────
+  if (pendingTikTok.has(m.sender)) {
+    const reply = (text || '').trim();
+    if (/^1$/i.test(reply) || /imagen/i.test(reply)) {
+      const { imageUrls } = pendingTikTok.get(m.sender);
+      clearTimeout(pendingTikTok.get(m.sender).timer);
+      pendingTikTok.delete(m.sender);
 
-  if (listResponse && pendingTikTok.has(m.sender)) {
-    const { imageUrls, videoUrl } = pendingTikTok.get(m.sender);
-    pendingTikTok.delete(m.sender);
-
-    if (listResponse === 'tt_images') {
       for (let i = 0; i < imageUrls.length; i++) {
         try {
           const { data } = await axios.get(imageUrls[i], {
@@ -125,7 +125,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       return;
     }
 
-    if (listResponse === 'tt_video') {
+    if (/^2$/i.test(reply) || /video/i.test(reply)) {
+      const { videoUrl } = pendingTikTok.get(m.sender);
+      clearTimeout(pendingTikTok.get(m.sender).timer);
+      pendingTikTok.delete(m.sender);
+
       const { data } = await axios.get(videoUrl, {
         responseType     : 'arraybuffer',
         timeout          : 120000,
@@ -135,6 +139,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       return await sendVideo(conn, m, Buffer.from(data));
     }
 
+    // Si no respondió 1 ni 2, ignorar y dejar el estado activo
     return;
   }
 
@@ -155,23 +160,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       const videoUrl = j?.data?.hdplay || j?.data?.play;
 
       if (Array.isArray(images) && images.length > 0 && videoUrl) {
-        pendingTikTok.set(m.sender, { imageUrls: images, videoUrl, ts: Date.now() });
-        setTimeout(() => pendingTikTok.delete(m.sender), 120000);
+        const timer = setTimeout(() => pendingTikTok.delete(m.sender), 120000);
+        pendingTikTok.set(m.sender, { imageUrls: images, videoUrl, timer });
 
         return await conn.sendMessage(m.chat, {
-          listMessage: {
-            title      : '🖼️ *Post con imágenes detectado*',
-            text       : `Este post contiene *${images.length} imágenes*.\n¿Qué deseas descargar?`,
-            buttonText : '📥 Ver opciones',
-            listType   : 1,
-            sections   : [{
-              title: 'Opciones de descarga',
-              rows : [
-                { title: '🖼️ Imágenes', description: `Descargar las ${images.length} imágenes`, rowId: 'tt_images' },
-                { title: '🎬 Video',    description: 'Descargar como video',                    rowId: 'tt_video'  },
-              ],
-            }],
-          },
+          text: `🖼️ Este post contiene *${images.length} imágenes*.\n\nResponde con:\n*1* — 🖼️ Descargar imágenes\n*2* — 🎬 Descargar video`,
         }, { quoted: m });
       }
     } catch (e) {
@@ -179,7 +172,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     }
   }
 
-  // ── APIs fallback ─────────────────────────────────────────────────────────
+  // ── APIs fallback ──────────────────────────────────────────────────────────
   const APIs = [
     async () => {
       const links = await fetchInstatiktok(url);
@@ -264,7 +257,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     let buffer = Buffer.from(res.data);
     console.log('[TikTok-DL] Descargado:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    // ── Modo documento ──────────────────────────────────────────────────────
+    // ── Modo documento ────────────────────────────────────────────────────────
     if (asDoc) {
       try {
         writeFileSync(tmpIn, buffer);
@@ -281,7 +274,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }, { quoted: m });
     }
 
-    // ── Modo video ──────────────────────────────────────────────────────────
+    // ── Modo video ────────────────────────────────────────────────────────────
     await sendVideo(conn, m, buffer);
 
   } catch (e) {
@@ -300,7 +293,7 @@ handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio|tikto
 
 export default handler;
 
-// ─── Scraper instatiktok ──────────────────────────────────────────────────────
+// ─── Scraper instatiktok ───────────────────────────────────────────────────────
 async function fetchInstatiktok(url) {
   try {
     const SITE_URL = 'https://instatiktok.com/';
@@ -332,4 +325,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-         }
+}
