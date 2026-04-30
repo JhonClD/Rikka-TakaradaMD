@@ -12,7 +12,7 @@ const MAX_RAW_MB  = 10;
 const WA_LIMIT_MB = 64;
 
 // ─── Estado pendiente por usuario ────────────────────────────────────────────
-const pendingTikTok = new Map(); // jid → { imageUrls, videoUrl, ts }
+const pendingTikTok = new Map();
 
 // ─── Compresión dinámica ──────────────────────────────────────────────────────
 async function compressForWhatsApp(inputPath, outputPath, targetMB) {
@@ -47,7 +47,7 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
 
 // ─── Enviar video procesado ───────────────────────────────────────────────────
 async function sendVideo(conn, m, buffer) {
-  const ts      = Date.now();
+  const ts       = Date.now();
   const tmpInput = join(tmpdir(), `tiktok_in_${ts}.mp4`);
   const tmpComp  = join(tmpdir(), `tiktok_comp_${ts}.mp4`);
 
@@ -99,16 +99,14 @@ async function sendVideo(conn, m, buffer) {
 // ─── Handler principal ────────────────────────────────────────────────────────
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
-  // ── Respuesta de botón pendiente ──────────────────────────────────────────
-  const btnResponse = m?.message?.buttonsResponseMessage?.selectedButtonId
-    || m?.message?.templateButtonReplyMessage?.selectedId;
+  // ── Capturar respuesta de lista ───────────────────────────────────────────
+  const listResponse = m?.message?.listResponseMessage?.singleSelectReply?.selectedRowId;
 
-  if (btnResponse && pendingTikTok.has(m.sender)) {
+  if (listResponse && pendingTikTok.has(m.sender)) {
     const { imageUrls, videoUrl } = pendingTikTok.get(m.sender);
     pendingTikTok.delete(m.sender);
 
-    if (btnResponse === 'tt_images') {
-      // Enviar imágenes una a una
+    if (listResponse === 'tt_images') {
       for (let i = 0; i < imageUrls.length; i++) {
         try {
           const { data } = await axios.get(imageUrls[i], {
@@ -127,7 +125,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       return;
     }
 
-    if (btnResponse === 'tt_video') {
+    if (listResponse === 'tt_video') {
       const { data } = await axios.get(videoUrl, {
         responseType     : 'arraybuffer',
         timeout          : 120000,
@@ -140,7 +138,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     return;
   }
 
-  // ── Validación normal ─────────────────────────────────────────────────────
+  // ── Validación ────────────────────────────────────────────────────────────
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
   if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/[^\s&]+/gi.test(text))
     throw '❌ El enlace no parece ser de TikTok.';
@@ -158,17 +156,22 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
       if (Array.isArray(images) && images.length > 0 && videoUrl) {
         pendingTikTok.set(m.sender, { imageUrls: images, videoUrl, ts: Date.now() });
-
-        // Limpiar estado si no responde en 2 minutos
         setTimeout(() => pendingTikTok.delete(m.sender), 120000);
 
         return await conn.sendMessage(m.chat, {
-          text: `🖼️ Este post contiene *${images.length} imágenes*.\n¿Qué deseas descargar?`,
-          buttons: [
-            { buttonId: 'tt_images', buttonText: { displayText: '🖼️ Imágenes' }, type: 1 },
-            { buttonId: 'tt_video',  buttonText: { displayText: '🎬 Video'    }, type: 1 },
-          ],
-          headerType: 1,
+          listMessage: {
+            title      : '🖼️ *Post con imágenes detectado*',
+            text       : `Este post contiene *${images.length} imágenes*.\n¿Qué deseas descargar?`,
+            buttonText : '📥 Ver opciones',
+            listType   : 1,
+            sections   : [{
+              title: 'Opciones de descarga',
+              rows : [
+                { title: '🖼️ Imágenes', description: `Descargar las ${images.length} imágenes`, rowId: 'tt_images' },
+                { title: '🎬 Video',    description: 'Descargar como video',                    rowId: 'tt_video'  },
+              ],
+            }],
+          },
         }, { quoted: m });
       }
     } catch (e) {
@@ -329,4 +332,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-                          }
+         }
