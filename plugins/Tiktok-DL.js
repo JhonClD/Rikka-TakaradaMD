@@ -8,8 +8,9 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-const TARGET_MB  = 9;
-const MAX_RAW_MB = 10;
+const TARGET_MB   = 60;  // objetivo de compresión
+const MAX_RAW_MB  = 10;  // si supera esto → comprimir
+const WA_LIMIT_MB = 64;  // límite real de WhatsApp para video reproducible
 
 async function compressForWhatsApp(inputPath, outputPath) {
   const { stdout } = await execAsync(
@@ -23,7 +24,7 @@ async function compressForWhatsApp(inputPath, outputPath) {
   const audioBitrate = 96;
   const videoBitrate = Math.floor(targetBits / duration / 1000) - audioBitrate;
 
-  if (videoBitrate < 100) throw new Error('Video demasiado largo para comprimir a 50 MB con calidad mínima');
+  if (videoBitrate < 100) throw new Error('Video demasiado largo para comprimir con calidad mínima');
 
   console.log(`[TikTok-DL] Comprimiendo: duración=${duration.toFixed(1)}s, vbitrate=${videoBitrate}k, abitrate=${audioBitrate}k`);
 
@@ -160,6 +161,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     // ── Modo video reproducible ───────────────────────────────────────────────
     if (rawMB <= MAX_RAW_MB) {
+      // Pequeño → enviar directo
       return await conn.sendMessage(m.chat, {
         video   : buffer,
         mimetype: 'video/mp4',
@@ -167,7 +169,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }, { quoted: m });
     }
 
-    // Video grande → comprimir
+    // Supera 10 MB → comprimir apuntando a 60 MB
     console.log(`[TikTok-DL] Video grande (${rawMB.toFixed(2)} MB), comprimiendo...`);
     writeFileSync(tmpInput, buffer);
 
@@ -184,13 +186,15 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const finalBuffer = compressed ? compBuffer : buffer;
     const finalMB     = finalBuffer.length / 1024 / 1024;
 
-    if (finalMB <= MAX_RAW_MB) {
+    if (finalMB <= WA_LIMIT_MB) {
+      // Cabe en WhatsApp → video reproducible
       await conn.sendMessage(m.chat, {
         video   : finalBuffer,
         mimetype: 'video/mp4',
         caption : `✅ *TikTok descargado*`,
       }, { quoted: m });
     } else {
+      // Aún demasiado grande → documento MP4
       console.log(`[TikTok-DL] Aún grande tras comprimir (${finalMB.toFixed(2)} MB), enviando como doc.`);
       await conn.sendMessage(m.chat, {
         document : finalBuffer,
@@ -248,4 +252,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-}
+    }
