@@ -72,7 +72,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   ];
 
   const tmpInput  = join(tmpdir(), `tiktok_in_${Date.now()}.mp4`);
-  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mp4`);
+  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mkv`);
 
   try {
     let videoUrl = null;
@@ -102,23 +102,31 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
     let buffer = rawBuffer;
 
-    // Remuxear con ffmpeg solo para modo documento
+    // Remuxear a MKV solo para modo documento
     if (asDoc) {
       try {
         writeFileSync(tmpInput, rawBuffer);
         await execAsync(
-          `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
+          `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy "${tmpOutput}"`,
           { timeout: 120000 }
         );
         buffer = readFileSync(tmpOutput);
-        console.log('[TikTok-DL] ffmpeg OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+        console.log('[TikTok-DL] ffmpeg MKV OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
       } catch (ffErr) {
         console.error('[TikTok-DL] ffmpeg falló, usando buffer directo:', ffErr.message);
         buffer = rawBuffer;
       }
     }
 
-    
+    await conn.sendMessage(m.chat, asDoc ? {
+      document : buffer,
+      mimetype : 'video/x-matroska',
+      fileName : `tiktok_${Date.now()}.mkv`,
+      caption  : `✅ *TikTok descargado*`,
+    } : {
+      video  : buffer,
+      caption: `✅ *TikTok descargado*`,
+    }, { quoted: m });
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
@@ -144,16 +152,7 @@ async function fetchInstatiktok(url) {
     form.append('platform', 'tiktok');
 
     const res = await axios.post(`${SITE_URL}api`, form.toString(), {
-      headers: await conn.sendMessage(m.chat, asDoc ? {
-  document : buffer,
-  mimetype : 'video/x-matroska',
-  fileName : `tiktok_${Date.now()}.mkv`,
-  caption  : `✅ *TikTok descargado*`,
-} : {
-  video  : buffer,
-  caption: `✅ *TikTok descargado*`,
-}, { quoted: m });{
-      
+      headers: {
         'Content-Type'    : 'application/x-www-form-urlencoded; charset=UTF-8',
         'Origin'          : SITE_URL,
         'Referer'         : SITE_URL,
@@ -176,4 +175,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-                      }
+}
