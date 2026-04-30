@@ -8,6 +8,44 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+const TARGET_MB  = 50;   // tamaño objetivo tras comprimir
+const MAX_RAW_MB = 64;   // límite WhatsApp para video reproducible
+
+// ─── Comprimir video para que quepa en WhatsApp ───────────────────────────────
+async function compressForWhatsApp(inputPath, outputPath) {
+  // 1. Obtener duración con ffprobe
+  const { stdout } = await execAsync(
+    `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
+    { timeout: 30000 }
+  );
+  const duration = parseFloat(stdout.trim());
+  if (!duration || isNaN(duration)) throw new Error('No se pudo obtener la duración del video');
+
+  // 2. Calcular bitrate total para alcanzar TARGET_MB
+  const targetBits    = TARGET_MB * 1024 * 1024 * 8;
+  const audioBitrate  = 96;                                       // kbps fijo para audio
+  const videoBitrate  = Math.floor(targetBits / duration / 1000) - audioBitrate; // kbps para video
+
+  if (videoBitrate < 100) throw new Error('Video demasiado largo para comprimir a 50 MB con calidad mínima');
+
+  console.log(`[TikTok-DL] Comprimiendo: duración=${duration.toFixed(1)}s, vbitrate=${videoBitrate}k, abitrate=${audioBitrate}k`);
+
+  // 3. Re-encodear: H264 + AAC, escalar a máx 1280px de ancho, mantener aspecto
+  await execAsync(
+    `ffmpeg -y -i "${inputPath}" \
+     -c:v libx264 -b:v ${videoBitrate}k -maxrate ${videoBitrate * 1.5}k -bufsize ${videoBitrate * 2}k \
+     -vf "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+     -c:a aac -b:a ${audioBitrate}k -movflags +faststart \
+     -preset fast "${outputPath}"`,
+    { timeout: 300000 }
+  );
+
+  const compressed = readFileSync(outputPath);
+  const sizeMB     = compressed.length / 1024 / 1024;
+  console.log(`[TikTok-DL] Compresión OK: ${sizeMB.toFixed(2)} MB`);
+  return compressed;
+}
+
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
   if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/[^\s&]+/gi.test(text))
@@ -71,8 +109,10 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     },
   ];
 
-  const tmpInput  = join(tmpdir(), `tiktok_in_${Date.now()}.mp4`);
-  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mkv`);
+  const ts        = Date.now();
+  const tmpInput  = join(tmpdir(), `tiktok_in_${ts}.mp4`);
+  const tmpComp   = join(tmpdir(), `tiktok_comp_${ts}.mp4`);
+  const tmpMkv    = join(tmpdir(), `tiktok_out_${ts}.mkv`);
 
   try {
     let videoUrl = null;
@@ -98,38 +138,86 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     });
 
     let buffer = Buffer.from(res.data);
-    console.log('[TikTok-DL] Descargado:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+    const rawMB = buffer.length / 1024 / 1024;
+    console.log('[TikTok-DL] Descargado:', rawMB.toFixed(2), 'MB');
 
-    // Siempre remuxear a MKV
-    try {
-      writeFileSync(tmpInput, buffer);
-      await execAsync(
-        `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy "${tmpOutput}"`,
-        { timeout: 120000 }
-      );
-      buffer = readFileSync(tmpOutput);
-      console.log('[TikTok-DL] ffmpeg MKV OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
-    } catch (ffErr) {
-      console.error('[TikTok-DL] ffmpeg falló:', ffErr.message);
+    // ── Modo documento (tiktok2 / tt2): remux a MKV ──────────────────────────
+    if (asDoc) {
+      try {
+        writeFileSync(tmpInput, buffer);
+        await execAsync(
+          `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy "${tmpMkv}"`,
+          { timeout: 120000 }
+        );
+        buffer = readFileSync(tmpMkv);
+        console.log('[TikTok-DL] MKV OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
+      } catch (ffErr) {
+        console.error('[TikTok-DL] ffmpeg MKV falló, usando original:', ffErr.message);
+      }
+
+      return await conn.sendMessage(m.chat, {
+        document : buffer,
+        mimetype : 'video/x-matroska',
+        fileName : `tiktok_${ts}.mkv`,
+        caption  : `✅ *TikTok descargado*`,
+      }, { quoted: m });
     }
 
-    await conn.sendMessage(m.chat, asDoc ? {
-      document : buffer,
-      mimetype : 'video/x-matroska',
-      fileName : `tiktok_${Date.now()}.mkv`,
-      caption  : `✅ *TikTok descargado*`,
-    } : {
-      video   : buffer,
-      mimetype: 'video/x-matroska',
-      caption : `✅ *TikTok descargado*`,
-    }, { quoted: m });
+    // ── Modo video reproducible ───────────────────────────────────────────────
+    if (rawMB <= MAX_RAW_MB) {
+      // Tamaño OK → enviar directo como MP4
+      return await conn.sendMessage(m.chat, {
+        video   : buffer,
+        mimetype: 'video/mp4',
+        caption : `✅ *TikTok descargado*`,
+      }, { quoted: m });
+    }
+
+    // Video grande → comprimir con ffmpeg
+    console.log(`[TikTok-DL] Video grande (${rawMB.toFixed(2)} MB), comprimiendo...`);
+    await conn.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
+
+    writeFileSync(tmpInput, buffer);
+    let compBuffer;
+    let compressed = false;
+
+    try {
+      compBuffer = await compressForWhatsApp(tmpInput, tmpComp);
+      compressed = true;
+    } catch (compErr) {
+      console.error('[TikTok-DL] Compresión falló:', compErr.message);
+    }
+
+    const finalBuffer = compressed ? compBuffer : buffer;
+    const finalMB     = finalBuffer.length / 1024 / 1024;
+
+    if (finalMB <= MAX_RAW_MB) {
+      // Compresión exitosa → video reproducible
+      await conn.sendMessage(m.chat, {
+        video   : finalBuffer,
+        mimetype: 'video/mp4',
+        caption : compressed
+          ? `✅ *TikTok descargado*\n_📦 Comprimido de ${rawMB.toFixed(0)} MB → ${finalMB.toFixed(0)} MB_`
+          : `✅ *TikTok descargado*`,
+      }, { quoted: m });
+    } else {
+      // Aún demasiado grande → mandar como documento MP4
+      console.log(`[TikTok-DL] Aún grande tras comprimir (${finalMB.toFixed(2)} MB), enviando como doc.`);
+      await conn.sendMessage(m.chat, {
+        document : finalBuffer,
+        mimetype : 'video/mp4',
+        fileName : `tiktok_${ts}.mp4`,
+        caption  : `✅ *TikTok descargado*\n_⚠️ Demasiado grande para reproducir inline (${finalMB.toFixed(0)} MB)._`,
+      }, { quoted: m });
+    }
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
     throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
   } finally {
-    if (existsSync(tmpInput))  unlinkSync(tmpInput);
-    if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
+    for (const f of [tmpInput, tmpComp, tmpMkv]) {
+      if (existsSync(f)) unlinkSync(f);
+    }
   }
 };
 
@@ -171,4 +259,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-                }
+        }
