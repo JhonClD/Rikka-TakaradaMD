@@ -2494,10 +2494,19 @@ handler.before = async function (m, { conn }) {
         return true
       }
 
-      // Inyectar el comando (.dl N) para que el handler principal lo procese
+      // FIX: invocar el handler directamente en vez de inyectar m.text
       const sk = `${m.chat}|${m.sender}`
       delete global.animeDlSessions[sk]
-      m.text = selectedId.trim()
+
+      const usedPrefix = selectedId.trim()[0]
+      const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
+      const text = argParts.join(' ')
+      try {
+        await handler.call(conn, m, { conn, text, usedPrefix, command })
+      } catch (e) {
+        console.error('[animeDL before] Error ejecutando handler:', e.message)
+      }
+      return true
     } catch (_) {}
     return false
   }
