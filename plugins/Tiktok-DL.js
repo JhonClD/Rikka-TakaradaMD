@@ -9,7 +9,7 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 const TARGET_MB  = 50;
-const MAX_RAW_MB = 10;
+const MAX_RAW_MB = 64;
 
 async function compressForWhatsApp(inputPath, outputPath) {
   const { stdout } = await execAsync(
@@ -248,4 +248,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-        }
+}
