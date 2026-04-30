@@ -8,6 +8,8 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+const MAX_VIDEO_SIZE = 60 * 1024 * 1024; // 60MB
+
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
   if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/[^\s&]+/gi.test(text))
@@ -97,15 +99,14 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       maxBodyLength    : Infinity,
     });
 
-    const rawBuffer = Buffer.from(res.data);
-    console.log('[TikTok-DL] Descargado:', (rawBuffer.length / 1024 / 1024).toFixed(2), 'MB');
+    let buffer = Buffer.from(res.data);
+    console.log('[TikTok-DL] Descargado:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
 
-    let buffer = rawBuffer;
+    const needsMkv = asDoc || buffer.length > MAX_VIDEO_SIZE;
 
-    // Remuxear a MKV solo para modo documento
-    if (asDoc) {
+    if (needsMkv) {
       try {
-        writeFileSync(tmpInput, rawBuffer);
+        writeFileSync(tmpInput, buffer);
         await execAsync(
           `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy "${tmpOutput}"`,
           { timeout: 120000 }
@@ -113,20 +114,22 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         buffer = readFileSync(tmpOutput);
         console.log('[TikTok-DL] ffmpeg MKV OK:', (buffer.length / 1024 / 1024).toFixed(2), 'MB');
       } catch (ffErr) {
-        console.error('[TikTok-DL] ffmpeg falló, usando buffer directo:', ffErr.message);
-        buffer = rawBuffer;
+        console.error('[TikTok-DL] ffmpeg falló:', ffErr.message);
       }
-    }
 
-    await conn.sendMessage(m.chat, asDoc ? {
-      document : buffer,
-      mimetype : 'video/x-matroska',
-      fileName : `tiktok_${Date.now()}.mkv`,
-      caption  : `✅ *TikTok descargado*`,
-    } : {
-      video  : buffer,
-      caption: `✅ *TikTok descargado*`,
-    }, { quoted: m });
+      await conn.sendMessage(m.chat, {
+        document : buffer,
+        mimetype : 'video/x-matroska',
+        fileName : `tiktok_${Date.now()}.mkv`,
+        caption  : `✅ *TikTok descargado*${!asDoc ? '\n_Video grande, enviado como archivo MKV_' : ''}`,
+      }, { quoted: m });
+
+    } else {
+      await conn.sendMessage(m.chat, {
+        video  : buffer,
+        caption: `✅ *TikTok descargado*`,
+      }, { quoted: m });
+    }
 
   } catch (e) {
     console.error('[TikTok-DL]', e);
@@ -175,4 +178,4 @@ async function fetchInstatiktok(url) {
   } catch {
     return null;
   }
-}
+        }
