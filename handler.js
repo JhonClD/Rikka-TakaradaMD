@@ -10,12 +10,21 @@ import mddd5 from 'md5';
 import ws from 'ws';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
 
-// Cache para deduplicación de mensajes (fix doble mensaje)
+import _printModule from './src/libraries/print.js';
+const _printMessage = _printModule?.default ?? _printModule;
+
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const _T = _require('./src/languages/es/handler.js.json');
+
 const _recentMessages = new Map();
 const _DUPLICATE_TIMEOUT = 3000;
 const _MAX_CACHE_SIZE = 150;
 
-// Limpieza periódica del cache de deduplicación
+const _initializedUsers = new Set();
+
+const _prefixRegexCache = new Map();
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, ts] of _recentMessages.entries()) {
@@ -25,9 +34,6 @@ setInterval(() => {
 
 let mconn;
 
-/**
- * @type {import("@whiskeysockets/baileys")}
- */
 const { proto } = (await import("@whiskeysockets/baileys")).default;
 const isNumber = (x) => typeof x === 'number' && !isNaN(x);
 const delay = (ms) => isNumber(ms) && new Promise((resolve) => setTimeout(function () {
@@ -35,16 +41,11 @@ const delay = (ms) => isNumber(ms) && new Promise((resolve) => setTimeout(functi
   resolve();
 }, ms));
 
-/**
- * Handle messages upsert
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>['messages.upsert']} groupsUpdate
- */
 export async function handler(chatUpdate) {
   this.msgqueque = this.msgqueque || [];
   this.uptime = this.uptime || Date.now();
   if (!chatUpdate) return;
 
-  // ── FIX DOBLE MENSAJE: filtrar por timestamp de conexión ──
   const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
   if (chatUpdate.messages?.length) {
     chatUpdate.messages = chatUpdate.messages.filter(msg => {
@@ -58,7 +59,6 @@ export async function handler(chatUpdate) {
   let m = chatUpdate.messages[chatUpdate.messages.length - 1];
   if (!m) return;
 
-  // ── FIX DOBLE MENSAJE: deduplicación por ID ──
   if (!isValidMessage(m)) return;
   const _msgText = extractMessageText(m);
   const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participant || m.key?.remoteJid || '');
@@ -66,7 +66,7 @@ export async function handler(chatUpdate) {
 
   if (global.db.data == null) await global.loadDatabase();
   
-  /* ------------------------------------------------*/
+  
   try {
     m = smsg(this, m) || m;
     if (!m) {
@@ -78,15 +78,14 @@ export async function handler(chatUpdate) {
     m.money = false;
     m.limit = false;
     try {
-      // TODO: use loop to insert data instead of this
+
       const user = global.db.data.users[m.sender]
       if (typeof user !== 'object') {
         global.db.data.users[m.sender] = {};
       }
-      if (user) {
-        // im gona cook this
-        // why the fuck nobody put the code like this in 3 years??????
-        // credit to mystic or skidy89
+
+      if (user && !_initializedUsers.has(m.sender)) {
+        _initializedUsers.add(m.sender);
         const dick = {
           afk: -1,
           wait: 0,
@@ -493,11 +492,9 @@ export async function handler(chatUpdate) {
           language: 'es',
           gameglx: {},
         }
-      for (const dicks in dick) {
-        if (user[dicks] === undefined || !user.hasOwnProperty(dicks)) {
-          user[dicks] = dick[dicks] // god pls forgive me
-        }
-      }}
+
+      Object.assign(user, { ...dick, ...user });
+      }
       const akinator = global.db.data.users[m.sender].akinator;
       if (typeof akinator !== 'object') {
         global.db.data.users[m.sender].akinator = {};
@@ -514,18 +511,15 @@ export async function handler(chatUpdate) {
           step: null,
           soal: null,
         };
-        for (const aki in akiSettings) {
-          if (akinator[aki] === undefined || !akinator.hasOwnProperty(aki)) {
-            akinator[aki] = akiSettings[aki] ?? {};
-          }
-        }
+
+      Object.assign(akinator, { ...akiSettings, ...akinator });
       }
       let gameglx = global.db.data.users[m.sender].gameglx
       if (typeof gameglx !== 'object') {
         global.db.data.users[m.sender].gameglx = {}
       }
       if (gameglx) {
-        const gameGalaxy = { // i want to assign dick instead gameGalaxy
+        const gameGalaxy = {
           status: false,
           notificacao: {
             recebidas: []
@@ -541,10 +535,10 @@ export async function handler(chatUpdate) {
             minerando: false,
             nome: null,
             username: null,
-            id: null, // Id do Jogador
+            id: null,
             idioma: 'pt-br',
             casa: {
-              id: null, // id do grupo ou seja do planeta casa
+              id: null,
               planeta: null,
               idpelonome: 'terra',
               colonia: {
@@ -563,7 +557,7 @@ export async function handler(chatUpdate) {
             },
             localizacao: {
               status: false,
-              nomeplaneta: null,  // id do grupo...
+              nomeplaneta: null,
               id: null,
               idpelonome: null,
               viajando: false,
@@ -614,13 +608,9 @@ export async function handler(chatUpdate) {
             }
           }
         }
-        for (const game in gameGalaxy) {
-          if (gameglx[game] === undefined || !gameglx.hasOwnProperty(game)) {
-            gameglx[game] = gameGalaxy[game] ?? {} // ctrl + v moment 
-          }
-        }
-      }
 
+        Object.assign(gameglx, { ...gameGalaxy, ...gameglx });
+      }
 
       const chat = global.db.data.chats[m.chat];
       if (typeof chat !== 'object') {
@@ -628,7 +618,7 @@ export async function handler(chatUpdate) {
       }
       if (chat) {
         
-      const chats = { // i want to assign dick instead chats
+      const chats = {
           isBanned: false,
           welcome: true,
           detect: true,
@@ -656,16 +646,13 @@ export async function handler(chatUpdate) {
           language: 'es',
           setPrimaryBot: '',
         }
-        for (const chatss in chats) {
-          if (chat[chatss] === undefined || !chat.hasOwnProperty(chatss)) {
-            chat[chatss] = chats[chatss] ?? {}// ctrl + v moment
-          }
-        }
+
+        Object.assign(chat, { ...chats, ...chat });
       }
       const settings = global.db.data.settings[this.user.jid];
       if (typeof settings !== 'object') global.db.data.settings[this.user.jid] = {};
       if (settings) {
-       const setttings = { // yk the drill 
+       const setttings = {
           self: false,
           autoread: false,
           autoread2: false,
@@ -677,22 +664,19 @@ export async function handler(chatUpdate) {
           audios_bot: true,
           modoia: false
         };
-        for (const setting in settings) {
-          if (settings[setting] === undefined || !settings.hasOwnProperty(setting)) {
-            settings[setting] = setttings[setting] ?? {} // ctrl + v moment
-          }
-        }
+
+        Object.assign(settings, { ...setttings, ...settings });
       }
     } catch (e) {
       console.error(e);
     }
 
     const tradutor = {
-      texto1: ["_*< USUARIO SUSPENDIDO />*_\n", "▢ *Aviso:*", "\n▢ *Motivo:*", "▢ *Motivo:* Sin especificar", "*[ ℹ️ ] Si consideras que esto es un error y cuentas con pruebas, puedes comunicarte con el propietario(a) del bot para apelar la suspensión.*"],
-      texto2: "*[ ℹ️ ] Sus diamantes se han agotado, puede adquirir más con el comando:*",
-      texto3: ["*[ ℹ️ ] Se require tener el nivel", "para poder utilizar el comando. Tú nivel actual es", "usa el comando", "para subir tu nivel con XP.*"],
-      texto4: ["*[ ℹ️ ] Se utilizaron", "diamante(s) (limites).*"]
-    }
+      texto1: _T.handler.banned,
+      texto2: _T.handler.noLimit,
+      texto3: _T.handler.needLevel,
+      texto4: _T.handler.usedLimit,
+    };
 
     if (opts['nyimak']) {
       return;
@@ -712,7 +696,7 @@ export async function handler(chatUpdate) {
     if (typeof m.text !== 'string') {
       m.text = '';
     }
-    // Resolver sender en caso de LID para isROwner/isOwner
+
     const _senderJid = m.sender;
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
@@ -738,7 +722,7 @@ export async function handler(chatUpdate) {
 
     let usedPrefix;
     const _user = global.db.data && global.db.data.users && global.db.data.users[m.sender];
-    // Cache groupMetadata con TTL de 5 minutos — evita llamada a WA en cada mensaje
+
     const _META_TTL = 5 * 60 * 1000;
     let _cachedMeta = conn.chats[m.chat]?.metadata || null;
     let _freshMeta  = null;
@@ -768,30 +752,30 @@ export async function handler(chatUpdate) {
       lid: participant.lid,
       admin: participant.admin
     }));
-    // Pre-poblar cache LID→JID desde participantes (resuelve m.sender cuando es @lid)
+
     if (m.isGroup && participants.length > 0 && this.resolveLid?.bulkCacheFromParticipants) {
       this.resolveLid.bulkCacheFromParticipants(participants);
     }
-    // Re-resolver m.sender si aún es un LID usando la caché recién poblada
+
     let resolvedSender = m.sender;
     if (m.sender?.endsWith?.('@lid') && this.resolveLid?.lidCache) {
       const cached = this.resolveLid.lidCache.get(m.sender);
       if (cached && !cached.endsWith?.('@lid')) resolvedSender = cached;
     }
     const user = (m.isGroup ? (
-      // Buscar por JID resuelto
-      participants.find((u) => conn.decodeJid(u.id || u.jid) === resolvedSender) ||
-      // Fallback: buscar por campo LID del participante (por si m.sender sigue siendo @lid)
-      participants.find((u) => u.lid && (conn.decodeJid(u.lid) === m.sender || u.lid === m.sender)) ||
-      // Fallback final: sender sin resolver
-      participants.find((u) => conn.decodeJid(u.id || u.jid) === m.sender)
-    ) : {}) || {}; // User Data
-    const bot = (m.isGroup ? participants.find((u) => conn.decodeJid(u.id || u.jid) == this.user.jid) : {}) || {}; // Your Data
-    const isRAdmin = user?.admin == 'superadmin' || false;
-    const isAdmin = isRAdmin || user?.admin == 'admin' || isROwner || false; // Is User Admin? (owner siempre pasa)
-    const isBotAdmin = bot?.admin || false; // Are you Admin?
 
-    const ___dirname = path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
+      participants.find((u) => conn.decodeJid(u.id || u.jid) === resolvedSender) ||
+
+      participants.find((u) => u.lid && (conn.decodeJid(u.lid) === m.sender || u.lid === m.sender)) ||
+
+      participants.find((u) => conn.decodeJid(u.id || u.jid) === m.sender)
+    ) : {}) || {};
+    const bot = (m.isGroup ? participants.find((u) => conn.decodeJid(u.id || u.jid) == this.user.jid) : {}) || {};
+    const isRAdmin = user?.admin == 'superadmin' || false;
+    const isAdmin = isRAdmin || user?.admin == 'admin' || isROwner || false;
+    const isBotAdmin = bot?.admin || false;
+
+    const ___dirname = handler._pluginsDir ??= path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
     for (const name in global.plugins) {
       const plugin = global.plugins[name];
       if (!plugin) {
@@ -809,36 +793,37 @@ export async function handler(chatUpdate) {
             __filename,
           });
         } catch (e) {
-          // if (typeof e === 'string') continue
+
           console.error(e);
-          /* for (const [jid] of global.reportes_solicitudes.filter(([number]) => number)) {
-            const data = (await conn.onWhatsApp(jid))[0] || {};
-            if (data.exists) {
-              await m.reply(`*[ ⚠️ 𝚁𝙴𝙿𝙾𝚁𝚃𝙴 𝙳𝙴 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 𝙲𝙾𝙽 𝙵𝙰𝙻𝙻𝙾𝚂 ⚠️ ]*\n\n*—◉ 𝙿𝙻𝚄𝙶𝙸𝙽:* ${name}\n*—◉ 𝚄𝚂𝚄𝙰𝚁𝙸𝙾:* ${m.sender}\n*—◉ 𝙲𝙾𝙼𝙰𝙽𝙳𝙾:* ${m.text}\n\n*—◉ 𝙴𝚁𝚁𝙾𝚁:*\n\`\`\`${format(e)}\`\`\`\n\n*[❗] 𝚁𝙴𝙿𝙾𝚁𝚃𝙴𝙻𝙾 𝙰𝙻 𝙲𝚁𝙴𝙰𝙳𝙾𝚁 𝙳𝙴𝙻 𝙱𝙾𝚃 𝙿𝙰𝚁𝙰 𝙳𝙰𝚁𝙻𝙴 𝚄𝙽𝙰 𝚂𝙾𝙻𝚄𝙲𝙸𝙾𝙽, 𝙿𝚄𝙴𝙳𝙴 𝚄𝚂𝙰𝚁 𝙴𝙻 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 #reporte*`.trim(), data.jid);
-            }
-          }*/
-          // md5 report eliminado (fetch comentado)
+          
+
         }
       }
       if (!opts['restrict']) {
         if (plugin.tags && plugin.tags.includes('admin')) {
-          // global.dfail('restrict', m, this)
+
           continue;
         }
       }
-      const str2Regex = (str) => str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&');
+
+      const _str2Regex = (str) => {
+        if (_prefixRegexCache.has(str)) return _prefixRegexCache.get(str);
+        const re = new RegExp(str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'));
+        _prefixRegexCache.set(str, re);
+        return re;
+      };
       const _prefix = plugin.customPrefix ? plugin.customPrefix : conn.prefix ? conn.prefix : global.prefix;
-      const match = (_prefix instanceof RegExp ? // RegExp Mode?
+      const match = (_prefix instanceof RegExp ?
         [[_prefix.exec(m.text), _prefix]] :
-        Array.isArray(_prefix) ? // Array?
+        Array.isArray(_prefix) ?
           _prefix.map((p) => {
-            const re = p instanceof RegExp ? // RegExp in Array?
+            const re = p instanceof RegExp ?
               p :
-              new RegExp(str2Regex(p));
+              _str2Regex(p);
             return [re.exec(m.text), re];
           }) :
-          typeof _prefix === 'string' ? // String?
-            [[new RegExp(str2Regex(_prefix)).exec(m.text), new RegExp(str2Regex(_prefix))]] :
+          typeof _prefix === 'string' ?
+            [[_str2Regex(_prefix).exec(m.text), _str2Regex(_prefix)]] :
             [[[], new RegExp]]
       ).find((p) => p[1]);
       if (typeof plugin.before === 'function') {
@@ -872,15 +857,15 @@ export async function handler(chatUpdate) {
         const _args = noPrefix.trim().split` `.slice(1);
         const text = _args.join` `;
         command = (command || '').toLowerCase();
-        const fail = plugin.fail || global.dfail; // When failed
-        const isAccept = plugin.command instanceof RegExp ? // RegExp Mode?
+        const fail = plugin.fail || global.dfail;
+        const isAccept = plugin.command instanceof RegExp ?
           plugin.command.test(command) :
-          Array.isArray(plugin.command) ? // Array?
-            plugin.command.some((cmd) => cmd instanceof RegExp ? // RegExp in Array?
+          Array.isArray(plugin.command) ?
+            plugin.command.some((cmd) => cmd instanceof RegExp ?
               cmd.test(command) :
               cmd === command,
             ) :
-            typeof plugin.command === 'string' ? // String?
+            typeof plugin.command === 'string' ?
               plugin.command === command :
               false;
 
@@ -896,9 +881,8 @@ export async function handler(chatUpdate) {
           const user = global.db.data.users[m.sender];
           const botSpam = global.db.data.settings[mconn.conn.user.jid];
 
-          if (!['owner-unbanchat.js', 'info-creator.js'].includes(name) && chat && chat?.isBanned && !isROwner) return; // Except this
-          if (name != 'owner-unbanchat.js' && name != 'owner-exec.js' && name != 'owner-exec2.js' && chat?.isBanned && !isROwner) return; // Except this
-          //if ((name != 'owner-unbanchat.js' || name != 'owner-exec.js' || name != 'owner-exec2.js') && chat?.isBanned && !isROwner) return; // Except this
+          if (!['owner-update.js'].includes(name) && chat && chat?.isBanned && !isROwner) return;
+          if (name != 'owner-update.js' && chat?.isBanned && !isROwner) return;
                     
           if (m.text && user.banned && !isROwner) {
             if (typeof user.bannedMessageCount === 'undefined') {
@@ -944,49 +928,49 @@ ${tradutor.texto1[1]} ${messageNumber}/3
         const mystica = `${plugin.botAdmin || plugin.admin || plugin.group || plugin || noPrefix || hl || m.text.slice(0, 1) == hl || plugin.command}`;
         if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin && mystica) return;
 
-        if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) { // Both Owner
+        if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) {
           fail('owner', m, this);
           continue;
         }
-        if (plugin.rowner && !isROwner) { // Real Owner
+        if (plugin.rowner && !isROwner) {
           fail('rowner', m, this);
           continue;
         }
-        if (plugin.owner && !isOwner) { // Number Owner
+        if (plugin.owner && !isOwner) {
           fail('owner', m, this);
           continue;
         }
-        if (plugin.mods && !isMods) { // Moderator
+        if (plugin.mods && !isMods) {
           fail('mods', m, this);
           continue;
         }
-        if (plugin.premium && !isPrems) { // Premium
+        if (plugin.premium && !isPrems) {
           fail('premium', m, this);
           continue;
         }
-        if (plugin.group && !m.isGroup) { // Group Only
+        if (plugin.group && !m.isGroup) {
           fail('group', m, this);
           continue;
-        } else if (plugin.botAdmin && !isBotAdmin) { // You Admin
+        } else if (plugin.botAdmin && !isBotAdmin) {
           fail('botAdmin', m, this);
           continue;
-        } else if (plugin.admin && !isAdmin) { // User Admin
+        } else if (plugin.admin && !isAdmin) {
           fail('admin', m, this);
           continue;
         }
-        if (plugin.private && m.isGroup) { // Private Chat Only
+        if (plugin.private && m.isGroup) {
           fail('private', m, this);
           continue;
         }
-        if (plugin.register == true && _user.registered == false) { // Butuh daftar?
+        if (plugin.register == true && _user.registered == false) {
           fail('unreg', m, this);
           continue;
         }
         m.isCommand = true;
-        const xp = 'exp' in plugin ? parseInt(plugin.exp) : 17; // XP Earning per command
+        const xp = 'exp' in plugin ? parseInt(plugin.exp) : 17;
         if (xp > 200) {
           m.reply('Ngecit -_-');
-        } // Hehehe
+        }
         else {
           m.exp += xp;
         }
@@ -1054,18 +1038,13 @@ ${tradutor.texto1[1]} ${messageNumber}/3
               text = text.replace(new RegExp(key, 'g'), '#HIDDEN#');
             }
             if (e.name) {
-              /* for (const [jid] of global.reportes_solicitudes.filter(([number]) => number)) {
-                const data = (await conn.onWhatsApp(jid))[0] || {};
-                if (data.exists) {
-                  await m.reply(`*[ ⚠️ 𝚁𝙴𝙿𝙾𝚁𝚃𝙴 𝙳𝙴 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 𝙲𝙾𝙽 𝙵𝙰𝙻𝙻𝙾𝚂 ⚠️ ]*\n\n*—◉ 𝙿𝙻𝚄𝙶𝙸𝙽:* ${m.plugin}\n*—◉ 𝚄𝚂𝚄𝙰𝚁𝙸𝙾:* ${m.sender}\n*—◉ 𝙲𝙾𝙼𝙰𝙽𝙳𝙾:* ${usedPrefix}${command} ${args.join(' ')}\n\n\`\`\`${text}\`\`\`\n\n*[❗] 𝚁𝙴𝙿𝙾𝚁𝚃𝙴𝙻𝙾 𝙰𝙻 𝙲𝚁𝙴𝙰𝙳𝙾𝚁 𝙳𝙴𝙻 𝙱𝙾𝚃 𝙿𝙰𝚁𝙰 𝙳𝙰𝚁𝙻𝙴 𝚄𝙽𝙰 𝚂𝙾𝙻𝚄𝙲𝙸𝙾𝙽, 𝙿𝚄𝙴𝙳𝙴 𝚄𝚂𝙰𝚁 𝙴𝙻 𝙲𝙾𝙼𝙰𝙽𝙳𝙾 #reporte*`.trim(), data.jid);
-                }
-              }*/
-              // md5 report eliminado (fetch comentado)
+              
+
             }
             await m.reply(text);
           }
         } finally {
-          // m.reply(util.format(_user))
+
           if (typeof plugin.after === 'function') {
             try {
               await plugin.after.call(this, m, extra);
@@ -1131,7 +1110,8 @@ ${tradutor.texto1[1]} ${messageNumber}/3
     }
 
     try {
-      if (!opts['noprint']) await (await import(`./src/libraries/print.js`)).default(m, this);
+
+      if (!opts['noprint']) await _printMessage(m, this);
     } catch (e) {
       console.log(m, m.quoted, e);
     }
@@ -1141,20 +1121,16 @@ ${tradutor.texto1[1]} ${messageNumber}/3
   }
 }
 
-/**
- * Handle groups participants update
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>['group-participants.update']} groupsUpdate
- */
 export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
   const tradutor = {
-    texto1: "👋 ¡Bienvenido/a!\n@user",
-    texto2: "👋 ¡Hasta luego!\n@user",
-    texto3: "*[ ℹ️ ] @user Fue promovido a administrador.*",
-    texto4: "*[ ℹ️ ] @user Fue degradado de administrador.*",
-    texto5: "*[ ℹ️ ] La descripción del grupo ha sido modificada.*",
-    texto6: "*[ ℹ️ ] El nombre del grupo ha sido modificado.*",
-    texto7: "*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*",
-    texto8: "*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*"
+    texto1: _T.events.welcome,
+    texto2: _T.events.bye,
+    texto3: _T.events.promote,
+    texto4: _T.events.demote,
+    texto5: _T.events.descChange,
+    texto6: _T.events.nameChange,
+    texto7: _T.events.iconChange,
+    texto8: _T.events.linkChange,
   }
 
   const m = mconn
@@ -1163,7 +1139,7 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
   const chat = global.db.data.chats[id] || {};
   const botTt = global.db.data.settings[mconn?.conn?.user?.jid] || {};
   let text = '';
-  // Normalize participants: newer Baileys may pass JSON strings instead of plain JIDs
+
   const _normalizeJidEntry = (p) => {
     if (typeof p !== 'string') return String(p);
     try {
@@ -1216,16 +1192,16 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
       if (!text) {
         text = (chat?.sDemote || tradutor.texto4 || conn?.sdemote || '@user ```is no longer Admin```');
       }
-      // Normalizar participants[0] por si viene como JSON string o @lid
+
       let _p0 = participants[0] || '';
-      // Si viene como JSON string, extraer phoneNumber o id
+
       try {
         const _parsed = JSON.parse(_p0);
         if (_parsed && typeof _parsed === 'object') {
           _p0 = _parsed.phoneNumber || _parsed.id || _p0;
         }
       } catch (_) {}
-      // Extraer solo el número (antes del @)
+
       const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
       text = text.replace('@user', '@' + _p0Number);
       if (chat.detect && !chat?.isBanned) {
@@ -1235,21 +1211,12 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
   }
 }
 
-/**
- * Handle groups update
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>['groups.update']} groupsUpdate
- */
-
 export async function groupsUpdate(groupsUpdate) {
   const tradutor = {
-    texto1: "👋 ¡Bienvenido/a!\n@user",
-    texto2: "👋 ¡Hasta luego!\n@user",
-    texto3: "*[ ℹ️ ] @user Fue promovido a administrador.*",
-    texto4: "*[ ℹ️ ] @user Fue degradado de administrador.*",
-    texto5: "*[ ℹ️ ] La descripción del grupo ha sido modificada.*",
-    texto6: "*[ ℹ️ ] El nombre del grupo ha sido modificado.*",
-    texto7: "*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*",
-    texto8: "*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*"
+    texto5: _T.events.descChange,
+    texto6: _T.events.nameChange,
+    texto7: _T.events.iconChange,
+    texto8: _T.events.linkChange,
   }
 
   if (opts['self']) {
@@ -1272,29 +1239,12 @@ export async function groupsUpdate(groupsUpdate) {
   }
 }
 
-export async function callUpdate(callUpdate) {
-  const isAnticall = global?.db?.data?.settings[mconn?.conn?.user?.jid].antiCall;
-  if (!isAnticall) return;
-  for (const nk of callUpdate) {
-    if (nk.isGroup == false) {
-      if (nk.status == 'offer') {
-        const callmsg = await mconn?.conn?.reply(nk.from, `Hola *@${nk.from.split('@')[0]}*, las ${nk.isVideo ? 'videollamadas' : 'llamadas'} no están permitidas, serás bloqueado.\n-\nSi accidentalmente llamaste póngase en contacto con mi creador para que te desbloquee!`, false, { mentions: [nk.from] });
-        // let data = global.owner.filter(([id, isCreator]) => id && isCreator)
-        // await this.sendContact(nk.from, data.map(([id, name]) => [id, name]), false, { quoted: callmsg })
-        const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:;𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑;;;\nFN:𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑\nORG:𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑\nTITLE:\nitem1.TEL;waid=5219992095479:+521 999 209 5479\nitem1.X-ABLabel:𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑\nX-WA-BIZ-DESCRIPTION:[❗] ᴄᴏɴᴛᴀᴄᴛᴀ ᴀ ᴇsᴛᴇ ɴᴜᴍ ᴘᴀʀᴀ ᴄᴏsᴀs ɪᴍᴘᴏʀᴛᴀɴᴛᴇs.\nX-WA-BIZ-NAME:𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑\nEND:VCARD`;
-        await mconn.conn.sendMessage(nk.from, { contacts: { displayName: '𝐁𝐫𝐮𝐧𝐨 𝐒𝐨𝐛𝐫𝐢𝐧𝐨 👑', contacts: [{ vcard }] } }, { quoted: callmsg });
-        await mconn.conn.updateBlockStatus(nk.from, 'block');
-      }
-    }
-  }
-}
+export async function callUpdate(callUpdate) {}
 
 export async function deleteUpdate(message) {
   const datas = global
   const id = message?.participant 
-  const tradutor = {
-    texto1: ["_*< ANTI-DELETE />*_\n", " ▢ *Usuario:*", " ▢ *Hora:*", "▢ *Fecha:*", "▢ *Enviando el mensaje eliminado...*\n", "*[ ℹ️ ] Para desactivar la función* _antidelete_*, envia el siguiente comando:* _/disable antidelete_"]
-  }
+  const tradutor = { texto1: _T.antidelete }
 
   let d = new Date(new Date + 3600000)
   let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -1322,34 +1272,10 @@ ${tradutor.texto1[5]}`.trim();
 
 global.dfail = (type, m, conn) => {
   const datas = global
-  const tradutor = {
-    texto1:  "*[ ℹ️ ] Este comando solo puede ser utilizado por el propietario del bot.*",
-    texto2:  "*[ ℹ️ ] Este comando solo puede ser utilizado por el propietario del bot.*",
-    texto3:  "*[ ℹ️ ] Este comando solo puede ser utilizado por moderadores y el propietario del bot.*",
-    texto4:  "*[ ℹ️ ] Este comando solo puede ser utilizado por usurios premium y el propietario del bot.*",
-    texto5:  "*[ ℹ️ ] Este comando solo puede ser utilizado en grupos.*",
-    texto6:  "*[ ℹ️ ] Este comando solo puede ser utilizado en el chat privado del bot.*",
-    texto7:  "*[ ℹ️ ] Este comando solo puede ser usado por administradores del grupo.*",
-    texto8:  "*[ ℹ️ ] Para utilizar este comando es necesario que el bot sea administrador del grupo.*",
-    texto9:  "*[ ℹ️ ] Para utilizar este comando debes estar registrado.*\n\n*[ 💡 ] Utiliza el comando:* _/verificar nombre.edad_ *para registrarte.*",
-    texto10: "*[ ℹ️ ] Este comando fue desactivado por el propietario del bot.*",
-    texto11: ["*[ ⚠ ] Advertencia*", "*[ ⚠ ] Advertencia*", "https://github.com/BrunoSobrino/TheMystic-Bot-MD"]
-  }
-
-  const msg = {
-    rowner: tradutor.texto1,
-    owner: tradutor.texto2,
-    mods: tradutor.texto3,
-    premium: tradutor.texto4,
-    group: tradutor.texto5,
-    private: tradutor.texto6,
-    admin: tradutor.texto7,
-    botAdmin: tradutor.texto8,
-    unreg: tradutor.texto9,
-    restrict: tradutor.texto10,
-  }[type];
+  const msg = _T.fail[type];
+  const warn = _T.fail.warn;
   const aa = { quoted: m, userJid: conn.user.jid };
-  const prep = generateWAMessageFromContent(m.chat, { extendedTextMessage: { text: msg, contextInfo: { externalAdReply: { title: tradutor.texto11[0], body: tradutor.texto11[1], thumbnail: imagen1, sourceUrl: tradutor.texto11[2] } } } }, aa);
+  const prep = generateWAMessageFromContent(m.chat, { extendedTextMessage: { text: msg, contextInfo: { externalAdReply: { title: warn[0], body: warn[1], thumbnail: imagen1, sourceUrl: warn[2] } } } }, aa);
 
   const chatPrim2 = global.db.data.chats[m.chat] || {};
   const normalizeJid2 = (jid) => jid?.replace(/[^0-9]/g, '');
