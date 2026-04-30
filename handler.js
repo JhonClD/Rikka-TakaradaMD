@@ -13,10 +13,6 @@ import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/m
 import _printModule from './src/libraries/print.js';
 const _printMessage = _printModule?.default ?? _printModule;
 
-import { createRequire } from 'module';
-const _require = createRequire(import.meta.url);
-const _T = _require('./src/languages/es/handler.js.json');
-
 const _recentMessages = new Map();
 const _DUPLICATE_TIMEOUT = 3000;
 const _MAX_CACHE_SIZE = 150;
@@ -672,10 +668,10 @@ export async function handler(chatUpdate) {
     }
 
     const tradutor = {
-      texto1: _T.handler.banned,
-      texto2: _T.handler.noLimit,
-      texto3: _T.handler.needLevel,
-      texto4: _T.handler.usedLimit,
+      texto1: ['', '', '', '', ''],
+      texto2: '',
+      texto3: ['', '', '', ''],
+      texto4: ['', ''],
     };
 
     if (opts['nyimak']) {
@@ -1123,14 +1119,14 @@ ${tradutor.texto1[1]} ${messageNumber}/3
 
 export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
   const tradutor = {
-    texto1: _T.events.welcome,
-    texto2: _T.events.bye,
-    texto3: _T.events.promote,
-    texto4: _T.events.demote,
-    texto5: _T.events.descChange,
-    texto6: _T.events.nameChange,
-    texto7: _T.events.iconChange,
-    texto8: _T.events.linkChange,
+    texto1: '',
+    texto2: '',
+    texto3: '',
+    texto4: '',
+    texto5: '',
+    texto6: '',
+    texto7: '',
+    texto8: '',
   }
 
   const m = mconn
@@ -1213,10 +1209,10 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
 
 export async function groupsUpdate(groupsUpdate) {
   const tradutor = {
-    texto5: _T.events.descChange,
-    texto6: _T.events.nameChange,
-    texto7: _T.events.iconChange,
-    texto8: _T.events.linkChange,
+    texto5: '',
+    texto6: '',
+    texto7: '',
+    texto8: '',
   }
 
   if (opts['self']) {
@@ -1244,7 +1240,7 @@ export async function callUpdate(callUpdate) {}
 export async function deleteUpdate(message) {
   const datas = global
   const id = message?.participant 
-  const tradutor = { texto1: _T.antidelete }
+  const tradutor = { texto1: ['', '', '', '', '', ''] }
 
   let d = new Date(new Date + 3600000)
   let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -1272,8 +1268,8 @@ ${tradutor.texto1[5]}`.trim();
 
 global.dfail = (type, m, conn) => {
   const datas = global
-  const msg = _T.fail[type];
-  const warn = _T.fail.warn;
+  const msg = '';
+  const warn = ['', '', ''];
   const aa = { quoted: m, userJid: conn.user.jid };
   const prep = generateWAMessageFromContent(m.chat, { extendedTextMessage: { text: msg, contextInfo: { externalAdReply: { title: warn[0], body: warn[1], thumbnail: imagen1, sourceUrl: warn[2] } } } }, aa);
 
