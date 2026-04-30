@@ -8,7 +8,7 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-const TARGET_MB  = 50;
+const TARGET_MB  = 9;
 const MAX_RAW_MB = 10;
 
 async function compressForWhatsApp(inputPath, outputPath) {
