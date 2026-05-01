@@ -30,14 +30,14 @@ const handler = async (m, { conn, command, usedPrefix }) => {
   const estado = chat.nsfw ? '🔞 *Activado*' : '✅ *Desactivado*';
   return m.reply(
     `*Estado NSFW:* ${estado}\n\n` +
-    `» *${usedPrefix}nsfwon* — activar\n` +
-    `» *${usedPrefix}nsfwoff* — desactivar`
+    `» *${usedPrefix}nsfw on* — activar\n` +
+    `» *${usedPrefix}nsfwo ff* — desactivar`
   );
 };
 
-handler.command  = ['nsfw', 'nsfwon', 'nsfwoff', 'activarnsfw', 'desactivarnsfw'];
+handler.command  = ['nsfw', 'nsfw on', 'nsfw off', 'activar nsfw', 'desactivar nsfw'];
 handler.tags     = ['group', 'admin'];
-handler.help     = ['nsfw — Ver estado NSFW', 'nsfwon — Activar NSFW', 'nsfwoff — Desactivar NSFW'];
+handler.help     = ['nsfw — Ver estado NSFW', 'nsfw on — Activar NSFW', 'nsf woff — Desactivar NSFW'];
 handler.admin    = true;
 handler.group    = true;
 
