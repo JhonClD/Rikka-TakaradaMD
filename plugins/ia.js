@@ -3,12 +3,25 @@
 // Adaptado para Rikka-TakaradaMD
 
 import fetch from 'node-fetch'
-import { config } from 'dotenv'
-
-// Carga el .env desde la raíz del bot
-config({ path: new URL('../../.env', import.meta.url) })
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
+
+// ── Carga .env manualmente (sin dependencia de dotenv) ───
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const envPath = path.resolve(__dirname, '../../.env')
+if (fs.existsSync(envPath)) {
+  const lines = fs.readFileSync(envPath, 'utf8').split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const idx = trimmed.indexOf('=')
+    if (idx === -1) continue
+    const key = trimmed.slice(0, idx).trim()
+    const val = trimmed.slice(idx + 1).trim()
+    if (key && !(key in process.env)) process.env[key] = val
+  }
+}
 
 // ── APIs de IA con fallback en cadena ────────────────────
 // Copilot es la principal. Las demás actúan como fallback.
