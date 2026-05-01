@@ -1137,16 +1137,23 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
   let text = '';
 
   const _normalizeJidEntry = (p) => {
-    if (typeof p !== 'string') return String(p);
-    try {
-      const parsed = JSON.parse(p);
-      if (parsed && typeof parsed === 'object') {
-        return parsed.phoneNumber || parsed.id || p;
-      }
-    } catch (_) {}
-    return p;
+    // Si ya es string limpio, intentar parsear como JSON por si viene serializado
+    if (typeof p === 'string') {
+      try {
+        const parsed = JSON.parse(p);
+        if (parsed && typeof parsed === 'object') {
+          return parsed.phoneNumber || parsed.id || parsed.jid || p;
+        }
+      } catch (_) {}
+      return p;
+    }
+    // Si es objeto directo (Baileys a veces pasa {id, jid, lid, admin})
+    if (p && typeof p === 'object') {
+      return p.id || p.jid || p.phoneNumber || '';
+    }
+    return String(p);
   };
-  const participants = _rawParticipants.map(_normalizeJidEntry);
+  const participants = _rawParticipants.map(_normalizeJidEntry).filter(Boolean);
 
   switch (action) {
     case 'add':
@@ -1154,11 +1161,7 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
       if (chat.welcome && !chat?.isBanned) {
         if (action === 'remove' && participants.includes(m?.conn?.user?.jid)) return;
         const groupMetadata = await m?.conn?.groupMetadata(id) || (conn?.chats[id] || {}).metadata;
-        for (const _rawUser of participants) {
-          // FIX: asegurar que userJid siempre sea un string JID limpio
-          const userJid = typeof _rawUser === 'string'
-            ? _rawUser
-            : (_rawUser?.id || _rawUser?.jid || _rawUser?.phoneNumber || String(_rawUser));
+        for (const userJid of participants) {
           try {
           let pp = await m?.conn?.profilePictureUrl(userJid, 'image').catch(_ => 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60');
            const apii = await mconn?.conn?.getFile(pp);
