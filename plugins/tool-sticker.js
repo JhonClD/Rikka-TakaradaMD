@@ -1,4 +1,4 @@
-import { sticker } from '../src/libraries/sticker.js';
+import { sticker4, sticker6, addExif } from '../src/libraries/sticker.js';
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const quoted = m.quoted ? m.quoted : m;
@@ -24,8 +24,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     if (parts[1]) author   = parts[1];
   }
 
-  await m.reply('⏳ Convirtiendo sticker...');
-
   let buffer;
   try {
     buffer = await quoted.download();
@@ -33,17 +31,19 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply('❌ No se pudo descargar el archivo.');
   }
 
-  let stickerBuffer;
+  let webpBuffer;
   try {
-    stickerBuffer = await sticker(buffer, null, packname, author);
+    const fn = (isVideo || isGif) ? sticker6 : sticker4;
+    webpBuffer = await fn(buffer, null);
+    webpBuffer = await addExif(webpBuffer, packname, author, [''], {});
   } catch (e) {
     console.error('[sticker]', e);
     return m.reply('❌ Error al convertir. Asegúrate de tener *ffmpeg* instalado.');
   }
 
-  if (!stickerBuffer || !Buffer.isBuffer(stickerBuffer)) return m.reply('❌ No se pudo generar el sticker.');
+  if (!webpBuffer || !Buffer.isBuffer(webpBuffer)) return m.reply('❌ No se pudo generar el sticker.');
 
-  await conn.sendMessage(m.chat, { sticker: stickerBuffer }, { quoted: m });
+  await conn.sendMessage(m.chat, { sticker: webpBuffer }, { quoted: m });
 };
 
 handler.help    = ['s [pack | autor]'];
@@ -51,4 +51,3 @@ handler.tags    = ['tools'];
 handler.command = ['s', 'sticker', 'st'];
 
 export default handler;
-  
