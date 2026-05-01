@@ -4,15 +4,12 @@ import moment from 'moment-timezone';
 
 const TIMEZONE = 'America/Lima';
 
-function getBotUptime(conn) {
-  const since = conn?.uptime || global.botUptime;
-  if (!since) return 'Recién iniciado';
-  const ms = Date.now() - since;
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  return [d && `${d}d`, h % 24 && `${h % 24}h`, `${m % 60}m`, `${s % 60}s`].filter(Boolean).join(' ');
+// Mismo formato y fuente que ping.js → process.uptime()
+function clockString(ms) {
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor(ms / 60_000) % 60;
+  const s = Math.floor(ms / 1_000) % 60;
+  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
 }
 
 function getOSName() {
@@ -56,7 +53,10 @@ const handler = async (m, { conn, usedPrefix }) => {
   const pushname  = m.pushName || sender.replace(/@.+/, '');
   const ownerNum  = global.owner?.[0]?.[0] || '';
   const date      = moment.tz(TIMEZONE).format('DD/MM/YYYY');
-  const uptime    = getBotUptime(conn);
+
+  // Uptime igual que ping.js
+  const uptime = clockString(process.uptime() * 1000);
+
   const osName    = getOSName();
   const categories = buildCategories();
   const totalCmds = Object.values(categories).flat().length;
@@ -64,19 +64,19 @@ const handler = async (m, { conn, usedPrefix }) => {
   // Integrantes solo en grupo
   let membersLine = '';
   if (m.isGroup) {
-    const meta    = await conn.groupMetadata(m.chat).catch(() => null);
-    const count   = meta?.participants?.length || '?';
-    membersLine = `│ 👥 *Integrantes:* ${count}\n`;
+    const meta  = await conn.groupMetadata(m.chat).catch(() => null);
+    const count = meta?.participants?.length || '?';
+    membersLine = `│ 👥 *Integrantes:* ${count}`;
   }
 
-  const header = [
+  const lines = [
     `🌸✨ *𝙍𝙞𝙠𝙠𝙖 𝙏𝙖𝙧𝙖𝙠𝙖𝙧𝙖𝙙𝙖* ✨🌸`,
     ``,
     `┌──────────────────`,
     `│ 🏷️  *Nombre:* ${pushname}`,
     `│ ⏱️  *Uptime:* ${uptime}`,
     `│ 📅 *Fecha:* ${date}`,
-    membersLine.trimEnd(),
+    membersLine,
     `│ 🖥️  *Sistema:* ${osName}`,
     `│ 👑 *Owner:* +${ownerNum}`,
     `│ 🔰 *Prefix:* ${prefix}`,
@@ -95,7 +95,7 @@ const handler = async (m, { conn, usedPrefix }) => {
     .join('\n\n');
 
   const footer = `\n_Usa_ *${prefix}menu* _para ver esta lista_`;
-  const fullMenu = `${header}\n\n${body}${footer}`;
+  const fullMenu = `${lines}\n\n${body}${footer}`;
 
   const menuImage = global.imagen1 || null;
   if (menuImage) {
