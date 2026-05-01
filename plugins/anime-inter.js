@@ -146,12 +146,27 @@ const alias = {
 const symbols = ['(⁠◠⁠‿⁠◕⁠)','˃͈◡˂͈','(づ｡◕‿‿◕｡)づ','(✿◡‿◡)','(*≧ω≦)','(✧ω◕)','˃ 𖥦 ˂','(⌒‿⌒)','(✧ω✧)','ʕ•́ᴥ•̀ʔっ','(∩︵∩)','(✪ω✪)','(✯◕‿◕✯)'];
 const randSym = () => symbols[Math.floor(Math.random() * symbols.length)];
 
+// Comandos que usan el endpoint /nsfw/ de stellarwa
+const NSFW_INTERACTIONS = new Set([
+  'fuck', 'cum', 'blowjob', 'anal', 'hentai', 'yuri', 'yaoi',
+  'neko_nsfw', 'trap',
+]);
+
 // Flatten alias map to build command array
 const allCommands = Object.values(alias).flat();
 
 const handler = async (m, { conn, command, usedPrefix }) => {
   const canonical = Object.keys(alias).find(k => alias[k].includes(command)) || command;
   if (!captions[canonical]) return;
+
+  // Verificar si el comando es NSFW y si el chat lo permite
+  const isNsfwCmd = NSFW_INTERACTIONS.has(canonical);
+  if (isNsfwCmd) {
+    const chat = global.db.data.chats?.[m.chat] || {};
+    if (!chat.nsfw) {
+      return m.reply(`🔞 Este comando es NSFW.\nUn admin debe activarlo con *${usedPrefix}nsfwon*`);
+    }
+  }
 
   // Resolve target: mention > quoted > self
   let whoRaw = m.mentionedJid?.[0] || (m.quoted ? m.quoted.sender : m.sender);
@@ -178,7 +193,8 @@ const handler = async (m, { conn, command, usedPrefix }) => {
     : `\`${fromName}\` ${captionText} ${randSym()}.`;
 
   try {
-    const res = await fetch(`https://api.stellarwa.xyz/sfw/interaction?inter=${canonical}`);
+    const mode = NSFW_INTERACTIONS.has(canonical) ? 'nsfw' : 'sfw';
+    const res = await fetch(`https://api.stellarwa.xyz/${mode}/interaction?inter=${canonical}`);
     const json = await res.json();
     const { result } = json;
     if (!result) throw new Error('No media URL returned');
@@ -198,3 +214,4 @@ handler.tags    = ['anime', 'interacciones'];
 handler.help    = ['pat @usuario', 'kiss @usuario', 'hug @usuario', 'slap @usuario', 'fuck @usuario', '... y más'];
 
 export default handler;
+  
