@@ -38,32 +38,39 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     if (parts[1]) author = parts[1];
   }
 
-  let buffer;
-  try {
-    buffer = await quoted.download();
-  } catch {
-    return m.reply('❌ Error al descargar el archivo.');
-  }
-
   let webpBuffer;
-  try {
-    const fn = (isVideo || isGif) ? sticker6 : sticker4;
-    let rawWebp = await fn(buffer, null);
+try {
+  const fn = (isVideo || isGif) ? sticker6 : sticker4;
+  let rawWebp = await fn(buffer, null);
 
-    // Corrección para evitar el error de .slice() en node-webpmux
-    if (typeof rawWebp === 'string') {
-      const fs = (await import('fs')).default;
-      rawWebp = fs.readFileSync(rawWebp);
+  // Normalizar el resultado según su tipo
+  if (typeof rawWebp === 'string') {
+    // Es una ruta de archivo
+    const fs = (await import('fs')).default;
+    rawWebp = fs.readFileSync(rawWebp);
+  } else if (Buffer.isBuffer(rawWebp)) {
+    // Ya es Buffer, no hacer nada
+  } else if (rawWebp instanceof Uint8Array || ArrayBuffer.isView(rawWebp)) {
+    rawWebp = Buffer.from(rawWebp.buffer, rawWebp.byteOffset, rawWebp.byteLength);
+  } else if (rawWebp && typeof rawWebp === 'object') {
+    // Objeto con propiedad .data (común en sharp/jimp)
+    if (rawWebp.data && Buffer.isBuffer(rawWebp.data)) {
+      rawWebp = rawWebp.data;
+    } else if (rawWebp.data) {
+      rawWebp = Buffer.from(rawWebp.data);
+    } else {
+      throw new Error('sticker fn returned unknown object format');
     }
-    webpBuffer = Buffer.isBuffer(rawWebp) ? rawWebp : Buffer.from(rawWebp);
-
-    // Inyectar los metadatos finales
-    webpBuffer = await addExif(webpBuffer, packname, author, [''], {});
-    
-  } catch (e) {
-    console.error(e);
-    return m.reply('❌ Error en la conversión.');
   }
+
+  webpBuffer = Buffer.isBuffer(rawWebp) ? rawWebp : Buffer.from(rawWebp);
+
+  webpBuffer = await addExif(webpBuffer, packname, author, [''], {});
+
+} catch (e) {
+  console.error(e);
+  return m.reply('❌ Error en la conversión.');
+}
 
   if (!webpBuffer || !Buffer.isBuffer(webpBuffer)) return m.reply('❌ No se pudo generar el sticker.');
 
