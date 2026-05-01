@@ -3,26 +3,19 @@ import moment from 'moment-timezone';
 const TIMEZONE = 'America/Lima';
 
 function getUptime(since) {
-    if (!since) return 'Recién iniciado';
+    if (!since) return 'INIT_STATE';
     const ms = Date.now() - since;
     const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-    let uptime = [];
-    if (d > 0) uptime.push(`${d}d`);
-    if (h % 24 > 0) uptime.push(`${h % 24}h`);
-    if (m % 60 > 0) uptime.push(`${m % 60}m`);
-    uptime.push(`${s % 60}s`);
-    return uptime.join(' ');
+    return `${d > 0 ? d + 'ᴅ ' : ''}${h % 24}ʜ ${m % 60}ᴍ ${s % 60}s`.trim();
 }
 
 const CAT_ICONS = {
-    anime: '🌸', downloader: '📥', descargas: '📥', search: '🔍', buscadores: '🔍',
-    tools: '🛠️', herramientas: '🛠️', ai: '🤖', ia: '🤖', sticker: '🎭', stickers: '🎭',
-    game: '🎮', games: '🎮', group: '🏯', grupos: '👥', nsfw: '🔞',
-    owner: '👑', info: '✨', converter: '🪄', img: '🖼️', xp: '🔮',
-    random: '🎲', otros: '📌',
+    anime: '◈', downloader: '⇲', search: '⌕', tools: '⚙︎', ai: '⌬', 
+    sticker: '❏', game: '🕹', group: '⧉', nsfw: '⚔︎', owner: '✧', 
+    info: 'ℹ︎', converter: '⏀', img: '🧩', xp: '📈', random: '⚄'
 };
 
-const getIcon = cat => CAT_ICONS[cat.toLowerCase()] || '🔖';
+const getIcon = cat => CAT_ICONS[cat.toLowerCase()] || '⬡';
 
 function buildCategories() {
     const cats = {};
@@ -44,39 +37,42 @@ function buildCategories() {
 const handler = async (m, { conn, usedPrefix }) => {
     const prefix = usedPrefix || '.';
     const sender = m.sender;
-    const pushname = m.pushName || sender.split('@')[0];
-    const botName = 'Rikka Takarada'; // Nombre actualizado
+    const botName = 'Rikka Takarada';
     const uptime = getUptime(global.botUptime);
-    const time = moment.tz(TIMEZONE).format('hh:mm A');
-    const date = moment.tz(TIMEZONE).format('DD/MM/YYYY');
+    const time = moment.tz(TIMEZONE).format('HH:mm');
+    const date = moment.tz(TIMEZONE).format('DD.MM.YYYY');
     const categories = buildCategories();
+    const totalCmds = Object.values(categories).flat().length;
 
-    // --- HEADER FLORAL ---
-    let header = `︿︿︿︿︿〔 *${botName}* 〕︿︿︿︿︿\n`;
-    header += `. . . . . ╰──╮ ˗ ˏˋ ˎˊ - ╭──╯ . . . . .\n\n`;
-    header += `  ˚♡⋆｡ *Usuario:* @${sender.split('@')[0]}\n`;
-    header += `  ˚♡⋆｡ *Fecha:* ${date}\n`;
-    header += `  ˚♡⋆｡ *Hora:* ${time}\n`;
-    header += `  ˚♡⋆｡ *Uptime:* ${uptime}\n\n`;
-    header += `┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n\n`;
+    // --- ESTRUCTURA DE INTERFAZ PREMIUM ---
+    let header = `─── · · ·  [ ${botName.toUpperCase()} ]  · · · ───\n\n`;
+    
+    header += `    ⎗  ꜱʏꜱᴛᴇᴍ.ɪɴꜰᴏ\n`;
+    header += `    │  ◦  ᴜꜱᴇʀ : @${sender.split('@')[0]}\n`;
+    header += `    │  ◦  ᴛɪᴍᴇ : ${time}  //  ${date}\n`;
+    header += `    │  ◦  ᴜᴘᴛ : ${uptime}\n`;
+    header += `    │  ◦  ʟɪʙ : ${totalCmds} ᴄᴍᴅꜱ\n`;
+    header += `    └─────────────── · · ·\n\n`;
 
-    // --- CUERPO DEL MENÚ ---
     const body = Object.entries(categories)
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([cat, cmds]) => {
             const icon = getIcon(cat);
-            const title = cat.charAt(0).toUpperCase() + cat.slice(1);
-            const list = cmds.map(c => `  » ${prefix}${c}`).join('\n');
+            const title = cat.toUpperCase();
+            // Formato de lista en doble columna simulada o lista limpia
+            const list = cmds.map(c => `    │  ${c}`).join('\n');
             
-            return `  ⊱ ❒ *${icon} ${title}*\n` +
-                   `﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏﹏\n` +
+            return `    ${icon}  [ ${title} ]\n` +
+                   `    ┌───────────────\n` +
                    `${list}\n` +
-                   `  ───────────────`;
+                   `    └───────────────`;
         })
         .join('\n\n');
 
-    // --- FOOTER ESTÉTICO ---
-    const footer = `\n\n*ੈ✩‧₊˚ ᭄🅜֟፝ıηͨσ‍ͥяͩυ🧸⃝꙰ཻུ⸙͎ *ੈ✩‧₊˚\n_Usa ${prefix}ayuda si necesitas soporte_`;
+    // --- FOOTER IDENTITARIO ---
+    const footer = `\n\n    · · · ───────────────────\n` +
+                   `    ᭄🅜֟፝ıηͨσ‍ͥяͩυ🧸⃝꙰ཻུ⸙͎  //  ʀɪᴋᴋᴀ-ɴᴇᴛ\n` +
+                   `    ─────────────────── · · ·`;
 
     const finalMenu = `${header}${body}${footer}`;
     const menuImage = global.imagen1 || null;
@@ -97,3 +93,4 @@ handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help|start|comandos)$/i;
 
 export default handler;
+    
