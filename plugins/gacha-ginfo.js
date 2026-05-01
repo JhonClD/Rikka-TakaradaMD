@@ -29,8 +29,8 @@ function formatTime(ms) {
 const handler = async (m, { conn, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users      ||= {};
-  chat.characters ||= {};
+  chat.users = chat.users || {};
+  chat.characters = chat.characters || {};
   if (!chat.users[m.sender]) chat.users[m.sender] = {};
 
   if (chat.gacha === false) {

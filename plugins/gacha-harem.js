@@ -19,8 +19,8 @@ function flattenCharacters(structure) {
 const handler = async (m, { conn, args, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users      ||= {};
-  chat.characters ||= {};
+  chat.users = chat.users || {};
+  chat.characters = chat.characters || {};
 
   if (chat.gacha === false) {
     return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);

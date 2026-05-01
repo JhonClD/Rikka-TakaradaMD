@@ -20,9 +20,9 @@ function getCharacterById(id, structure) {
 const handler = async (m, { conn, usedPrefix, command }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users      ||= {};
-  chat.characters ||= {};
-  chat.rolls      ||= {};
+  chat.users = chat.users || {};
+  chat.characters = chat.characters || {};
+  chat.rolls = chat.rolls || {};
 
   if (chat.gacha === false) {
     return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
@@ -60,7 +60,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const sourceData = getCharacterById(id, structure);
   if (!sourceData) return m.reply('ꕥ Personaje no encontrado en characters.json.');
 
-  chat.characters[id] ||= {};
+  if (!chat.characters[id]) chat.characters[id] = {};
   const record    = chat.characters[id];
   const globalRec = global.db.data.characters?.[id] || {};
 

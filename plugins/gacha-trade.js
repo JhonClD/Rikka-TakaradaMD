@@ -8,10 +8,10 @@ const handler = async (m, { conn, command, args, usedPrefix }) => {
 
   if (!db.chats[chatId]) db.chats[chatId] = {};
   const chatData = db.chats[chatId];
-  chatData.users          ||= {};
-  chatData.characters     ||= {};
-  chatData.intercambios   ||= [];
-  chatData.regalosPendientes ||= {};
+  chatData.users = chatData.users || {};
+  chatData.characters = chatData.characters || {};
+  chatData.intercambios = chatData.intercambios || [];
+  chatData.regalosPendientes = chatData.regalosPendientes || {};
 
   if (chatData.gacha === false) {
     return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
@@ -101,9 +101,11 @@ const handler = async (m, { conn, command, args, usedPrefix }) => {
         const sname = db.users[regalo.sender]?.name || regalo.sender.split('@')[0];
         return m.reply(`ꕥ Solo *${sname}* puede confirmar la transferencia.`);
       }
-      const receiver = chatData.users[regalo.to] ||= {};
+      if (!chatData.users[regalo.to]) chatData.users[regalo.to] = {};
+      const receiver = chatData.users[regalo.to];
       if (!Array.isArray(receiver.characters)) receiver.characters = [];
-      const sender = chatData.users[regalo.sender] ||= {};
+      if (!chatData.users[regalo.sender]) chatData.users[regalo.sender] = {};
+      const sender = chatData.users[regalo.sender];
       for (const id of regalo.ids || []) {
         const reg = chatData.characters[id];
         if (!reg || reg.user !== regalo.sender) continue;
