@@ -1,104 +1,121 @@
-/**
- * gc-setwelcome.js
- * Plugin para configurar el mensaje de bienvenida de un grupo
- * Compatible con KanaArima-MD / Rikka-TakaradaMD (Baileys + ES Modules)
- *
- * Uso:
- *   .setwelcome <texto>   → Establece un mensaje de bienvenida personalizado
- *   .setwelcome reset     → Restaura el mensaje por defecto
- *   .setwelcome ver       → Muestra el mensaje actual
- *
- * Variables disponibles en el texto:
- *   @user    → mención al nuevo miembro
- *   @subject → nombre del grupo
- *   @desc    → descripción del grupo
- */
-
 const cooldowns = new Map();
-const COOLDOWN_MS = 2 * 60 * 1000; // 2 minutos
+const COOLDOWN_MS = 2 * 60 * 1000;
 
-const handler = async (m, { isOwner, isAdmin, conn, text, args, usedPrefix }) => {
-  // Ignorar si el prefijo es 'a' / 'A' (modo automatización)
-  if (usedPrefix === 'a' || usedPrefix === 'A') return;
-
-  // Solo grupos
+const handler = async (m, { isOwner, isAdmin, conn, args, text, usedPrefix, command }) => {
   if (!m.isGroup) return m.reply('❌ Este comando solo funciona en grupos.');
 
-  // Solo admins o owner del bot
-  if (!isAdmin && !isOwner)
-    return m.reply('⚠️ Solo los *administradores del grupo* pueden usar este comando.');
+  if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
+  const chat = global.db.data.chats[m.chat];
 
-  // Cooldown por grupo
-  const now = Date.now();
-  const chatId = m.chat;
-  if (cooldowns.has(chatId)) {
-    const expiration = cooldowns.get(chatId) + COOLDOWN_MS;
-    if (now < expiration) {
-      const secsLeft = Math.ceil((expiration - now) / 1000);
-      const mins = Math.floor(secsLeft / 60);
-      const secs = secsLeft % 60;
-      return m.reply(`⏰ Espera *${mins}m ${secs}s* antes de usar este comando nuevamente.`);
+  // ── .testwelcome ───────────────────────────────────────────────────────────
+  if (command === 'testwelcome') {
+    const groupMetadata = await conn.groupMetadata(m.chat).catch(() => ({}));
+    const welcomeMsg = (chat.sWelcome || conn.welcome || '👋 ¡Bienvenido/a!\n@user')
+      .replace('@user',    '@' + m.sender.split('@')[0])
+      .replace('@subject', groupMetadata?.subject || 'Grupo')
+      .replace('@desc',    groupMetadata?.desc?.toString() || '*SIN DESCRIPCIÓN*');
+
+    let pp;
+    try {
+      pp = await conn.profilePictureUrl(m.sender, 'image');
+    } catch {
+      pp = 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60';
     }
+
+    const file = await conn.getFile(pp).catch(() => null);
+    if (file?.data) {
+      await conn.sendFile(m.chat, file.data, 'pp.jpg', `🧪 *[TEST WELCOME]*\n\n${welcomeMsg}`, null, false, { mentions: [m.sender] });
+    } else {
+      await conn.sendMessage(m.chat, { text: `🧪 *[TEST WELCOME]*\n\n${welcomeMsg}`, mentions: [m.sender] });
+    }
+    return;
   }
 
-  // Asegurar que el chat exista en la DB
-  if (!global.db.data.chats[chatId]) global.db.data.chats[chatId] = {};
-  const chat = global.db.data.chats[chatId];
+  // ── .setwelcome ────────────────────────────────────────────────────────────
+  if (command === 'setwelcome') {
+    if (!isAdmin && !isOwner)
+      return m.reply('⚠️ Solo los *administradores* pueden usar este comando.');
 
-  const subcommand = args[0]?.toLowerCase();
+    // Cooldown
+    const now = Date.now();
+    if (cooldowns.has(m.chat)) {
+      const expiration = cooldowns.get(m.chat) + COOLDOWN_MS;
+      if (now < expiration) {
+        const secsLeft = Math.ceil((expiration - now) / 1000);
+        const mins = Math.floor(secsLeft / 60);
+        const secs = secsLeft % 60;
+        return m.reply(`⏰ Espera *${mins}m ${secs}s* antes de usar este comando nuevamente.`);
+      }
+    }
 
-  // ── Ver mensaje actual ──────────────────────────────────────────────────────
-  if (subcommand === 'ver') {
-    const current = chat.sWelcome || conn.welcome || '👋 ¡Bienvenido/a!\n@user';
-    return m.reply(
-      `📋 *Mensaje de bienvenida actual:*\n\n${current}\n\n` +
-      `_Variables: @user, @subject, @desc_`
-    );
-  }
+    const sub = args[0]?.toLowerCase();
 
-  // ── Reset al mensaje por defecto ────────────────────────────────────────────
-  if (subcommand === 'reset') {
-    chat.sWelcome = '';
-    global.db.data.chats[chatId].sWelcome = '';
-    cooldowns.set(chatId, now);
-    return m.reply('🔄 El mensaje de bienvenida ha sido *restablecido* al predeterminado.');
-  }
+    if (sub === 'reset') {
+      chat.sWelcome = '';
+      global.db.data.chats[m.chat].sWelcome = '';
+      cooldowns.set(m.chat, now);
+      return m.reply('🔄 Mensaje de bienvenida *restablecido* al predeterminado.');
+    }
 
-  // ── Establecer mensaje personalizado ────────────────────────────────────────
-  if (text) {
-    chat.sWelcome = text;
-    global.db.data.chats[chatId].sWelcome = text;
-    cooldowns.set(chatId, now);
-    return m.reply(
-      `✅ *Mensaje de bienvenida actualizado.*\n\n` +
-      `📝 *Nuevo mensaje:*\n${text}\n\n` +
+    if (text) {
+      chat.sWelcome = text;
+      global.db.data.chats[m.chat].sWelcome = text;
+      cooldowns.set(m.chat, now);
+      return m.reply(
+        `✅ *Mensaje de bienvenida actualizado.*\n\n` +
+        `📝 *Nuevo mensaje:*\n${text}\n\n` +
+        `_Variables: @user · @subject · @desc_\n` +
+        `_Usa *${usedPrefix}testwelcome* para previsualizarlo_`
+      );
+    }
+
+    throw (
+      `📖 *Uso de ${usedPrefix}setwelcome:*\n\n` +
+      `• *${usedPrefix}setwelcome <texto>* → Personalizar mensaje\n` +
+      `• *${usedPrefix}setwelcome reset* → Restaurar por defecto\n\n` +
       `_Variables disponibles:_\n` +
-      `• *@user* → mención al nuevo miembro\n` +
-      `• *@subject* → nombre del grupo\n` +
-      `• *@desc* → descripción del grupo`
+      `*@user* · *@subject* · *@desc*`
     );
   }
 
-  // ── Sin argumentos: mostrar ayuda ───────────────────────────────────────────
-  throw (
-    `📖 *Uso del comando:*\n\n` +
-    `• *${usedPrefix}setwelcome <texto>* → Establece bienvenida personalizada\n` +
-    `• *${usedPrefix}setwelcome reset* → Restaura la bienvenida por defecto\n` +
-    `• *${usedPrefix}setwelcome ver* → Muestra la bienvenida actual\n\n` +
-    `_Variables disponibles en el texto:_\n` +
-    `*- @user* (mención al nuevo miembro)\n` +
-    `*- @subject* (nombre del grupo)\n` +
-    `*- @desc* (descripción del grupo)`
-  );
+  // ── .welcome ───────────────────────────────────────────────────────────────
+  if (command === 'welcome') {
+    const sub = args[0]?.toLowerCase();
+
+    if (!sub) {
+      const estado = chat.welcome ? '✅ *Activada*' : '❌ *Desactivada*';
+      const msg = chat.sWelcome || conn.welcome || '👋 ¡Bienvenido/a!\n@user';
+      return m.reply(
+        `👥 *Bienvenida del grupo*\n\n` +
+        `Estado: ${estado}\n\n` +
+        `📝 *Mensaje actual:*\n${msg}\n\n` +
+        `_Usa *${usedPrefix}setwelcome <texto>* para personalizar_\n` +
+        `_Usa *${usedPrefix}testwelcome* para previsualizar_`
+      );
+    }
+
+    if (!isAdmin && !isOwner)
+      return m.reply('⚠️ Solo los *administradores* pueden cambiar este ajuste.');
+
+    if (sub === 'on') {
+      chat.welcome = true;
+      global.db.data.chats[m.chat].welcome = true;
+      return m.reply('✅ Bienvenida *activada*.');
+    }
+
+    if (sub === 'off') {
+      chat.welcome = false;
+      global.db.data.chats[m.chat].welcome = false;
+      return m.reply('❌ Bienvenida *desactivada*.');
+    }
+
+    throw `❓ *Uso:*\n• *${usedPrefix}welcome on*\n• *${usedPrefix}welcome off*\n• *${usedPrefix}welcome* → Ver estado`;
+  }
 };
 
-handler.help  = ['setwelcome <texto|reset|ver>'];
-handler.tags  = ['group'];
-handler.command = ['setwelcome'];
-
-// El handler nativo del bot ya valida plugin.group → solo grupos
-handler.group = true;
-// El handler nativo ya valida plugin.admin → solo admins
-handler.admin = true;
+handler.help    = ['welcome <on|off>', 'setwelcome <texto|reset>', 'testwelcome'];
+handler.tags    = ['group'];
+handler.command = ['welcome', 'setwelcome', 'testwelcome'];
+handler.group   = true;
 
 export default handler;
