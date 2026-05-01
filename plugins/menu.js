@@ -50,28 +50,28 @@ const handler = async (m, { conn, usedPrefix }) => {
   const totalCmds  = Object.values(categories).flat().length;
 
   // ── Separadores ──────────────────────────────────────────
-  const HR  = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
-  const HR2 = '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌';
-  const CAP = '╰────────────────────────────';
+  const HR1 = '━━━━━━ ◦ ❖ ◦ ━━━━━━━━━━━━━━━';   // pesado con joya central
+  const HR2 = '──────── ◈ ──────────────────';   // ligero con diamante
+  const CAP = '╰────────────────────────────';   // cierre de bloque
 
   // ── Header ───────────────────────────────────────────────
   const header = [
-    HR,
+    HR1,
     `  ✦  *${botName}*  ✦`,
-    `  _𝑅𝑖𝑘𝑘𝑎  𝑇𝑎𝑟𝑎𝑘𝑎𝑟𝑎𝑑𝑎_`,
-    HR,
+    `  _‧₊˚ 𝑅𝑖𝑘𝑘𝑎  𝑇𝑎𝑟𝑎𝑘𝑎𝑟𝑎𝑑𝑎 ˚₊‧_`,
+    HR1,
     '',
-    `  ╭──『 *SISTEMA* 』`,
-    `  │  👤  Usuario   ›  *${pushname}*`,
-    `  │  🕐  Hora      ›  ${time}`,
-    `  │  📅  Fecha     ›  ${date}`,
-    `  │  ⏱  Uptime    ›  ${uptime}`,
-    `  │  💎  Owner     ›  +${ownerNum}`,
-    `  │  ⌨  Prefix    ›  *${prefix}*`,
-    `  │  📋  Comandos  ›  *${totalCmds}*`,
+    `  ╭── ❲ *SISTEMA* ❳`,
+    `  ┊  👤  Usuario   ⇢  *${pushname}*`,
+    `  ┊  🕐  Hora      ⇢  ${time}`,
+    `  ┊  📅  Fecha     ⇢  ${date}`,
+    `  ┊  ⏱  Uptime    ⇢  ${uptime}`,
+    `  ┊  💎  Owner     ⇢  +${ownerNum}`,
+    `  ┊  ⌨  Prefix    ⇢  *${prefix}*`,
+    `  ┊  📋  Comandos  ⇢  *${totalCmds}*`,
     `  ${CAP}`,
     '',
-    HR,
+    HR2,
   ].join('\n');
 
   // ── Categorías ───────────────────────────────────────────
@@ -80,13 +80,13 @@ const handler = async (m, { conn, usedPrefix }) => {
     .map(([cat, cmds]) => {
       const icon  = getIcon(cat);
       const title = cat.charAt(0).toUpperCase() + cat.slice(1);
-      const list  = cmds.map(c => `  │   ›  ${prefix}${c}`).join('\n');
+      const list  = cmds.map(c => `  ┊   ↳  ${prefix}${c}`).join('\n');
       return [
         '',
-        `  ╭──『 ${icon} *${title}* 』`,
-        `  │`,
+        `  ╭── ❲ ${icon} *${title}* ❳`,
+        `  ┊`,
         list,
-        `  │`,
+        `  ┊`,
         `  ${CAP}`,
       ].join('\n');
     })
@@ -95,9 +95,9 @@ const handler = async (m, { conn, usedPrefix }) => {
   // ── Footer ───────────────────────────────────────────────
   const footer = [
     '',
-    HR,
-    `  _Escribe_ *${prefix}help <cmd>* _para más información_`,
-    HR,
+    HR1,
+    `  ⊹ _Escribe_ *${prefix}help <cmd>* _para más info_  ⊹`,
+    HR1,
   ].join('\n');
 
   const fullMenu = `${header}\n${body}\n${footer}`;
