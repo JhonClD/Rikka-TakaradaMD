@@ -14,26 +14,28 @@ function setSinPrefijo(chatId, value) {
 }
 
 // ── Before hook — activa el modo sin prefijo ──────────────
-// Si el grupo tiene sinprefijo activado y el mensaje no tiene
-// prefijo, se lo agrega para que el handler lo procese normal.
+// REGLA: solo devolver true cuando el handler debe SALTAR este plugin.
+// Si devuelve true en un mensaje con prefijo → el comando nunca ejecuta.
 const _before = async (m) => {
-  if (!m.isGroup || !m.text) return true
+  if (!m.isGroup || !m.text) return false
 
-  // Ya tiene prefijo → no tocar
-  if (/^[.!/]/.test(m.text.trim())) return true
+  // Ya tiene prefijo → no tocar el texto,
+  // y devolver FALSE para que el handler ejecute el comando normalmente.
+  if (/^[.!/]/.test(m.text.trim())) return false
 
-  // Chat sin modo sinprefijo → no tocar
-  if (!getSinPrefijo(m.chat)) return true
+  // Sin prefijo y modo desactivado → ignorar
+  if (!getSinPrefijo(m.chat)) return false
 
-  // Agregar prefijo para que el handler lo detecte como comando
+  // Sin prefijo + modo activado → agregar prefijo
   m.text = '.' + m.text.trim()
   if (m.body) m.body = '.' + m.body.trim()
 
-  return true
+  // Devolver false para que los demás plugins del loop también vean el texto modificado
+  return false
 }
 
 // ── Comando principal ─────────────────────────────────────
-const handler = async (m, { conn, isOwner, isAdmin, command }) => {
+const handler = async (m, { isOwner, isAdmin, command }) => {
   if (!m.isGroup) return m.reply('¡Ne ne! Este comando solo funciona en grupos.')
   if (!isAdmin && !isOwner) return m.reply('⚠️ Solo los administradores pueden usar este comando.')
 
@@ -43,9 +45,7 @@ const handler = async (m, { conn, isOwner, isAdmin, command }) => {
     if (estado) {
       return m.reply('¡El modo sin prefijo ya está ACTIVADO en este grupo!')
     }
-
     setSinPrefijo(m.chat, true)
-
     await m.reply(`✅ *Modo sin prefijo ACTIVADO*
 
 ¡Ne ne! Ahora los miembros pueden escribir comandos sin prefijo.
@@ -64,9 +64,7 @@ Para desactivar: .conprefijo`)
     if (!estado) {
       return m.reply('El modo sin prefijo ya está DESACTIVADO en este grupo.')
     }
-
     setSinPrefijo(m.chat, false)
-
     await m.reply(`✅ *Modo sin prefijo DESACTIVADO*
 
 Los comandos ahora solo funcionarán con prefijo.
@@ -88,4 +86,3 @@ handler.group = true
 handler.admin = true
 
 export default handler
-      
