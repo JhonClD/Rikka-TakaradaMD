@@ -4,9 +4,9 @@
 const handler = async (m, { conn, command, args, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users      ||= {};
-  chat.characters ||= {};
-  chat.sales      ||= {};
+  chat.users = chat.users || {};
+  chat.characters = chat.characters || {};
+  chat.sales = chat.sales || {};
 
   if (chat.gacha === false) {
     return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);

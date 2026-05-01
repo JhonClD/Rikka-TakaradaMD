@@ -87,9 +87,9 @@ const handler = async (m, { conn, usedPrefix }) => {
   // Inicializar estructuras del chat en la DB de Rikka
   if (!global.db.data.chats[chatId])         global.db.data.chats[chatId] = {};
   const chat = global.db.data.chats[chatId];
-  chat.users      ||= {};
-  chat.characters ||= {};
-  chat.rolls      ||= {};
+  chat.users = chat.users || {};
+  chat.characters = chat.characters || {};
+  chat.rolls = chat.rolls || {};
 
   // Verificar si gacha está habilitado (si no existe el flag, permitir por defecto)
   if (chat.gacha === false) {
@@ -129,7 +129,7 @@ const handler = async (m, { conn, usedPrefix }) => {
       return m.reply(`ꕥ No se encontraron imágenes para *${selected.name}*.`);
     }
 
-    chat.characters[selected.id] ||= {};
+    if (!chat.characters[selected.id]) chat.characters[selected.id] = {};
     const record    = chat.characters[selected.id];
     const globalRec = global.db.data.characters?.[selected.id] || {};
 
