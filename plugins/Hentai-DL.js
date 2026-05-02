@@ -18,28 +18,10 @@ import fs from 'fs'
 import path from 'path'
 import { tmpdir } from 'os'
 import https from 'https'
-import { execSync } from 'child_process'
 import puppeteerExtra from 'puppeteer-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 
 puppeteerExtra.use(StealthPlugin())
-
-// ─── Diagnóstico de Chromium al cargar el plugin ──────────────────────────
-;(() => {
-  try {
-    const result = execSync(
-      'which google-chrome || which chromium || which chromium-browser || echo "NO_CHROME_FOUND"',
-      { encoding: 'utf8', timeout: 5000 }
-    ).trim()
-    console.log(`[Hentai-DL] 🔍 Chromium detectado en: ${result}`)
-  } catch {
-    console.warn('[Hentai-DL] ⚠️  No se pudo detectar Chromium con which')
-  }
-  if (process.env.PUPPETEER_EXECUTABLE_PATH)
-    console.log(`[Hentai-DL] 🔧 PUPPETEER_EXECUTABLE_PATH = ${process.env.PUPPETEER_EXECUTABLE_PATH}`)
-  if (process.env.CHROME_BIN)
-    console.log(`[Hentai-DL] 🔧 CHROME_BIN = ${process.env.CHROME_BIN}`)
-})()
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 global.activeDownloads = global.activeDownloads || new Map()
@@ -289,19 +271,13 @@ async function buscarPorFetch(query) {
 async function buscarConPuppeteer(query) {
     // Detectar Chromium del sistema (necesario en VPS/Docker con Pelican)
     const chromiumPaths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        process.env.CHROME_BIN,
         '/usr/bin/chromium-browser',
         '/usr/bin/chromium',
         '/usr/bin/google-chrome',
         '/usr/bin/google-chrome-stable',
-        '/usr/local/bin/chromium-browser',
-        '/usr/local/bin/chromium',
-        '/opt/google/chrome/google-chrome',
-        '/opt/chromium/chrome',
         '/data/data/com.termux/files/usr/bin/chromium-browser',
         '/data/data/com.termux/files/usr/bin/chromium',
-    ].filter(Boolean)
+    ]
     let execPath = null
     for (const p of chromiumPaths) {
         if (fs.existsSync(p)) { execPath = p; break }
