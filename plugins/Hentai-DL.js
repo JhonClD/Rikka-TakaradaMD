@@ -18,28 +18,10 @@ import fs from 'fs'
 import path from 'path'
 import { tmpdir } from 'os'
 import https from 'https'
-import { execSync } from 'child_process'
 import puppeteerExtra from 'puppeteer-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 
 puppeteerExtra.use(StealthPlugin())
-
-// ─── Diagnóstico de Chromium al cargar el plugin ──────────────────────────
-;(() => {
-  try {
-    const result = execSync(
-      'which google-chrome || which chromium || which chromium-browser || echo "NO_CHROME_FOUND"',
-      { encoding: 'utf8', timeout: 5000 }
-    ).trim()
-    console.log(`[Hentai-DL] 🔍 Chromium detectado en: ${result}`)
-  } catch {
-    console.warn('[Hentai-DL] ⚠️  No se pudo detectar Chromium con which')
-  }
-  if (process.env.PUPPETEER_EXECUTABLE_PATH)
-    console.log(`[Hentai-DL] 🔧 PUPPETEER_EXECUTABLE_PATH = ${process.env.PUPPETEER_EXECUTABLE_PATH}`)
-  if (process.env.CHROME_BIN)
-    console.log(`[Hentai-DL] 🔧 CHROME_BIN = ${process.env.CHROME_BIN}`)
-})()
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 global.activeDownloads = global.activeDownloads || new Map()
@@ -253,11 +235,15 @@ async function buscarPorAPI(query) {
 
 async function buscarPorFetch(query) {
     try {
-        const res = await fetch(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
+        const url = `${BASE}/busqueda?q=${encodeURIComponent(query)}`
+        console.log(`[FETCH] 🌐 GET ${url}`)
+        const res = await fetch(url, {
             headers: { 'User-Agent': UA, 'Accept-Language': 'es-419,es;q=0.9' },
             timeout: 15000,
         })
+        console.log(`[FETCH] status: ${res.status}`)
         const html = await res.text()
+        console.log(`[FETCH] HTML length: ${html.length}, snippet: ${html.slice(0, 300).replace(/\n/g, ' ')}`)
         const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
 
         // Buscar slugs en el HTML/JS embebido
@@ -278,8 +264,10 @@ async function buscarPorFetch(query) {
                 results.push({ slug, title: slug.replace(/-/g, ' ') })
         }
 
+        console.log(`[FETCH] 🎯 Resultados encontrados: ${results.length} → ${JSON.stringify(results.slice(0, 5))}`)
         return results
-    } catch (_) {
+    } catch (e) {
+        console.error(`[FETCH] ❌ Error: ${e.message}`)
         return []
     }
 }
@@ -289,19 +277,13 @@ async function buscarPorFetch(query) {
 async function buscarConPuppeteer(query) {
     // Detectar Chromium del sistema (necesario en VPS/Docker con Pelican)
     const chromiumPaths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        process.env.CHROME_BIN,
         '/usr/bin/chromium-browser',
         '/usr/bin/chromium',
         '/usr/bin/google-chrome',
         '/usr/bin/google-chrome-stable',
-        '/usr/local/bin/chromium-browser',
-        '/usr/local/bin/chromium',
-        '/opt/google/chrome/google-chrome',
-        '/opt/chromium/chrome',
         '/data/data/com.termux/files/usr/bin/chromium-browser',
         '/data/data/com.termux/files/usr/bin/chromium',
-    ].filter(Boolean)
+    ]
     let execPath = null
     for (const p of chromiumPaths) {
         if (fs.existsSync(p)) { execPath = p; break }
@@ -319,14 +301,28 @@ async function buscarConPuppeteer(query) {
     const page = await browser.newPage()
     await page.setUserAgent(UA)
     try {
-        await page.goto(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
+        const searchUrl = `${BASE}/busqueda?q=${encodeURIComponent(query)}`
+        console.log(`[Puppeteer] 🌐 Navegando a: ${searchUrl}`)
+
+        await page.goto(searchUrl, {
             waitUntil: 'networkidle2', timeout: 50000,
         })
         await new Promise(r => setTimeout(r, 4000))
 
-        // Capturar el HTML renderizado y buscar slugs
+        // ── Diagnóstico: URL final y fragmento del HTML ──
+        const finalUrl = page.url()
+        console.log(`[Puppeteer] 📍 URL final tras carga: ${finalUrl}`)
         const content = await page.content()
+        console.log(`[Puppeteer] 📄 HTML length: ${content.length} chars`)
+        console.log(`[Puppeteer] 📄 snippet: ${content.slice(0, 600).replace(/\n/g, ' ')}`)
+
         const decoded = content.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
+
+        // ── Contar links /media/ ──
+        const mediaLinksCount = await page.evaluate(() =>
+            document.querySelectorAll('a[href*="/media/"]').length
+        )
+        console.log(`[Puppeteer] 🔗 a[href*="/media/"] en DOM: ${mediaLinksCount}`)
 
         const links = await page.evaluate(() => {
             const results = []
@@ -342,6 +338,7 @@ async function buscarConPuppeteer(query) {
             })
             return results
         })
+        console.log(`[Puppeteer] 🎯 Slugs DOM: ${JSON.stringify(links.slice(0, 5))}`)
 
         // También buscar en el HTML serializado por si Svelte lo embebió
         const extraRe = /"slug":"([^"]+)"(?:[^}]{0,300}?"title":"([^"]+)")?/g
@@ -351,12 +348,13 @@ async function buscarConPuppeteer(query) {
             if (slug && !links.find(r => r.slug === slug) && !slug.includes('/'))
                 links.push({ slug, title })
         }
+        console.log(`[Puppeteer] ✅ Total final: ${links.length} resultados`)
 
         await browser.close()
         return links
     } catch (err) {
         await browser.close()
-        console.error('[Puppeteer]', err.message)
+        console.error('[Puppeteer] ❌ Error:', err.message)
         return []
     }
 }
@@ -366,11 +364,13 @@ async function buscarConPuppeteer(query) {
 async function buscarHentaiLA(query) {
     // 1. Probar slugs generados directamente (HEAD request, muy rápido)
     const variaciones = generarSlugVariaciones(query)
+    console.log(`[SLUG] Probando variaciones para "${query}": ${JSON.stringify(variaciones)}`)
     for (const slug of variaciones) {
         try {
             const res = await fetch(`${BASE}/media/${slug}`, {
                 method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 6000,
             })
+            console.log(`[SLUG] ${slug} → status ${res.status}`)
             if (res.status === 200) {
                 console.log(`[SLUG] ✅ Encontrado directo: ${slug}`)
                 return [{ slug, title: slug.replace(/-/g, ' ') }]
