@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url'
 
 // ── Carga .env manualmente (sin dependencia de dotenv) ───
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const envPath = path.resolve(__dirname, '../../.env')
+const envPath = path.resolve(__dirname, '../.env')
 if (fs.existsSync(envPath)) {
   const lines = fs.readFileSync(envPath, 'utf8').split('\n')
   for (const line of lines) {
