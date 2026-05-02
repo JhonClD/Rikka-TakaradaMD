@@ -864,27 +864,19 @@ handler.before = async function (m, { conn }) {
             const params = JSON.parse(nativeFlow.paramsJson || '{}')
             const selectedId = params?.id || null
             if (selectedId) {
+                // Verificar que quien toca el botón sea el dueño de la sesión
                 const sessionKey = `${m.chat}|${m.sender}`
                 const session = global.hdlSessions?.[sessionKey]
 
                 if (!session || session.owner !== m.sender || Date.now() > session.expiry) {
+                    // No es el dueño o expiró → bloquear silenciosamente (solo log en terminal)
                     console.log(`[HDL] Botón ignorado: @${m.sender.split('@')[0]} no es el dueño de la sesión`)
-                    return true
+                    return true // Consumir el mensaje sin ejecutar
                 }
 
+                // Es el dueño → limpiar sesión y ejecutar comando
                 delete global.hdlSessions[sessionKey]
-
-                // ── FIX: invocar el handler directamente en lugar de solo setear m.text ──
-                // usedPrefix = primer carácter (ej "."), command = "hdl", text = resto
-                const usedPrefix = selectedId[0]
-                const [command, ...argParts] = selectedId.slice(1).trim().split(' ')
-                const text = argParts.join(' ')
-                try {
-                    await handler.call(conn, m, { conn, text, usedPrefix, command })
-                } catch (e) {
-                    console.error('[HDL before] Error ejecutando handler:', e.message)
-                }
-                return true // consumir el mensaje
+                m.text = selectedId
             }
         } catch (_) {}
         return false
