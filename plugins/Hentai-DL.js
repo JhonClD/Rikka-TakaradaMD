@@ -235,15 +235,11 @@ async function buscarPorAPI(query) {
 
 async function buscarPorFetch(query) {
     try {
-        const url = `${BASE}/busqueda?q=${encodeURIComponent(query)}`
-        console.log(`[FETCH] 🌐 GET ${url}`)
-        const res = await fetch(url, {
+        const res = await fetch(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
             headers: { 'User-Agent': UA, 'Accept-Language': 'es-419,es;q=0.9' },
             timeout: 15000,
         })
-        console.log(`[FETCH] status: ${res.status}`)
         const html = await res.text()
-        console.log(`[FETCH] HTML length: ${html.length}, snippet: ${html.slice(0, 300).replace(/\n/g, ' ')}`)
         const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
 
         // Buscar slugs en el HTML/JS embebido
@@ -264,10 +260,8 @@ async function buscarPorFetch(query) {
                 results.push({ slug, title: slug.replace(/-/g, ' ') })
         }
 
-        console.log(`[FETCH] 🎯 Resultados encontrados: ${results.length} → ${JSON.stringify(results.slice(0, 5))}`)
         return results
-    } catch (e) {
-        console.error(`[FETCH] ❌ Error: ${e.message}`)
+    } catch (_) {
         return []
     }
 }
@@ -301,28 +295,14 @@ async function buscarConPuppeteer(query) {
     const page = await browser.newPage()
     await page.setUserAgent(UA)
     try {
-        const searchUrl = `${BASE}/busqueda?q=${encodeURIComponent(query)}`
-        console.log(`[Puppeteer] 🌐 Navegando a: ${searchUrl}`)
-
-        await page.goto(searchUrl, {
+        await page.goto(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
             waitUntil: 'networkidle2', timeout: 50000,
         })
         await new Promise(r => setTimeout(r, 4000))
 
-        // ── Diagnóstico: URL final y fragmento del HTML ──
-        const finalUrl = page.url()
-        console.log(`[Puppeteer] 📍 URL final tras carga: ${finalUrl}`)
+        // Capturar el HTML renderizado y buscar slugs
         const content = await page.content()
-        console.log(`[Puppeteer] 📄 HTML length: ${content.length} chars`)
-        console.log(`[Puppeteer] 📄 snippet: ${content.slice(0, 600).replace(/\n/g, ' ')}`)
-
         const decoded = content.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
-
-        // ── Contar links /media/ ──
-        const mediaLinksCount = await page.evaluate(() =>
-            document.querySelectorAll('a[href*="/media/"]').length
-        )
-        console.log(`[Puppeteer] 🔗 a[href*="/media/"] en DOM: ${mediaLinksCount}`)
 
         const links = await page.evaluate(() => {
             const results = []
@@ -338,7 +318,6 @@ async function buscarConPuppeteer(query) {
             })
             return results
         })
-        console.log(`[Puppeteer] 🎯 Slugs DOM: ${JSON.stringify(links.slice(0, 5))}`)
 
         // También buscar en el HTML serializado por si Svelte lo embebió
         const extraRe = /"slug":"([^"]+)"(?:[^}]{0,300}?"title":"([^"]+)")?/g
@@ -348,13 +327,12 @@ async function buscarConPuppeteer(query) {
             if (slug && !links.find(r => r.slug === slug) && !slug.includes('/'))
                 links.push({ slug, title })
         }
-        console.log(`[Puppeteer] ✅ Total final: ${links.length} resultados`)
 
         await browser.close()
         return links
     } catch (err) {
         await browser.close()
-        console.error('[Puppeteer] ❌ Error:', err.message)
+        console.error('[Puppeteer]', err.message)
         return []
     }
 }
@@ -364,13 +342,11 @@ async function buscarConPuppeteer(query) {
 async function buscarHentaiLA(query) {
     // 1. Probar slugs generados directamente (HEAD request, muy rápido)
     const variaciones = generarSlugVariaciones(query)
-    console.log(`[SLUG] Probando variaciones para "${query}": ${JSON.stringify(variaciones)}`)
     for (const slug of variaciones) {
         try {
             const res = await fetch(`${BASE}/media/${slug}`, {
                 method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 6000,
             })
-            console.log(`[SLUG] ${slug} → status ${res.status}`)
             if (res.status === 200) {
                 console.log(`[SLUG] ✅ Encontrado directo: ${slug}`)
                 return [{ slug, title: slug.replace(/-/g, ' ') }]
