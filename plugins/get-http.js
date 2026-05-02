@@ -14,24 +14,22 @@ const EXT_MAP = {
   pdf: 'document', zip: 'document', rar: 'document',
 };
 
-// ─── Cloudflare bypass User-Agents ──────────────────────────────────────────
-// Android 14 Chrome (más efectivo contra CF JS challenge)
-const UA_ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
-// Android TV (evita detección de scraping en sitios con CF)
+// ─── User-Agents ─────────────────────────────────────────────────────────────
+const UA_ANDROID    = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 const UA_ANDROID_TV = 'Mozilla/5.0 (Linux; Android 12; BRAVIA 4K UR3 Build/STTB.211019.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.105 Safari/537.36 CrKey/1.56.500000 AFTT';
 
 const CF_HEADERS_ANDROID = {
-  'User-Agent':      UA_ANDROID,
-  'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Connection':      'keep-alive',
+  'User-Agent':                UA_ANDROID,
+  'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language':           'es-419,es;q=0.9,en;q=0.8',
+  'Accept-Encoding':           'gzip, deflate, br',
+  'Connection':                'keep-alive',
   'Upgrade-Insecure-Requests': '1',
-  'Sec-Fetch-Dest':  'document',
-  'Sec-Fetch-Mode':  'navigate',
-  'Sec-Fetch-Site':  'none',
-  'Sec-Fetch-User':  '?1',
-  'Cache-Control':   'max-age=0',
+  'Sec-Fetch-Dest':            'document',
+  'Sec-Fetch-Mode':            'navigate',
+  'Sec-Fetch-Site':            'none',
+  'Sec-Fetch-User':            '?1',
+  'Cache-Control':             'max-age=0',
 };
 
 const CF_HEADERS_ANDROID_TV = {
@@ -47,60 +45,75 @@ const CF_HEADERS_ANDROID_TV = {
   'Referer':         'https://www.google.com/',
 };
 
-// ─── Intentar fetch con múltiples estrategias ────────────────────────────────
-async function fetchWithBypass(url) {
-  const strategies = [
-    // 1. Directo sin headers (algunos sitios no tienen CF)
-    { headers: { 'User-Agent': UA_ANDROID }, label: 'direct' },
-    // 2. Android Chrome completo
-    { headers: CF_HEADERS_ANDROID, label: 'android' },
-    // 3. Android TV
-    { headers: CF_HEADERS_ANDROID_TV, label: 'android-tv' },
-    // 4. Android + cookie vacía (bypass ligero)
-    { headers: { ...CF_HEADERS_ANDROID, 'Cookie': '' }, label: 'android+cookie' },
-    // 5. Googlebot (algunos CF lo dejan pasar)
-    {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': '*/*',
-        'Accept-Language': 'en',
-      },
-      label: 'googlebot',
-    },
-  ];
-
-  let lastErr;
-  for (const { headers, label } of strategies) {
-    try {
-      const res = await fetch(url, {
-        headers,
-        redirect: 'follow',
-        signal: AbortSignal.timeout(30000),
-      });
-
-      // Cloudflare bloqueado devuelve 403 o 503 con página HTML de CF
-      if (res.status === 403 || res.status === 503) {
-        const txt = await res.text();
-        if (/cloudflare|cf-ray|just a moment|checking your browser/i.test(txt)) {
-          lastErr = new Error(`CF bloqueó con ${label} (${res.status})`);
-          continue;
-        }
-      }
-
-      return { res, label };
-    } catch (e) {
-      lastErr = e;
-    }
+// ─── Detectar página de bloqueo CF ───────────────────────────────────────────
+async function isCFBlocked(res) {
+  if (res.status === 403 || res.status === 503 || res.status === 429) {
+    const txt = await res.clone().text().catch(() => '');
+    return /cloudflare|cf-ray|just a moment|checking your browser|enable javascript|ddos.protection|ray id/i.test(txt);
   }
-  throw lastErr || new Error('Todas las estrategias fallaron');
+  return false;
 }
 
-// ─── Handler principal ───────────────────────────────────────────────────────
+// ─── Estrategia 1: Directo con headers Android / Android TV ──────────────────
+async function tryDirect(url) {
+  for (const [headers, label] of [[CF_HEADERS_ANDROID, 'android'], [CF_HEADERS_ANDROID_TV, 'android-tv']]) {
+    try {
+      const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(25000) });
+      if (await isCFBlocked(res)) continue;
+      return { res, label };
+    } catch { continue; }
+  }
+  throw new Error('directo bloqueado');
+}
+
+// ─── Estrategia 2: AllOrigins (proxy CORS público) ────────────────────────────
+async function tryAllOrigins(url) {
+  const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+  const res   = await fetch(proxy, { headers: { 'User-Agent': UA_ANDROID }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`allorigins ${res.status}`);
+  return { res, label: 'allorigins' };
+}
+
+// ─── Estrategia 3: corsproxy.io ───────────────────────────────────────────────
+async function tryCorsProxy(url) {
+  const proxy = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+  const res   = await fetch(proxy, { headers: { 'User-Agent': UA_ANDROID }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`corsproxy ${res.status}`);
+  return { res, label: 'corsproxy.io' };
+}
+
+// ─── Estrategia 4: thingproxy ─────────────────────────────────────────────────
+async function tryThingProxy(url) {
+  const proxy = `https://thingproxy.freeboard.io/fetch/${url}`;
+  const res   = await fetch(proxy, { headers: { 'User-Agent': UA_ANDROID_TV }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`thingproxy ${res.status}`);
+  return { res, label: 'thingproxy' };
+}
+
+// ─── Estrategia 5: codetabs ───────────────────────────────────────────────────
+async function tryCodetabs(url) {
+  const proxy = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`;
+  const res   = await fetch(proxy, { headers: { 'User-Agent': UA_ANDROID }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`codetabs ${res.status}`);
+  return { res, label: 'codetabs' };
+}
+
+// ─── Orquestador ─────────────────────────────────────────────────────────────
+async function fetchWithBypass(url) {
+  const strategies = [tryDirect, tryAllOrigins, tryCorsProxy, tryThingProxy, tryCodetabs];
+  let lastErr;
+  for (const fn of strategies) {
+    try { return await fn(url); } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('Todas las estrategias de bypass fallaron');
+}
+
+// ─── Handler ─────────────────────────────────────────────────────────────────
 const handler = async (m, { conn, text }) => {
   if (!/^https?:\/\//.test(text)) throw '❌ La URL debe comenzar con http:// o https://';
 
-  const _url  = new URL(text);
-  const url   = global.API(_url.origin, _url.pathname, Object.fromEntries(_url.searchParams.entries()), 'APIKEY');
+  const _url = new URL(text);
+  const url  = global.API(_url.origin, _url.pathname, Object.fromEntries(_url.searchParams.entries()), 'APIKEY');
 
   let res, label;
   try {
@@ -116,8 +129,7 @@ const handler = async (m, { conn, text }) => {
     throw `❌ El archivo es demasiado grande (${(contentLength / 1024 / 1024).toFixed(1)} MB)`;
   }
 
-  // Detectar tipo por content-type o extensión
-  const ext = _url.pathname.split('.').pop()?.toLowerCase();
+  const ext       = _url.pathname.split('.').pop()?.toLowerCase();
   const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t)))
                     || EXT_MAP[ext]
                     || null;
@@ -138,14 +150,12 @@ const handler = async (m, { conn, text }) => {
     return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
   }
 
-  // Texto o JSON
   if (/text|json/.test(contentType)) {
     let txt = buf.toString();
-    try { txt = format(JSON.parse(txt)); } catch { /* dejar como texto */ }
+    try { txt = format(JSON.parse(txt)); } catch { /* texto plano */ }
     return m.reply(`${txt.slice(0, 65536)}\n\n_bypass: ${label}_`);
   }
 
-  // Cualquier otro: documento
   const fileName = _url.pathname.split('/').pop() || 'file';
   conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
 };
@@ -155,3 +165,4 @@ handler.tags    = ['internet'];
 handler.command = /^(fetch|get)$/i;
 handler.rowner  = false;
 export default handler;
+                          
