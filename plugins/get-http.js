@@ -1,9 +1,10 @@
 import { format } from 'util';
 
 const MIME_MAP = {
-  video:   ['video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/quicktime'],
-  image:   ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'],
-  audio:   ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/aac'],
+  video:    ['video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/quicktime'],
+  image:    ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'],
+  audio:    ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/aac'],
+  sticker:  ['image/webp'],
 };
 
 const EXT_MAP = {
@@ -13,6 +14,7 @@ const EXT_MAP = {
   pdf: 'document', zip: 'document', rar: 'document',
 };
 
+// ─── User-Agents ─────────────────────────────────────────────────────────────
 const UA_ANDROID    = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 const UA_ANDROID_TV = 'Mozilla/5.0 (Linux; Android 12; BRAVIA 4K UR3 Build/STTB.211019.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.105 Safari/537.36 CrKey/1.56.500000 AFTT';
 
@@ -43,28 +45,28 @@ const CF_HEADERS_ANDROID_TV = {
   'Referer':         'https://www.google.com/',
 };
 
-// ─── Detectar bloqueo CF en el body (funciona también cuando el proxy retorna 200) ──
-function isCFHtml(buf) {
-  const txt = buf.toString('utf8', 0, 4096); // solo primeros 4KB, suficiente
-  return /cloudflare|cf-ray|just a moment|checking your browser|sorry.*blocked|you have been blocked|enable cookies.*cf/i.test(txt);
+// ─── Detectar página de bloqueo CF ───────────────────────────────────────────
+async function isCFBlocked(res) {
+  if (res.status === 403 || res.status === 503 || res.status === 429) {
+    const txt = await res.clone().text().catch(() => '');
+    return /cloudflare|cf-ray|just a moment|checking your browser|enable javascript|ddos.protection|ray id/i.test(txt);
+  }
+  return false;
 }
 
 // ─── Estrategia 1: Directo con headers Android / Android TV ──────────────────
 async function tryDirect(url) {
-  for (const [headers, label] of [
-    [CF_HEADERS_ANDROID,    'android'],
-    [CF_HEADERS_ANDROID_TV, 'android-tv'],
-  ]) {
+  for (const [headers, label] of [[CF_HEADERS_ANDROID, 'android'], [CF_HEADERS_ANDROID_TV, 'android-tv']]) {
     try {
       const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(25000) });
-      if (res.status === 403 || res.status === 503 || res.status === 429) throw new Error(`HTTP ${res.status}`);
+      if (await isCFBlocked(res)) continue;
       return { res, label };
     } catch { continue; }
   }
   throw new Error('directo bloqueado');
 }
 
-// ─── Estrategia 2: AllOrigins ─────────────────────────────────────────────────
+// ─── Estrategia 2: AllOrigins (proxy CORS público) ────────────────────────────
 async function tryAllOrigins(url) {
   const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
   const res   = await fetch(proxy, { headers: { 'User-Agent': UA_ANDROID }, signal: AbortSignal.timeout(30000) });
@@ -101,23 +103,9 @@ async function fetchWithBypass(url) {
   const strategies = [tryDirect, tryAllOrigins, tryCorsProxy, tryThingProxy, tryCodetabs];
   let lastErr;
   for (const fn of strategies) {
-    try {
-      const result = await fn(url);
-      // Leer el buffer aquí para poder inspeccionar el body
-      const buf = Buffer.from(await result.res.arrayBuffer());
-      if (isCFHtml(buf)) {
-        lastErr = new Error(`${result.label}: respuesta bloqueada por Cloudflare WAF`);
-        continue;
-      }
-      return { buf, res: result.res, label: result.label };
-    } catch (e) { lastErr = e; }
+    try { return await fn(url); } catch (e) { lastErr = e; }
   }
-  // Todos fallaron — error claro
-  throw new Error(
-    '🛡️ El sitio está protegido por Cloudflare WAF y bloqueó todas las estrategias.\n' +
-    'Este nivel de protección requiere un navegador real con JavaScript.\n' +
-    'Prueba con otra URL o un sitio sin Cloudflare agresivo.'
-  );
+  throw lastErr || new Error('Todas las estrategias de bypass fallaron');
 }
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
@@ -127,15 +115,15 @@ const handler = async (m, { conn, text }) => {
   const _url = new URL(text);
   const url  = global.API(_url.origin, _url.pathname, Object.fromEntries(_url.searchParams.entries()), 'APIKEY');
 
-  let buf, res, label;
+  let res, label;
   try {
-    ({ buf, res, label } = await fetchWithBypass(url));
+    ({ res, label } = await fetchWithBypass(url));
   } catch (e) {
-    throw `❌ ${e.message}`;
+    throw `❌ No se pudo acceder a la URL: ${e.message}`;
   }
 
   const contentType   = res.headers.get('content-type') || '';
-  const contentLength = buf.length;
+  const contentLength = parseInt(res.headers.get('content-length') || '0');
 
   if (contentLength > 100 * 1024 * 1024) {
     throw `❌ El archivo es demasiado grande (${(contentLength / 1024 / 1024).toFixed(1)} MB)`;
@@ -143,14 +131,20 @@ const handler = async (m, { conn, text }) => {
 
   const ext       = _url.pathname.split('.').pop()?.toLowerCase();
   const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t)))
-                    || EXT_MAP[ext] || null;
+                    || EXT_MAP[ext]
+                    || null;
 
-  if (mediaType === 'video')
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  if (mediaType === 'video') {
     return conn.sendMessage(m.chat, { video: buf, mimetype: contentType || 'video/mp4' }, { quoted: m });
-  if (mediaType === 'image')
+  }
+  if (mediaType === 'image') {
     return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
-  if (mediaType === 'audio')
+  }
+  if (mediaType === 'audio') {
     return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
+  }
   if (mediaType === 'document') {
     const fileName = _url.pathname.split('/').pop() || 'file';
     return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
@@ -171,4 +165,3 @@ handler.tags    = ['internet'];
 handler.command = /^(fetch|get)$/i;
 handler.rowner  = false;
 export default handler;
-                                     
