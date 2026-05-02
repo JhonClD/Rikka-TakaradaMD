@@ -330,12 +330,11 @@ async function detectIntent(userText) {
   return JSON.parse(clean)
 }
 
-// ── Número del dueño del bot ──────────────────────────────
-const OWNER_NUMBER = '51925092348'
-
+// ── Detección de owner (lee global.owner del config.js) ───
 function isOwnerSender(m) {
   const senderNum = (m.sender || '').replace(/[^0-9]/g, '')
-  return senderNum.endsWith(OWNER_NUMBER)
+  const owners = global.owner || []
+  return owners.some(([num]) => num && senderNum.endsWith(num))
 }
 
 // ── Prompts de Rikka según quién habla ───────────────────
@@ -668,7 +667,8 @@ handler.before = async (m) => {
     }
 
     // 3. Si no es comando → respuesta normal de Rikka
-    const quotedText = (m.quoted?.text || '').trim()
+    const rawQuoted = (m.quoted?.text || '').trim()
+    const quotedText = rawQuoted.length > 800 ? rawQuoted.slice(0, 800) + '...[mensaje recortado]' : rawQuoted
     const reply = await callRikka(userText, quotedText, ownerSender, m.chat)
 
     await m.conn.sendPresenceUpdate('paused', m.chat)
