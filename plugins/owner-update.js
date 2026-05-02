@@ -1,51 +1,84 @@
 import { execSync } from 'child_process';
-import fs from 'fs';
+
+const run = (cmd) => execSync(cmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 
 const handler = async (m, { conn, text }) => {
-  const tradutor = {
-    texto1: "_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*",
-    texto2: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Actualización finalizada exitosamente.*\n\n",
-    texto3: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Se han hecho cambios locales en archivos del bot que entran en conflicto con las actualizaciones del repositorio. Para actualizar, reinstala el bot o realiza las actualizaciones manualmente.*\n\n*Archivos en conflicto:*",
-    texto4: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Ocurrió un error. Por favor, inténtalo de nuevo más tarde.*"
-  };
+  const reply = (msg) => conn.reply(m.chat, msg, m);
+
+  const extraArgs = m.fromMe && text ? ' ' + text : '';
 
   try {
-    const stdout = execSync('git pull' + (m.fromMe && text ? ' ' + text : ''));
-    let messager = stdout.toString();
-    if (messager.includes('Already up to date.')) messager = tradutor.texto1;
-    if (messager.includes('Updating')) messager = tradutor.texto2 + stdout.toString();
-    conn.reply(m.chat, messager, m);
-  } catch {
-    try {
-      const status = execSync('git status --porcelain');
-      if (status.length > 0) {
-        const conflictedFiles = status
-          .toString()
-          .split('\n')
-          .filter(line => line.trim() !== '')
-          .map(line => {
-            if (
-              line.includes('.npm/') ||
-              line.includes('.cache/') ||
-              line.includes('tmp/') ||
-              line.includes('RikkaSession/') ||
-              line.includes('npm-debug.log')
-            ) return null;
-            return '*→ ' + line.slice(3) + '*';
-          })
-          .filter(Boolean);
+    // ── 1. ¿Hay algo que actualizar? ─────────────────────────────────────
+    run('git fetch origin');
+    const behind = run('git rev-list HEAD..origin/$(git rev-parse --abbrev-ref HEAD) --count');
 
-        if (conflictedFiles.length > 0) {
-          const errorMessage = `${tradutor.texto3}\n\n${conflictedFiles.join('\n')}.*`;
-          await conn.reply(m.chat, errorMessage, m);
-        }
-      }
-    } catch (error) {
-      console.error(error);
-      let errorMessage2 = tradutor.texto4;
-      if (error.message) errorMessage2 += '\n*- Mensaje de error:* ' + error.message;
-      await conn.reply(m.chat, errorMessage2, m);
+    if (behind === '0') {
+      return reply('_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*');
     }
+
+    // ── 2. Detectar cambios locales ───────────────────────────────────────
+    const statusRaw = run('git status --porcelain');
+    const hasLocalChanges = statusRaw.length > 0;
+
+    let stashed = false;
+    if (hasLocalChanges) {
+      try {
+        const stashOut = run('git stash push -u -m "bot-autostash"');
+        stashed = !stashOut.includes('No local changes');
+      } catch {
+        // Si stash falla, intentamos igual
+      }
+    }
+
+    // ── 3. Pull ───────────────────────────────────────────────────────────
+    let pullOut = '';
+    try {
+      pullOut = run('git pull' + extraArgs);
+    } catch (pullErr) {
+      // Si el pull falló, restaurar stash y reportar
+      if (stashed) {
+        try { run('git stash pop'); } catch { /* ignorar */ }
+      }
+      return reply(
+        `_*< PROPIETARIO - ACTUALIZAR />*_\n\n` +
+        `*[ ❌ ] Error al hacer pull:*\n\`\`\`${pullErr.message?.slice(0, 400) || 'desconocido'}\`\`\``
+      );
+    }
+
+    // ── 4. Restaurar cambios locales (stash pop) ──────────────────────────
+    let popWarning = '';
+    if (stashed) {
+      try {
+        run('git stash pop');
+      } catch (popErr) {
+        // Hay conflictos reales entre remote y archivos locales
+        const conflicts = run('git diff --name-only --diff-filter=U').split('\n').filter(Boolean);
+        run('git checkout --theirs ' + conflicts.map(f => `"${f}"`).join(' '));
+        run('git add ' + conflicts.map(f => `"${f}"`).join(' '));
+        run('git stash drop');
+        popWarning =
+          `\n\n*[ ⚠️ ] Conflictos resueltos (se usó la versión remota en):*\n` +
+          conflicts.map(f => `*→ ${f}*`).join('\n');
+      }
+    }
+
+    // ── 5. Respuesta de éxito ─────────────────────────────────────────────
+    const stashNote = stashed
+      ? '\n*[ 💾 ] Cambios locales restaurados con stash pop.*'
+      : '';
+
+    reply(
+      `_*< PROPIETARIO - ACTUALIZAR />*_\n\n` +
+      `*[ ✅ ] Actualización exitosa.*${stashNote}${popWarning}\n\n` +
+      `\`\`\`${pullOut.slice(0, 600)}\`\`\``
+    );
+
+  } catch (err) {
+    console.error('[owner-update]', err);
+    reply(
+      `_*< PROPIETARIO - ACTUALIZAR />*_\n\n` +
+      `*[ ❌ ] Error inesperado:*\n\`\`\`${err.message?.slice(0, 400) || String(err)}\`\`\``
+    );
   }
 };
 
