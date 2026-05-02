@@ -1,8 +1,7 @@
-import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
-const handler = async (m, { conn, usedPrefix, command, args }) => {
+const handler = async (m, { conn, args }) => {
   const filter = args[0]?.toLowerCase() || null; // .deps axios → busca solo axios
 
   await conn.sendMessage(m.chat, { text: '🔍 _Revisando dependencias..._' }, { quoted: m });
@@ -13,7 +12,7 @@ const handler = async (m, { conn, usedPrefix, command, args }) => {
     const pkg = JSON.parse(readFileSync('./package.json', 'utf8'));
     pkgDeps = {
       ...pkg.dependencies,
-      ...pkg.optionalDependencies
+      ...pkg.optionalDependencies,
     };
   } catch {
     throw '❌ No se pudo leer package.json';
@@ -66,7 +65,6 @@ const handler = async (m, { conn, usedPrefix, command, args }) => {
 
   if (results.ok.length > 0) {
     lines.push('*✅ Instaladas:*');
-    // Si hay filtro o pocas, mostrar todas; si no, resumir
     if (filter || results.ok.length <= 20) {
       results.ok.forEach(p => lines.push(`  • ${p}`));
     } else {
@@ -89,4 +87,3 @@ handler.command = /^(deps|dependencias|checkdeps)$/i;
 handler.owner = true;
 
 export default handler;
-  
