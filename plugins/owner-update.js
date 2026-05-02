@@ -1,7 +1,6 @@
 import { execSync } from 'child_process';
-import fs from 'fs';
 
-const handler = async (m, { conn, text }) => {
+const handler = async (m, { conn, text, command }) => {
   const tradutor = {
     texto1: "_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*",
     texto2: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Actualización finalizada exitosamente.*\n\n",
@@ -9,6 +8,45 @@ const handler = async (m, { conn, text }) => {
     texto4: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Ocurrió un error. Por favor, inténtalo de nuevo más tarde.*"
   };
 
+  // .skipfile plugins/speedtest.js → protege un archivo del git pull
+  if (/^(skipfile|proteger)$/i.test(command)) {
+    const file = text?.trim();
+    if (!file) return conn.reply(m.chat, '❌ Indica el archivo.\nEjemplo: `.skipfile plugins/speedtest.js`', m);
+    try {
+      execSync(`git update-index --skip-worktree ${file}`);
+      return conn.reply(m.chat, `✅ *${file}* protegido. Git pull ya no lo sobreescribirá.`, m);
+    } catch (e) {
+      return conn.reply(m.chat, `❌ Error: ${e.message}`, m);
+    }
+  }
+
+  // .unskipfile plugins/speedtest.js → quita la protección
+  if (/^(unskipfile|desproteger)$/i.test(command)) {
+    const file = text?.trim();
+    if (!file) return conn.reply(m.chat, '❌ Indica el archivo.\nEjemplo: `.unskipfile plugins/speedtest.js`', m);
+    try {
+      execSync(`git update-index --no-skip-worktree ${file}`);
+      return conn.reply(m.chat, `✅ *${file}* desprotegido. Git pull volverá a actualizarlo.`, m);
+    } catch (e) {
+      return conn.reply(m.chat, `❌ Error: ${e.message}`, m);
+    }
+  }
+
+  // .skiplist → ver archivos protegidos
+  if (/^(skiplist|protegidos)$/i.test(command)) {
+    try {
+      const out = execSync('git ls-files -v').toString();
+      const skipped = out.split('\n')
+        .filter(l => l.startsWith('S '))
+        .map(l => `  • ${l.slice(2)}`);
+      if (skipped.length === 0) return conn.reply(m.chat, '📋 No hay archivos protegidos.', m);
+      return conn.reply(m.chat, `📋 *Archivos protegidos del git pull:*\n\n${skipped.join('\n')}`, m);
+    } catch (e) {
+      return conn.reply(m.chat, `❌ Error: ${e.message}`, m);
+    }
+  }
+
+  // .gitpull / .update normal
   try {
     const stdout = execSync('git pull' + (m.fromMe && text ? ' ' + text : ''));
     let messager = stdout.toString();
@@ -49,9 +87,9 @@ const handler = async (m, { conn, text }) => {
   }
 };
 
-handler.help = ['update'];
+handler.help = ['update', 'skipfile <archivo>', 'unskipfile <archivo>', 'skiplist'];
 handler.tags = ['owner'];
-handler.command = /^(update|actualizar|gitpull)$/i;
+handler.command = /^(update|actualizar|gitpull|skipfile|proteger|unskipfile|desproteger|skiplist|protegidos)$/i;
 handler.rowner = true;
 
 export default handler;
