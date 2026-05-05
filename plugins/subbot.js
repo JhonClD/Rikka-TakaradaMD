@@ -247,11 +247,11 @@ const handler = async (m, { conn, command, args, usedPrefix, isOwner, isROwner }
     const lastSub = user.Subs || 0;
     const diff    = Date.now() - lastSub;
     if (diff < COOLDOWN) {
-      return m.reply('ꕥ Debes esperar *' + msToTime(COOLDOWN - diff) + '* para volver a vincular un socket.');
+      return m.reply('⇢ ʚ Espera *' + msToTime(COOLDOWN - diff) + '* para volver a vincular ɞ');
     }
     const { saved } = listSubBots();
     if (saved.length >= MAX_SUBS) {
-      return m.reply('✐ No hay espacios disponibles para registrar un Sub-Bot.');
+      return m.reply('↳ ✗ No hay espacios disponibles para registrar un Sub-Bot.');
     }
 
     const isCode = command === 'code';
@@ -269,32 +269,31 @@ const handler = async (m, { conn, command, args, usedPrefix, isOwner, isROwner }
   // .listsub
   if (command === 'listsub' || command === 'listbot' || command === 'subbots') {
     const { active, saved } = listSubBots();
-    if (!saved.length) return m.reply('ꕥ No hay sub-bots registrados.');
-    let text = '*✿ Lista de Sub-Bots*\n\n';
-    text += 'Guardados: *' + saved.length + '* | Activos: *' + active.length + '*\n\n';
+    if (!saved.length) return m.reply('↳ No hay sub-bots registrados aún.');
+    let text = '˗ˏˋ *Sub-Bots* ˎˊ-\n⇢ Guardados: *' + saved.length + '* ˑ Activos: *' + active.length + '*\n\n';
     for (const dir of saved) {
       const on = active.some(c => c.userId === dir);
-      text += '» *+' + dir + '* — ' + (on ? '🟢 Conectado' : '🔴 Desconectado') + '\n';
+      text += '⇢ *+' + dir + '* ➤ ' + (on ? '🟢 Conectado' : '🔴 Desconectado') + '\n';
     }
     return m.reply(text.trim());
   }
 
   // .delsub
   if (command === 'delsub' || command === 'delbot' || command === 'removesub') {
-    if (!isOwner && !isROwner) return m.reply('ꕥ Solo el *owner* puede usar este comando.');
+    if (!isOwner && !isROwner) return m.reply('↳ ✗ Solo el *owner* puede usar este comando.');
     const raw    = args[0] || (m.mentionedJid && m.mentionedJid[0] ? m.mentionedJid[0] : (m.quoted ? m.quoted.sender : ''));
     const target = cleanJid(raw);
-    if (!target) return m.reply('❀ Uso: *' + usedPrefix + 'delsub <número>*');
+    if (!target) return m.reply('⸙͎ Uso: *' + usedPrefix + 'delsub <número>*');
     if (!fs.existsSync(path.join(JADIBTS, target))) return m.reply('ꕥ No se encontró el sub-bot *+' + target + '*.');
     const ok = await removeSubBot(target);
-    return m.reply(ok ? '✅ Sub-bot *+' + target + '* eliminado.' : '❌ No se pudo eliminar *+' + target + '*.');
+    return m.reply(ok ? '✩ Sub-bot *+' + target + '* eliminado ❁' : '↳ ✗ No se pudo eliminar *+' + target + '*');
   }
 
   // .subreload
   if (command === 'subreload' || command === 'reloadsub') {
-    if (!isOwner && !isROwner) return m.reply('ꕥ Solo el *owner* puede usar este comando.');
+    if (!isOwner && !isROwner) return m.reply('↳ ✗ Solo el *owner* puede usar este comando.');
     const { active } = listSubBots();
-    if (!active.length) return m.reply('ꕥ No hay sub-bots activos.');
+    if (!active.length) return m.reply('↳ No hay sub-bots activos para recargar.');
     let count = 0;
     for (const sock of active) {
       if (typeof sock.subreloadHandler === 'function') {
@@ -302,7 +301,7 @@ const handler = async (m, { conn, command, args, usedPrefix, isOwner, isROwner }
         count++;
       }
     }
-    return m.reply('✅ Handler recargado en *' + count + '* sub-bot' + (count !== 1 ? 's' : '') + '.');
+    return m.reply('✩ Handler recargado en *' + count + '* sub-bot' + (count !== 1 ? 's' : '') + ' ❁');
   }
 };
 
@@ -317,4 +316,4 @@ handler.help    = [
 ];
 
 export default handler;
-          
+           
