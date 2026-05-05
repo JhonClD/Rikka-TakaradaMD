@@ -29,28 +29,28 @@ function formatTime(ms) {
 const handler = async (m, { conn, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
+
+
   if (!chat.users[m.sender]) chat.users[m.sender] = {};
 
   if (chat.gacha === false) {
-    return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
+    return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
-  const me         = chat.users[m.sender];
+  const me = global.db.data.users[m.sender] || {};
   const globalUser = global.db.data.users[m.sender] || {};
   const now        = Date.now();
 
-  const rollLeft  = me.lastRoll  && now < me.lastRoll  ? me.lastRoll  - now : 0;
-  const claimLeft = me.lastClaim && now < me.lastClaim ? me.lastClaim - now : 0;
+  const rollLeft  = me.lastrw  && now < me.lastrw  ? me.lastrw  - now : 0;
+  const claimLeft = me.lastclaim && now < me.lastclaim ? me.lastclaim - now : 0;
 
   let structure;
-  try { structure = await loadCharacters(); } catch { return m.reply('ꕥ No se pudo leer characters.json'); }
+  try { structure = await loadCharacters(); } catch { return m.reply('❲ ✗ ❳ No se pudo leer characters.json'); }
   const allCharacters  = flattenCharacters(structure);
   const totalCharacters = allCharacters.length;
   const totalSeries    = Object.keys(structure).length;
 
-  const claimedIDs = Object.entries(chat.characters)
+  const claimedIDs = Object.entries(chat.gacha_characters)
     .filter(([, c]) => c.user === m.sender).map(([id]) => id);
   const totalValue = claimedIDs.reduce((sum, id) => {
     const gv  = global.db.data.characters?.[id]?.value;
@@ -59,13 +59,13 @@ const handler = async (m, { conn, usedPrefix }) => {
   }, 0);
 
   const userName = global.db.data.users[m.sender]?.name || m.sender.split('@')[0];
-  const msg = `*❀ Info Gacha — \`${userName}\`*\n\n` +
-    `ⴵ Roll waifu » *${formatTime(rollLeft)}*\n` +
-    `ⴵ Claim » *${formatTime(claimLeft)}*\n\n` +
-    `♡ Reclamados » *${claimedIDs.length}*\n` +
-    `✰ Valor total » *${totalValue.toLocaleString()}*\n` +
-    `❏ Total personajes DB » *${totalCharacters}*\n` +
-    `❏ Total series DB » *${totalSeries}*`;
+  const msg = `˗ˏˋ *Gacha Info — ${userName}* ˎˊ-\n\n` +
+    `⇢ Roll waifu ➤ *${formatTime(rollLeft)}*\n` +
+    `⇢ Claim     ➤ *${formatTime(claimLeft)}*\n\n` +
+    `⇢ Reclamados ➤ *${claimedIDs.length}*\n` +
+    `⇢ Valor total ➤ *¥${totalValue.toLocaleString()}*\n` +
+    `⇢ Personajes DB ➤ *${totalCharacters}*\n` +
+    `⇢ Series DB ➤ *${totalSeries}*`;
 
   await conn.sendMessage(m.chat, { text: msg.trim() }, { quoted: m });
 };

@@ -1,5 +1,7 @@
 // gacha-farmeo.js — Farmeo de monedas (daily, work, balance)
-// Portado de YukiBot-MD → Rikka-TakaradaMD
+// USA los campos reales del handler de Rikka-TakaradaMD:
+//   monedas → user.coin   banco → user.atm
+//   cooldowns → user.lastclaim / user.lastweekly / user.lastmonthly / user.lastwork
 
 const COOLDOWNS = {
   daily:   24 * 60 * 60 * 1000,
@@ -11,11 +13,11 @@ const COOLDOWNS = {
 function formatTime(ms) {
   if (ms <= 0) return 'Disponible';
   const s = Math.ceil(ms / 1000);
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const h = Math.floor(s / 3600), m2 = Math.floor((s % 3600) / 60), sec = s % 60;
   const p = [];
-  if (h)   p.push(`${h}h`);
-  if (m || h) p.push(`${m}m`);
-  p.push(`${sec}s`);
+  if (h)      p.push(h + 'h');
+  if (m2 || h) p.push(m2 + 'm');
+  p.push(sec + 's');
   return p.join(' ');
 }
 
@@ -33,97 +35,95 @@ const workPhrases = [
 const handler = async (m, { conn, command, args, usedPrefix }) => {
   if (!global.db.data.users[m.sender]) global.db.data.users[m.sender] = {};
   const user = global.db.data.users[m.sender];
-  user.coins  = typeof user.coins  === 'number' ? user.coins  : 0;
-  user.bank   = typeof user.bank   === 'number' ? user.bank   : 0;
+  // Campos exactos del schema del handler de Rikka
+  if (typeof user.coin !== 'number') user.coin = 0;
+  if (typeof user.atm  !== 'number') user.atm  = 0;
   const name = user.name || m.sender.split('@')[0];
   const now  = Date.now();
 
-  // ─── BALANCE ────────────────────────────────────────────────
   if (['balance', 'bal', 'monedas', 'coins'].includes(command)) {
     return m.reply(
-      `💰 *Balance de ${name}*\n\n` +
-      `ꕥ Cartera » *¥${user.coins.toLocaleString()}*\n` +
-      `ꕥ Banco   » *¥${user.bank.toLocaleString()}*\n` +
-      `ꕥ Total   » *¥${(user.coins + user.bank).toLocaleString()}*`
+      '˗ˏˋ *Balance — ' + name + '* ˎˊ-\n\n' +
+      '⇢ Cartera ➤ *¥' + user.coin.toLocaleString() + '*\n' +
+      '⇢ Banco   ➤ *¥' + user.atm.toLocaleString()  + '*\n' +
+      '⇢ Total   ➤ *¥' + (user.coin + user.atm).toLocaleString() + '*'
     );
   }
 
-  // ─── DEPOSIT ────────────────────────────────────────────────
   if (['deposit', 'depositar'].includes(command)) {
-    const amount = args[0] === 'all' ? user.coins : parseInt(args[0]);
-    if (isNaN(amount) || amount <= 0) return m.reply(`❀ Uso: *${usedPrefix}deposit <cantidad|all>*`);
-    if (amount > user.coins) return m.reply(`ꕥ No tienes suficientes monedas. Tienes *¥${user.coins.toLocaleString()}*.`);
-    user.coins -= amount;
-    user.bank  += amount;
-    return m.reply(`✅ Depositaste *¥${amount.toLocaleString()}* al banco.\n> Banco: *¥${user.bank.toLocaleString()}*`);
+    const amount = args[0] === 'all' ? user.coin : parseInt(args[0]);
+    if (isNaN(amount) || amount <= 0) return m.reply('⸙͎ Uso: *' + usedPrefix + 'deposit <cantidad|all>*');
+    if (amount > user.coin) return m.reply('↳ ✗ Monedas insuficientes. Tienes *¥' + user.coin.toLocaleString() + '*');
+    user.coin -= amount;
+    user.atm  += amount;
+    return m.reply('✩ Depositaste *¥' + amount.toLocaleString() + '* al banco ❁\n↳ Banco: *¥' + user.atm.toLocaleString() + '*');
   }
 
-  // ─── WITHDRAW ───────────────────────────────────────────────
   if (['withdraw', 'retirar'].includes(command)) {
-    const amount = args[0] === 'all' ? user.bank : parseInt(args[0]);
-    if (isNaN(amount) || amount <= 0) return m.reply(`❀ Uso: *${usedPrefix}withdraw <cantidad|all>*`);
-    if (amount > user.bank) return m.reply(`ꕥ Solo tienes *¥${user.bank.toLocaleString()}* en el banco.`);
-    user.bank  -= amount;
-    user.coins += amount;
-    return m.reply(`✅ Retiraste *¥${amount.toLocaleString()}* del banco.\n> Cartera: *¥${user.coins.toLocaleString()}*`);
+    const amount = args[0] === 'all' ? user.atm : parseInt(args[0]);
+    if (isNaN(amount) || amount <= 0) return m.reply('⸙͎ Uso: *' + usedPrefix + 'withdraw <cantidad|all>*');
+    if (amount > user.atm) return m.reply('↳ ✗ Solo tienes *¥' + user.atm.toLocaleString() + '* en el banco.');
+    user.atm  -= amount;
+    user.coin += amount;
+    return m.reply('✩ Retiraste *¥' + amount.toLocaleString() + '* del banco ❁\n↳ Cartera: *¥' + user.coin.toLocaleString() + '*');
   }
 
-  // ─── DAILY ──────────────────────────────────────────────────
   if (['daily', 'diario'].includes(command)) {
-    if (user.lastDaily && now < user.lastDaily) {
-      return m.reply(`ꕥ Próximo daily en *${formatTime(user.lastDaily - now)}*.`);
+    const last = user.lastclaim || 0;
+    if (last && now < last + COOLDOWNS.daily) {
+      return m.reply('⇢ ʚ Próximo daily en *' + formatTime((last + COOLDOWNS.daily) - now) + '* ɞ');
     }
     const reward = Math.floor(Math.random() * 1500) + 500;
-    user.coins    += reward;
-    user.lastDaily = now + COOLDOWNS.daily;
-    return m.reply(`🎁 *Daily reclamado!*\n+¥${reward.toLocaleString()} monedas\n> Total: *¥${user.coins.toLocaleString()}*`);
+    user.coin     += reward;
+    user.lastclaim = now;
+    return m.reply('✩ *Daily reclamado* ❁\n⇢ +¥' + reward.toLocaleString() + ' monedas\n↳ Total: *¥' + user.coin.toLocaleString() + '*');
   }
 
-  // ─── WEEKLY ─────────────────────────────────────────────────
   if (['weekly', 'semanal'].includes(command)) {
-    if (user.lastWeekly && now < user.lastWeekly) {
-      return m.reply(`ꕥ Próximo weekly en *${formatTime(user.lastWeekly - now)}*.`);
+    const last = user.lastweekly || 0;
+    if (last && now < last + COOLDOWNS.weekly) {
+      return m.reply('⇢ ʚ Próximo weekly en *' + formatTime((last + COOLDOWNS.weekly) - now) + '* ɞ');
     }
-    const reward  = Math.floor(Math.random() * 8000) + 5000;
-    user.coins     += reward;
-    user.lastWeekly = now + COOLDOWNS.weekly;
-    return m.reply(`📦 *Weekly reclamado!*\n+¥${reward.toLocaleString()} monedas\n> Total: *¥${user.coins.toLocaleString()}*`);
+    const reward    = Math.floor(Math.random() * 8000) + 5000;
+    user.coin       += reward;
+    user.lastweekly  = now;
+    return m.reply('✩ *Weekly reclamado* ❁\n⇢ +¥' + reward.toLocaleString() + ' monedas\n↳ Total: *¥' + user.coin.toLocaleString() + '*');
   }
 
-  // ─── MONTHLY ────────────────────────────────────────────────
   if (['monthly', 'mensual'].includes(command)) {
-    if (user.lastMonthly && now < user.lastMonthly) {
-      return m.reply(`ꕥ Próximo monthly en *${formatTime(user.lastMonthly - now)}*.`);
+    const last = user.lastmonthly || 0;
+    if (last && now < last + COOLDOWNS.monthly) {
+      return m.reply('⇢ ʚ Próximo monthly en *' + formatTime((last + COOLDOWNS.monthly) - now) + '* ɞ');
     }
-    const reward   = Math.floor(Math.random() * 30000) + 20000;
-    user.coins      += reward;
-    user.lastMonthly = now + COOLDOWNS.monthly;
-    return m.reply(`🏆 *Monthly reclamado!*\n+¥${reward.toLocaleString()} monedas\n> Total: *¥${user.coins.toLocaleString()}*`);
+    const reward     = Math.floor(Math.random() * 30000) + 20000;
+    user.coin        += reward;
+    user.lastmonthly  = now;
+    return m.reply('✩ *Monthly reclamado* ❁\n⇢ +¥' + reward.toLocaleString() + ' monedas\n↳ Total: *¥' + user.coin.toLocaleString() + '*');
   }
 
-  // ─── WORK ───────────────────────────────────────────────────
   if (['work', 'trabajar', 'farm'].includes(command)) {
-    if (user.lastWork && now < user.lastWork) {
-      return m.reply(`ꕥ Próximo trabajo en *${formatTime(user.lastWork - now)}*.`);
+    const last = user.lastwork || 0;
+    if (last && now < last + COOLDOWNS.work) {
+      return m.reply('⇢ ʚ Próximo trabajo en *' + formatTime((last + COOLDOWNS.work) - now) + '* ɞ');
     }
     const reward  = Math.floor(Math.random() * 800) + 200;
     const phrase  = workPhrases[Math.floor(Math.random() * workPhrases.length)];
-    user.coins    += reward;
-    user.lastWork  = now + COOLDOWNS.work;
-    return m.reply(`💼 *${name}* ${phrase} *¥${reward.toLocaleString()}*!\n> Total en cartera: *¥${user.coins.toLocaleString()}*`);
+    user.coin    += reward;
+    user.lastwork = now;
+    return m.reply('✩ *' + name + '* ' + phrase + ' *¥' + reward.toLocaleString() + '* ❁\n↳ Cartera: *¥' + user.coin.toLocaleString() + '*');
   }
 
-  // ─── GIVECOINS (owner) ──────────────────────────────────────
   if (['givecoins', 'darmonedas'].includes(command)) {
-    const target  = m.mentionedJid?.[0] || m.quoted?.sender;
-    const amount  = parseInt(args[args.length - 1]);
+    const target = (m.mentionedJid && m.mentionedJid[0]) ? m.mentionedJid[0] : (m.quoted ? m.quoted.sender : null);
+    const amount = parseInt(args[args.length - 1]);
     if (!target || isNaN(amount) || amount <= 0) {
-      return m.reply(`❀ Uso: *${usedPrefix}givecoins @usuario <cantidad>*`);
+      return m.reply('⸙͎ Uso: *' + usedPrefix + 'givecoins @usuario <cantidad>*');
     }
-    if (!global.db.data.users[target]) global.db.data.users[target] = { coins: 0 };
-    global.db.data.users[target].coins = (global.db.data.users[target].coins || 0) + amount;
-    const tName = global.db.data.users[target]?.name || target.split('@')[0];
-    return m.reply(`✅ Se dieron *¥${amount.toLocaleString()}* a *${tName}*.\n> Total: *¥${global.db.data.users[target].coins.toLocaleString()}*`);
+    if (!global.db.data.users[target]) global.db.data.users[target] = { coin: 0 };
+    if (typeof global.db.data.users[target].coin !== 'number') global.db.data.users[target].coin = 0;
+    global.db.data.users[target].coin += amount;
+    const tName = global.db.data.users[target].name || target.split('@')[0];
+    return m.reply('✩ Se dieron *¥' + amount.toLocaleString() + '* a *' + tName + '* ❁\n↳ Total: *¥' + global.db.data.users[target].coin.toLocaleString() + '*');
   }
 };
 

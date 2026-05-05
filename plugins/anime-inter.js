@@ -205,7 +205,7 @@ const handler = async (m, { conn, command, usedPrefix }) => {
       mentions: [who, m.sender],
     }, { quoted: m });
   } catch (e) {
-    await m.reply(`❌ Error al ejecutar *${usedPrefix + command}*: ${e.message}`);
+    await m.reply(`↳ ✗ Error al ejecutar *${usedPrefix + command}*: ${e.message}`);
   }
 };
 
@@ -214,4 +214,3 @@ handler.tags    = ['anime', 'interacciones'];
 handler.help    = ['pat @usuario', 'kiss @usuario', 'hug @usuario', 'slap @usuario', 'fuck @usuario', '... y más'];
 
 export default handler;
-  

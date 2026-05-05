@@ -72,51 +72,51 @@ function findCharacter(allChars, query) {
 const handler = async (m, { conn, command, args, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
-  chat.sales = chat.sales || {};
+
+
+
 
   if (chat.gacha === false) {
-    return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
+    return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
   // ─── SETFAV ─────────────────────────────────────────────────
   if (['setfav', 'setfavourite', 'favorito'].includes(command)) {
-    if (!args.length) return m.reply(`❀ Uso: *${usedPrefix}setfav <nombre personaje>*`);
+    if (!args.length) return m.reply(`⸙͎ Uso: *${usedPrefix}setfav <personaje>*`);
     if (!chat.users[m.sender]) chat.users[m.sender] = {};
     const me = chat.users[m.sender];
-    if (!Array.isArray(me.characters)) me.characters = [];
+    if (!Array.isArray(me.gacha_characters)) me.gacha_characters = [];
     let structure;
-    try { structure = await loadCharacters(); } catch { return m.reply('ꕥ No se pudo leer characters.json'); }
+    try { structure = await loadCharacters(); } catch { return m.reply('❲ ✗ ❳ No se pudo leer characters.json'); }
     const character = findCharacter(flattenCharacters(structure), args.join(' '));
-    if (!character) return m.reply(`ꕥ No se encontró *${args.join(' ')}*.`);
-    if (!me.characters.includes(character.id) && !me.characters.includes(String(character.id))) {
-      return m.reply(`ꕥ *${character.name}* no está en tu colección.`);
+    if (!character) return m.reply(`❲ ✗ ❳ No se encontró *${args.join(' ')}*`);
+    if (!me.gacha_characters.includes(character.id) && !me.gacha_characters.includes(String(character.id))) {
+      return m.reply(`↳ ✗ *${character.name}* no está en tu colección.`);
     }
-    const prevId = me.favorite;
-    me.favorite = character.id;
+    const prevId = me.gacha_favorite;
+    me.gacha_favorite = character.id;
     if (!global.db.data.users[m.sender]) global.db.data.users[m.sender] = {};
     global.db.data.users[m.sender].favorite = character.id;
     if (prevId && prevId !== character.id) {
       const prev = global.db.data.characters?.[prevId];
       const prevName = typeof prev?.name === 'string' ? prev.name : 'personaje anterior';
-      return m.reply(`❀ Reemplazaste tu favorito *${prevName}* por *${character.name}*!`);
+      return m.reply(`✩ Reemplazaste *${prevName}* por *${character.name}* como favorita ❁`);
     }
-    return m.reply(`❀ *${character.name}* es ahora tu personaje favorito!`);
+    return m.reply(`✩ *${character.name}* es ahora tu favorita ❁`);
   }
 
   // ─── CHARIMAGE / CHARINFO ───────────────────────────────────
   if (['charimage', 'waifuimage', 'cimage', 'wimage', 'charinfo', 'wifu'].includes(command)) {
-    if (!args.length) return m.reply(`❀ Uso: *${usedPrefix}${command} <nombre personaje>*`);
+    if (!args.length) return m.reply(`⸙͎ Uso: *${usedPrefix}${command} <personaje>*`);
     let structure;
-    try { structure = await loadCharacters(); } catch { return m.reply('ꕥ No se pudo leer characters.json'); }
+    try { structure = await loadCharacters(); } catch { return m.reply('❲ ✗ ❳ No se pudo leer characters.json'); }
     const character = findCharacter(flattenCharacters(structure), args.join(' '));
-    if (!character) return m.reply(`ꕥ No se encontró *${args.join(' ')}*.`);
+    if (!character) return m.reply(`❲ ✗ ❳ No se encontró *${args.join(' ')}*`);
     const tag = Array.isArray(character.tags) ? character.tags[0] : null;
-    if (!tag) return m.reply(`ꕥ *${character.name}* no tiene tag para buscar imágenes.`);
+    if (!tag) return m.reply(`↳ ✗ *${character.name}* no tiene tag disponible.`);
     const mediaList = await buscarImagen(tag);
     const media = mediaList[Math.floor(Math.random() * mediaList.length)];
-    if (!media) return m.reply(`ꕥ No se encontraron imágenes para *${character.name}*.`);
+    if (!media) return m.reply(`❲ ✗ ❳ No se encontraron imágenes para *${character.name}*`);
     const source = getSeriesName(structure, character.id);
     const msg = `❀ Nombre » *${character.name}*\n⚥ Género » *${character.gender || 'Desconocido'}*\n❖ Fuente » *${source}*`;
     const imgRes = await axios.get(media, {
@@ -128,14 +128,14 @@ const handler = async (m, { conn, command, args, usedPrefix }) => {
 
   // ─── REMOVESALE ─────────────────────────────────────────────
   if (['removesale', 'quitarventa', 'cancelsale'].includes(command)) {
-    if (!args.length) return m.reply(`❀ Uso: *${usedPrefix}removesale <nombre personaje>*`);
+    if (!args.length) return m.reply(`⸙͎ Uso: *${usedPrefix}removesale <personaje>*`);
     const name   = args.join(' ').toLowerCase();
-    const idDel  = Object.keys(chat.sales).find(id => (chat.sales[id]?.name || '').toLowerCase() === name);
-    if (!idDel) return m.reply(`ꕥ No se encontró *${args.join(' ')}* en venta.`);
-    if (chat.sales[idDel].user !== m.sender) return m.reply('ꕥ Solo el vendedor puede retirar su personaje de venta.');
-    const charName = chat.sales[idDel].name;
-    delete chat.sales[idDel];
-    return m.reply(`✎ *${charName}* retirado de la venta.`);
+    const idDel  = Object.keys(chat.gacha_sales).find(id => (chat.gacha_sales[id]?.name || '').toLowerCase() === name);
+    if (!idDel) return m.reply(`❲ ✗ ❳ No se encontró *${args.join(' ')}* en venta.`);
+    if (chat.gacha_sales[idDel].user !== m.sender) return m.reply('↳ ✗ Solo el vendedor puede retirarlo de venta.');
+    const charName = chat.gacha_sales[idDel].name;
+    delete chat.gacha_sales[idDel];
+    return m.reply(`✩ *${charName}* retirado de la venta ❁`);
   }
 };
 

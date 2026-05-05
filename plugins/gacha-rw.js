@@ -87,27 +87,27 @@ const handler = async (m, { conn, usedPrefix }) => {
   // Inicializar estructuras del chat en la DB de Rikka
   if (!global.db.data.chats[chatId])         global.db.data.chats[chatId] = {};
   const chat = global.db.data.chats[chatId];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
-  chat.rolls = chat.rolls || {};
+
+
+
 
   // Verificar si gacha está habilitado (si no existe el flag, permitir por defecto)
   if (chat.gacha === false) {
-    return m.reply(`ꕥ Los comandos de *Gacha* están desactivados en este grupo.\n\nUn *administrador* puede activarlos con:\n» *${usedPrefix}gacha on*`);
+    return m.reply(`╰─► Los comandos de *Gacha* están desactivados.\n⇢ *${usedPrefix}gacha on* para activarlos.`);
   }
 
-  if (!chat.users[userId]) chat.users[userId] = {};
-  const me = chat.users[userId];
+  if (!global.db.data.users[userId]) global.db.data.users[userId] = {};
+  const me = global.db.data.users[userId];
   const now = Date.now();
   const cooldown = 15 * 60 * 1000;
 
-  if (me.lastRoll && now < me.lastRoll) {
-    const r = Math.ceil((me.lastRoll - now) / 1000);
+  if (me.lastrw && now < me.lastrw) {
+    const r = Math.ceil((me.lastrw - now) / 1000);
     const min = Math.floor(r / 60), sec = r % 60;
     let t = '';
     if (min > 0) t += `${min} minuto${min !== 1 ? 's' : ''} `;
     if (sec > 0 || !t) t += `${sec} segundo${sec !== 1 ? 's' : ''}`;
-    return m.reply(`ꕥ Debes esperar *${t.trim()}* para usar *${usedPrefix}rw* de nuevo.`);
+    return m.reply(`⇢ ʚ Espera *${t.trim()}* para volver a usar *${usedPrefix}rw* ɞ`);
   }
 
   rollLocks.set(userId, now);
@@ -115,7 +115,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   try {
     const db       = await loadCharacters();
     const all      = flattenCharacters(db);
-    if (!all.length) return m.reply('ꕥ No hay personajes cargados en la base de datos.');
+    if (!all.length) return m.reply('❲ ✗ ❳ No hay personajes cargados en la base de datos.');
 
     const selected = all[Math.floor(Math.random() * all.length)];
     const id       = String(selected.id);
@@ -126,11 +126,11 @@ const handler = async (m, { conn, usedPrefix }) => {
 
     if (!media) {
       rollLocks.delete(userId);
-      return m.reply(`ꕥ No se encontraron imágenes para *${selected.name}*.`);
+      return m.reply(`❲ ✗ ❳ No se encontraron imágenes para *${selected.name}*.`);
     }
 
-    if (!chat.characters[selected.id]) chat.characters[selected.id] = {};
-    const record    = chat.characters[selected.id];
+    if (!chat.gacha_characters[selected.id]) chat.gacha_characters[selected.id] = {};
+    const record    = chat.gacha_characters[selected.id];
     const globalRec = global.db.data.characters?.[selected.id] || {};
 
     record.name         = String(selected.name || 'Sin nombre');
@@ -144,7 +144,7 @@ const handler = async (m, { conn, usedPrefix }) => {
       ? (global.db.data.users?.[record.user]?.name || record.user.split('@')[0]).trim()
       : 'libre';
 
-    const msg = `❀ Nombre » *${record.name}*\n⚥ Género » *${selected.gender || 'Desconocido'}*\n✰ Valor » *${record.value.toLocaleString()}*\n♡ Estado » *${record.user ? `Reclamado por ${owner}` : 'Libre'}*\n❖ Fuente » *${source}*\n\n_Responde con_ *${usedPrefix}c* _para reclamar_`;
+    const msg = `˗ˏˋ *${record.name}* ˎˊ-\n\n⇢ Género ➤ *${selected.gender || 'Desconocido'}*\n⇢ Valor  ➤ *¥${record.value.toLocaleString()}*\n⇢ Estado ➤ *${record.user ? `Reclamado por ${owner}` : 'Libre'}*\n⇢ Fuente ➤ *${source}*\n\n↳ Responde *${usedPrefix}c* para reclamar`;
 
     const imgRes = await axios.get(media, {
       responseType: 'arraybuffer',
@@ -157,17 +157,17 @@ const handler = async (m, { conn, usedPrefix }) => {
       caption: msg,
     }, { quoted: m });
 
-    chat.rolls[sent.key.id] = {
+    chat.gacha_rolls[sent.key.id] = {
       id,
       name: record.name,
       expiresAt: record.expiresAt,
       reservedBy: userId,
       reservedUntil: record.reservedUntil,
     };
-    me.lastRoll = now + cooldown;
+    me.lastrw = now + cooldown;
 
   } catch (e) {
-    await m.reply(`❌ Error en *${usedPrefix}rw*: ${e.message}`);
+    await m.reply(`↳ ✗ Error en *${usedPrefix}rw*: ${e.message}`);
   } finally {
     rollLocks.delete(userId);
   }

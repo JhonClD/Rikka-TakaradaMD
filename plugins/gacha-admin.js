@@ -9,16 +9,16 @@ const handler = async (m, { conn, command, args, usedPrefix }) => {
 
   if (subCmd === 'on') {
     chat.gacha = true;
-    return m.reply('✅ *Gacha activado* en este grupo.\n> Comandos disponibles: *rw, c, harem, ginfo, wshop, trade...*');
+    return m.reply('✩ *Gacha activado* en este grupo ❁\n↳ Comandos: *rw, c, harem, ginfo, wshop, trade...*');
   }
 
   if (subCmd === 'off') {
     chat.gacha = false;
-    return m.reply('❌ *Gacha desactivado* en este grupo.');
+    return m.reply('↳ ✗ *Gacha desactivado* en este grupo.');
   }
 
-  const estado = chat.gacha === false ? '❌ Desactivado' : '✅ Activado';
-  return m.reply(`*Estado del Gacha:* ${estado}\n\nUso:\n» *${usedPrefix}gacha on* — activar\n» *${usedPrefix}gacha off* — desactivar`);
+  const estado = chat.gacha === false ? '↳ ✗ Desactivado' : '✩ Activado ❁';
+  return m.reply(`˗ˏˋ *Estado del Gacha* ˎˊ-\n⇢ ${estado}\n\n↳ *${usedPrefix}gacha on*  — activar\n↳ *${usedPrefix}gacha off* — desactivar`);
 };
 
 handler.command = ['gacha', 'gachaon', 'gachaoff'];
