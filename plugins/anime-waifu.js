@@ -14,12 +14,12 @@ const handler = async (m, { conn, command, usedPrefix }) => {
     const buf = Buffer.from(await (await fetch(json.url)).arrayBuffer());
     await conn.sendMessage(m.chat, {
       image: buf,
-      caption: `ꕥ Aquí tienes tu *${type.toUpperCase()}* ฅ^•ﻌ•^ฅ`,
+      caption: `✩ *${type.toUpperCase()}* para ti ˑ ❁ཻུ۪۪`,
     }, { quoted: m });
     await m.react('✔️');
   } catch (e) {
     await m.react('✖️');
-    await m.reply(`❌ Error en *${usedPrefix + command}*: ${e.message}`);
+    await m.reply(`↳ ✗ Error en *${usedPrefix + command}*: ${e.message}`);
   }
 };
 

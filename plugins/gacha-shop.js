@@ -4,74 +4,74 @@
 const handler = async (m, { conn, command, args, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
-  chat.sales = chat.sales || {};
+
+
+
 
   if (chat.gacha === false) {
-    return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
+    return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
   // ─── SELL ───────────────────────────────────────────────────
   if (['sell', 'vender'].includes(command)) {
     if (args.length < 2) {
-      return m.reply(`❀ Uso: *${usedPrefix}sell <precio> <nombre personaje>*\nEjemplo: *${usedPrefix}sell 5000 Rem*`);
+      return m.reply(`⸙͎ Uso: *${usedPrefix}sell <precio> <personaje>*\n↳ Ejemplo: *${usedPrefix}sell 5000 Rem*`);
     }
     const price = parseInt(args[0]);
-    if (isNaN(price) || price < 2000)       return m.reply('ꕥ El precio mínimo es *¥2,000*.');
-    if (price > 100_000_000)                return m.reply('ꕥ El precio máximo es *¥100,000,000*.');
+    if (isNaN(price) || price < 2000)       return m.reply('↳ ✗ El precio mínimo es *¥2,000*.');
+    if (price > 100_000_000)                return m.reply('↳ ✗ El precio máximo es *¥100,000,000*.');
     const name   = args.slice(1).join(' ').toLowerCase();
-    const idSell = Object.keys(chat.characters).find(id =>
-      (chat.characters[id]?.name || '').toLowerCase() === name
+    const idSell = Object.keys(chat.gacha_characters).find(id =>
+      (chat.gacha_characters[id]?.name || '').toLowerCase() === name
     );
-    if (!idSell) return m.reply(`ꕥ No se encontró el personaje *${args.slice(1).join(' ')}*.`);
-    const charSell = chat.characters[idSell];
-    if (charSell.user !== m.sender) return m.reply(`ꕥ *${charSell.name}* debe ser tuyo para venderlo.`);
-    chat.sales[idSell] = { name: charSell.name, user: m.sender, price, time: Date.now() };
+    if (!idSell) return m.reply(`❲ ✗ ❳ No se encontró *${args.slice(1).join(' ')}*`);
+    const charSell = chat.gacha_characters[idSell];
+    if (charSell.user !== m.sender) return m.reply(`↳ ✗ *${charSell.name}* no es tuyo para venderlo.`);
+    chat.gacha_sales[idSell] = { name: charSell.name, user: m.sender, price, time: Date.now() };
     const sellerName = global.db.data.users[m.sender]?.name?.trim() || m.sender.split('@')[0];
-    return m.reply(`✎ *${charSell.name}* puesto en venta!\n❀ Vendedor » *${sellerName}*\n⛁ Precio » *¥${price.toLocaleString()}*\nⴵ Expira en » *3 días*\n> Usa *${usedPrefix}wshop* para ver la tienda.`);
+    return m.reply(`˗ˏˋ *${charSell.name}* en venta ˎˊ-\n⇢ Vendedor ➤ *${sellerName}*\n⇢ Precio ➤ *¥${price.toLocaleString()}*\n⇢ Expira en ➤ *3 días*\n↳ *${usedPrefix}wshop* para ver la tienda`);
   }
 
   // ─── BUYCHAR ────────────────────────────────────────────────
   if (['buyc', 'buychar', 'comprarwaifu'].includes(command)) {
     if (!args.length) {
-      return m.reply(`❀ Uso: *${usedPrefix}buyc <nombre personaje>*`);
+      return m.reply(`⸙͎ Uso: *${usedPrefix}buyc <personaje>*`);
     }
     const queryBuy = args.join(' ').toLowerCase();
-    const idBuy    = Object.keys(chat.sales).find(id =>
-      (chat.sales[id]?.name || '').toLowerCase() === queryBuy
+    const idBuy    = Object.keys(chat.gacha_sales).find(id =>
+      (chat.gacha_sales[id]?.name || '').toLowerCase() === queryBuy
     );
-    if (!idBuy) return m.reply(`ꕥ No se encontró *${args.join(' ')}* en venta.`);
-    const venta = chat.sales[idBuy];
-    if (venta.user === m.sender) return m.reply('ꕥ No puedes comprar tu propio personaje.');
+    if (!idBuy) return m.reply(`❲ ✗ ❳ No se encontró *${args.join(' ')}* en venta.`);
+    const venta = chat.gacha_sales[idBuy];
+    if (venta.user === m.sender) return m.reply('↳ ✗ No puedes comprar tu propio personaje.');
     if (!chat.users[m.sender]) chat.users[m.sender] = {};
-    const saldo = typeof chat.users[m.sender]?.coins === 'number' ? chat.users[m.sender].coins : 0;
+    const saldo = typeof chat.users[m.sender]?.coin === 'number' ? chat.users[m.sender].coin : 0;
     if (saldo < venta.price) {
-      return m.reply(`ꕥ No tienes suficientes monedas para comprar *${venta.name}*.\n> Necesitas *¥${venta.price.toLocaleString()}*`);
+      return m.reply(`↳ ✗ Monedas insuficientes para *${venta.name}*\n⇢ Necesitas *¥${venta.price.toLocaleString()}*`);
     }
     if (!chat.users[venta.user])                            chat.users[venta.user] = { coins: 0, characters: [] };
     if (!Array.isArray(chat.users[venta.user].characters)) chat.users[venta.user].characters = [];
-    chat.users[m.sender].coins  -= venta.price;
-    chat.users[venta.user].coins += venta.price;
-    chat.characters[idBuy].user  = m.sender;
+    chat.users[m.sender].coin  -= venta.price;
+    chat.users[venta.user].coin += venta.price;
+    chat.gacha_characters[idBuy].user  = m.sender;
     if (!chat.users[m.sender].characters) chat.users[m.sender].characters = [];
     if (!chat.users[m.sender].characters.includes(idBuy)) chat.users[m.sender].characters.push(idBuy);
     chat.users[venta.user].characters = (chat.users[venta.user].characters || []).filter(id => id !== idBuy);
     if (chat.users[venta.user].favorite === idBuy) delete chat.users[venta.user].favorite;
-    delete chat.sales[idBuy];
+    delete chat.gacha_sales[idBuy];
     const vendedor  = global.db.data.users[venta.user]?.name?.trim() || venta.user.split('@')[0];
     const comprador = global.db.data.users[m.sender]?.name?.trim()   || m.sender.split('@')[0];
-    return m.reply(`❀ *${venta.name}* comprado por *${comprador}*!\n> Se transfirieron *¥${venta.price.toLocaleString()}* a *${vendedor}*`);
+    return m.reply(`✩ *${venta.name}* es de *${comprador}* ˑ ❁\n⇢ *¥${venta.price.toLocaleString()}* transferidos a *${vendedor}*`);
   }
 
   // ─── HAREMSHOP ──────────────────────────────────────────────
   if (['wshop', 'haremshop', 'tiendawaifus'].includes(command)) {
     const ahora = Date.now();
-    for (const [id, v] of Object.entries(chat.sales)) {
-      if (ahora - v.time >= 3 * 864e5) delete chat.sales[id];
+    for (const [id, v] of Object.entries(chat.gacha_sales)) {
+      if (ahora - v.time >= 3 * 864e5) delete chat.gacha_sales[id];
     }
-    const ventas = Object.entries(chat.sales);
-    if (!ventas.length) return m.reply('ꕥ No hay personajes en venta en este grupo.');
+    const ventas = Object.entries(chat.gacha_sales);
+    if (!ventas.length) return m.reply('↳ No hay personajes en venta actualmente.');
     const page      = parseInt(args[0]) || 1;
     const porPagina = 10;
     const totalPag  = Math.ceil(ventas.length / porPagina);
@@ -84,10 +84,10 @@ const handler = async (m, { conn, command, args, usedPrefix }) => {
       const mi = Math.floor(rem % 3600000 / 60000);
       const s  = Math.floor(rem % 60000 / 1000);
       const vendedor = global.db.data.users[v.user]?.name?.trim() || v.user.split('@')[0];
-      const valor    = global.db.data.characters?.[id]?.value ?? chat.characters?.[id]?.value ?? 0;
-      listado.push(`❀ *${v.name}* (✰ ${valor})\n⛁ Precio » *¥${v.price.toLocaleString()}*\n❖ Vendedor » *${vendedor}*\nⴵ Expira en » *${d}d ${h}h ${mi}m ${s}s*`);
+      const valor    = global.db.data.characters?.[id]?.value ?? chat.gacha_characters?.[id]?.value ?? 0;
+      listado.push(`⇢ *${v.name}* ˑ *¥${valor}*\n  ↳ Precio ➤ *¥${v.price.toLocaleString()}*\n  ↳ Vendedor ➤ *${vendedor}*\n  ↳ Expira ➤ *${d}d ${h}h ${mi}m ${s}s*`);
     }
-    return m.reply(`*☆ HaremShop ≧◠ᴥ◠≦*\n❏ En venta: ${ventas.length}\n\n` + listado.join('\n\n') + `\n\n> Página *${page}* de *${totalPag}*`);
+    return m.reply(`˗ˏˋ *HaremShop* ˎˊ-\n⇢ En venta: *${ventas.length}*\n\n` + listado.join('\n\n') + `\n\n↳ Página *${page}* de *${totalPag}*`);
   }
 };
 

@@ -20,48 +20,48 @@ function getCharacterById(id, structure) {
 const handler = async (m, { conn, usedPrefix, command }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
-  chat.rolls = chat.rolls || {};
+
+
+
 
   if (chat.gacha === false) {
-    return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
+    return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
-  if (!chat.users[m.sender]) chat.users[m.sender] = {};
-  const me  = chat.users[m.sender];
+  if (!global.db.data.users[m.sender]) global.db.data.users[m.sender] = {};
+  const me = global.db.data.users[m.sender];
   const now = Date.now();
   const cooldown = 30 * 60 * 1000;
 
-  if (me.lastClaim && now < me.lastClaim) {
-    const r = Math.ceil((me.lastClaim - now) / 1000);
+  if (me.lastclaim && now < me.lastclaim) {
+    const r = Math.ceil((me.lastclaim - now) / 1000);
     const min = Math.floor(r / 60), sec = r % 60;
     let t = '';
     if (min > 0) t += `${min} minuto${min !== 1 ? 's' : ''} `;
     if (sec > 0 || !t) t += `${sec} segundo${sec !== 1 ? 's' : ''}`;
-    return m.reply(`ꕥ Debes esperar *${t.trim()}* para hacer *claim* de nuevo.`);
+    return m.reply(`⇢ ʚ Espera *${t.trim()}* para hacer otro *claim* ɞ`);
   }
 
   const quotedId = m.quoted?.id;
-  if (!quotedId || !chat.rolls[quotedId]) {
-    return m.reply(`❀ Debes *citar* un roll válido para reclamar.\nUsa *${usedPrefix}rw* y luego responde el mensaje.`);
+  if (!quotedId || !chat.gacha_rolls[quotedId]) {
+    return m.reply(`⸙͎ Cita un roll válido para reclamar.\n↳ Usa *${usedPrefix}rw* y responde ese mensaje.`);
   }
 
-  const rollData = chat.rolls[quotedId];
+  const rollData = chat.gacha_rolls[quotedId];
   const id = rollData.id;
 
   let structure;
   try {
     structure = await loadCharacters();
   } catch {
-    return m.reply('ꕥ No se pudo leer la base de datos de personajes.');
+    return m.reply('❲ ✗ ❳ No se pudo leer la base de datos de personajes.');
   }
 
   const sourceData = getCharacterById(id, structure);
-  if (!sourceData) return m.reply('ꕥ Personaje no encontrado en characters.json.');
+  if (!sourceData) return m.reply('❲ ✗ ❳ Personaje no encontrado en la base de datos.');
 
-  if (!chat.characters[id]) chat.characters[id] = {};
-  const record    = chat.characters[id];
+  if (!chat.gacha_characters[id]) chat.gacha_characters[id] = {};
+  const record    = chat.gacha_characters[id];
   const globalRec = global.db.data.characters?.[id] || {};
 
   record.name  = record.name || sourceData.name;
@@ -71,27 +71,27 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   if (record.reservedBy && record.reservedBy !== m.sender && now < record.reservedUntil) {
     const rName = global.db.data.users[record.reservedBy]?.name || record.reservedBy.split('@')[0];
     const rem   = ((record.reservedUntil - now) / 1000).toFixed(1);
-    return m.reply(`ꕥ Este personaje está protegido por *${rName}* durante *${rem}s.*`);
+    return m.reply(`❁ཻུ۪۪ *${rName}* tiene prioridad durante *${rem}s*`);
   }
 
   if (record.expiresAt && now > record.expiresAt && !record.user && !(record.reservedBy && now < record.reservedUntil)) {
     const exp = ((now - record.expiresAt) / 1000).toFixed(1);
-    return m.reply(`ꕥ El personaje ha expirado hace ${exp}s.`);
+    return m.reply(`↳ ✗ El personaje expiró hace *${exp}s*`);
   }
 
   if (record.user) {
     const ownerName = global.db.data.users[record.user]?.name || `@${record.user.split('@')[0]}`;
-    return m.reply(`ꕥ *${record.name}* ya fue reclamado por *${ownerName}*.`);
+    return m.reply(`❝ *${record.name}* ❞ ya fue reclamado por *${ownerName}*`);
   }
 
   record.user      = m.sender;
   record.claimedAt = now;
   delete record.reservedBy;
   delete record.reservedUntil;
-  me.lastClaim = now + cooldown;
+  me.lastclaim = now + cooldown;
 
-  if (!Array.isArray(me.characters)) me.characters = [];
-  if (!me.characters.includes(id)) me.characters.push(id);
+  if (!Array.isArray(me.gacha_characters)) me.gacha_characters = [];
+  if (!me.gacha_characters.includes(id)) me.gacha_characters.push(id);
 
   const displayName = global.db.data.users[m.sender]?.name || m.sender.split('@')[0];
   const custom      = global.db.data.users?.[m.sender]?.claimMessage;
@@ -100,8 +100,8 @@ const handler = async (m, { conn, usedPrefix, command }) => {
     ? custom.replace(/€user/g, `*${displayName}*`).replace(/€character/g, `*${record.name}*`)
     : `*${record.name}* ha sido reclamado por *${displayName}*`;
 
-  await conn.sendMessage(m.chat, { text: `❀ ${finalMsg} (${duration}s)` }, { quoted: m });
-  chat.rolls[quotedId].claimed = true;
+  await conn.sendMessage(m.chat, { text: `✩ ${finalMsg} ˑ *(${duration}s)*` }, { quoted: m });
+  chat.gacha_rolls[quotedId].claimed = true;
 };
 
 handler.command = ['claim', 'c', 'reclamar'];

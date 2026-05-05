@@ -19,11 +19,11 @@ function flattenCharacters(structure) {
 const handler = async (m, { conn, args, usedPrefix }) => {
   if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
   const chat = global.db.data.chats[m.chat];
-  chat.users = chat.users || {};
-  chat.characters = chat.characters || {};
+
+
 
   if (chat.gacha === false) {
-    return m.reply(`ꕥ El Gacha está desactivado.\n» *${usedPrefix}gacha on* para activarlo.`);
+    return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
   // Resolver a quién ver el harem
@@ -40,10 +40,10 @@ const handler = async (m, { conn, args, usedPrefix }) => {
 
   const name = global.db.data.users[userId]?.name || userId.split('@')[0];
   let structure;
-  try { structure = await loadCharacters(); } catch { return m.reply('ꕥ No se pudo leer characters.json'); }
+  try { structure = await loadCharacters(); } catch { return m.reply('❲ ✗ ❳ No se pudo leer characters.json'); }
   const allCharacters = flattenCharacters(structure);
 
-  const ownedIDs = Object.entries(chat.characters)
+  const ownedIDs = Object.entries(chat.gacha_characters)
     .filter(([, c]) => (c.user || '').replace(/\D/g, '') === userId.replace(/\D/g, ''))
     .map(([id]) => id);
 
@@ -54,28 +54,28 @@ const handler = async (m, { conn, args, usedPrefix }) => {
 
   // Ordenar por valor
   ownedIDs.sort((a, b) => {
-    const va = global.db.data.characters?.[a]?.value ?? chat.characters[a]?.value ?? 0;
-    const vb = global.db.data.characters?.[b]?.value ?? chat.characters[b]?.value ?? 0;
+    const va = global.db.data.characters?.[a]?.value ?? chat.gacha_characters[a]?.value ?? 0;
+    const vb = global.db.data.characters?.[b]?.value ?? chat.gacha_characters[b]?.value ?? 0;
     return vb - va;
   });
 
   const page = parseInt(args[0]) || 1;
   const perPage = 50;
   const totalPages = Math.ceil(ownedIDs.length / perPage);
-  if (page < 1 || page > totalPages) return m.reply(`❀ Página inválida. Total: *${totalPages}* páginas.`);
+  if (page < 1 || page > totalPages) return m.reply(`↳ ✗ Página inválida. Total: *${totalPages}* páginas.`);
 
   const start = (page - 1) * perPage;
-  let message = `✿ *Personajes reclamados* ✿\n⌦ Usuario: *${name}*\n♡ Personajes: *(${ownedIDs.length})*\n\n`;
+  let message = `˗ˏˋ *Harem de ${name}* ˎˊ-\n⇢ Personajes: *${ownedIDs.length}*\n\n`;
 
   for (let i = start; i < Math.min(start + perPage, ownedIDs.length); i++) {
     const id = ownedIDs[i];
     const globalRec = global.db.data.characters?.[id] || {};
     const jsonRec   = allCharacters.find(c => c.id == id);
-    const charName  = jsonRec?.name || chat.characters[id]?.name || globalRec.name || `ID:${id}`;
+    const charName  = jsonRec?.name || chat.gacha_characters[id]?.name || globalRec.name || `ID:${id}`;
     const value     = typeof globalRec.value === 'number' ? globalRec.value : (jsonRec?.value || 0);
     message += `» *${charName}* (*${value.toLocaleString()}*)\n`;
   }
-  message += `\n⌦ _Página *${page}* de *${totalPages}*_`;
+  message += `\n↳ Página *${page}* de *${totalPages}*`;
 
   await conn.sendMessage(m.chat, { text: message.trim(), mentions: [userId] }, { quoted: m });
 };
