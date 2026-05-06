@@ -735,6 +735,8 @@ async function connectionUpdate(update) {
   // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
   if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
     if (!global.conn.authState.creds.registered) {
+      // Delay mayor para dar tiempo al WS de estabilizarse antes de pedir el código
+      const delayMs = pairingAttemptCount === 0 ? 3000 : 5000;
       setTimeout(async () => {
         if (pairingCodeDone) return;
         pairingAttemptCount++;
@@ -753,7 +755,7 @@ async function connectionUpdate(update) {
           }
           // El siguiente 'connecting' reintentará automáticamente
         }
-      }, 1500);
+      }, delayMs);
     }
   }
   // ──────────────────────────────────────────────────────────
@@ -802,9 +804,19 @@ async function connectionUpdate(update) {
   if (reason == 405) {
     //await fs.unlinkSync("./MysticSession/" + "creds.json");
     console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, Por favor espere un momento me voy a reiniciar...\nSi aparecen error vuelve a iniciar con : npm start`));
+    // Resetear estado de pairing para que el próximo intento pida un nuevo código
+    if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
+      pairingCodeDone = false;
+      pairingAttemptCount = 0;
+    }
     //process.send('reset');
   }
   if (connection === 'close') {
+    // Resetear pairing state para que el reconectar pida un nuevo código si aún no está registrado
+    if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
+      pairingCodeDone = false;
+      pairingAttemptCount = 0;
+    }
     if (reason === DisconnectReason.badSession) {
       if (shouldLogError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
