@@ -758,7 +758,7 @@ async function connectionUpdate(update) {
   }
   // ──────────────────────────────────────────────────────────
   const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
-  if (code && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
+  if (code && code !== DisconnectReason.loggedOut && code !== 405 && conn?.ws.socket == null) {
     await global.reloadHandler(true).catch(console.error);
     global.timestamp.connect = new Date;
   }
@@ -800,9 +800,10 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, reconectando en 5 segundos...`));
-    await new Promise(r => setTimeout(r, 5000));
+    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, reconectando en 10 segundos...`));
+    await new Promise(r => setTimeout(r, 10000));
     await global.reloadHandler(true).catch(console.error);
+    return;
   }
   if (connection === 'close') {
     if (reason === DisconnectReason.badSession) {
@@ -821,10 +822,7 @@ async function connectionUpdate(update) {
       }
       await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.connectionReplaced) {
-      if (shouldLogError('connectionReplaced')) {
-        conn.logger.error(`[ ⚠️ ] Conexión reemplazada, se ha abierto otra nueva sesión. Por favor, cierra la sesión actual primero.`);
-      }
-      await global.reloadHandler(true).catch(console.error);
+      // Ya manejado por el bloque reason == 405 con delay
     } else if (reason === DisconnectReason.loggedOut) {
       if (shouldLogError('loggedOut')) {
         conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
