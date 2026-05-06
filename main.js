@@ -555,7 +555,7 @@ const connectionOptions = {
   logger: pino({ level: 'silent' }),
   printQRInTerminal: opcion == '1' ? true : methodCodeQR ? true : false,
   mobile: MethodMobile,
-  browser: opcion === '1' ? ['TheMystic-Bot-MD', 'Safari', '2.0.0'] : methodCodeQR ? ['TheMystic-Bot-MD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
+  browser: opcion === '1' ? ['Rikka-TakaradaMD', 'Chrome', '120.0.0'] : methodCodeQR ? ['Rikka-TakaradaMD', 'Chrome', '120.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
   auth: {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -747,6 +747,7 @@ async function connectionUpdate(update) {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
+    global._405count = 0; // reset 405 counter on success
     isFirstConnection = true;
     if (!global.subBotsInitialized) {
       global.subBotsInitialized = true;
@@ -772,8 +773,15 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    console.log(chalk.bold.yellowBright(`[ ⚠️ ] Conexión reemplazada (405). Reconectando en 5s...`));
-    await new Promise(r => setTimeout(r, 5000));
+    global._405count = (global._405count || 0) + 1;
+    const wait = Math.min(5000 * global._405count, 60000); // backoff: 5s, 10s, 15s... max 60s
+    console.log(chalk.bold.yellowBright(`[ ⚠️ ] Conexión reemplazada (405) — intento ${global._405count}. Reconectando en ${wait/1000}s...`));
+    if (global._405count > 10) {
+      console.log(chalk.bold.redBright('[ ✗ ] Demasiados reintentos 405. Borra la sesión y vuelve a vincular.'));
+      global._405count = 0;
+      return;
+    }
+    await new Promise(r => setTimeout(r, wait));
     await global.reloadHandler(true).catch(console.error);
     return;
   }
