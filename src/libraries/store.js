@@ -16,7 +16,10 @@
  * Ciphertext error fix and additional improvements by @BrunoSobrino
  * See: https://github.com/BrunoSobrino
  */
-const { BufferJSON, proto, isJidBroadcast, WAMessageStubType, updateMessageWithReceipt, updateMessageWithReaction, jidNormalizedUser } = (await import('@whiskeysockets/baileys')).default;
+const _storeBaileys = await import('@whiskeysockets/baileys');
+const _storeDef = _storeBaileys.default || _storeBaileys;
+// Extraer del nivel raíz del módulo (named exports en itsliaaa/baileys)
+const { BufferJSON, proto, isJidBroadcast, WAMessageStubType, updateMessageWithReceipt, updateMessageWithReaction, jidNormalizedUser } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
 
 const TIME_TO_DATA_STALE = 5 * 60 * 1000;
 
