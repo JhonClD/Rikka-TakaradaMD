@@ -518,6 +518,8 @@ let opcion;
 let pairingPhoneNumber = null;
 let pairingCodeDone = false;
 let pairingAttemptCount = 0;
+let pairingCodeTimer = null;   // evita múltiples timers simultáneos
+let reconnect405Count = 0;     // cuenta reconexiones por 405 para evitar loop infinito
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -735,15 +737,23 @@ async function connectionUpdate(update) {
   // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
   if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
     if (!global.conn.authState.creds.registered) {
-      // Delay mayor para dar tiempo al WS de estabilizarse antes de pedir el código
-      const delayMs = pairingAttemptCount === 0 ? 3000 : 5000;
-      setTimeout(async () => {
-        if (pairingCodeDone) return;
+      // Cancelar cualquier timer anterior para evitar race conditions
+      if (pairingCodeTimer) {
+        clearTimeout(pairingCodeTimer);
+        pairingCodeTimer = null;
+      }
+      // Capturar referencia al socket actual para evitar llamadas en sockets viejos
+      const currentConn = global.conn;
+      pairingCodeTimer = setTimeout(async () => {
+        pairingCodeTimer = null;
+        // Si ya se obtuvo el código o el socket cambió, abortar
+        if (pairingCodeDone || currentConn !== global.conn) return;
         pairingAttemptCount++;
         try {
-          let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
+          let codigo = await currentConn.requestPairingCode(pairingPhoneNumber);
           if (!codigo) throw new Error('Código vacío recibido');
           pairingCodeDone = true;
+          reconnect405Count = 0; // reset al obtener código exitosamente
           codigo = codigo?.match(/.{1,4}/g)?.join('-') || codigo;
           console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
           console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(chalk.black(` ${codigo} `))));
@@ -751,11 +761,10 @@ async function connectionUpdate(update) {
           console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/5): ${err.message}`));
           if (pairingAttemptCount >= 5) {
             console.log(chalk.red('[ ❌ ] No se pudo obtener el código. Reinicia y usa QR.'));
-            pairingPhoneNumber = null; // detener reintentos
+            pairingPhoneNumber = null;
           }
-          // El siguiente 'connecting' reintentará automáticamente
         }
-      }, delayMs);
+      }, 3000);
     }
   }
   // ──────────────────────────────────────────────────────────
@@ -802,17 +811,24 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    //await fs.unlinkSync("./MysticSession/" + "creds.json");
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, Por favor espere un momento me voy a reiniciar...\nSi aparecen error vuelve a iniciar con : npm start`));
-    // Resetear estado de pairing para que el próximo intento pida un nuevo código
+    reconnect405Count++;
     if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
+      // Cancelar timer de pairing pendiente
+      if (pairingCodeTimer) { clearTimeout(pairingCodeTimer); pairingCodeTimer = null; }
       pairingCodeDone = false;
       pairingAttemptCount = 0;
+      if (reconnect405Count >= 4) {
+        console.log(chalk.bold.red(`[ ❌ ] Demasiados errores 405. Ve a WhatsApp > Dispositivos Vinculados, elimina el bot y reinicia con: npm start`));
+        reconnect405Count = 0;
+        pairingPhoneNumber = null; // detener el loop completamente
+        return;
+      }
     }
-    //process.send('reset');
+    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada (405/${reconnect405Count}), reintentando...`));
   }
   if (connection === 'close') {
-    // Resetear pairing state para que el reconectar pida un nuevo código si aún no está registrado
+    // Cancelar timer de pairing si la conexión se cerró
+    if (pairingCodeTimer) { clearTimeout(pairingCodeTimer); pairingCodeTimer = null; }
     if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
       pairingCodeDone = false;
       pairingAttemptCount = 0;
@@ -862,6 +878,11 @@ async function connectionUpdate(update) {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
+      }
+      // Si es 405 y aún no está registrado, esperamos más tiempo antes de reconectar
+      if (reason == 405 && pairingPhoneNumber && !global.conn.authState.creds.registered) {
+        if (pairingPhoneNumber === null) return; // loop detenido desde el bloque 405
+        await new Promise(r => setTimeout(r, 6000));
       }
       await global.reloadHandler(true).catch(console.error);
     }
