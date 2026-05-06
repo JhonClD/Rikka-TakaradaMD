@@ -1,10 +1,8 @@
-// subBotManager.js — Gestor de Sub-Bots para Rikka-TakaradaMD
-// Reescrito limpio inspirado en YukiBot-MD/core/subs.js
-// Carpeta de sesiones: ./jadibts/<número>/
+// subBotManager.js — Reescrito limpio para Rikka-TakaradaMD
+// FIX: no asigna propiedades read-only del socket (decodeJid, etc.)
+// El estado custom (isInit, userId, fstop, uptime) se guarda en un Map aparte
 
-import {
-  makeWASocket as _makeWASocket,
-} from './simple.js';
+import { makeWASocket } from './simple.js';
 import store from './store.js';
 import {
   useMultiFileAuthState,
@@ -12,349 +10,264 @@ import {
   makeCacheableSignalKeyStore,
   DisconnectReason,
   jidNormalizedUser,
-  jidDecode,
 } from '@whiskeysockets/baileys';
 import NodeCache from 'node-cache';
 import pino from 'pino';
-import qrcode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const JADIBTS_DIR = path.join(__dirname, '../../jadibts');
+const __dirname  = path.dirname(fileURLToPath(import.meta.url));
+const JADIBTS    = path.join(__dirname, '../../jadibts');
+const silentLog  = pino({ level: 'silent' });
+const delay      = ms => new Promise(r => setTimeout(r, ms));
+const cleanJid   = j  => String(j || '').replace(/:\d+/, '').split('@')[0];
 
-if (!fs.existsSync(JADIBTS_DIR)) fs.mkdirSync(JADIBTS_DIR, { recursive: true });
-if (!(global.conns instanceof Array)) global.conns = [];
+// Estado custom por socket — evita asignar props read-only al sock original
+const sockMeta = new WeakMap();
+const getMeta  = sock => {
+  if (!sockMeta.has(sock)) sockMeta.set(sock, { isInit: false, userId: null, fstop: false, uptime: Date.now() });
+  return sockMeta.get(sock);
+};
+
+if (!fs.existsSync(JADIBTS)) fs.mkdirSync(JADIBTS, { recursive: true });
+if (!global.conns) global.conns = [];
 
 const reintentos = {};
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-const cleanJid = (jid = '') => jid.replace(/:\d+/, '').split('@')[0];
-const silentLogger = pino({ level: 'silent' });
 
-// ─── Inicializar todos los sub-bots guardados al arrancar ────────────────────
-export async function initializeSubBots() {
+// ─── Registrar handlers del handler.js principal ──────────────────────────────
+async function registerHandlers(sock) {
   try {
-    const modejadibot = global.db?.data?.settings?.[global.conn?.user?.jid]?.modejadibot ?? true;
-    if (!modejadibot) {
-      console.log('[SUB-BOT] Modo jadibot desactivado en configuración del Bot Principal');
-      return;
+    const handlerPath = path.join(__dirname, '../../handler.js');
+    const mod = await import(handlerPath + '?t=' + Date.now()).catch(console.error);
+    if (!mod?.handler) return console.error('[SUB-BOT] handler.js no exporta handler');
+
+    store.bind(sock);
+
+    const evMap = [
+      ['messages.upsert',          '_h',  'handler'],
+      ['group-participants.update', '_p',  'participantsUpdate'],
+      ['groups.update',             '_g',  'groupsUpdate'],
+      ['message.delete',            '_d',  'deleteUpdate'],
+      ['call',                      '_c',  'callUpdate'],
+    ];
+
+    // Limpiar listeners viejos (guardados en meta)
+    const meta = getMeta(sock);
+    for (const [evt, key] of evMap) {
+      if (meta[key]) sock.ev.off(evt, meta[key]);
     }
-    if (!fs.existsSync(JADIBTS_DIR)) {
-      console.log('[SUB-BOT] No hay sub-bots previamente conectados');
-      return;
+    for (const [evt, key, exp] of evMap) {
+      if (!mod[exp]) continue;
+      meta[key] = mod[exp].bind(sock);
+      sock.ev.on(evt, meta[key]);
     }
-    const dirs = fs.readdirSync(JADIBTS_DIR);
-    for (const dir of dirs) {
-      const credsPath = path.join(JADIBTS_DIR, dir, 'creds.json');
-      if (!fs.existsSync(credsPath)) continue;
-      let creds;
-      try {
-        creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-      } catch {
-        continue;
-      }
-      if (creds.isInit === true) continue; // ya marcado como init (por startup anterior)
-      console.log(`[SUB-BOT] Iniciando sub-bot ${dir}`);
-      await startSubBot(null, null, '', false, dir, '', {}, false).catch((e) =>
-        console.error(`[SUB-BOT] Error al iniciar sub-bot ${dir}:`, e)
-      );
-    }
+
+    // Alias accesibles desde handler.js watchFile
+    sock.handler            = meta._h;
+    sock.participantsUpdate = meta._p;
+    sock.groupsUpdate       = meta._g;
+    sock.subreloadHandler   = () => registerHandlers(sock);
   } catch (e) {
-    console.error('[SUB-BOT] Error en initializeSubBots:', e);
+    console.error('[SUB-BOT] Error registrando handlers:', e.message);
   }
 }
 
-// ─── Iniciar un sub-bot individual ──────────────────────────────────────────
+// ─── Iniciar un sub-bot ───────────────────────────────────────────────────────
 export async function startSubBot(
-  m,
-  client,
-  caption = '',
-  isCode = false,
-  phone = '',
-  chatId = '',
-  commandFlags = {},
-  isCommand = false
+  m, client, caption, isCode, phone, chatId, cmdFlags, isCmd
 ) {
-  const id = phone || (m?.sender || '').split('@')[0];
-  const sessionFolder = path.join(JADIBTS_DIR, id);
+  const id     = phone || (m ? m.sender.split('@')[0] : '');
+  const folder = path.join(JADIBTS, id);
 
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
-    const { version } = await fetchLatestBaileysVersion();
-    const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+    const { state, saveCreds } = await useMultiFileAuthState(folder);
+    const { version }          = await fetchLatestBaileysVersion();
 
-    const sockConfig = {
+    const cfg = {
       printQRInTerminal: false,
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
+        keys:  makeCacheableSignalKeyStore(state.keys, silentLog),
       },
-      logger: silentLogger,
-      browser: ['Rikka-TakaradaMD', 'Safari', '2.0.0'],
-      markOnlineOnConnect: true,
+      logger:                         silentLog,
+      browser:                        ['Rikka-TakaradaMD', 'Safari', '2.0.0'],
+      markOnlineOnConnect:            true,
       generateHighQualityLinkPreview: true,
-      syncFullHistory: false,
-      getMessage: async (key) => {
-        const jid = jidNormalizedUser(key.remoteJid);
-        const msg = await store.loadMessage(jid, key.id);
+      syncFullHistory:                false,
+      getMessage: async key => {
+        const msg = await store.loadMessage(jidNormalizedUser(key.remoteJid), key.id);
         return msg?.message || '';
       },
-      msgRetryCounterCache,
+      msgRetryCounterCache: new NodeCache({ stdTTL: 0, checkperiod: 0 }),
       version,
-      keepAliveIntervalMs: 60_000,
-      maxIdleTimeMs: 120_000,
-      waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat?ED=CAIICA',
+      keepAliveIntervalMs: 60000,
+      maxIdleTimeMs:       120000,
+      waWebSocketUrl:      'wss://web.whatsapp.com/ws/chat?ED=CAIICA',
     };
 
-    let sock = _makeWASocket(sockConfig);
-    sock.isInit = false;
-    sock.uptime = Date.now();
-    sock.userId = null;
-
-    // Decode JID helper (igual que en simple.js)
-    sock.decodeJid = (jid) => {
-      if (!jid) return jid;
-      if (/:\d+@/gi.test(jid)) {
-        const dec = jidDecode(jid) || {};
-        return (dec.user && dec.server && dec.user + '@' + dec.server) || jid;
-      }
-      return jid;
-    };
+    const sock = makeWASocket(cfg);
+    const meta = getMeta(sock); // estado en WeakMap, no en el sock directamente
+    meta.uptime = Date.now();
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ── Watchdog: si pierde el user después de conectarse, limpiar de conns ──
+    // Watchdog
     const watchdog = setInterval(() => {
-      if (sock.isInit && !sock.user) {
+      if (meta.isInit && !sock.user) {
+        clearInterval(watchdog);
         try { sock.ws.close(); } catch {}
         sock.ev.removeAllListeners();
-        clearInterval(watchdog);
         const idx = global.conns.indexOf(sock);
         if (idx >= 0) global.conns.splice(idx, 1);
       }
-    }, 60_000);
+    }, 60000);
 
-    // ── Manejador de conexión ────────────────────────────────────────────────
-    sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin, qr }) => {
-      if (isNewLogin) sock.isInit = false;
-
-      // ── Conexión abierta ─────────────────────────────────────────────────
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+      // ── Conectado ───────────────────────────────────────────────────────────
       if (connection === 'open') {
-        sock.isInit = true;
-        sock.userId = cleanJid(sock.user?.id || '');
-        const botJid = sock.userId + '@s.whatsapp.net';
+        clearInterval(watchdog);
+        meta.isInit = true;
+        meta.userId = cleanJid(sock.user?.id || '');
+        const botJid = meta.userId + '@s.whatsapp.net';
 
-        // Registrar en settings de la DB
+        if (!global.db?.data?.settings) global.db.data.settings = {};
         if (!global.db.data.settings[botJid]) global.db.data.settings[botJid] = {};
         global.db.data.settings[botJid].type = 'Sub';
 
-        // Agregar a global.conns si no está ya
-        if (!global.conns.find((c) => c.userId === sock.userId)) {
+        // Exponer isInit/userId directamente en el sock para compatibilidad con handler.js
+        try { Object.defineProperty(sock, 'isInit', { value: true,        writable: true, configurable: true }); } catch {}
+        try { Object.defineProperty(sock, 'userId', { value: meta.userId, writable: true, configurable: true }); } catch {}
+        try { Object.defineProperty(sock, 'uptime', { value: meta.uptime, writable: true, configurable: true }); } catch {}
+
+        if (!global.conns.find(c => getMeta(c).userId === meta.userId)) {
           global.conns.push(sock);
         }
-
-        // Registrar handlers del handler.js principal
-        await _registerHandlers(sock);
-
-        delete reintentos[sock.userId || id];
-        console.log(`[SUB-BOT] ✅ ${sock.userId} conectado con éxito`);
+        delete reintentos[meta.userId || id];
+        await registerHandlers(sock);
+        console.log('[SUB-BOT] ✅ Conectado: +' + meta.userId);
       }
 
-      // ── Conexión cerrada ─────────────────────────────────────────────────
+      // ── Desconectado ────────────────────────────────────────────────────────
       if (connection === 'close') {
-        const botId = sock.userId || id;
-        const statusCode =
-          lastDisconnect?.error?.output?.statusCode ||
-          lastDisconnect?.error?.output?.payload?.statusCode ||
-          0;
-
         clearInterval(watchdog);
-
-        // Remover de conns
-        const idx = global.conns.indexOf(sock);
+        const botId = meta.userId || id;
+        const code  = lastDisconnect?.error?.output?.statusCode || 0;
+        const idx   = global.conns.indexOf(sock);
         if (idx >= 0) global.conns.splice(idx, 1);
 
-        // Sesión apagada manualmente (fstop)
-        if (sock.fstop) {
-          console.log(`[SUB-BOT] ${botId} apagado correctamente`);
+        if (meta.fstop) {
+          console.log('[SUB-BOT] ' + botId + ' apagado manualmente');
           return;
         }
-
-        // Sesión inválida / baneada → borrar
-        if ([401, 403].includes(statusCode) || statusCode === DisconnectReason.badSession) {
-          const intentos = (reintentos[botId] || 0) + 1;
-          reintentos[botId] = intentos;
-          if (intentos <= 5) {
-            console.log(`[SUB-BOT] ${botId} sesión problemática (${statusCode}), intento ${intentos}/5`);
-            await delay(3000);
-            return startSubBot(m, client, caption, isCode, phone, chatId, commandFlags, isCommand);
-          } else {
-            console.log(`[SUB-BOT] ${botId} falló 5 veces — eliminando sesión`);
-            try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
+        if (code === DisconnectReason.loggedOut) {
+          console.log('[SUB-BOT] ' + botId + ' cerró sesión — borrando');
+          try { fs.rmSync(folder, { recursive: true, force: true }); } catch {}
+          return;
+        }
+        if (code === 401 || code === 403) {
+          reintentos[botId] = (reintentos[botId] || 0) + 1;
+          if (reintentos[botId] > 5) {
+            console.log('[SUB-BOT] ' + botId + ' falló 5 veces — eliminando');
+            try { fs.rmSync(folder, { recursive: true, force: true }); } catch {}
             delete reintentos[botId];
             return;
           }
         }
-
-        // Logout explícito → borrar sesión
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.log(`[SUB-BOT] ${botId} cerró sesión`);
-          try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
-          return;
-        }
-
-        // Reconexión normal para el resto de casos
-        const reconnectCodes = [
-          DisconnectReason.connectionClosed,
-          DisconnectReason.connectionLost,
-          DisconnectReason.timedOut,
-          DisconnectReason.connectionReplaced,
-          DisconnectReason.restartRequired,
-        ];
-        if (reconnectCodes.includes(statusCode) || statusCode === 0) {
-          console.log(`[SUB-BOT] ${botId} perdió conexión (${statusCode}), reconectando...`);
-          await delay(3000);
-          return startSubBot(m, client, caption, isCode, phone, chatId, commandFlags, isCommand);
-        }
-
-        console.log(`[SUB-BOT] ${botId} desconectado por razón desconocida: ${statusCode}`);
-        await delay(5000);
-        return startSubBot(m, client, caption, isCode, phone, chatId, commandFlags, isCommand);
+        console.log('[SUB-BOT] ' + botId + ' reconectando (código ' + code + ')...');
+        await delay(3000);
+        return startSubBot(m, client, caption, isCode, phone, chatId, cmdFlags, isCmd);
       }
 
-      // ── QR recibido ──────────────────────────────────────────────────────
-      if (qr) {
-        const senderId = m?.sender;
-
-        // Modo código de pareo
-        if (isCode && phone && client && chatId && commandFlags[senderId]) {
+      // ── QR recibido ─────────────────────────────────────────────────────────
+      if (qr && client && chatId && cmdFlags?.[m?.sender]) {
+        if (isCode) {
           try {
-            let code = await sock.requestPairingCode(phone.replace(/\D/g, ''));
-            code = code?.match(/.{1,4}/g)?.join('-') || code;
-            const msgCaption = await client.sendMessage(chatId, { text: caption }, { quoted: m });
-            const msgCode = await client.sendMessage(chatId, { text: `*${code}*` }, { quoted: m });
-            delete commandFlags[senderId];
-            // Auto-borrar después de 60s
+            let code = await sock.requestPairingCode(id.replace(/\D/g, ''));
+            // Formatear: XXXX-XXXX
+            code = String(code).replace(/\W/g, '').match(/.{1,4}/g)?.join('-') || code;
+            const msgCap  = await client.sendMessage(chatId, { text: caption }, { quoted: m });
+            const msgCode = await client.sendMessage(chatId, { text: '*' + code + '*' }, { quoted: m });
+            delete cmdFlags[m.sender];
             setTimeout(async () => {
-              try {
-                await client.sendMessage(chatId, { delete: msgCaption.key });
-                await client.sendMessage(chatId, { delete: msgCode.key });
-              } catch {}
-            }, 60_000);
-          } catch (err) {
-            console.error('[SUB-BOT] Error generando código de pareo:', err);
+              try { await client.sendMessage(chatId, { delete: msgCap.key }); } catch {}
+              try { await client.sendMessage(chatId, { delete: msgCode.key }); } catch {}
+            }, 60000);
+          } catch (e) {
+            console.error('[SUB-BOT] Error código pareo:', e.message);
           }
-        }
-
-        // Modo QR imagen
-        if (!isCode && client && chatId && commandFlags[senderId]) {
+        } else {
           try {
-            const qrBuffer = await qrcode.toBuffer(qr, { scale: 8 });
-            const sentQR = await client.sendMessage(chatId, {
-              image: qrBuffer,
-              caption,
-            }, { quoted: m });
-            delete commandFlags[senderId];
+            const qrcode  = (await import('qrcode')).default;
+            const buf     = await qrcode.toBuffer(qr, { scale: 8 });
+            const sentQR  = await client.sendMessage(chatId, { image: buf, caption }, { quoted: m });
+            delete cmdFlags[m.sender];
             setTimeout(async () => {
               try { await client.sendMessage(chatId, { delete: sentQR.key }); } catch {}
-            }, 60_000);
-          } catch (err) {
-            console.error('[SUB-BOT] Error enviando QR:', err);
+            }, 60000);
+          } catch (e) {
+            console.error('[SUB-BOT] Error QR:', e.message);
           }
-        }
-      }
-    });
-
-    // ── Mensajes entrantes ───────────────────────────────────────────────────
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
-      if (!global.reloadHandler) return;
-      for (const raw of messages) {
-        if (!raw.message) continue;
-        try {
-          await sock.handler?.({ messages: [raw], type });
-        } catch (err) {
-          console.error(`[SUB-BOT] ${sock.userId} error en mensaje:`, err.message);
         }
       }
     });
 
     return sock;
   } catch (e) {
-    console.error(`[SUB-BOT] Error al iniciar sub-bot ${id}:`, e);
+    console.error('[SUB-BOT] Error iniciando ' + id + ':', e.message);
   }
 }
 
-// ─── Registrar los handlers del handler.js en un sock de sub-bot ────────────
-async function _registerHandlers(sock) {
+// ─── Inicializar sub-bots al arrancar ─────────────────────────────────────────
+export async function initializeSubBots() {
   try {
-    const handlerPath = path.join(__dirname, '../../handler.js');
-    const mod = await import(handlerPath + '?t=' + Date.now()).catch(console.error);
-    if (!mod || !mod.handler) {
-      console.error('[SUB-BOT] Handler no definido o incompleto');
-      return;
+    if (!fs.existsSync(JADIBTS)) return;
+    const dirs = fs.readdirSync(JADIBTS);
+    for (const dir of dirs) {
+      const credsPath = path.join(JADIBTS, dir, 'creds.json');
+      if (!fs.existsSync(credsPath)) continue;
+      const already = global.conns.find(c => getMeta(c).userId === dir || c.userId === dir);
+      if (already) continue;
+      console.log('[SUB-BOT] Iniciando sub-bot ' + dir);
+      await startSubBot(null, null, '', false, dir, '', {}, false).catch(e =>
+        console.error('[SUB-BOT] Error iniciando ' + dir + ':', e.message)
+      );
+      await delay(1500); // pequeña pausa entre subbots
     }
-
-    store.bind(sock);
-
-    // Limpiar listeners viejos antes de registrar nuevos
-    sock.ev.off('messages.upsert',          sock._handler);
-    sock.ev.off('group-participants.update', sock._participantsUpdate);
-    sock.ev.off('groups.update',             sock._groupsUpdate);
-    sock.ev.off('message.delete',            sock._deleteUpdate);
-    sock.ev.off('call',                      sock._callUpdate);
-
-    sock._handler            = mod.handler.bind(sock);
-    sock._participantsUpdate = mod.participantsUpdate?.bind(sock);
-    sock._groupsUpdate       = mod.groupsUpdate?.bind(sock);
-    sock._deleteUpdate       = mod.deleteUpdate?.bind(sock);
-    sock._callUpdate         = mod.callUpdate?.bind(sock);
-
-    sock.ev.on('messages.upsert',          sock._handler);
-    if (sock._participantsUpdate) sock.ev.on('group-participants.update', sock._participantsUpdate);
-    if (sock._groupsUpdate)       sock.ev.on('groups.update',             sock._groupsUpdate);
-    if (sock._deleteUpdate)       sock.ev.on('message.delete',            sock._deleteUpdate);
-    if (sock._callUpdate)         sock.ev.on('call',                      sock._callUpdate);
-
-    // Asignar subreloadHandler para que handler.js watchFile lo pueda llamar
-    sock.subreloadHandler = async (reconnect = false) => {
-      await _registerHandlers(sock);
-    };
-
-    sock.handler = sock._handler;
   } catch (e) {
-    console.error('[SUB-BOT] Error al cargar handler:', e);
+    console.error('[SUB-BOT] Error en initializeSubBots:', e.message);
   }
 }
 
-// ─── Listar sub-bots activos ─────────────────────────────────────────────────
+// ─── Listar sub-bots ──────────────────────────────────────────────────────────
 export function listSubBots() {
-  const active = global.conns.filter((c) => c.isInit && c.userId);
-  const saved  = fs.existsSync(JADIBTS_DIR)
-    ? fs.readdirSync(JADIBTS_DIR).filter((d) => fs.existsSync(path.join(JADIBTS_DIR, d, 'creds.json')))
+  const active = global.conns.filter(c => {
+    const m = getMeta(c);
+    return m.isInit && m.userId;
+  });
+  const saved = fs.existsSync(JADIBTS)
+    ? fs.readdirSync(JADIBTS).filter(d => fs.existsSync(path.join(JADIBTS, d, 'creds.json')))
     : [];
   return { active, saved };
 }
 
-// ─── Desconectar y eliminar un sub-bot ───────────────────────────────────────
+// ─── Eliminar un sub-bot ──────────────────────────────────────────────────────
 export async function removeSubBot(userId) {
-  const clean = cleanJid(userId);
-  const sessionFolder = path.join(JADIBTS_DIR, clean);
-
-  // Desconectar de conns
-  const idx = global.conns.findIndex((c) => c.userId === clean);
+  const clean  = cleanJid(userId);
+  const folder = path.join(JADIBTS, clean);
+  const idx    = global.conns.findIndex(c => {
+    const m = getMeta(c);
+    return m.userId === clean || c.userId === clean;
+  });
   if (idx >= 0) {
     const sock = global.conns[idx];
-    sock.fstop = true;
+    getMeta(sock).fstop = true;
     try { sock.ws.close(); } catch {}
     sock.ev.removeAllListeners();
     global.conns.splice(idx, 1);
   }
-
-  // Borrar sesión del disco
-  if (fs.existsSync(sessionFolder)) {
-    fs.rmSync(sessionFolder, { recursive: true, force: true });
+  if (fs.existsSync(folder)) {
+    fs.rmSync(folder, { recursive: true, force: true });
     return true;
   }
   return false;
