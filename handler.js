@@ -478,13 +478,6 @@ export async function handler(chatUpdate) {
           vodka: 0,
           wallet: 0,
           warn: 0,
-          // ── Gacha / Waifu ──────────────────────────────────────────────────
-          lastrw: 0,
-          gacha_characters: [],
-          gacha_favorite: '',
-          gacha_claimMsg: '',
-          // ── Sub-Bot ──────────────────────────────────────────────────────
-          Subs: 0,
           weapon: 0,
           weapondurability: 0,
           wolf: 0,
@@ -648,14 +641,6 @@ export async function handler(chatUpdate) {
           expired: 0,
           language: 'es',
           setPrimaryBot: '',
-          // ── Gacha ──────────────────────────────────────────────────────────
-          gacha: true,
-          gacha_characters: {},
-          gacha_rolls: {},
-          gacha_sales: {},
-          gacha_intercambios: [],
-          gacha_timeTrade: 0,
-          gacha_regalos: {},
         }
 
         Object.assign(chat, { ...chats, ...chat });
@@ -713,59 +698,7 @@ export async function handler(chatUpdate) {
     const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
     const isMods = isOwner || global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(_senderJid);
-
-    // ── Premium: premiumTime es timestamp de expiración ──────────────────────
-    const _userDb = global.db.data.users[m.sender] || {};
-    const _premExpiry = typeof _userDb.premiumTime === 'number' ? _userDb.premiumTime : 0;
-    const isPremium = _premExpiry > Date.now();
-    // Auto-limpiar si expiró
-    if (_premExpiry > 0 && !isPremium) { _userDb.premiumTime = 0; _userDb.premium = false; }
-
-    // ── Sub-bot: este número de conexión es un sub-bot si no está en owner ──
-    const _thisBotJid = this.user?.jid || '';
-    const _isSubBot   = !_ownerList.includes(_thisBotJid) && global.conns?.some(c => c.user?.jid === _thisBotJid);
-
-    // Comandos permitidos para sub-bots (sin punto, se compara con command en minúsculas)
-    const _subBotAllowed = new Set([
-      // Sticker
-      's','sticker','st',
-      // TikTok
-      'tiktok','ttdl','tiktokdl','tiktoknowm','tt','ttnowm','tiktokaudio','tiktok2','tt2',
-      // Facebook
-      'fb','facebook','fbdl',
-      // Play (YouTube audio/video)
-      'play','play2','playaudio','mp4','video',
-      // Gacha completo
-      'rw','rollwaifu','roll','c','claim','reclamar',
-      'harem','waifus','claims','mischicas',
-      'ginfo','infogacha','gachainfo',
-      'sell','vender','buyc','buychar','comprarwaifu','wshop','haremshop','tiendawaifus',
-      'trade','intercambiar','aceptar','accept',
-      'setfav','setfavourite','favorito','charimage','waifuimage','cimage','wimage','charinfo','wifu',
-      'removesale','quitarventa','cancelsale',
-      'balance','bal','monedas','coins','deposit','depositar','withdraw','retirar',
-      'daily','diario','weekly','semanal','monthly','mensual','work','trabajar','farm',
-      // Waifu/neko imagen
-      'waifu','neko',
-      // Interacciones anime
-      ...['pat','kiss','hug','slap','fuck','bite','lick','dance','cry','blush','wave',
-          'punch','run','sleep','laugh','angry','bored','clap','coffee','cuddle',
-          'pout','sad','scared','shy','smile','stare','think','wink','eat','bleh',
-          'bonk','blowkiss','call','cold','comfort','cringe','curious','draw','dramatic',
-          'drunk','gaming','handhold','happy','heat','highfive','impregnate','jump',
-          'kill','kisscheek','love','nope','peek','push','scream','seduce','sing',
-          'sleep','smoke','smug','sniff','snuggle','spit','step','thinkhard','tickle',
-          'trip','walk','bath','bully','abrazar','besar','acariciar','morder','lamer',
-          'bailar','llorar','sonrojarse','saludar','golpear','correr','dormir',
-          'reir','enojado','aburrido','aplaudir','cafe','acurrucar','mueca',
-          'triste','asustado','timido','sonreir','fumar','escupir','pisar',
-          'caminar','guiñar','comer','nom','bañarse','molestar','pensar',
-          'muak','choca','tomarlamano','calor','jugar','dibujar','llamar',
-          'besito','tropezar','mirar','oler','curioso','consolar','embarazar',
-          'besomejilla','coger','follar','preñar'],
-    ]);
-
-    const isPrems = isROwner || isOwner || isMods || isPremium;
+    const isPrems = isROwner || isOwner || isMods || global.db.data.users[m.sender].premiumTime > 0; // || global.db.data.users[m.sender].premium = 'true'
 
     if (opts['queque'] && m.text && !(isMods || isPrems)) {
       const queque = this.msgqueque; const time = 1000 * 5;
@@ -936,11 +869,6 @@ export async function handler(chatUpdate) {
           continue;
         }
 
-        // ── Sub-bot: bloquear comandos no permitidos ─────────────────────────
-        if (_isSubBot && !_subBotAllowed.has(command)) {
-          continue; // silencioso — el sub-bot simplemente no responde
-        }
-
        if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return
 
         m.plugin = name;
@@ -1088,8 +1016,6 @@ ${tradutor.texto1[1]} ${messageNumber}/3
           isAdmin,
           isBotAdmin,
           isPrems,
-          isPremium,
-          isSubBot: _isSubBot,
           chatUpdate,
           __dirname: ___dirname,
           __filename,
