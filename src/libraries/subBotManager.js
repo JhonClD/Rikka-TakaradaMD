@@ -103,10 +103,10 @@ export async function startSubBot(
       version,
       keepAliveIntervalMs: 60000,
       maxIdleTimeMs:       120000,
-      waWebSocketUrl:      'wss://web.whatsapp.com/ws/chat?ED=CAIICA',
     };
 
     const sock = makeWASocket(cfg);
+    sock.ev.setMaxListeners(0); // evitar MaxListenersExceededWarning
     const meta = getMeta(sock); // estado en WeakMap, no en el sock directamente
     meta.uptime = Date.now();
 
@@ -156,6 +156,8 @@ export async function startSubBot(
         const idx   = global.conns.indexOf(sock);
         if (idx >= 0) global.conns.splice(idx, 1);
 
+        // Limpiar todos los listeners antes de reconectar
+        sock.ev.removeAllListeners();
         if (meta.fstop) {
           console.log('[SUB-BOT] ' + botId + ' apagado manualmente');
           return;
