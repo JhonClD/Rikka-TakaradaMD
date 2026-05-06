@@ -518,8 +518,6 @@ let opcion;
 let pairingPhoneNumber = null;
 let pairingCodeDone = false;
 let pairingAttemptCount = 0;
-let pairingCodeTimer = null;   // evita múltiples timers simultáneos
-let reconnect405Count = 0;     // cuenta reconexiones por 405 para evitar loop infinito
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -588,7 +586,6 @@ const connectionOptions = {
 };
 
 global.conn = makeWASocket(connectionOptions);
-global.conn.ev.setMaxListeners(20); // evitar MaxListenersExceededWarning
 const lidResolver = new LidResolver(global.conn);
 
 // Ejecutar análisis y corrección automática al inicializar (SILENCIOSO)
@@ -738,23 +735,13 @@ async function connectionUpdate(update) {
   // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
   if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
     if (!global.conn.authState.creds.registered) {
-      // Cancelar cualquier timer anterior para evitar race conditions
-      if (pairingCodeTimer) {
-        clearTimeout(pairingCodeTimer);
-        pairingCodeTimer = null;
-      }
-      // Capturar referencia al socket actual para evitar llamadas en sockets viejos
-      const currentConn = global.conn;
-      pairingCodeTimer = setTimeout(async () => {
-        pairingCodeTimer = null;
-        // Si ya se obtuvo el código o el socket cambió, abortar
-        if (pairingCodeDone || currentConn !== global.conn) return;
+      setTimeout(async () => {
+        if (pairingCodeDone) return;
         pairingAttemptCount++;
         try {
-          let codigo = await currentConn.requestPairingCode(pairingPhoneNumber);
+          let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
           if (!codigo) throw new Error('Código vacío recibido');
           pairingCodeDone = true;
-          reconnect405Count = 0; // reset al obtener código exitosamente
           codigo = codigo?.match(/.{1,4}/g)?.join('-') || codigo;
           console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
           console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(chalk.black(` ${codigo} `))));
@@ -762,10 +749,11 @@ async function connectionUpdate(update) {
           console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/5): ${err.message}`));
           if (pairingAttemptCount >= 5) {
             console.log(chalk.red('[ ❌ ] No se pudo obtener el código. Reinicia y usa QR.'));
-            pairingPhoneNumber = null;
+            pairingPhoneNumber = null; // detener reintentos
           }
+          // El siguiente 'connecting' reintentará automáticamente
         }
-      }, 3000);
+      }, 1500);
     }
   }
   // ──────────────────────────────────────────────────────────
@@ -812,28 +800,11 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    reconnect405Count++;
-    if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
-      // Cancelar timer de pairing pendiente
-      if (pairingCodeTimer) { clearTimeout(pairingCodeTimer); pairingCodeTimer = null; }
-      pairingCodeDone = false;
-      pairingAttemptCount = 0;
-      if (reconnect405Count >= 4) {
-        console.log(chalk.bold.red(`[ ❌ ] Demasiados errores 405. Ve a WhatsApp > Dispositivos Vinculados, elimina el bot y reinicia con: npm start`));
-        reconnect405Count = 0;
-        pairingPhoneNumber = null; // detener el loop completamente
-        return;
-      }
-    }
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada (405/${reconnect405Count}), reintentando...`));
+    //await fs.unlinkSync("./MysticSession/" + "creds.json");
+    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, Por favor espere un momento me voy a reiniciar...\nSi aparecen error vuelve a iniciar con : npm start`));
+    //process.send('reset');
   }
   if (connection === 'close') {
-    // Cancelar timer de pairing si la conexión se cerró
-    if (pairingCodeTimer) { clearTimeout(pairingCodeTimer); pairingCodeTimer = null; }
-    if (pairingPhoneNumber && !global.conn.authState.creds.registered) {
-      pairingCodeDone = false;
-      pairingAttemptCount = 0;
-    }
     if (reason === DisconnectReason.badSession) {
       if (shouldLogError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
@@ -880,11 +851,6 @@ async function connectionUpdate(update) {
       if (shouldLogError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
-      // Si es 405 y aún no está registrado, esperamos más tiempo antes de reconectar
-      if (reason == 405 && pairingPhoneNumber && !global.conn.authState.creds.registered) {
-        if (pairingPhoneNumber === null) return; // loop detenido desde el bloque 405
-        await new Promise(r => setTimeout(r, 6000));
-      }
       await global.reloadHandler(true).catch(console.error);
     }
   }
@@ -894,12 +860,8 @@ process.on('uncaughtException', console.error);
 
 let isInit = true;
 let handler = await import('./handler.js');
-let isReloading = false; // lock para evitar múltiples recargas simultáneas
 
 global.reloadHandler = async function (restatConn) {
-  // Evitar reconexiones simultáneas (causa de 405 por sockets concurrentes)
-  if (restatConn && isReloading) return;
-  if (restatConn) isReloading = true;
   try {
     const Handler = await import(`./handler.js?update=${Date.now()}`).catch(console.error);
     if (Object.keys(Handler || {}).length) handler = Handler;
@@ -912,16 +874,7 @@ global.reloadHandler = async function (restatConn) {
       global.conn.ws.close();
     } catch { }
     conn.ev.removeAllListeners();
-    // Esperar a que el socket anterior se cierre completamente antes de crear uno nuevo
-    await new Promise(r => setTimeout(r, 1500));
-    // Re-leer auth state fresco para evitar corrupción de keys entre reconexiones
-    const { state: freshState, saveCreds: freshSaveCreds } = await useMultiFileAuthState(global.authFile);
-    connectionOptions.auth = {
-      creds: freshState.creds,
-      keys: makeCacheableSignalKeyStore(freshState.keys, Pino({ level: 'fatal' }).child({ level: 'fatal' })),
-    };
     global.conn = makeWASocket(connectionOptions, { chats: oldChats });
-    global.conn.ev.setMaxListeners(20);
     store?.bind(conn);
     // Reinicializar lidResolver con la nueva conexión
     lidResolver.conn = global.conn;
@@ -1010,7 +963,6 @@ global.reloadHandler = async function (restatConn) {
   });
 
   isInit = false;
-  isReloading = false; // liberar lock
   return true;
 };
 
