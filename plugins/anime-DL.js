@@ -28,14 +28,22 @@ import fs                from 'fs'
 import path              from 'path'
 import fetch             from 'node-fetch'
 import * as cheerio      from 'cheerio'
-import puppeteerExtra    from 'puppeteer-extra'
-import StealthPlugin     from 'puppeteer-extra-plugin-stealth'
+// puppeteer-extra cargado de forma lazy para no crashear si no está instalado
+let _puppeteerExtra = null
 import { File as MegaFile } from 'megajs'
 import { lookup as mimeLookup } from 'mime-types'
 import { pipeline }      from 'stream/promises'
 import https             from 'https'
 
-puppeteerExtra.use(StealthPlugin())
+async function getPuppeteer() {
+  if (!_puppeteerExtra) {
+    const { default: pe }      = await import('puppeteer-extra')
+    const { default: Stealth } = await import('puppeteer-extra-plugin-stealth')
+    pe.use(Stealth())
+    _puppeteerExtra = pe
+  }
+  return _puppeteerExtra
+}
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 20 })
 global.activeDownloads    = global.activeDownloads    || new Map()
@@ -535,7 +543,7 @@ async function fetchHtmlConPuppeteer(url) {
   }
 
   let capturedVideoUrl = null
-  const browser = await puppeteerExtra.launch({
+  const browser = await (await getPuppeteer()).launch({
     headless: 'new',
     executablePath: execPath,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
@@ -761,7 +769,7 @@ async function extractStreamWish(embedUrl) {
     }
 
     let capturedUrl = null
-    const browser = await puppeteerExtra.launch({
+    const browser = await (await getPuppeteer()).launch({
       headless: 'new',
       executablePath: execPath,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
@@ -1370,7 +1378,7 @@ async function scrapeJKanime(url) {
     for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
     if (!execPath) throw new Error('Chromium no disponible')
 
-    const browser = await puppeteerExtra.launch({
+    const browser = await (await getPuppeteer()).launch({
       headless      : 'new',
       executablePath: execPath,
       args          : ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
