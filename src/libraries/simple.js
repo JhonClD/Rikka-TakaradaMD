@@ -24,10 +24,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
  * @type {import("@whiskeysockets/baileys")}
  */
+const _baileys = await import("@whiskeysockets/baileys");
+const _baileysDef = _baileys.default || _baileys;
 const {
     default: _makeWaSocket,
     makeWALegacySocket,
-    proto,
     downloadContentFromMessage,
     jidDecode,
     areJidsSameUser,
@@ -41,7 +42,9 @@ const {
     prepareWAMessageMedia,
     WA_DEFAULT_EPHEMERAL,
     PHONENUMBER_MCC,
-} = (await import("@whiskeysockets/baileys")).default;
+} = _baileysDef;
+// proto es un named export del módulo raíz en itsliaaa/baileys, no del default
+const proto = _baileys.proto || _baileysDef.proto;
 
 export function makeWASocket(connectionOptions, options = {}) {
     /**
