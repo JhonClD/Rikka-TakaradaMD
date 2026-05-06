@@ -514,10 +514,6 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
 let opcion;
-// Variables de estado para el pairing code (sobreviven reconexiones)
-let pairingPhoneNumber = null;
-let pairingCodeDone = false;
-let pairingAttemptCount = 0;
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -623,10 +619,12 @@ if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
         rl.close();
       }
 
-      // Guardar número — el código se pedirá dentro de connectionUpdate
-      // para sobrevivir reconexiones por badSession u otros errores
-      pairingPhoneNumber = numeroTelefono;
-      console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
+      setTimeout(async () => {
+        let codigo = await conn.requestPairingCode(numeroTelefono);
+        codigo = codigo?.match(/.{1,4}/g)?.join("-") || codigo;
+        console.log(chalk.yellow('[ ℹ️ ] introduce el código de emparejamiento en WhatsApp.'));
+        console.log(chalk.black(chalk.bgGreen(`Su código de emparejamiento: `)), chalk.black(chalk.white(codigo)));
+      }, 3000);
     }
   }
 }
@@ -731,32 +729,6 @@ async function connectionUpdate(update) {
   const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
-
-  // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
-  if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
-    if (!global.conn.authState.creds.registered) {
-      setTimeout(async () => {
-        if (pairingCodeDone) return;
-        pairingAttemptCount++;
-        try {
-          let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
-          if (!codigo) throw new Error('Código vacío recibido');
-          pairingCodeDone = true;
-          codigo = codigo?.match(/.{1,4}/g)?.join('-') || codigo;
-          console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
-          console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(chalk.black(` ${codigo} `))));
-        } catch (err) {
-          console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/5): ${err.message}`));
-          if (pairingAttemptCount >= 5) {
-            console.log(chalk.red('[ ❌ ] No se pudo obtener el código. Reinicia y usa QR.'));
-            pairingPhoneNumber = null; // detener reintentos
-          }
-          // El siguiente 'connecting' reintentará automáticamente
-        }
-      }, 1500);
-    }
-  }
-  // ──────────────────────────────────────────────────────────
   const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
   if (code && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
     await global.reloadHandler(true).catch(console.error);
@@ -800,9 +772,10 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    //await fs.unlinkSync("./MysticSession/" + "creds.json");
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, Por favor espere un momento me voy a reiniciar...\nSi aparecen error vuelve a iniciar con : npm start`));
-    //process.send('reset');
+    console.log(chalk.bold.yellowBright(`[ ⚠️ ] Conexión reemplazada (405). Reconectando en 5s...`));
+    await new Promise(r => setTimeout(r, 5000));
+    await global.reloadHandler(true).catch(console.error);
+    return;
   }
   if (connection === 'close') {
     if (reason === DisconnectReason.badSession) {
@@ -851,6 +824,7 @@ async function connectionUpdate(update) {
       if (shouldLogError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
+      await new Promise(r => setTimeout(r, 3000));
       await global.reloadHandler(true).catch(console.error);
     }
   }
