@@ -21,7 +21,9 @@ import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 import LidResolver from './src/libraries/LidResolver.js';
 
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, PHONENUMBER_MCC } = await import("@whiskeysockets/baileys");
+const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser } = await import("@whiskeysockets/baileys");
+// PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
+const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
 import readline from 'readline';
 import NodeCache from 'node-cache';
 const { chain } = lodash;
@@ -609,7 +611,7 @@ if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
       let numeroTelefono;
       if (!!phoneNumber) {
         numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
-        if (!Object.keys(PHONENUMBER_MCC).some(v => numeroTelefono.startsWith(v))) {
+        if (!_isValidCountryCode(numeroTelefono)) {
           console.log(chalk.bgBlack(chalk.bold.redBright("Comience con el código de país de su número de WhatsApp.\nEjemplo: +5219992095479\n")));
           process.exit(0);
         }
@@ -617,7 +619,7 @@ if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
         while (true) {
           numeroTelefono = await question(chalk.bgBlack(chalk.bold.yellowBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479\n')));
           numeroTelefono = numeroTelefono.replace(/[^0-9]/g, '');
-          if (numeroTelefono.match(/^\d+$/) && Object.keys(PHONENUMBER_MCC).some(v => numeroTelefono.startsWith(v))) break;
+          if (_isValidCountryCode(numeroTelefono)) break;
           console.log(chalk.bgBlack(chalk.bold.redBright("Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479.\n")));
         }
         rl.close();
