@@ -18,10 +18,17 @@ import fs from 'fs'
 import path from 'path'
 import { tmpdir } from 'os'
 import https from 'https'
-import puppeteerExtra from 'puppeteer-extra'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
-
-puppeteerExtra.use(StealthPlugin())
+// puppeteer-extra cargado de forma lazy para no crashear si no está instalado
+let _puppeteerExtra = null
+async function getPuppeteer() {
+  if (!_puppeteerExtra) {
+    const { default: pe }      = await import('puppeteer-extra')
+    const { default: Stealth } = await import('puppeteer-extra-plugin-stealth')
+    pe.use(Stealth())
+    _puppeteerExtra = pe
+  }
+  return _puppeteerExtra
+}
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 global.activeDownloads = global.activeDownloads || new Map()
@@ -287,7 +294,7 @@ async function buscarConPuppeteer(query) {
         throw new Error('Chromium no disponible en el sistema (instala con: apt install chromium-browser)')
     }
 
-    const browser = await puppeteerExtra.launch({
+    const browser = await (await getPuppeteer()).launch({
         headless: 'new',
         executablePath: execPath,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
