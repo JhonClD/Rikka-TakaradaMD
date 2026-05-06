@@ -25,10 +25,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * @type {import("@whiskeysockets/baileys")}
  */
 const _baileys = await import("@whiskeysockets/baileys");
-const _baileysDef = _baileys.default || _baileys;
+// En itsliaaa/baileys el default export ES la función makeWASocket directamente
+const _makeWaSocket = _baileys.default;
 const {
-    default: _makeWaSocket,
     makeWALegacySocket,
+    proto,
     downloadContentFromMessage,
     jidDecode,
     areJidsSameUser,
@@ -42,9 +43,7 @@ const {
     prepareWAMessageMedia,
     WA_DEFAULT_EPHEMERAL,
     PHONENUMBER_MCC,
-} = _baileysDef;
-// proto es un named export del módulo raíz en itsliaaa/baileys, no del default
-const proto = _baileys.proto || _baileysDef.proto;
+} = _baileys;
 
 export function makeWASocket(connectionOptions, options = {}) {
     /**
