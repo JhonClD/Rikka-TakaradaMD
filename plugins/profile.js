@@ -13,31 +13,27 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-const handler = async (m, { conn, args, usedPrefix, command }) => {
+const handler = async (m, { conn, args, usedPrefix, command, text }) => {
   const users = global.db.data.users
   
-  // Obtener el JID REAL sin modificaciones del LidResolver
-  let target
-  if (m.mentionedJid?.[0]) {
-    target = m.mentionedJid[0]
-  } else if (m.quoted?.sender) {
-    target = m.quoted.sender
+  // Obtener who EXACTAMENTE como en el ejemplo
+  let who
+  if (m.quoted) {
+    who = m.quoted.sender
+  } else if (m.mentionedJid && m.mentionedJid[0]) {
+    who = m.mentionedJid[0]
   } else {
-    // Usar el sender original del mensaje, no el modificado
-    target = m.key.participant || m.key.remoteJid || m.sender
+    who = m.sender
   }
-  
-  // Normalizar JID (quitar @lid si existe)
-  if (target?.endsWith?.('@lid')) {
-    const cached = conn.lid?.getUserInfo?.(target.split('@')[0])
-    target = cached?.jid || target
-  }
-  
-  const isSelf = target === m.sender || target === (m.key.participant || m.key.remoteJid)
-  const name = await conn.getName(target)
 
-  if (!users[target]) users[target] = {}
-  const u = users[target]
+  // Normalizar JID
+  if (!who.includes('@')) who += '@s.whatsapp.net'
+  
+  const isSelf = who === m.sender
+  const name = await conn.getName(who)
+
+  if (!users[who]) users[who] = {}
+  const u = users[who]
 
   if (u.birthday === undefined) u.birthday = null
   if (u.gender === undefined) u.gender = null
@@ -68,7 +64,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   const pct = Math.min(100, Math.floor((xpNow / xpNeed) * 100))
 
   const sorted = Object.entries(users).sort(([, a], [, b]) => (b.exp || 0) - (a.exp || 0))
-  const rank = sorted.findIndex(([jid]) => jid === target) + 1
+  const rank = sorted.findIndex(([jid]) => jid === who) + 1
 
   const txt = `
 「✿」 *Perfil* ◢ ${name} ◤
@@ -87,60 +83,25 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Intentar obtener foto de perfil con timeout
-  let ppUrl = null
-  
+  // Obtener foto EXACTAMENTE como en el ejemplo
+  let pp = 'https://files.catbox.moe/leegee.jpg' // Imagen por defecto
   try {
-    // Timeout de 3 segundos para no bloquear
-    ppUrl = await Promise.race([
-      conn.profilePictureUrl(target, 'image').catch(() => null),
-      new Promise(resolve => setTimeout(() => resolve(null), 3000))
-    ])
-  } catch {}
-
-  if (!ppUrl) {
+    pp = await conn.profilePictureUrl(who, 'image')
+  } catch {
     try {
-      ppUrl = await Promise.race([
-        conn.profilePictureUrl(target, 'preview').catch(() => null),
-        new Promise(resolve => setTimeout(() => resolve(null), 2000))
-      ])
+      pp = await conn.profilePictureUrl(who, 'preview')
     } catch {}
   }
 
-  let imgBuf = null
-  
-  if (ppUrl) {
-    try {
-      const res = await fetch(ppUrl)
-      if (res.ok) imgBuf = Buffer.from(await res.arrayBuffer())
-    } catch {}
-  }
-
-  // Si no hay foto, usar fallback
-  if (!imgBuf) {
-    try {
-      const res = await fetch('https://files.catbox.moe/leegee.jpg')
-      imgBuf = Buffer.from(await res.arrayBuffer())
-    } catch {}
-  }
-
-  if (imgBuf) {
-    await conn.sendMessage(
-      m.chat,
-      {
-        image: imgBuf,
-        caption: txt,
-        mentions: [target],
-      },
-      { quoted: m }
-    )
-  } else {
-    await conn.sendMessage(
-      m.chat,
-      { text: txt, mentions: [target] },
-      { quoted: m }
-    )
-  }
+  await conn.sendMessage(
+    m.chat,
+    {
+      image: { url: pp },
+      caption: txt,
+      mentions: [who],
+    },
+    { quoted: m }
+  )
 }
 
 handler.help = ['profile', 'setbirth', 'setgender']
