@@ -13,6 +13,90 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
+// Función mejorada para obtener la foto de perfil
+const getProfilePicture = async (conn, jid, options = {}) => {
+  const { fallback = 'https://files.catbox.moe/leegee.jpg', maxAttempts = 3, delay = 1000 } = options
+  
+  const isValidUrl = (url) => {
+    try {
+      return url && typeof url === 'string' && new URL(url)
+    } catch {
+      return false
+    }
+  }
+
+  const toBuffer = async (url) => {
+    if (!isValidUrl(url)) throw new Error('URL inválida')
+    
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000) // 10 segundos timeout
+    
+    try {
+      const res = await fetch(url, { 
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)' }
+      })
+      
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+      
+      const arrayBuffer = await res.arrayBuffer()
+      return Buffer.from(arrayBuffer)
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  // Estrategias para obtener la foto de perfil (en orden)
+  const strategies = [
+    // 1. Intento directo con 'image' (mejor calidad)
+    async () => {
+      try {
+        const url = await conn.profilePictureUrl(jid, 'image')
+        if (isValidUrl(url)) return await toBuffer(url)
+      } catch (e) {
+        console.log(`[Profile] Intento 1 (image) falló:`, e.message)
+      }
+      return null
+    },
+    
+    // 2. Intento con 'preview' (calidad reducida)
+    async () => {
+      try {
+        const url = await conn.profilePictureUrl(jid, 'preview')
+        if (isValidUrl(url)) return await toBuffer(url)
+      } catch (e) {
+        console.log(`[Profile] Intento 2 (preview) falló:`, e.message)
+      }
+      return null
+    },
+    
+    // 3. Reintentos con delay
+    async () => {
+      for (let i = 0; i < maxAttempts; i++) {
+        try {
+          const url = await conn.profilePictureUrl(jid, 'image')
+          if (isValidUrl(url)) return await toBuffer(url)
+        } catch (e) {
+          if (i < maxAttempts - 1) {
+            await new Promise(resolve => setTimeout(resolve, delay))
+          }
+        }
+      }
+      return null
+    }
+  ]
+
+  // Probar cada estrategia en orden
+  for (const strategy of strategies) {
+    const result = await strategy()
+    if (result) return result
+  }
+
+  // Si todo falla, usar imagen por defecto
+  console.log(`[Profile] Usando imagen por defecto para ${jid}`)
+  return await toBuffer(fallback)
+}
+
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
   const target = m.mentionedJid?.[0] || m.quoted?.sender || m.sender
@@ -71,23 +155,12 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  const FALLBACK = 'https://files.catbox.moe/leegee.jpg'
-
-  const toBuffer = async (url) => {
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
-    return Buffer.from(await res.arrayBuffer())
-  }
-
-  const isValidUrl = (u) => u && typeof u === 'string' && u.startsWith('http')
-
-  let imgBuf
-  try {
-    let pp = await conn.profilePictureUrl(target, 'image').catch(() => null)
-    if (!isValidUrl(pp)) pp = await conn.profilePictureUrl(target, 'preview').catch(() => null)
-    imgBuf = await toBuffer(isValidUrl(pp) ? pp : FALLBACK)
-  } catch {
-    imgBuf = await toBuffer(FALLBACK)
-  }
+  // Obtener imagen de perfil con el nuevo sistema mejorado
+  const imgBuf = await getProfilePicture(conn, target, {
+    fallback: 'https://files.catbox.moe/leegee.jpg',
+    maxAttempts: 2,
+    delay: 500
+  })
 
   await conn.sendMessage(
     m.chat,
