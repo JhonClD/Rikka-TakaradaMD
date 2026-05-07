@@ -1,24 +1,22 @@
-// menu.js — Rikka-TakaradaMD
-import os from 'os';
-import moment from 'moment-timezone';
+import os from 'os'
+import moment from 'moment-timezone'
 
-const TIMEZONE = 'America/Lima';
+const TIMEZONE = 'America/Lima'
 
-// Mismo formato y fuente que ping.js → process.uptime()
 function clockString(ms) {
-  const h = Math.floor(ms / 3_600_000);
-  const m = Math.floor(ms / 60_000) % 60;
-  const s = Math.floor(ms / 1_000) % 60;
-  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
+  const h = Math.floor(ms / 3_600_000)
+  const m = Math.floor(ms / 60_000) % 60
+  const s = Math.floor(ms / 1_000) % 60
+  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':')
 }
 
 function getOSName() {
-  const p = os.platform();
-  if (p === 'android' || process.env.PREFIX?.includes('com.termux')) return 'Android 🤖';
-  if (p === 'linux')  return 'Linux 🐧';
-  if (p === 'win32')  return 'Windows 🪟';
-  if (p === 'darwin') return 'macOS 🍎';
-  return p;
+  const p = os.platform()
+  if (p === 'android' || process.env.PREFIX?.includes('com.termux')) return 'Android 🤖'
+  if (p === 'linux')  return 'Linux 🐧'
+  if (p === 'win32')  return 'Windows 🪟'
+  if (p === 'darwin') return 'macOS 🍎'
+  return p
 }
 
 const CAT_ICONS = {
@@ -26,87 +24,82 @@ const CAT_ICONS = {
   tools: '🛠️', herramientas: '🛠️', ai: '🤖', ia: '🤖', sticker: '🎭', stickers: '🎭',
   game: '🎮', games: '🎮', group: '🏯', grupos: '👥', nsfw: '🔞',
   owner: '💎', info: '💫', converter: '🪄', img: '🌸', xp: '🔮',
+  gacha: '🎰', farmeo: '💰', interacciones: '💞', user: '👤',
   random: '⭐', otros: '📌',
-};
-const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌';
+}
+const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌'
 
 function buildCategories() {
-  const cats = {};
+  const cats = {}
   for (const [, plugin] of Object.entries(global.plugins || {})) {
-    if (!plugin?.command) continue;
-    const tag  = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
-    let cmds   = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : []);
+    if (!plugin?.command) continue
+    const tag  = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros'
+    let cmds   = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : [])
     if (!cmds.length) {
       cmds = plugin.command instanceof RegExp
         ? [plugin.command.source.replace(/[^a-z|]/gi, '').split('|')[0]]
-        : Array.isArray(plugin.command) ? [plugin.command[0]] : [plugin.command];
+        : Array.isArray(plugin.command) ? [plugin.command[0]] : [plugin.command]
     }
-    if (!cats[tag]) cats[tag] = [];
-    cats[tag].push(...cmds.filter(Boolean));
+    if (!cats[tag]) cats[tag] = []
+    cats[tag].push(...cmds.filter(Boolean))
   }
-  return cats;
+  return cats
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
-  const prefix    = usedPrefix || '.';
-  const sender    = m.sender;
-  const pushname  = m.pushName || sender.replace(/@.+/, '');
-  const ownerNum  = global.owner?.[0]?.[0] || '';
-  const date      = moment.tz(TIMEZONE).format('DD/MM/YYYY');
+  const prefix     = usedPrefix || '.'
+  const sender     = m.sender
+  const pushname   = m.pushName || sender.replace(/@.+/, '')
+  const ownerNum   = global.owner?.[0]?.[0] || ''
+  const date       = moment.tz(TIMEZONE).format('DD/MM/YYYY')
+  const uptime     = clockString(process.uptime() * 1000)
+  const osName     = getOSName()
+  const categories = buildCategories()
+  const totalCmds  = Object.values(categories).flat().length
 
-  // Uptime igual que ping.js
-  const uptime = clockString(process.uptime() * 1000);
-
-  const osName    = getOSName();
-  const categories = buildCategories();
-  const totalCmds = Object.values(categories).flat().length;
-
-  // Integrantes solo en grupo
-  let membersLine = '';
+  let membersLine = ''
   if (m.isGroup) {
-    const meta  = await conn.groupMetadata(m.chat).catch(() => null);
-    const count = meta?.participants?.length || '?';
-    membersLine = `│ 👥 *Integrantes:* ${count}`;
+    const meta  = await conn.groupMetadata(m.chat).catch(() => null)
+    const count = meta?.participants?.length || '?'
+    membersLine = `┊⇢ 👥 *Miembros:* ${count}`
   }
 
-  const lines = [
-    `🌸✨ *𝙍𝙞𝙠𝙠𝙖 𝙏𝙖𝙧𝙖𝙠𝙖𝙧𝙖𝙙𝙖* ✨🌸`,
-    ``,
-    `┌──────────────────`,
-    `│ 🏷️  *Nombre:* ${pushname}`,
-    `│ ⏱️  *Uptime:* ${uptime}`,
-    `│ 📅 *Fecha:* ${date}`,
+  const header = [
+    `꒰ ✦ *𝙍𝙞𝙠𝙠𝙖 𝙏𝙖𝙧𝙖𝙠𝙖𝙧𝙖𝙙𝙖* ✦ ꒱`,
+    `⌜────────────────⌝`,
+    `┊⇢ 🏷️ *Usuario:* ${pushname}`,
+    `┊⇢ ⏱️ *Uptime:* ${uptime}`,
+    `┊⇢ 📅 *Fecha:* ${date}`,
     membersLine,
-    `│ 🖥️  *Sistema:* ${osName}`,
-    `│ 👑 *Owner:* +${ownerNum}`,
-    `│ 🔰 *Prefix:* ${prefix}`,
-    `│ 📋 *Comandos:* ${totalCmds}`,
-    `└──────────────────`,
-  ].filter(l => l !== '').join('\n');
+    `┊⇢ 🖥️ *Sistema:* ${osName}`,
+    `┊⇢ 👑 *Owner:* +${ownerNum}`,
+    `┊⇢ ⸙͎ *Prefix:* ${prefix}`,
+    `┊⇢ 📋 *Comandos:* ${totalCmds}`,
+    `⌞────────────────⌟`,
+  ].filter(l => l !== '').join('\n')
 
   const body = Object.entries(categories)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([cat, cmds]) => {
-      const icon  = getIcon(cat);
-      const title = cat.charAt(0).toUpperCase() + cat.slice(1);
-      const list  = cmds.map(c => `┊✦ ${prefix}${c}`).join('\n');
-      return `❖––––––『${icon} *${title}*\n${list}\n╰━═┅═━––––––๑`;
+      const icon  = getIcon(cat)
+      const title = cat.charAt(0).toUpperCase() + cat.slice(1)
+      const list  = cmds.map(c => `┊✧ ${prefix}${c}`).join('\n')
+      return `╭─『 ${icon} *${title}* 』\n${list}\n╰───────────────`
     })
-    .join('\n\n');
+    .join('\n\n')
 
-  const footer = `\n_Usa_ *${prefix}menu* _para ver esta lista_`;
-  const fullMenu = `${lines}\n\n${body}${footer}`;
+  const footer = `\n_↳ Usa_ *${prefix}menu* _para ver esta lista_`
+  const fullMenu = `${header}\n\n${body}${footer}`
 
-  const menuImage = global.imagen1 || null;
+  const menuImage = global.imagen1 || null
   if (menuImage) {
-    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu, mentions: [sender] }, { quoted: m });
+    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu, mentions: [sender] }, { quoted: m })
   } else {
-    await m.reply(fullMenu);
+    await m.reply(fullMenu)
   }
-};
+}
 
-handler.help    = ['menu'];
-handler.tags    = ['info'];
-handler.command = /^(menu|ayuda|help|start|comandos)$/i;
-
-export default handler;
+handler.help    = ['menu']
+handler.tags    = ['info']
+handler.command = /^(menu|ayuda|help|start|comandos)$/i
+export default handler
