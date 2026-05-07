@@ -71,14 +71,26 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // .catch() garantiza que siempre hay una URL string válida — igual que el bot de referencia
-  const perfil = await conn.profilePictureUrl(target, 'image')
-    .catch(() => 'https://files.catbox.moe/leegee.jpg')
+  const FALLBACK = 'https://files.catbox.moe/leegee.jpg'
+
+  const toBuffer = async (url) => {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    return Buffer.from(await res.arrayBuffer())
+  }
+
+  let imgBuf
+  try {
+    const pp = await conn.profilePictureUrl(target, 'image')
+    const url = (pp && typeof pp === 'string' && pp.startsWith('http')) ? pp : FALLBACK
+    imgBuf = await toBuffer(url)
+  } catch {
+    imgBuf = await toBuffer(FALLBACK)
+  }
 
   await conn.sendMessage(
     m.chat,
     {
-      image: { url: perfil },
+      image: imgBuf,
       caption: txt,
       mentions: [target],
     },
@@ -91,3 +103,4 @@ handler.tags = ['user']
 handler.command = /^(perfil|profile|pf|setbirth|setgender)$/i
 
 export default handler
+      
