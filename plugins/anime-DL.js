@@ -1,4 +1,4 @@
-// plugins/anime-DL.js  — v2.3  (extractores byse/dsvplay/lulu dedicados + descarga Savefiles/Gofile)
+// plugins/anime-DL.js  — v2.4  (mejoras: LatAnime búsqueda + JKanime data-id + anisabi_player)
 //
 // Comandos:
 //   .anilist                          → muestra los sitios disponibles numerados
@@ -1118,11 +1118,7 @@ async function scrapeAnimeFLV(url) {
 }
 
 // ── LatAnime ──────────────────────────────────────────────────────────────────
-// LatAnime tiene dos fuentes de video:
-//  1. Tabs de reproductores: data-src / data-player con embed URL
-//  2. Botones de descarga directa: <a href="https://mega.nz/...">Mega</a>
-//     OJO: algunos links pasan por un redirector de anuncio antes de llegar
-//     al servidor real (ej: togglevpn.org → mediafire.com). Hay que resolverlos.
+// Mejorado: usa /buscar?q= para búsqueda correcta
 async function scrapeLatAnime(url) {
   const html = await fetchHtml(url)
   const $    = cheerio.load(html)
@@ -1133,12 +1129,10 @@ async function scrapeLatAnime(url) {
 
   // Resolver un posible redirector de anuncio para obtener la URL real
   async function resolverRedirector(href) {
-    // Si ya es un servidor conocido, no hace falta resolver
     const dominiosDirectos = ['mega.nz','mediafire.com','voe.sx','streamtape','filemoon',
       'mp4upload','streamwish','dood','upstream','ok.ru','vidhide','mixdrop','gofile.io']
     if (dominiosDirectos.some(d => href.includes(d))) return href
 
-    // Si parece un redirector externo, seguirlo para obtener la URL destino
     try {
       const { default: axios } = await import('axios')
       const res = await axios.get(href, {
@@ -1146,22 +1140,18 @@ async function scrapeLatAnime(url) {
         httpsAgent,
         maxRedirects: 5,
         timeout: 10000,
-        validateStatus: () => true, // aceptar cualquier status
+        validateStatus: () => true,
       })
-      // Buscar la URL de MediaFire u otro servidor en el HTML de la página de anuncio
       const body = typeof res.data === 'string' ? res.data : ''
       const finalUrl = res.request?.res?.responseUrl || ''
 
-      // Patrón 1: URL de servidor en el HTML del redirector
       for (const d of dominiosDirectos) {
         const m = body.match(new RegExp(`https?://[^"'\\s]*${d.replace('.', '\\.')}[^"'\\s]*`))
         if (m) return m[0]
       }
-      // Patrón 2: URL final después del redirect
       if (finalUrl && dominiosDirectos.some(d => finalUrl.includes(d))) return finalUrl
-
     } catch (_) {}
-    return href // si no pudo resolver, devolver el original
+    return href
   }
 
   // ── 1. Botones de descarga directa ──────────────────────────────────────
@@ -1180,7 +1170,6 @@ async function scrapeLatAnime(url) {
       href.includes('savefiles')  || href.includes('gofile.io')     ||
       href.includes('byse')       || href.includes('dsvplay')       ||
       href.includes('lulu')       || href.includes('cloud')
-    // También detectar redirectores externos que llevan a servidores
     const esRedirector = !href.includes('latanime.org') &&
       !href.includes('javascript') && !href.includes('#') &&
       (href.includes('toggle') || href.includes('redirect') ||
@@ -1190,7 +1179,6 @@ async function scrapeLatAnime(url) {
       linksDescarga.push({ href, label })
   })
 
-  // Resolver redirectores en paralelo (máx 5 a la vez)
   for (const { href, label } of linksDescarga) {
     const urlReal = await resolverRedirector(href)
     const urlNorm = normalizarMegaUrl(urlReal)
@@ -1198,8 +1186,7 @@ async function scrapeLatAnime(url) {
       servidores.push({ nombre: label || detectarServidor(urlNorm), url: urlNorm })
   }
 
-  // ── 2. Tabs de reproductores embed (data-src / data-player / data-url) ──
-  // También capturar tabs con texto como "dsvplay", "byse", etc. que usan atributo href o data-*
+  // ── 2. Tabs de reproductores embed ──────────────────────────────────────
   $('[data-src], [data-player], [data-url]').each((_, el) => {
     const raw   = $(el).attr('data-src') || $(el).attr('data-player') || $(el).attr('data-url') || ''
     const label = $(el).text().trim().toLowerCase()
@@ -1276,8 +1263,6 @@ async function scrapeGenerico(url) {
 }
 
 // ── TioAnime ──────────────────────────────────────────────────────────────────
-// NUEVO — fuente: stremio-addon/routes/tioanime.js & tioanime-master/src/api.js
-// Formato: var videos = [[server, url], ...] (array de arrays)
 async function scrapeTioAnime(url) {
   const html = await fetchHtml(url)
   const $ = cheerio.load(html)
@@ -1305,7 +1290,6 @@ async function scrapeTioAnime(url) {
       } catch (_) {}
     }
 
-    // Fallback: array simple o {SUB:[...]}
     if (servidores.length === 0) {
       const mArr = code.match(/var\s+videos\s*=\s*(\[[\s\S]*?\]);/)
       if (mArr) {
@@ -1335,14 +1319,12 @@ async function scrapeTioAnime(url) {
 }
 
 // ── JKanime ───────────────────────────────────────────────────────────────────
-// La tabla "Enlaces de descarga" se renderiza con JavaScript, por lo que
-// se necesita Puppeteer para ver los servidores reales.
-// El flujo es: página carga → XHR con lista de descargas → tabla DOM con nombres.
+// MEJORADO: Soporte para data-id (anisabi_player) y API moderna
 async function scrapeJKanime(url) {
   const servidores = []
 
   // ── Resolución de redirect (jkplayers → URL real) ──────────────────────────
-  const resolverRedirect = async (href) => {
+  const resolverRedirectJK = async (href) => {
     let current = href
     try {
       for (let i = 0; i < 5; i++) {
@@ -1354,168 +1336,201 @@ async function scrapeJKanime(url) {
         const loc = res.headers?.get?.('location') || res.headers?.location
         if (!loc) break
         current = loc.startsWith('http') ? loc : new URL(loc, current).href
-        // parar si ya salimos de jkplayers
         if (!current.includes('jkplayers.com')) break
       }
     } catch (_) {}
     return current
   }
 
-  // ── Estrategia 0: Puppeteer — tabla de descargas renderizada ───────────────
-  const jkMatch = url.match(/jkanime\.net\/([^/]+)\/(\d+)/)
-  const slug    = jkMatch?.[1]
-  const cap     = jkMatch?.[2]
-
   try {
-    const chromiumPaths = [
-      process.env.PUPPETEER_EXECUTABLE_PATH,
-      '/data/data/com.termux/files/usr/bin/chromium-browser',
-      '/data/data/com.termux/files/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-    ].filter(Boolean)
-    let execPath = null
-    for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
-    if (!execPath) throw new Error('Chromium no disponible')
+    const html = await fetchHtml(url)
+    const $ = cheerio.load(html)
 
-    const browser = await (await getPuppeteer()).launch({
-      headless      : 'new',
-      executablePath: execPath,
-      args          : ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    })
-    const page = await browser.newPage()
-    await page.setUserAgent(randomUA())
-    await page.setExtraHTTPHeaders(buildHeaders({ Referer: 'https://jkanime.net/' }))
+    // ── NUEVO: Extraer data-id del div .anisabi_player ──────────────────────
+    const dataId = $('.anisabi_player').data('id')
+    console.log(`[jkanime] data-id encontrado: ${dataId || 'no'}`)
 
-    // Bloquear recursos pesados para acelerar
-    await page.setRequestInterception(true)
-    page.on('request', req => {
-      if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort()
-      else req.continue()
-    })
-
-    try { await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }) } catch (_) {
-      try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }) } catch (_) {}
-    }
-
-    // Esperar a que la tabla de descargas aparezca en el DOM
-    try { await page.waitForSelector('table tr td a[href]', { timeout: 8000 }) } catch (_) {}
-
-    // Extraer filas de la tabla "Enlaces de descarga"
-    // Estructura: <tr><td>NombreServidor</td><td>Tamaño</td><td>Audio</td><td><a href="...">Descargar HD</a></td></tr>
-    const filas = await page.evaluate(() => {
-      const resultado = []
-      document.querySelectorAll('table tr').forEach(tr => {
-        const tds = tr.querySelectorAll('td')
-        if (tds.length < 4) return
-        const nombre = tds[0]?.textContent?.trim()
-        const link   = tds[3]?.querySelector('a[href]')?.href
-        if (nombre && link?.startsWith('http')) resultado.push({ nombre, link })
-      })
-      return resultado
-    })
-
-    await browser.close()
-
-    if (filas.length > 0) {
-      console.log(`[jkanime] tabla: ${filas.length} servidores:`, filas.map(f => f.nombre).join(', '))
-      // Resolver redirects en paralelo (jkplayers → mega/mediafire/etc.)
-      const promesas = filas.map(async ({ nombre, link }) => {
-        const finalUrl = await resolverRedirect(link)
-        return {
-          nombre : nombre.toLowerCase(),
-          url    : normalizarMegaUrl(finalUrl),
-          directo: /mega\.nz|mediafire\.com|gofile\.io|savefiles\.me/.test(finalUrl),
-        }
-      })
-      const resultados = await Promise.allSettled(promesas)
-      for (const r of resultados) {
-        if (r.status === 'fulfilled' && r.value?.url && !servidores.find(s => s.url === r.value.url))
-          servidores.push(r.value)
-      }
-      if (servidores.length > 0) {
-        console.log(`[jkanime] ${servidores.length} URLs resueltas`)
-        return servidores
-      }
-    }
-  } catch (e) { console.error('[jkanime] Puppeteer tabla:', e.message) }
-
-  // ── Estrategia 1: API oficial /ajax/episode/2/ + decodificar remote ────────
-  if (slug && cap) {
-    const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
-    const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
-
-    for (const srv of SERVIDORES_JK) {
+    if (dataId) {
+      // Intentar API moderna
+      const apiUrl = `https://jkanime.net/api/episode/${dataId}/`
       try {
-        const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
-        const res    = await fetch(apiUrl, { headers, timeout: 12000 })
-        if (!res.ok) continue
-        const json   = await res.json()
+        const res = await fetch(apiUrl, {
+          headers: {
+            ...buildHeaders({ Referer: 'https://jkanime.net/' }),
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+          },
+          timeout: 15000
+        })
 
-        // Campo remote en base64
-        if (json?.remote) {
+        if (res.ok) {
+          const json = await res.json()
+          console.log(`[jkanime] API response keys:`, Object.keys(json))
+
+          // Procesar servidores del JSON
+          const serversData = json.servers || json.data || json
+
+          for (const [serverName, serverData] of Object.entries(serversData)) {
+            let videoUrl = null
+
+            if (typeof serverData === 'string') {
+              videoUrl = serverData
+            } else if (serverData?.url) {
+              videoUrl = serverData.url
+            } else if (serverData?.file) {
+              videoUrl = serverData.file
+            } else if (serverData?.embed) {
+              videoUrl = serverData.embed
+            } else if (serverData?.remote) {
+              // Decodificar base64
+              try {
+                let decoded = Buffer.from(serverData.remote, 'base64').toString('utf-8')
+                videoUrl = decoded
+              } catch (_) {}
+            }
+
+            if (videoUrl && videoUrl.startsWith('http')) {
+              let finalUrl = videoUrl
+              if (videoUrl.includes('jkplayers.com')) {
+                finalUrl = await resolverRedirectJK(videoUrl)
+              }
+              const urlNorm = normalizarMegaUrl(finalUrl)
+              if (!servidores.find(s => s.url === urlNorm)) {
+                servidores.push({
+                  nombre: serverName.toLowerCase(),
+                  url: urlNorm,
+                  directo: /mega\.nz|mediafire\.com|gofile\.io|savefiles\.me/.test(finalUrl)
+                })
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[jkanime] API fetch error:', e.message)
+      }
+    }
+
+    // ── Fallback: Extraer de script inline si la API no funcionó ────────────
+    if (servidores.length === 0) {
+      $('script').each((_, el) => {
+        const code = $(el).html() || ''
+
+        // Buscar var videos = [...]
+        const videoMatch = code.match(/var\s+videos\s*=\s*(\[[\s\S]*?\]);/)
+        if (videoMatch) {
           try {
-            let d = json.remote
-            const pad = 4 - (d.length % 4)
-            if (pad !== 4) d += '='.repeat(pad)
-            const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
-            if (decoded.startsWith('http') && !servidores.find(s => s.url === decoded)) {
-              // Seguir el redirect para salir de jkplayers
-              const finalUrl = decoded.includes('jkplayers.com') ? await resolverRedirect(decoded) : decoded
-              console.log(`[jkanime] API ${srv}: ${finalUrl.slice(0, 60)}`)
-              servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
-              continue
+            const videos = JSON.parse(videoMatch[1])
+            for (const video of videos) {
+              let videoUrl = null
+              if (Array.isArray(video)) {
+                videoUrl = video[1]
+              } else if (video.url) {
+                videoUrl = video.url
+              } else if (video.file) {
+                videoUrl = video.file
+              }
+              if (videoUrl && videoUrl.startsWith('http') && !servidores.find(s => s.url === videoUrl)) {
+                servidores.push({
+                  nombre: (video.name || video.server || 'desconocido').toLowerCase(),
+                  url: normalizarMegaUrl(videoUrl)
+                })
+              }
             }
           } catch (_) {}
         }
 
-        const embedUrl =
-          json?.source?.[0]?.file || json?.iframe || json?.url ||
-          json?.embed || json?.data?.url || json?.data?.iframe
-        if (embedUrl?.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
-          const finalUrl = embedUrl.includes('jkplayers.com') ? await resolverRedirect(embedUrl) : embedUrl
-          console.log(`[jkanime] API ${srv}: ${finalUrl.slice(0, 60)}`)
-          servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
+        // Buscar objetos de servidor
+        const serverMatch = code.match(/servers?\s*:\s*(\{[\s\S]*?\})/i)
+        if (serverMatch) {
+          try {
+            const servers = JSON.parse(serverMatch[1])
+            for (const [name, data] of Object.entries(servers)) {
+              const videoUrl = data?.url || data?.file || data
+              if (typeof videoUrl === 'string' && videoUrl.startsWith('http') && !servidores.find(s => s.url === videoUrl)) {
+                servidores.push({
+                  nombre: name.toLowerCase(),
+                  url: normalizarMegaUrl(videoUrl)
+                })
+              }
+            }
+          } catch (_) {}
         }
-      } catch (e) { console.error(`[jkanime] API ${srv}:`, e.message) }
+      })
     }
+
+    // ── Último recurso: buscar enlaces directos en la tabla ────────────────
+    if (servidores.length === 0) {
+      $('table a[href*="mega.nz"], table a[href*="mediafire.com"], .download-links a[href]').each((_, el) => {
+        const href = $(el).attr('href') || ''
+        const text = $(el).text().trim().toLowerCase()
+        if (href.startsWith('http') && !servidores.find(s => s.url === href)) {
+          servidores.push({
+            nombre: text || detectarServidor(href),
+            url: normalizarMegaUrl(href),
+            directo: true
+          })
+        }
+      })
+    }
+
+    // ── Estrategia alternativa: API con slug y cap ─────────────────────────
+    if (servidores.length === 0) {
+      const jkMatch = url.match(/jkanime\.net\/([^/]+)\/(\d+)/)
+      const slug = jkMatch?.[1]
+      const cap = jkMatch?.[2]
+
+      if (slug && cap) {
+        const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
+        const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
+
+        for (const srv of SERVIDORES_JK) {
+          try {
+            const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
+            const res = await fetch(apiUrl, { headers, timeout: 12000 })
+            if (!res.ok) continue
+            const json = await res.json()
+
+            if (json?.remote) {
+              try {
+                let d = json.remote
+                const pad = 4 - (d.length % 4)
+                if (pad !== 4) d += '='.repeat(pad)
+                const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
+                if (decoded.startsWith('http') && !servidores.find(s => s.url === decoded)) {
+                  const finalUrl = decoded.includes('jkplayers.com') ? await resolverRedirectJK(decoded) : decoded
+                  servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
+                  continue
+                }
+              } catch (_) {}
+            }
+
+            const embedUrl = json?.source?.[0]?.file || json?.iframe || json?.url || json?.embed || json?.data?.url || json?.data?.iframe
+            if (embedUrl?.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
+              const finalUrl = embedUrl.includes('jkplayers.com') ? await resolverRedirectJK(embedUrl) : embedUrl
+              servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
+            }
+          } catch (e) { console.error(`[jkanime] API ${srv}:`, e.message) }
+        }
+      }
+    }
+
+  } catch (e) {
+    console.error('[jkanime] scrape error:', e.message)
   }
 
   console.log(`[jkanime] ${servidores.length} servidor(es) encontrados`)
   return servidores
 }
 
-// ─── Helpers para filtrar temporada ──────────────────────────────────────────
-
-function elegirPorTemporada(links, temporada) {
-  if (!links?.length) return null
-  if (temporada <= 1) return links[0]
-  const keywords = [
-    `temporada-${temporada}`, `temporada ${temporada}`,
-    `season-${temporada}`,    `season ${temporada}`,
-    `parte-${temporada}`,     `parte ${temporada}`,
-    `part-${temporada}`,      `part ${temporada}`,
-    `-${temporada}nd-`, `-${temporada}rd-`, `-${temporada}th-`,
-  ]
-  return (
-    links.find(r => keywords.some(kw =>
-      (r.title || '').includes(kw) || (r.href || r.url || '').includes(kw)
-    )) || links[0]
-  )
-}
-
 // ─── Funciones de búsqueda ────────────────────────────────────────────────────
 
 // ── AnimeFLV ──────────────────────────────────────────────────────────────────
-// Mejorado: CSS selectors correctos, soporte DUB/SUB en label, slug robusto
-// Fuente: stremio-addon/routes/animeFLV.js > SearchAnimesBySpecificURL
 async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
   const html = await fetchHtml(`https://www3.animeflv.net/browse?q=${encodeURIComponent(query)}`)
   const $ = cheerio.load(html)
 
   const links = []
-  // Selectores AnimeFLV: ul.ListAnimes li  (fuente: stremio addon scrapSearchAnimeData)
   $('ul.ListAnimes li, ul li article.Anime').each((_, el) => {
     const $el   = $(el)
     const aTag  = $el.find('a').first()
@@ -1530,42 +1545,64 @@ async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
   return `https://www3.animeflv.net/ver/${slug}-${episodio}`
 }
 
-// ── LatAnime ──────────────────────────────────────────────────────────────────
+// ── LatAnime ─────────────────────────────────────────────────────────────────-
+// MEJORADA: usa /buscar?q= correctamente
 async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
-  const html  = await fetchHtml(`https://latanime.org/?s=${encodeURIComponent(query)}`)
-  const $     = cheerio.load(html)
+  const searchUrl = `https://latanime.org/buscar?q=${encodeURIComponent(query)}`
 
-  const links = []
-  // Solo tomar links /ver/ que incluyan "-episodio-" o links de anime
-  $('a[href*="/ver/"]').each((_, el) => {
-    const href  = $(el).attr('href') || ''
-    const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-    // Filtrar links que sean de episodios o de páginas de anime
-    if (href.includes('latanime.org') || href.startsWith('/ver/')) {
-      links.push({ href, title })
+  try {
+    const html = await fetchHtml(searchUrl)
+    const $ = cheerio.load(html)
+
+    const links = []
+    // Selectores mejorados para LatAnime
+    $('.animes-list .anime-item, .row .col-lg-2, article.card, .item-anime, .anime-card').each((_, el) => {
+      const titleLink = $(el).find('h3 a, h2 a, .title a, a[href*="/anime/"]').first()
+      const href = titleLink.attr('href') || $(el).find('a[href*="/anime/"]').first().attr('href') || ''
+      const title = (titleLink.text() || $(el).find('h3, h2, .title').text()).trim().toLowerCase()
+
+      if (href && href.includes('/anime/') && title) {
+        const fullUrl = href.startsWith('http') ? href : `https://latanime.org${href}`
+        links.push({ href: fullUrl, title })
+      }
+    })
+
+    // También buscar en enlaces directos de ver
+    if (links.length === 0) {
+      $('a[href*="/ver/"]').each((_, el) => {
+        const href = $(el).attr('href') || ''
+        const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
+        if (href && !links.find(l => l.href === href)) {
+          const fullUrl = href.startsWith('http') ? href : `https://latanime.org${href}`
+          links.push({ href: fullUrl, title })
+        }
+      })
     }
-  })
-  // También buscar en cards de resultados
-  $('article a, .card a, .anime-item a').each((_, el) => {
-    const href  = $(el).attr('href') || ''
-    const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-    if (href && !links.find(l => l.href === href)) links.push({ href, title })
-  })
 
-  if (links.length === 0) return null
+    if (links.length === 0) return null
 
-  // Usar mejorMatch para elegir el resultado más parecido al nombre buscado
-  const elegido   = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
-  // Extraer slug base sin número de episodio
-  const slugMatch = elegido.href.match(/\/ver\/([^/]+?)(?:-episodio-\d+)?(?:\/|$)/)
-  if (!slugMatch) return null
-  const slugBase = slugMatch[1].replace(/-episodio-\d+$/, '')
-  return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
+    const elegido = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
+
+    let slugBase = null
+    const slugMatch = elegido.href.match(/\/anime\/([^/]+)/)
+    if (slugMatch) {
+      slugBase = slugMatch[1]
+    } else {
+      const verMatch = elegido.href.match(/\/ver\/([^/-]+)/)
+      if (verMatch) slugBase = verMatch[1]
+    }
+
+    if (!slugBase) return null
+
+    return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
+  } catch (e) {
+    console.error('[buscarEnLatAnime]', e.message)
+    return null
+  }
 }
 
-// ── JKanime ───────────────────────────────────────────────────────────────────
-// Mejorado: usa el mismo flujo que JKAnimeClient (Python), incluyendo slug directo
+// ── JKanime ─────────────────────────────────────────────────────────────────--
 async function buscarEnJKanime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
 
@@ -1595,23 +1632,19 @@ async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     const html  = await fetchHtml(`https://jkanime.net/buscar/?q=${encodeURIComponent(query)}`)
     const $     = cheerio.load(html)
     const links = []
-    // Selectores específicos de resultados de búsqueda JKanime
     $('.anime__item, .col-lg-2, .card, article').each((_, el) => {
       const aTag  = $(el).find('a').first()
       const href  = aTag.attr('href') || ''
       const title = (aTag.attr('title') || $(el).find('h3, h5, .title').text() || aTag.text()).trim().toLowerCase()
-      // Solo URLs tipo jkanime.net/slug-del-anime/
       if (href.match(/jkanime\.net\/[a-z0-9][a-z0-9-]+\/?$/) && title) {
         links.push({ href, title })
       }
     })
-    // Fallback: cualquier link con slug válido
     if (links.length === 0) {
       $('a[href*="jkanime.net/"]').each((_, el) => {
         const href  = $(el).attr('href') || ''
         const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
         const slug  = href.match(/jkanime\.net\/([a-z0-9][a-z0-9-]+)\/?$/)?.[1]
-        // Excluir páginas de sistema
         const excluir = ['buscar','categoria','notificaciones','contacto','login','registro','perfil','favoritos','historial','top','calendario','faq']
         if (slug && !excluir.includes(slug) && title) {
           links.push({ href, title })
@@ -1646,18 +1679,14 @@ async function buscarEnJKanime(nombre, episodio, temporada = 1) {
   return null
 }
 
-// ── TioAnime ──────────────────────────────────────────────────────────────────
-// NUEVO — fuente: stremio-addon/routes/tioanime.js > SearchTioAnime + GetEpisodeLinks
-// URL de episodio: /ver/<slug>-<ep>
+// ── TioAnime ─────────────────────────────────────────────────────────────────-
 async function buscarEnTioAnime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
-  // Directorio con año y estado requeridos (como en tioanime.js)
   const searchUrl = `https://tioanime.com/directorio?q=${encodeURIComponent(query)}&year=1950%2C2026&status=2&sort=recent`
   const html = await fetchHtml(searchUrl)
   const $    = cheerio.load(html)
 
   const links = []
-  // Selectores TioAnime (fuente: tioanime.js > scrapSearchAnimeData)
   $('main > ul > li, #tioanime > div > div ul > li').each((_, el) => {
     const $el   = $(el)
     const aTag  = $el.find('a').first()
@@ -1673,6 +1702,25 @@ async function buscarEnTioAnime(nombre, episodio, temporada = 1) {
   if (!slugMatch) return null
   const slug = slugMatch[1]
   return `https://tioanime.com/ver/${slug}-${episodio}`
+}
+
+// ─── Helpers para filtrar temporada ──────────────────────────────────────────
+
+function elegirPorTemporada(links, temporada) {
+  if (!links?.length) return null
+  if (temporada <= 1) return links[0]
+  const keywords = [
+    `temporada-${temporada}`, `temporada ${temporada}`,
+    `season-${temporada}`,    `season ${temporada}`,
+    `parte-${temporada}`,     `parte ${temporada}`,
+    `part-${temporada}`,      `part ${temporada}`,
+    `-${temporada}nd-`, `-${temporada}rd-`, `-${temporada}th-`,
+  ]
+  return (
+    links.find(r => keywords.some(kw =>
+      (r.title || '').includes(kw) || (r.href || r.url || '').includes(kw)
+    )) || links[0]
+  )
 }
 
 // ─── Descarga con yt-dlp ──────────────────────────────────────────────────────
@@ -1771,7 +1819,6 @@ async function descargarConYtDlp(embedUrl, outputDir) {
       if (code === 0) {
         resolve()
       } else {
-        // Incluir stdout también porque yt-dlp a veces escribe el error ahí
         const fullLog = [stderrBuf, stdoutBuf]
           .map(s => s.trim()).filter(Boolean).join('\n')
         const msg = fullLog || `yt-dlp salió con código ${code}`
@@ -1811,7 +1858,6 @@ async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m
         statusKey = sent?.key || null
       }
     } catch (_) {
-      // Si el edit falla, intentar nuevo mensaje
       try {
         const sent = await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
         statusKey = sent?.key || null
@@ -2030,7 +2076,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if ((command === 'animedl' || command === 'dl') && /^(\d+|[a-z])$/i.test(text?.trim())) {
     const pick = global.pendingServerPicks.get(m.chat)
     if (pick) {
-      // Solo el usuario que inició puede elegir
       if (pick.owner && pick.owner !== m.sender) {
         return conn.sendMessage(m.chat,
           { text: `⛔ @${m.sender.split('@')[0]}, esta selección pertenece a otro usuario.` },
@@ -2038,7 +2083,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         )
       }
       const raw = text.trim().toLowerCase()
-      const num = /^[a-z]$/.test(raw) ? raw.charCodeAt(0) - 96 : parseInt(raw)  // a=1, b=2, …
+      const num = /^[a-z]$/.test(raw) ? raw.charCodeAt(0) - 96 : parseInt(raw)
       if (num < 1 || num > pick.servers.length) {
         return m.reply(`❌ Selección inválida. Elige entre *a* y *${numToLetter(pick.servers.length - 1)}* (o *1*–*${pick.servers.length}*).`)
       }
@@ -2088,11 +2133,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         const tmpMega = path.join(process.env.TMPDIR || '/tmp', `mega_ytdlp_${Date.now()}`)
         fs.mkdirSync(tmpMega, { recursive: true })
 
-        // Variables de archivo — necesarias tanto si usa yt-dlp como megajs
         let megaFileName = null
         let megaSizeH    = null
 
-        // Intentar yt-dlp primero
         let usedYtDlp = false
         try {
           await conn.sendMessage(m.chat, { text: `📥 *Mega:* descargando con yt-dlp...`, edit: key })
@@ -2105,7 +2148,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
           fs.rmSync(tmpMega, { recursive: true, force: true })
         }
 
-        // Fallback: megajs
         if (!usedYtDlp) {
           let file
           try {
@@ -2240,7 +2282,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       const nombreBusq = tokensSinEp.join(' ')
       if (!nombreBusq) return m.reply(`❌ Escribe el nombre del anime.\nEjemplo: *.animedl naruto*`)
 
-      // Mensaje de estado que se irá editando en todo el flujo
       const { key: statusKey } = await m.reply(`🔎 Buscando *${nombreBusq}*...`)
       const editStatus = async (txt) => {
         try { await conn.sendMessage(m.chat, { text: txt, edit: statusKey }) } catch (_) {}
@@ -2255,12 +2296,10 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         )
       }
 
-      // Un único resultado o match exacto → info + episodios (editando el mismo mensaje)
       if (resultados.length === 1 || puntuarMatch(resultados[0].title, nombreBusq) >= 85) {
         return mostrarInfoYEpisodios(resultados[0], m, conn, usedPrefix, temporada, statusKey)
       }
 
-      // Múltiples resultados → editar estado + lista interactiva
       await editStatus(`🔍 *${resultados.length} resultados para "${nombreBusq}"* — elige uno:`)
 
       const maxR = Math.min(resultados.length, 26)
@@ -2396,7 +2435,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   global.animeDlSessions[sessionKey] = {
     owner : m.sender,
     chat  : m.chat,
-    expiry: Date.now() + 10 * 60 * 1000,   // 10 min para elegir
+    expiry: Date.now() + 10 * 60 * 1000,
   }
   guardarPicks()
 
@@ -2468,7 +2507,6 @@ handler.before = async function (m, { conn }) {
       const selectedId = params?.id || null
       if (!selectedId) return false
 
-      // ── Selección de anime desde lista de búsqueda ──────────────────────────
       if (selectedId.startsWith('__animeselect__')) {
         const slug        = selectedId.replace('__animeselect__', '')
         const animeSearch = global.pendingAnimeSearch.get(m.chat)
@@ -2493,7 +2531,6 @@ handler.before = async function (m, { conn }) {
       const pick = global.pendingServerPicks.get(m.chat)
       if (!pick) return false
 
-      // Solo el owner puede usar los botones
       if (pick.owner && pick.owner !== m.sender) {
         await conn.sendMessage(m.chat,
           { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
@@ -2502,7 +2539,6 @@ handler.before = async function (m, { conn }) {
         return true
       }
 
-      // FIX: invocar el handler directamente en vez de inyectar m.text
       const sk = `${m.chat}|${m.sender}`
       delete global.animeDlSessions[sk]
 
@@ -2525,7 +2561,6 @@ handler.help    = ['animedl <nombre> [tN] <ep>', 'animedl <S> <nombre> [tN] <ep>
 handler.tags    = ['descargas']
 handler.command = /^(animedl|dl|anilist|cancelar|stop)$/i
 
-// Restaurar picks pendientes al cargar el plugin (sobrevive reinicios)
 cargarPicks()
 
 export default handler
