@@ -78,11 +78,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     return Buffer.from(await res.arrayBuffer())
   }
 
+  const isValidUrl = (u) => u && typeof u === 'string' && u.startsWith('http')
+
   let imgBuf
   try {
-    const pp = await conn.profilePictureUrl(target, 'image')
-    const url = (pp && typeof pp === 'string' && pp.startsWith('http')) ? pp : FALLBACK
-    imgBuf = await toBuffer(url)
+    let pp = await conn.profilePictureUrl(target, 'image').catch(() => null)
+    if (!isValidUrl(pp)) pp = await conn.profilePictureUrl(target, 'preview').catch(() => null)
+    imgBuf = await toBuffer(isValidUrl(pp) ? pp : FALLBACK)
   } catch {
     imgBuf = await toBuffer(FALLBACK)
   }
@@ -103,4 +105,3 @@ handler.tags = ['user']
 handler.command = /^(perfil|profile|pf|setbirth|setgender)$/i
 
 export default handler
-      
