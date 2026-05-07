@@ -62,7 +62,7 @@ async function start(file) {
   isRunning = true;
 
   // Título con degradado Menta -> Violeta
-  say('RIKKA\nBOT', {
+  say('RIKKA TAKARADA\nBOT', {
     font: 'block',
     align: 'center',
     colors: [mint, softViolet],
