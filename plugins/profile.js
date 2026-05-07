@@ -46,7 +46,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     return m.reply(`✅ Género guardado: *${GENEROS[g]}*`)
   }
 
-  const { min, max, xp } = xpRange(u.level, global.multiplier || 1)
+  const { min, xp } = xpRange(u.level, global.multiplier || 1)
   const xpNow = Math.max(0, u.exp - min)
   const xpNeed = xp
   const pct = Math.min(100, Math.floor((xpNow / xpNeed) * 100))
@@ -71,29 +71,19 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Intentar obtener foto de perfil del usuario
-  let ppUrl
-  try {
-    ppUrl = await conn.profilePictureUrl(target, 'image')
-  } catch {
-    ppUrl = null
-  }
+  // .catch() garantiza que siempre hay una URL string válida — igual que el bot de referencia
+  const perfil = await conn.profilePictureUrl(target, 'image')
+    .catch(() => 'https://files.catbox.moe/leegee.jpg')
 
-  if (ppUrl) {
-    // Enviar como imagen con el perfil de caption
-    await conn.sendMessage(
-      m.chat,
-      {
-        image: { url: ppUrl },
-        caption: txt,
-        mentions: [target],
-      },
-      { quoted: m }
-    )
-  } else {
-    // Sin foto: enviar solo texto
-    await conn.sendMessage(m.chat, { text: txt, mentions: [target] }, { quoted: m })
-  }
+  await conn.sendMessage(
+    m.chat,
+    {
+      image: { url: perfil },
+      caption: txt,
+      mentions: [target],
+    },
+    { quoted: m }
+  )
 }
 
 handler.help = ['profile', 'setbirth', 'setgender']
@@ -101,4 +91,4 @@ handler.tags = ['user']
 handler.command = /^(perfil|profile|pf|setbirth|setgender)$/i
 
 export default handler
-        
+                                              
