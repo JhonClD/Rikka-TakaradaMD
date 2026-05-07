@@ -18,7 +18,13 @@ let childProcess = null;
 
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
-console.log(chalk.hex('#ff85c2').bold('—◉ㅤIniciando sistema...'));
+// Colores personalizados
+const pPink = '#ffafcc'; // Rosa pastel
+const sPink = '#ffc8dd'; // Rosa claro
+const lavender = '#cdb4db'; // Lavanda
+const rose = '#fb6f92'; // Rosa vibrante
+
+console.log(chalk.hex(pPink).bold('✨ 🌸 Iniciando sistema... 🌸 ✨'));
 
 function verificarOCrearCarpetaAuth() {
   const authPath = join(__dirname, global.authFile);
@@ -55,18 +61,25 @@ async function start(file) {
   if (isRunning) return;
   isRunning = true;
 
-  say('Rikka Takarada\nBot', {
-    font: 'chrome',
+  // Fuente 'block' con gradiente pastel para un look más suave
+  say('RIKKA\nTAKARADA', {
+    font: 'block',
     align: 'center',
-    colors: ['#ff6eb4'],
-    gradient: false,
-    transitionGradient: false,
+    colors: [pPink, lavender],
+    background: 'transparent',
+    letterSpacing: 1,
+    lineHeight: 1,
+    space: true,
+    maxLength: '0',
+    gradient: true,
+    independentGradient: true,
+    transitionGradient: true,
   });
 
-  say(`Bot creado por JhonCID`, {
+  say(`🎀 Bot creado por JhonCID 🎀`, {
     font: 'console',
     align: 'center',
-    gradient: ['#b57bee', '#ff85c2'],
+    colors: [sPink],
   });
 
   verificarOCrearCarpetaAuth();
@@ -78,14 +91,24 @@ async function start(file) {
     return;
   }
 
-  const opcion = await question(chalk.hex('#da70d6').bold('—◉ㅤSeleccione una opción (solo el numero):\n') + chalk.hex('#ffb6e1').bold('1. Con código QR\n2. Con código de texto de 8 dígitos\n—> '));
+  console.log(chalk.hex(lavender)('━'.repeat(40)));
+  const opcion = await question(
+    chalk.hex(rose).bold('🌷 Seleccione una opción (solo el número):\n') + 
+    chalk.hex(pPink)('  1. 📱 Vincular con código QR\n') + 
+    chalk.hex(pPink)('  2. 🔢 Vincular con código de 8 dígitos\n') + 
+    chalk.hex(lavender)('╰─> ')
+  );
 
   if (opcion === '2') {
-    const phoneNumber = await question(chalk.hex('#da70d6').bold('\n—◉ㅤEscriba su número de WhatsApp:\n') + chalk.hex('#ffb6e1').bold('◉ㅤEjemplo: +5219992095479\n—> '));
+    const phoneNumber = await question(
+      chalk.hex(rose).bold('\n🌸 Escriba su número de WhatsApp:\n') + 
+      chalk.hex(sPink)('💡 Ejemplo: +5219992095479\n') + 
+      chalk.hex(lavender)('╰─> ')
+    );
     const numeroTelefono = formatearNumeroTelefono(phoneNumber);
     
     if (!esNumeroValido(numeroTelefono)) {
-      console.log(chalk.bgRed(chalk.white.bold('[ ERROR ] Número inválido. Asegúrese de haber escrito su numero en formato internacional y haber comenzado con el código de país.\n—◉ㅤEjemplo:\n◉ +5219992095479\n')));
+      console.log(chalk.bgHex(rose).white.bold('\n [ ! ] Número inválido. Revisa el formato internacional. \n'));
       process.exit(0);
     }
     
@@ -104,10 +127,10 @@ function forkProcess(file) {
   childProcess = fork();
 
   childProcess.on('message', (data) => {
-    console.log(chalk.hex('#b57bee').bold('—◉ㅤRECIBIDO:'), data);
+    console.log(chalk.hex(lavender).bold('💌 RECIBIDO:'), data);
     switch (data) {
       case 'reset':
-        console.log(chalk.hex('#ff85c2').bold('—◉ㅤSolicitud de reinicio recibida...'));
+        console.log(chalk.hex(pPink).bold('🎀 Reiniciando sistema, espera un momento...'));
         childProcess.removeAllListeners();
         childProcess.kill('SIGTERM');
         isRunning = false;
@@ -120,12 +143,12 @@ function forkProcess(file) {
   });
 
   childProcess.on('exit', (code, signal) => {
-    console.log(chalk.hex('#da70d6').bold(`—◉ㅤProceso secundario terminado (${code || signal})`));
+    console.log(chalk.hex(rose).bold(`🌷 Proceso terminado (${code || signal})`));
     isRunning = false;
     childProcess = null;
     
     if (code !== 0 || signal === 'SIGTERM') {
-      console.log(chalk.hex('#ff85c2').bold('—◉ㅤReiniciando proceso...'));
+      console.log(chalk.hex(pPink).bold('🌸 Reiniciando proceso...'));
       setTimeout(() => start(file), 1000);
     }
   });
@@ -141,7 +164,7 @@ function forkProcess(file) {
 try {
   start('main.js');
 } catch (error) {
-  console.error(chalk.red.bold('[ ERROR CRÍTICO ]:'), error);
+  console.error(chalk.hex(rose).bold('❌ [ ERROR CRÍTICO ]:'), error);
   process.exit(1);
-}
-  
+                                         }
+    
