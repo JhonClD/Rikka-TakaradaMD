@@ -1,29 +1,30 @@
-const handler = async (m, { conn }) => {
-  const text = `꒰ ✦ *Rikka Takarada - MD* ✦ ꒱
-⌜────────────────⌝
+const handler = async (m, { conn, usedPrefix }) => {
+  const text = `
+𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
-┊⇢ 👑 *Propietario*
-┊  ✧ wa.me/51925092348
+𓂃 ࣪˖ *Propietario*
+  ˖ *WA:* wa.me/51925092348
 
-┊⇢ 🌸 *Colaborador*
-┊  ✧ wa.me/51997149670
-
-⌞────────────────⌟`.trim()
+𓂃 ࣪˖ *Colaborador*
+  ˖ *WA:* wa.me/51997149670
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const mimeTypes = [
-    'pdf', 'zip',
-    'vnd.openxmlformats-officedocument.presentationml.presentation',
-    'vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'vnd.openxmlformats-officedocument.wordprocessingml.document',
-  ]
-  const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)]
-  const menuImage  = global.imagen1 ?? Buffer.alloc(0)
-  const linkUrl    = 'https://wa.me/51925092348'
+    "pdf",
+    "zip",
+    "vnd.openxmlformats-officedocument.presentationml.presentation",
+    "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ];
+  const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
+  const menuImage = global.imagen1 ?? Buffer.alloc(0);
+  const linkUrl   = "https://wa.me/51925092348";
 
   await conn.sendMessage(m.chat, {
     document: menuImage,
     mimetype: `application/${randomMime}`,
-    fileName: 'Rikka Takarada-MD',
+    fileName: "Rikka Takarada-MD",
     fileLength: 99999999999999,
     pageCount: 200,
     caption: text,
@@ -33,17 +34,19 @@ const handler = async (m, { conn }) => {
       externalAdReply: {
         mediaUrl: linkUrl,
         mediaType: 2,
-        previewType: 'pdf',
-        title: 'Rikka Takarada - MD',
-        body: 'Rikka Takarada Bot',
+        previewType: "pdf",
+        title: "Rikka Takarada - MD",
+        body: "Rikka Takarada Bot",
         thumbnail: menuImage,
         sourceUrl: linkUrl,
       },
     },
-  }, { quoted: m })
-}
+  }, { quoted: m });
+};
 
-handler.help    = ['owner']
-handler.tags    = ['info']
-handler.command = /^(owner|creator|creador|propietario)$/i
-export default handler
+handler.help = ["owner"];
+handler.tags = ["info"];
+handler.command = /^(owner|creator|creador|propietario)$/i;
+
+export default handler;
+
