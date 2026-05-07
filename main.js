@@ -25,6 +25,7 @@ const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, make
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
 const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
 import readline from 'readline';
+import qrcodeTerminal from 'qrcode-terminal';
 import NodeCache from 'node-cache';
 const { chain } = lodash;
 const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
@@ -765,13 +766,14 @@ async function connectionUpdate(update) {
     global.timestamp.connect = new Date;
   }
   if (global.db.data == null) loadDatabase();
-  if (update.qr != 0 && update.qr != undefined || methodCodeQR) {
-    if (opcion == '1' || methodCodeQR) {
+  if (update.qr && (opcion == '1' || methodCodeQR)) {
+    qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
+      console.log(qr);
       console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));
-      qrAlreadyShown = true;
-      if (qrTimeout) clearTimeout(qrTimeout);
-      qrTimeout = setTimeout(() => qrAlreadyShown = false, 60000);
-    }
+    });
+    qrAlreadyShown = true;
+    if (qrTimeout) clearTimeout(qrTimeout);
+    qrTimeout = setTimeout(() => qrAlreadyShown = false, 60000);
   }
   if (connection == 'open') {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
