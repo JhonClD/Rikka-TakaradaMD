@@ -110,7 +110,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
           code = code?.match(/.{1,4}/g)?.join('-') || code;
           pairingDone = true;
           const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
-          const mk = await client.sendMessage(chatId, { text: `꒰ ✦ *Tu código:* ꒱\n┊⇢ \`${code}\`` }, { quoted: m });
+          const mk = await client.sendMessage(chatId, { text: `\`${code}\`` }, { quoted: m });
           delete flags[senderId];
           setTimeout(async () => {
             try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
@@ -192,21 +192,28 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       if (subsCount >= 50) return m.reply('꒰ ✗ ꒱ No hay espacios disponibles (máx. 50 sub-bots).');
 
       const isCode = command === 'code';
-      const phone  = args[0] ? args[0].replace(/\D/g, '') : null;
 
-      if (isCode && !phone) {
-        return m.reply(
-          `✤ Vincula tu *cuenta* usando el *codigo.*\n\n` +
-          `> ✥ Sigue las *instrucciones*\n\n` +
-          `*›* Click en los *3 puntos*\n` +
-          `*›* Toque *dispositivos vinculados*\n` +
-          `*›* Vincular *nuevo dispositivo*\n` +
-          `*›* Selecciona *Vincular con el número de teléfono*\n\n` +
-          `ꕤ *\`Importante\`*\n` +
-          `> ₊·( 🜸 ) ➭ Debes indicar el número con *código de país*\n\n` +
-          `꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`
-        );
+      // Resolver número real del sender (evita LID @lid que da número incorrecto)
+      let senderNum;
+      if (m.sender.endsWith('@s.whatsapp.net')) {
+        senderNum = m.sender.split('@')[0];
+      } else if (!m.isGroup && m.chat?.endsWith('@s.whatsapp.net')) {
+        // En DM: el chat JID es el número real del sender
+        senderNum = m.chat.split('@')[0];
+      } else {
+        // Intento de resolución vía LidResolver del conn
+        try {
+          const resolved = await conn.lid?.resolveLid?.(m.sender, m.chat);
+          senderNum = (resolved && !resolved.endsWith('@lid'))
+            ? resolved.split('@')[0]
+            : m.sender.split('@')[0];
+        } catch {
+          senderNum = m.sender.split('@')[0];
+        }
       }
+
+      // Si no se pasa número, usar automáticamente el número del que envía
+      const phone = args[0] ? args[0].replace(/\D/g, '') : senderNum;
 
       commandFlags[m.sender] = true;
 
@@ -233,7 +240,6 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
         `> ₊·( 🜸 ) ➭ *No uses* tu cuenta principal`
       );
 
-      await m.reply(`꒰ ✦ ꒱ Iniciando vinculación${isCode ? ` para *+${phone}*` : ' vía QR'}...\n⸙͎ Espera unos segundos.`);
       await startSubBotFromCommand(m, conn, isCode ? capCode : capQR, isCode, phone, m.chat, commandFlags);
       user.Subs = Date.now();
       break;
@@ -406,3 +412,4 @@ handler.help = [
   'setowner @user',
 ];
 export default handler;
+                                              
