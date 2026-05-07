@@ -16,7 +16,7 @@ import pino from 'pino';
 import Pino from 'pino';
 import { Boom } from '@hapi/boom';
 import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
-import { initializeSubBots } from './src/libraries/subBotManager.js';
+import { initializeSubBots, startSubBotFromCommand } from './src/libraries/subBotManager.js';
 import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 import LidResolver from './src/libraries/LidResolver.js';
@@ -892,14 +892,14 @@ global.reloadHandler = async function (restatConn) {
     conn.ev.off('creds.update', conn.credsUpdate);
   }
 
-  conn.welcome = '👋 ¡Bienvenido/a!\n@user';
-  conn.bye = '👋 ¡Hasta luego!\n@user';
-  conn.spromote = '*[ ℹ️ ] @user Fue promovido a administrador.*';
-  conn.sdemote = '*[ ℹ️ ] @user Fue degradado de administrador.*';
-  conn.sDesc = '*[ ℹ️ ] La descripción del grupo ha sido modificada.*';
-  conn.sSubject = '*[ ℹ️ ] El nombre del grupo ha sido modificado.*';
-  conn.sIcon = '*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*';
-  conn.sRevoke = '*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*';
+  conn.welcome = '꒰ ✦ ꒱ ¡Bienvenido/a al grupo!\n┊⇢ @user';
+  conn.bye = '꒰ ✦ ꒱ ¡Hasta luego!\n┊⇢ @user';
+  conn.spromote = '꒰ ✦ ꒱ @user fue *ascendido* a administrador.';
+  conn.sdemote = '꒰ ✦ ꒱ @user fue *degradado* de administrador.';
+  conn.sDesc = '꒰ ✦ ꒱ La *descripción* del grupo fue modificada.';
+  conn.sSubject = '꒰ ✦ ꒱ El *nombre* del grupo fue modificado.';
+  conn.sIcon = '꒰ ✦ ꒱ Se actualizó la *foto* del grupo.';
+  conn.sRevoke = '꒰ ✦ ꒱ El *enlace* del grupo fue restablecido.';
 
   const originalHandler = handler.handler.bind(global.conn);
   // HANDLER MEJORADO con procesamiento LID robusto
