@@ -1,140 +1,3 @@
-import { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
-import { jidDecode } from '@whiskeysockets/baileys';
-import qrcode from 'qrcode';
-import NodeCache from 'node-cache';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import pino from 'pino';
-import { makeWASocket } from '../src/libraries/simple.js';
-
-const __filename  = fileURLToPath(import.meta.url);
-const __dirname   = path.dirname(__filename);
-const JADIBTS_DIR = path.join(__dirname, '../jadibts');
-const commandFlags = {};
-const reconnectMap = {};
-
-function msToTime(ms) {
-  const s = Math.floor((ms / 1000) % 60);
-  const m = Math.floor((ms / 60000) % 60);
-  const h = Math.floor((ms / 3600000) % 24);
-  if (h) return `${h}h ${m}m ${s}s`;
-  if (m) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-
-function getBotJid(conn) {
-  return conn.user.id.split(':')[0] + '@s.whatsapp.net';
-}
-
-function isSocketOwner(conn, sender) {
-  const botJid = getBotJid(conn);
-  const config = global.db.data.settings[botJid] || {};
-  const owners = (global.owner || []).map(n => (Array.isArray(n) ? n[0] : n) + '@s.whatsapp.net');
-  return [botJid, ...(config.owner ? [config.owner] : []), ...owners].includes(sender);
-}
-
-async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId, flags) {
-  const senderId   = m?.sender;
-  const sessionId  = phone || senderId.split('@')[0];
-  const sessionDir = path.join(JADIBTS_DIR, sessionId);
-  fs.mkdirSync(sessionDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  const { version }          = await fetchLatestBaileysVersion();
-  const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
-
-  const sock = makeWASocket({
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
-    },
-    markOnlineOnConnect: true,
-    generateHighQualityLinkPreview: true,
-    syncFullHistory: false,
-    getMessage: async () => '',
-    msgRetryCounterCache,
-    keepAliveIntervalMs: 60_000,
-    maxIdleTimeMs: 120_000,
-    version,
-  });
-
-  sock.isInit = false;
-  sock.ev.on('creds.update', saveCreds);
-
-  let pairingDone = false;
-
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-
-    if (connection === 'connecting' && isCode && phone && !pairingDone && flags[senderId]) {
-      setTimeout(async () => {
-        if (pairingDone) return;
-        try {
-          if (sock.authState?.creds?.registered) return;
-          let code = await sock.requestPairingCode(phone);
-          code = code?.match(/.{1,4}/g)?.join('-') || code;
-          pairingDone = true;
-          const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
-          const mk = await client.sendMessage(chatId, { text: `꒰ ✦ *Tu código:* ꒱\n┊⇢ \`${code}\`` }, { quoted: m });
-          delete flags[senderId];
-          setTimeout(async () => {
-            try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
-            try { await client.sendMessage(chatId, { delete: mk.key }); } catch {}
-          }, 90000);
-        } catch (e) {
-          console.error('[SOCKET] Error código pairing:', e.message);
-          if (!pairingDone && flags[senderId]) {
-            await client.sendMessage(chatId, { text: `꒰ ✗ ꒱ Error generando código: *${e.message}*\n⸙͎ Verifica que el número sea correcto e intenta de nuevo.` }, { quoted: m }).catch(() => {});
-            delete flags[senderId];
-          }
-        }
-      }, 2000);
-    }
-
-    if (qr && !isCode && client && chatId && flags[senderId]) {
-      try {
-        const mq = await client.sendMessage(chatId, {
-          image: await qrcode.toBuffer(qr, { scale: 8 }),
-          caption,
-        }, { quoted: m });
-        delete flags[senderId];
-        setTimeout(async () => { try { await client.sendMessage(chatId, { delete: mq.key }); } catch {} }, 60000);
-      } catch (e) { console.error('[SOCKET] Error QR:', e.message); }
-    }
-
-    if (connection === 'open') {
-      sock.isInit = true;
-      const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-      if (!global.db.data.settings[botJid]) global.db.data.settings[botJid] = {};
-      global.db.data.settings[botJid].type = 'Sub';
-      delete reconnectMap[sessionId];
-      if (!global.conns?.find(c => c.user?.id === sock.user?.id)) global.conns?.push(sock);
-      console.log(`[SOCKET] +${sessionId} conectado`);
-    }
-
-    if (connection === 'close') {
-      const reason  = lastDisconnect?.error?.output?.statusCode || 0;
-      const retries = (reconnectMap[sessionId] || 0) + 1;
-      reconnectMap[sessionId] = retries;
-      if (retries > 5) {
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-        delete reconnectMap[sessionId];
-        return;
-      }
-      if ([401, 403, DisconnectReason.loggedOut].includes(reason)) {
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-        return;
-      }
-      setTimeout(() => startSubBotFromCommand(m, client, caption, isCode, phone, chatId, {}), 4000);
-    }
-  });
-
-  return sock;
-}
-
 const handler = async (m, { conn, command, args, text, usedPrefix }) => {
   const botJid = getBotJid(conn);
   const config = global.db.data.settings[botJid] || (global.db.data.settings[botJid] = {});
@@ -155,18 +18,22 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       if (subsCount >= 50) return m.reply('꒰ ✗ ꒱ No hay espacios disponibles (máx. 50 sub-bots).');
 
       const isCode = command === 'code';
-      const phone  = args[0] ? args[0].replace(/\D/g, '') : null;
+      let phone = args[0] ? args[0].replace(/\D/g, '') : null;
 
       if (isCode && !phone) {
-        return m.reply(`⸙͎ Debes indicar el número con código de país.\n꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`);
+        phone = m.sender.split('@')[0];
+      }
+
+      if (isCode && !phone) {
+        return m.reply(`⸙͎ No se pudo obtener tu número. Usa: *${usedPrefix}code 51925092348*`);
       }
 
       commandFlags[m.sender] = true;
 
-      const capCode = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Ingresa el código en WhatsApp:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular con número de teléfono*\n⌞────────────────⌟`;
+      const capCode = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Se usará tu número: *+${phone}*\n┊⇢ Ingresa el código en WhatsApp:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular con número de teléfono*\n⌞────────────────⌟`;
       const capQR   = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Escanea el *QR* para vincular:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular nuevo dispositivo*\n⌞────────────────⌟\n\n⸙͎ No uses tu cuenta principal.`;
 
-      await m.reply(`꒰ ✦ ꒱ Iniciando vinculación${isCode ? ` para *+${phone}*` : ' vía QR'}...\n⸙͎ Espera unos segundos.`);
+      await m.reply(`꒰ ✦ ꒱ Iniciando vinculación${isCode ? ` para tu número *+${phone}*` : ' vía QR'}...\n⸙͎ Espera unos segundos.`);
       await startSubBotFromCommand(m, conn, isCode ? capCode : capQR, isCode, phone, m.chat, commandFlags);
       user.Subs = Date.now();
       break;
