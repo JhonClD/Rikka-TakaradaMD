@@ -13,95 +13,76 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-// Función mejorada para obtener la foto de perfil
-const getProfilePicture = async (conn, jid, options = {}) => {
-  const { fallback = 'https://files.catbox.moe/leegee.jpg', maxAttempts = 3, delay = 1000 } = options
-  
-  const isValidUrl = (url) => {
+// Cache simple en memoria
+const profilePicCache = new Map()
+
+const getProfilePicture = async (conn, jid) => {
+  // Verificar cache primero (respuesta instantánea)
+  const cached = profilePicCache.get(jid)
+  if (cached && (Date.now() - cached.time) < 300000) { // 5 minutos cache
+    return cached.buffer
+  }
+
+  try {
+    // Obtener la URL de la foto de perfil
+    let ppUrl = null
+    
+    // Intentar obtener la URL (esto es lo que fallaba)
     try {
-      return url && typeof url === 'string' && new URL(url)
-    } catch {
-      return false
+      ppUrl = await conn.profilePictureUrl(jid, 'image')
+      console.log('✅ URL de imagen obtenida:', ppUrl?.substring(0, 50) + '...')
+    } catch (err) {
+      console.log('❌ Error al obtener URL de imagen:', err.message)
     }
-  }
 
-  const toBuffer = async (url) => {
-    if (!isValidUrl(url)) throw new Error('URL inválida')
-    
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000) // 10 segundos timeout
-    
-    try {
-      const res = await fetch(url, { 
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)' }
-      })
-      
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
-      
-      const arrayBuffer = await res.arrayBuffer()
-      return Buffer.from(arrayBuffer)
-    } finally {
-      clearTimeout(timeout)
-    }
-  }
-
-  // Estrategias para obtener la foto de perfil (en orden)
-  const strategies = [
-    // 1. Intento directo con 'image' (mejor calidad)
-    async () => {
+    // Si falla, intentar con 'preview' (más rápido, menor calidad)
+    if (!ppUrl) {
       try {
-        const url = await conn.profilePictureUrl(jid, 'image')
-        if (isValidUrl(url)) return await toBuffer(url)
-      } catch (e) {
-        console.log(`[Profile] Intento 1 (image) falló:`, e.message)
+        ppUrl = await conn.profilePictureUrl(jid, 'preview')
+        console.log('✅ URL de preview obtenida:', ppUrl?.substring(0, 50) + '...')
+      } catch (err) {
+        console.log('❌ Error al obtener URL de preview:', err.message)
       }
-      return null
-    },
-    
-    // 2. Intento con 'preview' (calidad reducida)
-    async () => {
-      try {
-        const url = await conn.profilePictureUrl(jid, 'preview')
-        if (isValidUrl(url)) return await toBuffer(url)
-      } catch (e) {
-        console.log(`[Profile] Intento 2 (preview) falló:`, e.message)
-      }
-      return null
-    },
-    
-    // 3. Reintentos con delay
-    async () => {
-      for (let i = 0; i < maxAttempts; i++) {
-        try {
-          const url = await conn.profilePictureUrl(jid, 'image')
-          if (isValidUrl(url)) return await toBuffer(url)
-        } catch (e) {
-          if (i < maxAttempts - 1) {
-            await new Promise(resolve => setTimeout(resolve, delay))
-          }
-        }
-      }
-      return null
     }
-  ]
 
-  // Probar cada estrategia en orden
-  for (const strategy of strategies) {
-    const result = await strategy()
-    if (result) return result
+    // Si tenemos URL, descargar la imagen
+    if (ppUrl && ppUrl.startsWith('http')) {
+      const response = await fetch(ppUrl)
+      if (response.ok) {
+        const buffer = Buffer.from(await response.arrayBuffer())
+        // Guardar en cache
+        profilePicCache.set(jid, { buffer, time: Date.now() })
+        console.log('✅ Imagen descargada correctamente')
+        return buffer
+      }
+    }
+
+    // Si no se pudo obtener, usar imagen por defecto
+    console.log('⚠️ Usando imagen por defecto')
+    const defaultUrl = 'https://files.catbox.moe/leegee.jpg'
+    const response = await fetch(defaultUrl)
+    const buffer = Buffer.from(await response.arrayBuffer())
+    profilePicCache.set(jid, { buffer, time: Date.now() })
+    return buffer
+
+  } catch (error) {
+    console.error('Error final:', error)
+    // Último recurso
+    const response = await fetch('https://files.catbox.moe/leegee.jpg')
+    return Buffer.from(await response.arrayBuffer())
   }
-
-  // Si todo falla, usar imagen por defecto
-  console.log(`[Profile] Usando imagen por defecto para ${jid}`)
-  return await toBuffer(fallback)
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
   const target = m.mentionedJid?.[0] || m.quoted?.sender || m.sender
+  
+  console.log('🎯 Target JID:', target) // Debug: ver qué JID se está usando
+  
   const isSelf = target === m.sender
   const name = await conn.getName(target)
+  
+  console.log('👤 Nombre:', name) // Debug: ver nombre
 
   if (!users[target]) users[target] = {}
   const u = users[target]
@@ -155,22 +136,34 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Obtener imagen de perfil con el nuevo sistema mejorado
-  const imgBuf = await getProfilePicture(conn, target, {
-    fallback: 'https://files.catbox.moe/leegee.jpg',
-    maxAttempts: 2,
-    delay: 500
-  })
+  // Mensaje de "cargando..." mientras se obtiene la imagen
+  await conn.sendMessage(m.chat, { react: { text: '⏳', key: m.key } })
 
-  await conn.sendMessage(
-    m.chat,
-    {
-      image: imgBuf,
-      caption: txt,
-      mentions: [target],
-    },
-    { quoted: m }
-  )
+  try {
+    // Obtener imagen de perfil
+    const imgBuf = await getProfilePicture(conn, target)
+
+    await conn.sendMessage(
+      m.chat,
+      {
+        image: imgBuf,
+        caption: txt,
+        mentions: [target],
+      },
+      { quoted: m }
+    )
+  } catch (error) {
+    console.error('Error enviando imagen:', error)
+    // Si falla el envío con imagen, enviar solo texto
+    await conn.sendMessage(
+      m.chat,
+      {
+        text: txt,
+        mentions: [target],
+      },
+      { quoted: m }
+    )
+  }
 }
 
 handler.help = ['profile', 'setbirth', 'setgender']
