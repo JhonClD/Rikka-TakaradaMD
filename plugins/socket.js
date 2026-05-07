@@ -1,4 +1,4 @@
-import { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
+import { Browsers, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
 import { jidDecode } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode';
 import NodeCache from 'node-cache';
@@ -34,20 +34,19 @@ function isSocketOwner(conn, sender) {
   return [botJid, ...(config.owner ? [config.owner] : []), ...owners].includes(sender);
 }
 
-// ── Registrar handler de mensajes en el sub-bot recién conectado ──────────────
+// ── Registrar handler de mensajes en el sub-bot para que responda ─────────────
 async function registerSubBotHandler(sock) {
   try {
     const handlerMod = await import(`../handler.js?update=${Date.now()}`);
     if (!handlerMod?.handler) return;
 
-    // Limpiar listeners anteriores por si acaso
     sock.ev.off('messages.upsert',          sock.handler);
     sock.ev.off('group-participants.update', sock.participantsUpdate);
     sock.ev.off('groups.update',             sock.groupsUpdate);
     sock.ev.off('message.delete',            sock.onDelete);
     sock.ev.off('call',                      sock.onCall);
 
-    sock.handler           = handlerMod.handler.bind(sock);
+    sock.handler            = handlerMod.handler.bind(sock);
     sock.participantsUpdate = handlerMod.participantsUpdate?.bind(sock);
     sock.groupsUpdate       = handlerMod.groupsUpdate?.bind(sock);
     sock.onDelete           = handlerMod.deleteUpdate?.bind(sock);
@@ -58,8 +57,6 @@ async function registerSubBotHandler(sock) {
     if (sock.groupsUpdate)       sock.ev.on('groups.update',             sock.groupsUpdate);
     if (sock.onDelete)           sock.ev.on('message.delete',            sock.onDelete);
     if (sock.onCall)             sock.ev.on('call',                      sock.onCall);
-
-    console.log(`[SOCKET] Handler registrado para sub-bot`);
   } catch (e) {
     console.error('[SOCKET] Error registrando handler:', e.message);
   }
@@ -78,7 +75,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
   const sock = makeWASocket({
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers.macOS('Chrome'),   // igual que Yuki — más compatible
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
@@ -96,34 +93,29 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
   sock.isInit = false;
   sock.ev.on('creds.update', saveCreds);
 
-  let pairingDone = false;
-
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
 
-    // ── Código de vinculación: solicitar al conectar ───────────────────────────
-    if (connection === 'connecting' && isCode && phone && !pairingDone && flags[senderId]) {
-      setTimeout(async () => {
-        if (pairingDone) return;
-        try {
-          if (sock.authState?.creds?.registered) return;
-          let code = await sock.requestPairingCode(phone);
-          code = code?.match(/.{1,4}/g)?.join('-') || code;
-          pairingDone = true;
-          const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
-          const mk = await client.sendMessage(chatId, { text: `\`${code}\`` }, { quoted: m });
+    // ── Código de vinculación: se pide en el evento qr (igual que Yuki) ────────
+    if (qr && isCode && phone && client && chatId && flags[senderId]) {
+      try {
+        let code = await sock.requestPairingCode(phone, 'ABCD1234');
+        code = code?.match(/.{1,4}/g)?.join('-') || code;
+        const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
+        const mk = await client.sendMessage(chatId, { text: `\`${code}\`` }, { quoted: m });
+        delete flags[senderId];
+        setTimeout(async () => {
+          try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
+          try { await client.sendMessage(chatId, { delete: mk.key }); } catch {}
+        }, 90000);
+      } catch (e) {
+        console.error('[SOCKET] Error código pairing:', e.message);
+        if (flags[senderId]) {
+          await client.sendMessage(chatId, {
+            text: `꒰ ✗ ꒱ Error generando código: *${e.message}*\n⸙͎ Verifica que el número sea correcto e intenta de nuevo.`
+          }, { quoted: m }).catch(() => {});
           delete flags[senderId];
-          setTimeout(async () => {
-            try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
-            try { await client.sendMessage(chatId, { delete: mk.key }); } catch {}
-          }, 90000);
-        } catch (e) {
-          console.error('[SOCKET] Error código pairing:', e.message);
-          if (!pairingDone && flags[senderId]) {
-            await client.sendMessage(chatId, { text: `꒰ ✗ ꒱ Error generando código: *${e.message}*\n⸙͎ Verifica que el número sea correcto e intenta de nuevo.` }, { quoted: m }).catch(() => {});
-            delete flags[senderId];
-          }
         }
-      }, 2000);
+      }
     }
 
     // ── QR ────────────────────────────────────────────────────────────────────
@@ -138,7 +130,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
       } catch (e) { console.error('[SOCKET] Error QR:', e.message); }
     }
 
-    // ── Conexión exitosa: registrar handler para que el sub-bot responda ───────
+    // ── Conexión exitosa ───────────────────────────────────────────────────────
     if (connection === 'open') {
       sock.isInit = true;
       const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
@@ -147,8 +139,6 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
       delete reconnectMap[sessionId];
       if (!global.conns?.find(c => c.user?.id === sock.user?.id)) global.conns?.push(sock);
       console.log(`[SOCKET] +${sessionId} conectado`);
-
-      // FIX: registrar handler de mensajes para que el sub-bot responda
       await registerSubBotHandler(sock);
     }
 
@@ -198,10 +188,8 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       if (m.sender.endsWith('@s.whatsapp.net')) {
         senderNum = m.sender.split('@')[0];
       } else if (!m.isGroup && m.chat?.endsWith('@s.whatsapp.net')) {
-        // En DM: el chat JID es el número real del sender
         senderNum = m.chat.split('@')[0];
       } else {
-        // Intento de resolución vía LidResolver del conn
         try {
           const resolved = await conn.lid?.resolveLid?.(m.sender, m.chat);
           senderNum = (resolved && !resolved.endsWith('@lid'))
@@ -212,14 +200,12 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
         }
       }
 
-      // Si no se pasa número, usar automáticamente el número del que envía
       const phone = args[0] ? args[0].replace(/\D/g, '') : senderNum;
 
       commandFlags[m.sender] = true;
 
-      // ── Mensaje de instrucciones al vincular correctamente ────────────────────
       const capCode = (
-        `✤ Vincula tu *cuenta* usando el *codigo.*\n\n` +
+        `\`✤\` Vincula tu *cuenta* usando el *codigo.*\n\n` +
         `> ✥ Sigue las *instrucciones*\n\n` +
         `*›* Click en los *3 puntos*\n` +
         `*›* Toque *dispositivos vinculados*\n` +
@@ -230,14 +216,13 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       );
 
       const capQR = (
-        `✤ Vincula tu *cuenta* escaneando el *QR.*\n\n` +
+        `\`✤\` Vincula tu *cuenta* usando *codigo qr.*\n\n` +
         `> ✥ Sigue las *instrucciones*\n\n` +
         `*›* Click en los *3 puntos*\n` +
         `*›* Toque *dispositivos vinculados*\n` +
         `*›* Vincular *nuevo dispositivo*\n` +
-        `*›* Escanea el *código QR*\n\n` +
-        `ꕤ *\`Importante\`*\n` +
-        `> ₊·( 🜸 ) ➭ *No uses* tu cuenta principal`
+        `*›* Escanea el código *QR.*\n\n` +
+        `> ₊·( 🜸 ) ➭ Recuerda que no es recomendable usar tu cuenta principal para registrar un socket.`
       );
 
       await startSubBotFromCommand(m, conn, isCode ? capCode : capQR, isCode, phone, m.chat, commandFlags);
@@ -309,7 +294,7 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       const sessPath = path.join(JADIBTS_DIR, cleanId);
       if (!fs.existsSync(sessPath)) return m.reply('꒰ ✗ ꒱ Solo usable desde un sub-bot.');
       await m.reply('꒰ ✦ ꒱ Reiniciando socket...');
-      await startSubBotFromCommand(m, conn, '꒰ ✦ ꒱ Socket reiniciado.', false, args[0]?.replace(/\D/g, '') || m.sender.split('@')[0], m.chat, {});
+      await startSubBotFromCommand(m, conn, '', false, args[0]?.replace(/\D/g, '') || m.sender.split('@')[0], m.chat, {});
       break;
     }
 
@@ -397,7 +382,7 @@ handler.command = [
 ];
 handler.tags = ['socket'];
 handler.help = [
-  'code <número> — Vincular sub-bot por código',
+  'code [número] — Vincular sub-bot por código',
   'qr — Vincular sub-bot por QR',
   'bots — Ver sockets activos',
   'join <link> — Unir al grupo',
