@@ -25,7 +25,7 @@ import {
   descargarConYtDlp,
   ejecutarDescargaServidor,
   MegaQuotaError,
-} from '../src/lib/anime-dl.js'
+} from '../src/libraries/anime-dl.js'
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
