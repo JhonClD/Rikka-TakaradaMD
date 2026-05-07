@@ -18,7 +18,7 @@ let childProcess = null;
 
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
-console.log(chalk.yellow.bold('—◉ㅤIniciando sistema...'));
+console.log(chalk.hex('#ff85c2').bold('—◉ㅤIniciando sistema...'));
 
 function verificarOCrearCarpetaAuth() {
   const authPath = join(__dirname, global.authFile);
@@ -58,13 +58,13 @@ async function start(file) {
   say('Rikka Takarada\nBot', {
     font: 'chrome',
     align: 'center',
-    gradient: ['red', 'magenta'],
+    gradient: ['#ff6eb4', '#da70d6'],
   });
 
   say(`Bot creado por JhonCID`, {
     font: 'console',
     align: 'center',
-    gradient: ['red', 'magenta'],
+    gradient: ['#b57bee', '#ff85c2'],
   });
 
   verificarOCrearCarpetaAuth();
@@ -76,10 +76,10 @@ async function start(file) {
     return;
   }
 
-  const opcion = await question(chalk.yellowBright.bold('—◉ㅤSeleccione una opción (solo el numero):\n') + chalk.white.bold('1. Con código QR\n2. Con código de texto de 8 dígitos\n—> '));
+  const opcion = await question(chalk.hex('#da70d6').bold('—◉ㅤSeleccione una opción (solo el numero):\n') + chalk.hex('#ffb6e1').bold('1. Con código QR\n2. Con código de texto de 8 dígitos\n—> '));
 
   if (opcion === '2') {
-    const phoneNumber = await question(chalk.yellowBright.bold('\n—◉ㅤEscriba su número de WhatsApp:\n') + chalk.white.bold('◉ㅤEjemplo: +5219992095479\n—> '));
+    const phoneNumber = await question(chalk.hex('#da70d6').bold('\n—◉ㅤEscriba su número de WhatsApp:\n') + chalk.hex('#ffb6e1').bold('◉ㅤEjemplo: +5219992095479\n—> '));
     const numeroTelefono = formatearNumeroTelefono(phoneNumber);
     
     if (!esNumeroValido(numeroTelefono)) {
@@ -102,10 +102,10 @@ function forkProcess(file) {
   childProcess = fork();
 
   childProcess.on('message', (data) => {
-    console.log(chalk.green.bold('—◉ㅤRECIBIDO:'), data);
+    console.log(chalk.hex('#b57bee').bold('—◉ㅤRECIBIDO:'), data);
     switch (data) {
       case 'reset':
-        console.log(chalk.yellow.bold('—◉ㅤSolicitud de reinicio recibida...'));
+        console.log(chalk.hex('#ff85c2').bold('—◉ㅤSolicitud de reinicio recibida...'));
         childProcess.removeAllListeners();
         childProcess.kill('SIGTERM');
         isRunning = false;
@@ -118,12 +118,12 @@ function forkProcess(file) {
   });
 
   childProcess.on('exit', (code, signal) => {
-    console.log(chalk.yellow.bold(`—◉ㅤProceso secundario terminado (${code || signal})`));
+    console.log(chalk.hex('#da70d6').bold(`—◉ㅤProceso secundario terminado (${code || signal})`));
     isRunning = false;
     childProcess = null;
     
     if (code !== 0 || signal === 'SIGTERM') {
-      console.log(chalk.yellow.bold('—◉ㅤReiniciando proceso...'));
+      console.log(chalk.hex('#ff85c2').bold('—◉ㅤReiniciando proceso...'));
       setTimeout(() => start(file), 1000);
     }
   });
