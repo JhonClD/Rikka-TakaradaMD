@@ -71,24 +71,29 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Intentar obtener foto de perfil del usuario; fallback si está privada o no tiene
-  const FALLBACK_PP = 'https://files.catbox.moe/leegee.jpg'
+  // Intentar obtener foto de perfil del usuario
   let ppUrl
   try {
     ppUrl = await conn.profilePictureUrl(target, 'image')
   } catch {
-    ppUrl = FALLBACK_PP
+    ppUrl = null
   }
 
-  await conn.sendMessage(
-    m.chat,
-    {
-      image: { url: ppUrl },
-      caption: txt,
-      mentions: [target],
-    },
-    { quoted: m }
-  )
+  if (ppUrl) {
+    // Enviar como imagen con el perfil de caption
+    await conn.sendMessage(
+      m.chat,
+      {
+        image: { url: ppUrl },
+        caption: txt,
+        mentions: [target],
+      },
+      { quoted: m }
+    )
+  } else {
+    // Sin foto: enviar solo texto
+    await conn.sendMessage(m.chat, { text: txt, mentions: [target] }, { quoted: m })
+  }
 }
 
 handler.help = ['profile', 'setbirth', 'setgender']
@@ -96,3 +101,4 @@ handler.tags = ['user']
 handler.command = /^(perfil|profile|pf|setbirth|setgender)$/i
 
 export default handler
+        
