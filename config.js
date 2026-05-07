@@ -20,6 +20,10 @@ global.owner = [
   ['51997149670']
 ];
 
+// Compatibilidad con plugins externos (ej. Yuki) que usan global.owner como array plano de strings
+// Rikka usa array de arrays — este helper evita que fallen los plugins externos
+global.ownerNumbers = global.owner.map(o => Array.isArray(o) ? o[0] : o);
+
 global.suittag = ['51925092348'];
 global.prems = ['84796064576'];
 
