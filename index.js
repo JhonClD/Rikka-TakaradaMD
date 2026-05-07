@@ -58,7 +58,9 @@ async function start(file) {
   say('Rikka Takarada\nBot', {
     font: 'chrome',
     align: 'center',
-    gradient: ['#ff6eb4', '#da70d6'],
+    colors: ['#ff6eb4'],
+    gradient: false,
+    transitionGradient: false,
   });
 
   say(`Bot creado por JhonCID`, {
@@ -142,3 +144,4 @@ try {
   console.error(chalk.red.bold('[ ERROR CRÍTICO ]:'), error);
   process.exit(1);
 }
+  
