@@ -18,8 +18,8 @@ function msToTime(ms) {
   const s = Math.floor((ms / 1000) % 60);
   const m = Math.floor((ms / 60000) % 60);
   const h = Math.floor((ms / 3600000) % 24);
-  if (h)   return `${h}h ${m}m ${s}s`;
-  if (m)   return `${m}m ${s}s`;
+  if (h) return `${h}h ${m}m ${s}s`;
+  if (m) return `${m}m ${s}s`;
   return `${s}s`;
 }
 
@@ -35,8 +35,8 @@ function isSocketOwner(conn, sender) {
 }
 
 async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId, flags) {
-  const senderId  = m?.sender;
-  const sessionId = phone || senderId.split('@')[0];
+  const senderId   = m?.sender;
+  const sessionId  = phone || senderId.split('@')[0];
   const sessionDir = path.join(JADIBTS_DIR, sessionId);
   fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -47,7 +47,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
   const sock = makeWASocket({
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Rikka-MD', 'Safari', '2.0.0'],
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
@@ -65,19 +65,33 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
   sock.isInit = false;
   sock.ev.on('creds.update', saveCreds);
 
+  let pairingDone = false;
+
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr && isCode && phone && client && chatId && flags[senderId]) {
-      try {
-        let code = await sock.requestPairingCode(phone);
-        code = code?.match(/.{1,4}/g)?.join('-') || code;
-        const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
-        const mk = await client.sendMessage(chatId, { text: code },    { quoted: m });
-        delete flags[senderId];
-        setTimeout(async () => {
-          try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
-          try { await client.sendMessage(chatId, { delete: mk.key }); } catch {}
-        }, 60000);
-      } catch (e) { console.error('[SOCKET] Error código:', e.message); }
+
+    if (connection === 'connecting' && isCode && phone && !pairingDone && flags[senderId]) {
+      setTimeout(async () => {
+        if (pairingDone) return;
+        try {
+          if (sock.authState?.creds?.registered) return;
+          let code = await sock.requestPairingCode(phone);
+          code = code?.match(/.{1,4}/g)?.join('-') || code;
+          pairingDone = true;
+          const mc = await client.sendMessage(chatId, { text: caption }, { quoted: m });
+          const mk = await client.sendMessage(chatId, { text: `꒰ ✦ *Tu código:* ꒱\n┊⇢ \`${code}\`` }, { quoted: m });
+          delete flags[senderId];
+          setTimeout(async () => {
+            try { await client.sendMessage(chatId, { delete: mc.key }); } catch {}
+            try { await client.sendMessage(chatId, { delete: mk.key }); } catch {}
+          }, 90000);
+        } catch (e) {
+          console.error('[SOCKET] Error código pairing:', e.message);
+          if (!pairingDone && flags[senderId]) {
+            await client.sendMessage(chatId, { text: `꒰ ✗ ꒱ Error generando código: *${e.message}*\n⸙͎ Verifica que el número sea correcto e intenta de nuevo.` }, { quoted: m }).catch(() => {});
+            delete flags[senderId];
+          }
+        }
+      }, 2000);
     }
 
     if (qr && !isCode && client && chatId && flags[senderId]) {
@@ -139,11 +153,20 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
         fs.existsSync(path.join(JADIBTS_DIR, d, 'creds.json'))
       ).length;
       if (subsCount >= 50) return m.reply('꒰ ✗ ꒱ No hay espacios disponibles (máx. 50 sub-bots).');
-      commandFlags[m.sender] = true;
+
       const isCode = command === 'code';
-      const phone  = args[0] ? args[0].replace(/\D/g, '') : m.sender.split('@')[0];
-      const capCode = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Usa el *código* para vincular.\n┊⇢ Dispositivos vinculados → Vincular con número\n⌞────────────────⌟\n\n⸙͎ Solo funciona con el número que lo solicitó.`;
-      const capQR   = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Escanea el *QR* para vincular.\n┊⇢ Dispositivos vinculados → Nuevo dispositivo\n⌞────────────────⌟\n\n⸙͎ No uses tu cuenta principal.`;
+      const phone  = args[0] ? args[0].replace(/\D/g, '') : null;
+
+      if (isCode && !phone) {
+        return m.reply(`⸙͎ Debes indicar el número con código de país.\n꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`);
+      }
+
+      commandFlags[m.sender] = true;
+
+      const capCode = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Ingresa el código en WhatsApp:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular con número de teléfono*\n⌞────────────────⌟`;
+      const capQR   = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Escanea el *QR* para vincular:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular nuevo dispositivo*\n⌞────────────────⌟\n\n⸙͎ No uses tu cuenta principal.`;
+
+      await m.reply(`꒰ ✦ ꒱ Iniciando vinculación${isCode ? ` para *+${phone}*` : ' vía QR'}...\n⸙͎ Espera unos segundos.`);
       await startSubBotFromCommand(m, conn, isCode ? capCode : capQR, isCode, phone, m.chat, commandFlags);
       user.Subs = Date.now();
       break;
@@ -151,9 +174,9 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
 
     case 'bots':
     case 'sockets': {
-      const mainJid  = global.conn?.user?.id?.split(':')[0] + '@s.whatsapp.net';
-      const groupP   = m.isGroup ? ((await conn.groupMetadata(m.chat).catch(() => ({}))).participants || []).map(p => p.id || '') : [];
-      const subs     = fs.existsSync(JADIBTS_DIR)
+      const mainJid = global.conn?.user?.id?.split(':')[0] + '@s.whatsapp.net';
+      const groupP  = m.isGroup ? ((await conn.groupMetadata(m.chat).catch(() => ({}))).participants || []).map(p => p.id || '') : [];
+      const subs    = fs.existsSync(JADIBTS_DIR)
         ? fs.readdirSync(JADIBTS_DIR).filter(d => fs.existsSync(path.join(JADIBTS_DIR, d, 'creds.json'))).map(d => d.replace(/\D/g, ''))
         : [];
       const mentioned = [];
@@ -186,9 +209,7 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       try {
         await conn.groupAcceptInvite(match[1]);
         return m.reply('꒰ ✦ ꒱ Bot unido al grupo exitosamente.');
-      } catch (e) {
-        return m.reply(`꒰ ✗ ꒱ No se pudo unir: ${e.message}`);
-      }
+      } catch (e) { return m.reply(`꒰ ✗ ꒱ No se pudo unir: ${e.message}`); }
     }
 
     case 'leave': {
@@ -198,7 +219,7 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
     }
 
     case 'logout': {
-      const cleanId  = (jidDecode(conn.user?.id || '')?.user) || conn.user?.id?.split('@')[0] || '';
+      const cleanId  = jidDecode(conn.user?.id || '')?.user || conn.user?.id?.split('@')[0] || '';
       const sessPath = path.join(JADIBTS_DIR, cleanId);
       if (!fs.existsSync(sessPath)) return m.reply('꒰ ✗ ꒱ Solo usable desde un sub-bot.');
       await m.reply('꒰ ✦ ꒱ Cerrando sesión...');
@@ -211,7 +232,7 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
     }
 
     case 'reload': {
-      const cleanId  = (jidDecode(conn.user?.id || '')?.user) || conn.user?.id?.split('@')[0] || '';
+      const cleanId  = jidDecode(conn.user?.id || '')?.user || conn.user?.id?.split('@')[0] || '';
       const sessPath = path.join(JADIBTS_DIR, cleanId);
       if (!fs.existsSync(sessPath)) return m.reply('꒰ ✗ ꒱ Solo usable desde un sub-bot.');
       await m.reply('꒰ ✦ ꒱ Reiniciando socket...');
@@ -303,11 +324,12 @@ handler.command = [
 ];
 handler.tags = ['socket'];
 handler.help = [
-  'code/qr — Vincular sub-bot',
+  'code <número> — Vincular sub-bot por código',
+  'qr — Vincular sub-bot por QR',
   'bots — Ver sockets activos',
   'join <link> — Unir al grupo',
   'leave — Salir del grupo',
-  'logout — Cerrar sesión',
+  'logout — Cerrar sesión del socket',
   'reload — Reiniciar socket',
   'self on/off — Modo privado',
   'setbotname Corto / Largo',
@@ -317,4 +339,3 @@ handler.help = [
   'setowner @user',
 ];
 export default handler;
-      
