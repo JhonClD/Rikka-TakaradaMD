@@ -1,5 +1,16 @@
-const handler = async (m, { isOwner, args, usedPrefix }) => {
-  if (!isOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.')
+const handler = async (m, { conn, isOwner, isROwner, args, usedPrefix }) => {
+  const botJid    = conn.user?.id?.split(':')[0] + '@s.whatsapp.net'
+  const sockOwner = global.db.data.settings?.[botJid]?.owner || ''
+  const isSubBot  = global.conns?.some(c => c.user?.jid === conn.user?.jid)
+
+  if (isSubBot) return
+
+  const ownerList = [...(global.owner || [])].flat().map(e => {
+    const num = Array.isArray(e) ? e[0] : e
+    return String(num).replace(/[^0-9]/g, '') + '@s.whatsapp.net'
+  })
+  const isRealOwner = ownerList.includes(m.sender) || m.fromMe || (sockOwner && m.sender === sockOwner)
+  if (!isRealOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.')
 
   const sub = args[0]?.toLowerCase()
 
