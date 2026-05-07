@@ -192,8 +192,21 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       if (subsCount >= 50) return m.reply('꒰ ✗ ꒱ No hay espacios disponibles (máx. 50 sub-bots).');
 
       const isCode = command === 'code';
-      // Si no se pasa número, usar automáticamente el número del que envía
-      const phone  = args[0] ? args[0].replace(/\D/g, '') : m.sender.split('@')[0];
+      const phone  = args[0] ? args[0].replace(/\D/g, '') : null;
+
+      if (isCode && !phone) {
+        return m.reply(
+          `✤ Vincula tu *cuenta* usando el *codigo.*\n\n` +
+          `> ✥ Sigue las *instrucciones*\n\n` +
+          `*›* Click en los *3 puntos*\n` +
+          `*›* Toque *dispositivos vinculados*\n` +
+          `*›* Vincular *nuevo dispositivo*\n` +
+          `*›* Selecciona *Vincular con el número de teléfono*\n\n` +
+          `ꕤ *\`Importante\`*\n` +
+          `> ₊·( 🜸 ) ➭ Debes indicar el número con *código de país*\n\n` +
+          `꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`
+        );
+      }
 
       commandFlags[m.sender] = true;
 
@@ -393,4 +406,3 @@ handler.help = [
   'setowner @user',
 ];
 export default handler;
-                                                   
