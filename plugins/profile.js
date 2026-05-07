@@ -15,14 +15,30 @@ const progressBar = (pct, width = 12) => {
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
-  const target = m.mentionedJid?.[0] || m.quoted?.sender || m.sender
-  const isSelf = target === m.sender
+  
+  // Obtener el JID REAL sin modificaciones del LidResolver
+  let target
+  if (m.mentionedJid?.[0]) {
+    target = m.mentionedJid[0]
+  } else if (m.quoted?.sender) {
+    target = m.quoted.sender
+  } else {
+    // Usar el sender original del mensaje, no el modificado
+    target = m.key.participant || m.key.remoteJid || m.sender
+  }
+  
+  // Normalizar JID (quitar @lid si existe)
+  if (target?.endsWith?.('@lid')) {
+    const cached = conn.lid?.getUserInfo?.(target.split('@')[0])
+    target = cached?.jid || target
+  }
+  
+  const isSelf = target === m.sender || target === (m.key.participant || m.key.remoteJid)
   const name = await conn.getName(target)
 
   if (!users[target]) users[target] = {}
   const u = users[target]
 
-  // Fix: reemplazado ??= por if checks (compatibilidad con parsers viejos)
   if (u.birthday === undefined) u.birthday = null
   if (u.gender === undefined) u.gender = null
   if (u.harem === undefined) u.harem = 0
@@ -71,60 +87,44 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // SOLUCIÓN: Intentar obtener la imagen de TODAS las formas posibles
+  // Intentar obtener foto de perfil con timeout
   let ppUrl = null
-
-  // Método 1: profilePictureUrl normal
+  
   try {
-    ppUrl = await conn.profilePictureUrl(target, 'image')
+    // Timeout de 3 segundos para no bloquear
+    ppUrl = await Promise.race([
+      conn.profilePictureUrl(target, 'image').catch(() => null),
+      new Promise(resolve => setTimeout(() => resolve(null), 3000))
+    ])
   } catch {}
 
-  // Método 2: Si falla, intentar obtener la foto desde el mensaje mismo
-  if (!ppUrl && m.quoted) {
-    try {
-      ppUrl = await conn.profilePictureUrl(m.quoted.sender, 'image')
-    } catch {}
-  }
-
-  // Método 3: Intentar con el número limpio (sin @s.whatsapp.net)
   if (!ppUrl) {
     try {
-      const cleanJid = target.split('@')[0]
-      ppUrl = await conn.profilePictureUrl(`${cleanJid}@s.whatsapp.net`, 'image')
-    } catch {}
-  }
-
-  // Método 4: Preview (menor calidad pero más rápido)
-  if (!ppUrl) {
-    try {
-      ppUrl = await conn.profilePictureUrl(target, 'preview')
-    } catch {}
-  }
-
-  // Método 5: Forzar actualización del perfil
-  if (!ppUrl) {
-    try {
-      // Esto fuerza a WhatsApp a recargar la info del contacto
-      await conn.updateProfilePicture(target)
-      ppUrl = await conn.profilePictureUrl(target, 'image')
+      ppUrl = await Promise.race([
+        conn.profilePictureUrl(target, 'preview').catch(() => null),
+        new Promise(resolve => setTimeout(() => resolve(null), 2000))
+      ])
     } catch {}
   }
 
   let imgBuf = null
-
-  // Si tenemos URL, descargar la imagen
+  
   if (ppUrl) {
     try {
       const res = await fetch(ppUrl)
-      if (res.ok) {
-        imgBuf = Buffer.from(await res.arrayBuffer())
-      }
+      if (res.ok) imgBuf = Buffer.from(await res.arrayBuffer())
     } catch {}
   }
 
-  // Enviar mensaje
+  // Si no hay foto, usar fallback
+  if (!imgBuf) {
+    try {
+      const res = await fetch('https://files.catbox.moe/leegee.jpg')
+      imgBuf = Buffer.from(await res.arrayBuffer())
+    } catch {}
+  }
+
   if (imgBuf) {
-    // ¡TENEMOS IMAGEN REAL! Enviar con imagen
     await conn.sendMessage(
       m.chat,
       {
@@ -135,14 +135,9 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       { quoted: m }
     )
   } else {
-    // NO hay imagen - enviar SOLO TEXTO (sin imagen de respaldo)
-    // Así es honesto y no muestra una foto que no es la tuya
     await conn.sendMessage(
       m.chat,
-      {
-        text: `⚠️ *No se pudo obtener tu foto de perfil*\n\n${txt}\n\n💡 *Solución:* Asegúrate de que el bot tenga tu número guardado en sus contactos.`,
-        mentions: [target],
-      },
+      { text: txt, mentions: [target] },
       { quoted: m }
     )
   }
