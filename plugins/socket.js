@@ -34,6 +34,37 @@ function isSocketOwner(conn, sender) {
   return [botJid, ...(config.owner ? [config.owner] : []), ...owners].includes(sender);
 }
 
+// ── Registrar handler de mensajes en el sub-bot recién conectado ──────────────
+async function registerSubBotHandler(sock) {
+  try {
+    const handlerMod = await import(`../handler.js?update=${Date.now()}`);
+    if (!handlerMod?.handler) return;
+
+    // Limpiar listeners anteriores por si acaso
+    sock.ev.off('messages.upsert',          sock.handler);
+    sock.ev.off('group-participants.update', sock.participantsUpdate);
+    sock.ev.off('groups.update',             sock.groupsUpdate);
+    sock.ev.off('message.delete',            sock.onDelete);
+    sock.ev.off('call',                      sock.onCall);
+
+    sock.handler           = handlerMod.handler.bind(sock);
+    sock.participantsUpdate = handlerMod.participantsUpdate?.bind(sock);
+    sock.groupsUpdate       = handlerMod.groupsUpdate?.bind(sock);
+    sock.onDelete           = handlerMod.deleteUpdate?.bind(sock);
+    sock.onCall             = handlerMod.callUpdate?.bind(sock);
+
+    sock.ev.on('messages.upsert',          sock.handler);
+    if (sock.participantsUpdate) sock.ev.on('group-participants.update', sock.participantsUpdate);
+    if (sock.groupsUpdate)       sock.ev.on('groups.update',             sock.groupsUpdate);
+    if (sock.onDelete)           sock.ev.on('message.delete',            sock.onDelete);
+    if (sock.onCall)             sock.ev.on('call',                      sock.onCall);
+
+    console.log(`[SOCKET] Handler registrado para sub-bot`);
+  } catch (e) {
+    console.error('[SOCKET] Error registrando handler:', e.message);
+  }
+}
+
 async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId, flags) {
   const senderId   = m?.sender;
   const sessionId  = phone || senderId.split('@')[0];
@@ -69,6 +100,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
 
+    // ── Código de vinculación: solicitar al conectar ───────────────────────────
     if (connection === 'connecting' && isCode && phone && !pairingDone && flags[senderId]) {
       setTimeout(async () => {
         if (pairingDone) return;
@@ -94,6 +126,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
       }, 2000);
     }
 
+    // ── QR ────────────────────────────────────────────────────────────────────
     if (qr && !isCode && client && chatId && flags[senderId]) {
       try {
         const mq = await client.sendMessage(chatId, {
@@ -105,6 +138,7 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
       } catch (e) { console.error('[SOCKET] Error QR:', e.message); }
     }
 
+    // ── Conexión exitosa: registrar handler para que el sub-bot responda ───────
     if (connection === 'open') {
       sock.isInit = true;
       const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
@@ -113,6 +147,9 @@ async function startSubBotFromCommand(m, client, caption, isCode, phone, chatId,
       delete reconnectMap[sessionId];
       if (!global.conns?.find(c => c.user?.id === sock.user?.id)) global.conns?.push(sock);
       console.log(`[SOCKET] +${sessionId} conectado`);
+
+      // FIX: registrar handler de mensajes para que el sub-bot responda
+      await registerSubBotHandler(sock);
     }
 
     if (connection === 'close') {
@@ -158,13 +195,43 @@ const handler = async (m, { conn, command, args, text, usedPrefix }) => {
       const phone  = args[0] ? args[0].replace(/\D/g, '') : null;
 
       if (isCode && !phone) {
-        return m.reply(`⸙͎ Debes indicar el número con código de país.\n꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`);
+        return m.reply(
+          `✤ Vincula tu *cuenta* usando el *codigo.*\n\n` +
+          `> ✥ Sigue las *instrucciones*\n\n` +
+          `*›* Click en los *3 puntos*\n` +
+          `*›* Toque *dispositivos vinculados*\n` +
+          `*›* Vincular *nuevo dispositivo*\n` +
+          `*›* Selecciona *Vincular con el número de teléfono*\n\n` +
+          `ꕤ *\`Importante\`*\n` +
+          `> ₊·( 🜸 ) ➭ Debes indicar el número con *código de país*\n\n` +
+          `꒰ ✦ Ejemplo ꒱ *${usedPrefix}code 51925092348*`
+        );
       }
 
       commandFlags[m.sender] = true;
 
-      const capCode = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Ingresa el código en WhatsApp:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular con número de teléfono*\n⌞────────────────⌟`;
-      const capQR   = `꒰ ✦ *Vincular Socket* ✦ ꒱\n⌜────────────────⌝\n┊⇢ Escanea el *QR* para vincular:\n┊⇢ *3 puntos* → *Dispositivos vinculados*\n┊⇢ *Vincular nuevo dispositivo*\n⌞────────────────⌟\n\n⸙͎ No uses tu cuenta principal.`;
+      // ── Mensaje de instrucciones al vincular correctamente ────────────────────
+      const capCode = (
+        `✤ Vincula tu *cuenta* usando el *codigo.*\n\n` +
+        `> ✥ Sigue las *instrucciones*\n\n` +
+        `*›* Click en los *3 puntos*\n` +
+        `*›* Toque *dispositivos vinculados*\n` +
+        `*›* Vincular *nuevo dispositivo*\n` +
+        `*›* Selecciona *Vincular con el número de teléfono*\n\n` +
+        `ꕤ *\`Importante\`*\n` +
+        `> ₊·( 🜸 ) ➭ Este *Código* solo funciona en el *número que lo solicito*`
+      );
+
+      const capQR = (
+        `✤ Vincula tu *cuenta* escaneando el *QR.*\n\n` +
+        `> ✥ Sigue las *instrucciones*\n\n` +
+        `*›* Click en los *3 puntos*\n` +
+        `*›* Toque *dispositivos vinculados*\n` +
+        `*›* Vincular *nuevo dispositivo*\n` +
+        `*›* Escanea el *código QR*\n\n` +
+        `ꕤ *\`Importante\`*\n` +
+        `> ₊·( 🜸 ) ➭ *No uses* tu cuenta principal`
+      );
 
       await m.reply(`꒰ ✦ ꒱ Iniciando vinculación${isCode ? ` para *+${phone}*` : ' vía QR'}...\n⸙͎ Espera unos segundos.`);
       await startSubBotFromCommand(m, conn, isCode ? capCode : capQR, isCode, phone, m.chat, commandFlags);
@@ -339,4 +406,4 @@ handler.help = [
   'setowner @user',
 ];
 export default handler;
-      
+                                     
