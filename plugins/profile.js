@@ -13,76 +13,11 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-// Cache simple en memoria
-const profilePicCache = new Map()
-
-const getProfilePicture = async (conn, jid) => {
-  // Verificar cache primero (respuesta instantánea)
-  const cached = profilePicCache.get(jid)
-  if (cached && (Date.now() - cached.time) < 300000) { // 5 minutos cache
-    return cached.buffer
-  }
-
-  try {
-    // Obtener la URL de la foto de perfil
-    let ppUrl = null
-    
-    // Intentar obtener la URL (esto es lo que fallaba)
-    try {
-      ppUrl = await conn.profilePictureUrl(jid, 'image')
-      console.log('✅ URL de imagen obtenida:', ppUrl?.substring(0, 50) + '...')
-    } catch (err) {
-      console.log('❌ Error al obtener URL de imagen:', err.message)
-    }
-
-    // Si falla, intentar con 'preview' (más rápido, menor calidad)
-    if (!ppUrl) {
-      try {
-        ppUrl = await conn.profilePictureUrl(jid, 'preview')
-        console.log('✅ URL de preview obtenida:', ppUrl?.substring(0, 50) + '...')
-      } catch (err) {
-        console.log('❌ Error al obtener URL de preview:', err.message)
-      }
-    }
-
-    // Si tenemos URL, descargar la imagen
-    if (ppUrl && ppUrl.startsWith('http')) {
-      const response = await fetch(ppUrl)
-      if (response.ok) {
-        const buffer = Buffer.from(await response.arrayBuffer())
-        // Guardar en cache
-        profilePicCache.set(jid, { buffer, time: Date.now() })
-        console.log('✅ Imagen descargada correctamente')
-        return buffer
-      }
-    }
-
-    // Si no se pudo obtener, usar imagen por defecto
-    console.log('⚠️ Usando imagen por defecto')
-    const defaultUrl = 'https://files.catbox.moe/leegee.jpg'
-    const response = await fetch(defaultUrl)
-    const buffer = Buffer.from(await response.arrayBuffer())
-    profilePicCache.set(jid, { buffer, time: Date.now() })
-    return buffer
-
-  } catch (error) {
-    console.error('Error final:', error)
-    // Último recurso
-    const response = await fetch('https://files.catbox.moe/leegee.jpg')
-    return Buffer.from(await response.arrayBuffer())
-  }
-}
-
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
   const target = m.mentionedJid?.[0] || m.quoted?.sender || m.sender
-  
-  console.log('🎯 Target JID:', target) // Debug: ver qué JID se está usando
-  
   const isSelf = target === m.sender
   const name = await conn.getName(target)
-  
-  console.log('👤 Nombre:', name) // Debug: ver nombre
 
   if (!users[target]) users[target] = {}
   const u = users[target]
@@ -136,13 +71,60 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Mensaje de "cargando..." mientras se obtiene la imagen
-  await conn.sendMessage(m.chat, { react: { text: '⏳', key: m.key } })
+  // SOLUCIÓN: Intentar obtener la imagen de TODAS las formas posibles
+  let ppUrl = null
 
+  // Método 1: profilePictureUrl normal
   try {
-    // Obtener imagen de perfil
-    const imgBuf = await getProfilePicture(conn, target)
+    ppUrl = await conn.profilePictureUrl(target, 'image')
+  } catch {}
 
+  // Método 2: Si falla, intentar obtener la foto desde el mensaje mismo
+  if (!ppUrl && m.quoted) {
+    try {
+      ppUrl = await conn.profilePictureUrl(m.quoted.sender, 'image')
+    } catch {}
+  }
+
+  // Método 3: Intentar con el número limpio (sin @s.whatsapp.net)
+  if (!ppUrl) {
+    try {
+      const cleanJid = target.split('@')[0]
+      ppUrl = await conn.profilePictureUrl(`${cleanJid}@s.whatsapp.net`, 'image')
+    } catch {}
+  }
+
+  // Método 4: Preview (menor calidad pero más rápido)
+  if (!ppUrl) {
+    try {
+      ppUrl = await conn.profilePictureUrl(target, 'preview')
+    } catch {}
+  }
+
+  // Método 5: Forzar actualización del perfil
+  if (!ppUrl) {
+    try {
+      // Esto fuerza a WhatsApp a recargar la info del contacto
+      await conn.updateProfilePicture(target)
+      ppUrl = await conn.profilePictureUrl(target, 'image')
+    } catch {}
+  }
+
+  let imgBuf = null
+
+  // Si tenemos URL, descargar la imagen
+  if (ppUrl) {
+    try {
+      const res = await fetch(ppUrl)
+      if (res.ok) {
+        imgBuf = Buffer.from(await res.arrayBuffer())
+      }
+    } catch {}
+  }
+
+  // Enviar mensaje
+  if (imgBuf) {
+    // ¡TENEMOS IMAGEN REAL! Enviar con imagen
     await conn.sendMessage(
       m.chat,
       {
@@ -152,13 +134,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       },
       { quoted: m }
     )
-  } catch (error) {
-    console.error('Error enviando imagen:', error)
-    // Si falla el envío con imagen, enviar solo texto
+  } else {
+    // NO hay imagen - enviar SOLO TEXTO (sin imagen de respaldo)
+    // Así es honesto y no muestra una foto que no es la tuya
     await conn.sendMessage(
       m.chat,
       {
-        text: txt,
+        text: `⚠️ *No se pudo obtener tu foto de perfil*\n\n${txt}\n\n💡 *Solución:* Asegúrate de que el bot tenga tu número guardado en sus contactos.`,
         mentions: [target],
       },
       { quoted: m }
