@@ -18,10 +18,10 @@ let childProcess = null;
 
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
-// Nueva Paleta de Colores
-const mint = '#b2f7ef';     // Verde Menta
-const celeste = '#8ecae6';  // Celeste (Sky Blue)
-const softViolet = '#dec0f1'; // Violeta suave
+// Paleta Soft-Cyber
+const mint = '#b2f7ef';     
+const celeste = '#8ecae6';  
+const softViolet = '#dec0f1'; 
 const white = '#f8f9fa';
 
 console.log(chalk.hex(mint).bold('『 ✦ 』Iniciando sistema...'));
@@ -61,8 +61,8 @@ async function start(file) {
   if (isRunning) return;
   isRunning = true;
 
-  // Título con degradado Menta -> Violeta
-  say('RIKKA TAKARADA\nBOT', {
+  // Título Completo: RIKKA TAKARADA
+  say('RIKKA\nTAKARADA', {
     font: 'block',
     align: 'center',
     colors: [mint, softViolet],
@@ -73,7 +73,7 @@ async function start(file) {
     gradient: true,
   });
 
-  // Créditos en Celeste (como pediste)
+  // Créditos en Celeste
   say(`Bot creado por JhonCID`, {
     font: 'console',
     align: 'center',
@@ -164,4 +164,4 @@ try {
 } catch (error) {
   console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
   process.exit(1);
-  }
+}
