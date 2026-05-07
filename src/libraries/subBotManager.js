@@ -1,1 +1,301 @@
-const _0x368275=_0x5d05;(function(_0x18ccae,_0x10921a){const _0x4ce2cc=_0x5d05,_0x3baf7a=_0x18ccae();while(!![]){try{const _0x149695=-parseInt(_0x4ce2cc(0x1e5))/0x1*(parseInt(_0x4ce2cc(0x1a6))/0x2)+parseInt(_0x4ce2cc(0x1b0))/0x3*(-parseInt(_0x4ce2cc(0x1ee))/0x4)+-parseInt(_0x4ce2cc(0x1ab))/0x5*(-parseInt(_0x4ce2cc(0x1a1))/0x6)+-parseInt(_0x4ce2cc(0x1de))/0x7+-parseInt(_0x4ce2cc(0x1b5))/0x8*(-parseInt(_0x4ce2cc(0x1eb))/0x9)+-parseInt(_0x4ce2cc(0x1ba))/0xa*(parseInt(_0x4ce2cc(0x1d4))/0xb)+-parseInt(_0x4ce2cc(0x1a0))/0xc*(-parseInt(_0x4ce2cc(0x1ce))/0xd);if(_0x149695===_0x10921a)break;else _0x3baf7a['push'](_0x3baf7a['shift']());}catch(_0x4527d1){_0x3baf7a['push'](_0x3baf7a['shift']());}}}(_0x4507,0x2a658));const {DisconnectReason,useMultiFileAuthState,MessageRetryMap,fetchLatestBaileysVersion,makeCacheableSignalKeyStore,jidNormalizedUser}=await import(_0x368275(0x1a3)),{proto}=(await import(_0x368275(0x1a3)))[_0x368275(0x1ca)];import _0x34550b from'qrcode';import _0x36fa76 from'fs';import _0x5e6e8d from'pino';import _0x422230 from'md5';import{exec}from'child_process';function _0x5d05(_0xef08f1,_0x50450a){const _0x45076c=_0x4507();return _0x5d05=function(_0x5d053b,_0xb33cbb){_0x5d053b=_0x5d053b-0x19e;let _0x5e2cc4=_0x45076c[_0x5d053b];return _0x5e2cc4;},_0x5d05(_0xef08f1,_0x50450a);}import{makeWASocket}from'./simple.js';import _0x57efcc from'./store.js';import _0x1d040d from'node-cache';import _0x14edd1 from'path';import{fileURLToPath}from'url';const __filename=fileURLToPath(import.meta[_0x368275(0x1c1)]),__dirname=_0x14edd1['dirname'](__filename),JADIBTS_DIR=_0x14edd1[_0x368275(0x1d0)](__dirname,_0x368275(0x1da));if(global['conns']instanceof Array)console[_0x368275(0x1c5)]();else global['conns']=[];function _0x4507(){const _0x431581=['connection.update','12zgUrYD','readdirSync','existsSync','user','[SUB-BOT]\x20No\x20hay\x20sub-bots\x20previamente\x20conectados','split','[SUB-BOT]\x20Iniciando\x20sub-bot\x20','modejadibot','\x20conectado\x20con\x20éxito','creds.update','loadMessage','utf-8','groupsUpdate','messages.upsert','912zJIxeY','1411638TmllVB','onDelete','@whiskeysockets/baileys','loggedOut','\x20fue\x20reemplazado','4486WFmfQP','subreloadHandler','silent','close','bind','5cEIToc','2.0.0','isInit','onCall','handler','207453GRITSH','groups.update','credsUpdate','payload','\x20cerró\x20sesión','10120NsLoLW','[SUB-BOT]\x20Error\x20al\x20iniciar\x20sub-bot\x20','off','uptime','timedOut','10MjASoI','TheMystic-Bot-MD','keys','conns','callUpdate','statusCode','conn','url','?update=','push','[SUB-BOT]\x20Límite\x20de\x20reconexiones\x20alcanzado\x20para\x20','log','group-participants.update','dataconst','message.delete','splice','default','\x20timeout,\x20reconectando...','[SUB-BOT]\x20Handler\x20no\x20definido\x20o\x20incompleto','[SUB-BOT]\x20Error\x20en\x20initializeSubBots:','86502Cxambh','indexOf','join','deleteUpdate','connectionUpdate','[SUB-BOT]\x20Reconectando\x20','1196833Dpxnra','now','error','[SUB-BOT]\x20','data','length','../../jadibts','catch','fstop','parse','1343573fTWFhu','\x20perdió\x20conexión,\x20reconectando...','rmdirSync','call','[SUB-BOT]\x20Modo\x20jadibot\x20desactivado\x20en\x20configuración\x20del\x20Bot\x20Principal','removeAllListeners','/3)','32gMxMsN','connectionClosed','badSession','[SUB-BOT]\x20Error\x20al\x20cargar\x20handler:','output','participantsUpdate','90slnCpk','open'];_0x4507=function(){return _0x431581;};return _0x4507();}if(global[_0x368275(0x1c7)]instanceof Array)console[_0x368275(0x1c5)]();else global[_0x368275(0x1c7)]=[];const delay=_0x540265=>new Promise(_0x512f0c=>setTimeout(_0x512f0c,_0x540265));export async function initializeSubBots(){const _0x58ed6d=_0x368275;try{const _0x535c90=global['db']?.[_0x58ed6d(0x1d8)]?.['settings']?.[global['conn']?.[_0x58ed6d(0x1f1)]?.['jid']]?.[_0x58ed6d(0x1f5)]??!![];if(!_0x535c90){console['log'](_0x58ed6d(0x1e2));return;}if(!_0x36fa76['existsSync'](JADIBTS_DIR)){console[_0x58ed6d(0x1c5)](_0x58ed6d(0x1f2));return;}const _0x4a134a=_0x36fa76[_0x58ed6d(0x1ef)](JADIBTS_DIR);for(const _0x51d33e of _0x4a134a){try{const _0x79bfb6=_0x14edd1[_0x58ed6d(0x1d0)](JADIBTS_DIR,_0x51d33e,'creds.json');if(!_0x36fa76[_0x58ed6d(0x1f0)](_0x79bfb6))continue;const _0x47fc0c=_0x36fa76['readFileSync'](_0x79bfb6,_0x58ed6d(0x1f9)),_0xa3f1eb=JSON[_0x58ed6d(0x1dd)](_0x47fc0c);if(_0xa3f1eb[_0x58ed6d(0x1dc)]===!![])continue;console['log'](_0x58ed6d(0x1f4)+_0x51d33e),await startSubBot(_0x51d33e,_0x47fc0c);}catch(_0x3f8763){console[_0x58ed6d(0x1d6)](_0x58ed6d(0x1b6)+_0x51d33e+':',_0x3f8763);}}}catch(_0x2f7b8a){console[_0x58ed6d(0x1d6)](_0x58ed6d(0x1cd),_0x2f7b8a);}}async function startSubBot(_0x492e5a,_0x511ba1){const _0x3b853c=_0x368275;try{const _0x1fa9a6=_0x14edd1['join'](JADIBTS_DIR,_0x492e5a),{state:_0x3d86b2,saveState:_0x9fe193,saveCreds:_0x524a4c}=await useMultiFileAuthState(_0x1fa9a6),_0x4323db=_0x4f5ae2=>{},_0x20cfa6=new _0x1d040d(),{version:_0x29648c}=await fetchLatestBaileysVersion(),_0x3018a3={'printQRInTerminal':![],'auth':{'creds':_0x3d86b2['creds'],'keys':makeCacheableSignalKeyStore(_0x3d86b2[_0x3b853c(0x1bc)],_0x5e6e8d({'level':_0x3b853c(0x1a8)}))},'waWebSocketUrl':'wss://web.whatsapp.com/ws/chat?ED=CAIICA','logger':_0x5e6e8d({'level':_0x3b853c(0x1a8)}),'browser':[_0x3b853c(0x1bb),'Safari',_0x3b853c(0x1ac)],'markOnlineOnConnect':!![],'generateHighQualityLinkPreview':!![],'getMessage':async _0x17e945=>{const _0x3c36e4=_0x3b853c;let _0x55a94a=jidNormalizedUser(_0x17e945['remoteJid']),_0x3261a1=await _0x57efcc[_0x3c36e4(0x1f8)](_0x55a94a,_0x17e945['id']);return _0x3261a1?.['message']||'';},'patchMessageBeforeSending':async _0x385f06=>{const _0xf125ed=_0x3b853c;let _0x4175bf=0x0;return global[_0xf125ed(0x1c0)]['uploadPreKeysToServerIfRequired'](),_0x4175bf++,_0x385f06;},'msgRetryCounterCache':_0x20cfa6,'msgRetryCounterMap':_0x4323db,'defaultQueryTimeoutMs':undefined,'version':_0x29648c};let _0x1eba1e=makeWASocket(_0x3018a3);_0x1eba1e['isInit']=![],_0x1eba1e[_0x3b853c(0x1b8)]=Date['now']();let _0x30d4a5=!![];async function _0x29e077(_0x4a38ed){const _0x97ee22=_0x3b853c,{connection:_0x2dc4f2,lastDisconnect:_0x2a8a83,isNewLogin:_0x2fabf3,qr:_0x1ffffc}=_0x4a38ed;if(_0x2fabf3)_0x1eba1e[_0x97ee22(0x1ad)]=![];const _0x5482fb=_0x2a8a83?.[_0x97ee22(0x1d6)]?.[_0x97ee22(0x1e9)]?.[_0x97ee22(0x1bf)]||_0x2a8a83?.['error']?.[_0x97ee22(0x1e9)]?.[_0x97ee22(0x1b3)]?.['statusCode'];if(_0x2dc4f2===_0x97ee22(0x1a9)){if(_0x1eba1e[_0x97ee22(0x1f1)]&&dataconst[_0x1eba1e['user']['id'][_0x97ee22(0x1f3)]('@')]==0x3){console[_0x97ee22(0x1c5)](_0x97ee22(0x1c4)+_0x492e5a);return;}if(_0x5482fb==0x195||_0x5482fb==0x194)return _0x36fa76['unlinkSync'](_0x14edd1['join'](JADIBTS_DIR,_0x492e5a,'creds.json')),startSubBot(_0x492e5a,_0x511ba1);if(_0x5482fb===DisconnectReason[_0x97ee22(0x1e7)])console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20Sesión\x20inválida\x20para\x20'+_0x492e5a),_0x36fa76[_0x97ee22(0x1e0)](_0x14edd1[_0x97ee22(0x1d0)](JADIBTS_DIR,_0x492e5a),{'recursive':!![]});else{if(_0x5482fb===DisconnectReason[_0x97ee22(0x1e6)]){if(_0x1eba1e[_0x97ee22(0x1dc)]){console['log'](_0x97ee22(0x1d7)+_0x492e5a+'\x20apagado\x20correctamente');return;}console[_0x97ee22(0x1c5)](_0x97ee22(0x1d3)+_0x492e5a+'\x20('+(dataconst[_0x1eba1e['user']['id'][_0x97ee22(0x1f3)]('@')]||0x0)+_0x97ee22(0x1e4)),await _0x136fa7(!![])[_0x97ee22(0x1db)](console[_0x97ee22(0x1d6)]);}else{if(_0x5482fb===DisconnectReason['connectionLost'])console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20'+_0x492e5a+_0x97ee22(0x1df)),await _0x136fa7(!![])[_0x97ee22(0x1db)](console[_0x97ee22(0x1d6)]);else{if(_0x5482fb===DisconnectReason['connectionReplaced'])console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20'+_0x492e5a+_0x97ee22(0x1a5)),await _0x136fa7(!![])['catch'](console[_0x97ee22(0x1d6)]);else{if(_0x5482fb===DisconnectReason[_0x97ee22(0x1a4)])console[_0x97ee22(0x1c5)](_0x97ee22(0x1d7)+_0x492e5a+_0x97ee22(0x1b4)),_0x36fa76[_0x97ee22(0x1e0)](_0x14edd1['join'](JADIBTS_DIR,_0x492e5a),{'recursive':!![]});else{if(_0x5482fb===DisconnectReason['restartRequired'])console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20'+_0x492e5a+'\x20requiere\x20reinicio'),await _0x136fa7(!![])[_0x97ee22(0x1db)](console[_0x97ee22(0x1d6)]);else _0x5482fb===DisconnectReason[_0x97ee22(0x1b9)]?(console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20'+_0x492e5a+_0x97ee22(0x1cb)),await _0x136fa7(!![])[_0x97ee22(0x1db)](console[_0x97ee22(0x1d6)])):console[_0x97ee22(0x1c5)](_0x97ee22(0x1d7)+_0x492e5a+'\x20desconectado\x20por\x20razón\x20desconocida:\x20'+_0x5482fb);}}}}}let _0xa447d7=global[_0x97ee22(0x1bd)][_0x97ee22(0x1cf)](_0x1eba1e);if(_0xa447d7<0x0)return;delete global[_0x97ee22(0x1bd)][_0xa447d7],global[_0x97ee22(0x1bd)][_0x97ee22(0x1c9)](_0xa447d7,0x1);}_0x2dc4f2==_0x97ee22(0x1ec)&&(_0x1eba1e['isInit']=!![],global[_0x97ee22(0x1bd)][_0x97ee22(0x1c3)](_0x1eba1e),console[_0x97ee22(0x1c5)]('[SUB-BOT]\x20+'+_0x492e5a+_0x97ee22(0x1f6)),_0x2dc4f2==='open'&&(dataconst[_0x1eba1e[_0x97ee22(0x1f1)]['id']['split']('@')]=0x1));}setInterval(async()=>{const _0x340aea=_0x3b853c;if(!_0x1eba1e['user']){try{_0x1eba1e['ws'][_0x340aea(0x1a9)]();}catch{}_0x1eba1e['ev'][_0x340aea(0x1e3)]();let _0x3d351a=global[_0x340aea(0x1bd)][_0x340aea(0x1cf)](_0x1eba1e);if(_0x3d351a<0x0)return;delete global[_0x340aea(0x1bd)][_0x3d351a],global[_0x340aea(0x1bd)][_0x340aea(0x1c9)](_0x3d351a,0x1);}},0xea60);let _0x30e838,_0x136fa7=async function(_0x2abb45){const _0x5da0d9=_0x3b853c;try{const _0x4850f0=_0x14edd1[_0x5da0d9(0x1d0)](__dirname,'../../handler.js'),_0x19e33a=await import(_0x4850f0+_0x5da0d9(0x1c2)+Date[_0x5da0d9(0x1d5)]())[_0x5da0d9(0x1db)](console['error']);if(Object[_0x5da0d9(0x1bc)](_0x19e33a||{})[_0x5da0d9(0x1d9)])_0x30e838=_0x19e33a;}catch(_0x3d4058){console[_0x5da0d9(0x1d6)](_0x5da0d9(0x1e8),_0x3d4058);return;}if(!_0x30e838||!_0x30e838[_0x5da0d9(0x1af)]){console[_0x5da0d9(0x1d6)](_0x5da0d9(0x1cc));return;}if(_0x2abb45){try{_0x1eba1e['ws']['close']();}catch{}_0x1eba1e['ev'][_0x5da0d9(0x1e3)](),_0x1eba1e=makeWASocket(_0x3018a3),_0x30d4a5=!![];}if(_0x1eba1e[_0x5da0d9(0x1f1)]&&_0x1eba1e[_0x5da0d9(0x1f1)]['id']&&!dataconst[_0x1eba1e[_0x5da0d9(0x1f1)]['id'][_0x5da0d9(0x1f3)]('@')])dataconst[_0x1eba1e[_0x5da0d9(0x1f1)]['id']['split']('@')]=0x0;if(_0x1eba1e['user']&&_0x1eba1e['user']['id']&&dataconst[_0x1eba1e['user']['id']['split']('@')]&&_0x2abb45)dataconst[_0x1eba1e['user']['id']['split']('@')]++;return!_0x30d4a5&&(_0x57efcc[_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e['ev'][_0x5da0d9(0x1b7)](_0x5da0d9(0x19f),_0x1eba1e['handler']),_0x1eba1e['ev']['off']('group-participants.update',_0x1eba1e[_0x5da0d9(0x1ea)]),_0x1eba1e['ev']['off']('groups.update',_0x1eba1e[_0x5da0d9(0x19e)]),_0x1eba1e['ev'][_0x5da0d9(0x1b7)](_0x5da0d9(0x1c8),_0x1eba1e[_0x5da0d9(0x1a2)]),_0x1eba1e['ev'][_0x5da0d9(0x1b7)](_0x5da0d9(0x1e1),_0x1eba1e[_0x5da0d9(0x1ae)]),_0x1eba1e['ev'][_0x5da0d9(0x1b7)](_0x5da0d9(0x1ed),_0x1eba1e[_0x5da0d9(0x1d2)]),_0x1eba1e['ev'][_0x5da0d9(0x1b7)](_0x5da0d9(0x1f7),_0x1eba1e['credsUpdate'])),_0x1eba1e[_0x5da0d9(0x1af)]=_0x30e838[_0x5da0d9(0x1af)][_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e[_0x5da0d9(0x1ea)]=_0x30e838[_0x5da0d9(0x1ea)]['bind'](_0x1eba1e),_0x1eba1e[_0x5da0d9(0x19e)]=_0x30e838['groupsUpdate'][_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e[_0x5da0d9(0x1a2)]=_0x30e838[_0x5da0d9(0x1d1)][_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e['onCall']=_0x30e838[_0x5da0d9(0x1be)][_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e[_0x5da0d9(0x1d2)]=_0x29e077[_0x5da0d9(0x1aa)](_0x1eba1e),_0x1eba1e['credsUpdate']=_0x524a4c[_0x5da0d9(0x1aa)](_0x1eba1e,!![]),_0x1eba1e['ev']['on'](_0x5da0d9(0x19f),_0x1eba1e[_0x5da0d9(0x1af)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1c6),_0x1eba1e[_0x5da0d9(0x1ea)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1b1),_0x1eba1e[_0x5da0d9(0x19e)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1c8),_0x1eba1e[_0x5da0d9(0x1a2)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1e1),_0x1eba1e[_0x5da0d9(0x1ae)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1ed),_0x1eba1e[_0x5da0d9(0x1d2)]),_0x1eba1e['ev']['on'](_0x5da0d9(0x1f7),_0x1eba1e[_0x5da0d9(0x1b2)]),_0x1eba1e[_0x5da0d9(0x1a7)]=_0x136fa7,_0x30d4a5=![],!![];};await _0x136fa7(![]);}catch(_0x10b4cf){console[_0x3b853c(0x1d6)](_0x3b853c(0x1b6)+_0x492e5a+':',_0x10b4cf);}}
+import { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser } from '@whiskeysockets/baileys';
+import qrcode from 'qrcode';
+import NodeCache from 'node-cache';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import pino from 'pino';
+import chalk from 'chalk';
+import { makeWASocket } from './simple.js';
+import store from './store.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const JADIBTS_DIR = path.join(__dirname, '../../jadibts');
+
+if (!Array.isArray(global.conns)) global.conns = [];
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+const reconnectCounters = {};
+const MAX_RECONNECTS = 5;
+
+export async function initializeSubBots() {
+  try {
+    const mainJid = global.conn?.user?.jid;
+    const modeEnabled = global.db?.data?.settings?.[mainJid]?.modejadibot ?? true;
+    if (!modeEnabled) {
+      console.log(chalk.gray('[SUB-BOT] Modo jadibot desactivado en configuración del Bot Principal'));
+      return;
+    }
+    if (!fs.existsSync(JADIBTS_DIR)) {
+      console.log(chalk.gray('[SUB-BOT] No hay sub-bots previamente conectados'));
+      return;
+    }
+    const dirs = fs.readdirSync(JADIBTS_DIR);
+    for (const dir of dirs) {
+      try {
+        const credsPath = path.join(JADIBTS_DIR, dir, 'creds.json');
+        if (!fs.existsSync(credsPath)) continue;
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+        if (creds.fstop === true) continue;
+        console.log(chalk.gray(`[SUB-BOT] Iniciando sub-bot ${dir}`));
+        await startSubBot(dir, creds);
+      } catch (e) {
+        console.error(chalk.red(`[SUB-BOT] Error al iniciar sub-bot ${dir}:`), e);
+      }
+    }
+  } catch (e) {
+    console.error(chalk.red('[SUB-BOT] Error en initializeSubBots:'), e);
+  }
+}
+
+export async function startSubBotFromCommand(m, client, caption = '', isCode = false, phone = '', chatId = '', commandFlags = {}, isCommand = false) {
+  const senderId   = m?.sender;
+  const sessionId  = phone || (m?.sender || '').split('@')[0];
+  const sessionDir = path.join(JADIBTS_DIR, sessionId);
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const { version } = await fetchLatestBaileysVersion();
+  const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+
+  const sock = makeWASocket({
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    browser: ['Rikka-MD', 'Safari', '2.0.0'],
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+    },
+    markOnlineOnConnect: true,
+    generateHighQualityLinkPreview: true,
+    syncFullHistory: false,
+    getMessage: async () => '',
+    msgRetryCounterCache,
+    defaultQueryTimeoutMs: undefined,
+    keepAliveIntervalMs: 60_000,
+    maxIdleTimeMs: 120_000,
+    version,
+  });
+
+  sock.isInit = false;
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin, qr }) => {
+    if (isNewLogin) sock.isInit = false;
+
+    if (qr && isCode && phone && client && chatId && commandFlags[senderId]) {
+      try {
+        let code = await sock.requestPairingCode(phone);
+        code = code?.match(/.{1,4}/g)?.join('-') || code;
+        const msgCaption = await client.sendMessage(chatId, { text: caption }, { quoted: m });
+        const msgCode    = await client.sendMessage(chatId, { text: code },    { quoted: m });
+        delete commandFlags[senderId];
+        setTimeout(async () => {
+          try {
+            await client.sendMessage(chatId, { delete: msgCaption.key });
+            await client.sendMessage(chatId, { delete: msgCode.key });
+          } catch {}
+        }, 60000);
+      } catch (e) {
+        console.error('[SUB-BOT] Error generando código:', e);
+      }
+    }
+
+    if (qr && !isCode && client && chatId && commandFlags[senderId]) {
+      try {
+        const msgQR = await client.sendMessage(chatId, {
+          image: await qrcode.toBuffer(qr, { scale: 8 }),
+          caption,
+        }, { quoted: m });
+        delete commandFlags[senderId];
+        setTimeout(async () => {
+          try { await client.sendMessage(chatId, { delete: msgQR.key }); } catch {}
+        }, 60000);
+      } catch (e) {
+        console.error('[SUB-BOT] Error enviando QR:', e);
+      }
+    }
+
+    if (connection === 'open') {
+      sock.uptime = Date.now();
+      sock.isInit = true;
+      const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+      if (!global.db.data.settings[botJid]) global.db.data.settings[botJid] = {};
+      global.db.data.settings[botJid].type = 'Sub';
+      delete reconnectCounters[sessionId];
+      if (!global.conns.find(c => c.user?.id === sock.user?.id)) global.conns.push(sock);
+      console.log(chalk.gray(`[SUB-BOT] +${sessionId} conectado con éxito`));
+    }
+
+    if (connection === 'close') {
+      const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason || 0;
+      const retries = reconnectCounters[sessionId] || 0;
+      reconnectCounters[sessionId] = retries + 1;
+
+      if ([401, 403].includes(reason)) {
+        if (retries < MAX_RECONNECTS) {
+          setTimeout(() => startSubBotFromCommand(m, client, caption, isCode, phone, chatId, {}, isCommand), 3000);
+        } else {
+          try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+          delete reconnectCounters[sessionId];
+        }
+        return;
+      }
+      if ([
+        DisconnectReason.connectionClosed,
+        DisconnectReason.connectionLost,
+        DisconnectReason.timedOut,
+        DisconnectReason.connectionReplaced,
+      ].includes(reason)) {
+        setTimeout(() => startSubBotFromCommand(m, client, caption, isCode, phone, chatId, {}, isCommand), 3000);
+        return;
+      }
+      setTimeout(() => startSubBotFromCommand(m, client, caption, isCode, phone, chatId, {}, isCommand), 3000);
+    }
+  });
+
+  return sock;
+}
+
+async function startSubBot(sessionId, _creds) {
+  try {
+    const sessionDir = path.join(JADIBTS_DIR, sessionId);
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const { version } = await fetchLatestBaileysVersion();
+    const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+
+    const connOptions = {
+      printQRInTerminal: false,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+      },
+      logger: pino({ level: 'silent' }),
+      browser: ['Rikka-MD', 'Safari', '2.0.0'],
+      markOnlineOnConnect: true,
+      generateHighQualityLinkPreview: true,
+      getMessage: async (key) => {
+        try {
+          const jid = jidNormalizedUser(key.remoteJid);
+          const msg = await store.loadMessage(jid, key.id);
+          return msg?.message || '';
+        } catch { return ''; }
+      },
+      msgRetryCounterCache,
+      defaultQueryTimeoutMs: undefined,
+      version,
+    };
+
+    let subConn = makeWASocket(connOptions);
+    subConn.isInit = false;
+    subConn.uptime = Date.now();
+
+    setInterval(() => {
+      if (!subConn.user) {
+        try { subConn.ws.close(); } catch {}
+        subConn.ev.removeAllListeners();
+        const idx = global.conns.indexOf(subConn);
+        if (idx >= 0) global.conns.splice(idx, 1);
+      }
+    }, 60000);
+
+    let handler;
+    const subreloadHandler = async (restart = false) => {
+      try {
+        const mod = await import(path.join(__dirname, '../../handler.js') + `?update=${Date.now()}`).catch(console.error);
+        if (mod && Object.keys(mod).length) handler = mod;
+      } catch (e) {
+        console.error('[SUB-BOT] Error al cargar handler:', e);
+        return;
+      }
+      if (!handler?.handler) {
+        console.error('[SUB-BOT] Handler no definido o incompleto');
+        return;
+      }
+      if (restart) {
+        try { subConn.ws.close(); } catch {}
+        subConn.ev.removeAllListeners();
+        subConn = makeWASocket(connOptions);
+      }
+      if (!restart) {
+        store.bind(subConn);
+        subConn.ev.off('messages.upsert',           subConn.handler);
+        subConn.ev.off('group-participants.update',  subConn.participantsUpdate);
+        subConn.ev.off('groups.update',              subConn.groupsUpdate);
+        subConn.ev.off('message.delete',             subConn.onDelete);
+        subConn.ev.off('call',                       subConn.onCall);
+        subConn.ev.off('connection.update',          subConn.connectionUpdate);
+        subConn.ev.off('creds.update',               subConn.credsUpdate);
+      }
+      subConn.handler           = handler.handler.bind(subConn);
+      subConn.participantsUpdate = handler.participantsUpdate.bind(subConn);
+      subConn.groupsUpdate      = handler.groupsUpdate.bind(subConn);
+      subConn.onDelete          = handler.deleteUpdate.bind(subConn);
+      subConn.onCall            = handler.callUpdate.bind(subConn);
+      subConn.connectionUpdate  = connectionUpdate.bind(subConn);
+      subConn.credsUpdate       = saveCreds.bind(subConn, true);
+      subConn.subreloadHandler  = subreloadHandler;
+      subConn.ev.on('messages.upsert',          subConn.handler);
+      subConn.ev.on('group-participants.update', subConn.participantsUpdate);
+      subConn.ev.on('groups.update',             subConn.groupsUpdate);
+      subConn.ev.on('message.delete',            subConn.onDelete);
+      subConn.ev.on('call',                      subConn.onCall);
+      subConn.ev.on('connection.update',         subConn.connectionUpdate);
+      subConn.ev.on('creds.update',              subConn.credsUpdate);
+      return true;
+    };
+
+    async function connectionUpdate({ connection, lastDisconnect, isNewLogin }) {
+      if (isNewLogin) subConn.isInit = false;
+      const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
+
+      if (connection === 'open') {
+        subConn.isInit = true;
+        const botJid = subConn.user.id.split(':')[0] + '@s.whatsapp.net';
+        if (!global.db.data.settings[botJid]) global.db.data.settings[botJid] = {};
+        global.db.data.settings[botJid].type = 'Sub';
+        delete reconnectCounters[sessionId];
+        if (!global.conns.find(c => c.user?.id === subConn.user?.id)) global.conns.push(subConn);
+        console.log(chalk.gray(`[SUB-BOT] +${sessionId} conectado con éxito`));
+      }
+
+      if (connection === 'close') {
+        const retries = reconnectCounters[sessionId] || 0;
+        reconnectCounters[sessionId] = retries + 1;
+
+        if (retries >= MAX_RECONNECTS) {
+          console.log(chalk.gray(`[SUB-BOT] Límite de reconexiones alcanzado para ${sessionId}`));
+          const idx = global.conns.indexOf(subConn);
+          if (idx >= 0) global.conns.splice(idx, 1);
+          return;
+        }
+
+        if (reason === DisconnectReason.loggedOut) {
+          console.log(chalk.gray(`[SUB-BOT] ${sessionId} cerró sesión`));
+          try { fs.rmdirSync(path.join(JADIBTS_DIR, sessionId), { recursive: true }); } catch {}
+          const idx = global.conns.indexOf(subConn);
+          if (idx >= 0) global.conns.splice(idx, 1);
+          return;
+        }
+        if (reason === DisconnectReason.badSession) {
+          console.log(chalk.gray(`[SUB-BOT] ${sessionId} sesión inválida`));
+          try { fs.rmdirSync(path.join(JADIBTS_DIR, sessionId), { recursive: true }); } catch {}
+          return;
+        }
+        if (reason === DisconnectReason.timedOut) {
+          console.log(chalk.gray(`[SUB-BOT] ${sessionId} timeout, reconectando...`));
+        } else if (reason === DisconnectReason.connectionLost) {
+          console.log(chalk.gray(`[SUB-BOT] ${sessionId} perdió conexión, reconectando...`));
+        } else if (reason === DisconnectReason.connectionReplaced) {
+          console.log(chalk.gray(`[SUB-BOT] ${sessionId} fue reemplazado`));
+        }
+        await subreloadHandler(true).catch(console.error);
+      }
+    }
+
+    await subreloadHandler(false);
+  } catch (e) {
+    console.error(chalk.red(`[SUB-BOT] Error al iniciar sub-bot ${sessionId}:`), e);
+  }
+}
