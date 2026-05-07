@@ -22,12 +22,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   if (!users[target]) users[target] = {}
   const u = users[target]
 
-  u.birthday ??= null
-  u.gender ??= null
-  u.harem ??= 0
-  u.totalCommand ??= 0
-  u.exp ??= 0
-  u.level ??= 0
+  // Fix: reemplazado ??= por if checks (compatibilidad con parsers viejos)
+  if (u.birthday === undefined) u.birthday = null
+  if (u.gender === undefined) u.gender = null
+  if (u.harem === undefined) u.harem = 0
+  if (u.totalCommand === undefined) u.totalCommand = 0
+  if (u.exp === undefined) u.exp = 0
+  if (u.level === undefined) u.level = 0
 
   if (command === 'setbirth') {
     if (!isSelf) return m.reply('❌ Solo puedes editar tu propio perfil.')
@@ -70,7 +71,24 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  await conn.sendMessage(m.chat, { text: txt, mentions: [target] }, { quoted: m })
+  // Intentar obtener foto de perfil del usuario; fallback si está privada o no tiene
+  const FALLBACK_PP = 'https://files.catbox.moe/leegee.jpg'
+  let ppUrl
+  try {
+    ppUrl = await conn.profilePictureUrl(target, 'image')
+  } catch {
+    ppUrl = FALLBACK_PP
+  }
+
+  await conn.sendMessage(
+    m.chat,
+    {
+      image: { url: ppUrl },
+      caption: txt,
+      mentions: [target],
+    },
+    { quoted: m }
+  )
 }
 
 handler.help = ['profile', 'setbirth', 'setgender']
