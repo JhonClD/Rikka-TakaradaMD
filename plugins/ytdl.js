@@ -38,7 +38,12 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         ? String(qualityArg)
         : (isVideo ? '480' : '128');
 
-    await m.react('⏳');
+    await conn.sendMessage(m.chat, {
+        react: {
+            text: '⏳',
+            key: m.key
+        }
+    });
 
     try {
         const { downloadUrl, meta, provider } = await ytDownload(url, type, { quality });
@@ -58,7 +63,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
                 ptt:      false,
             }, { quoted: m });
 
-            await m.react('✅');
+            await conn.sendMessage(m.chat, {
+                react: {
+                    text: '✅',
+                    key: m.key
+                }
+            });
+
             return;
         }
 
@@ -104,11 +115,23 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
             }, { quoted: m });
         }
 
-        await m.react('✅');
+        await conn.sendMessage(m.chat, {
+            react: {
+                text: '✅',
+                key: m.key
+            }
+        });
 
     } catch (e) {
-        await m.react('🔴');
+        await conn.sendMessage(m.chat, {
+            react: {
+                text: '🔴',
+                key: m.key
+            }
+        });
+
         console.error('[YTPlugin]', e.message);
+
         return conn.reply(m.chat,
             `╭─❒「 ᴇʀʀᴏʀ 」\n` +
             `│ ❌ ${e.message}\n` +
