@@ -112,54 +112,42 @@ const handler = async (m, { conn, text, usedPrefix: px }) => {
 };
 
 handler.before = async function (m, { conn }) {
-    // ── Respuesta de nativeFlowMessage / interactiveMessage (WhatsApp nuevo) ──
+    // Extrae el selectedId tanto de nativeFlow (WA nuevo) como de listResponse (WA viejo)
+    let selectedId = null;
+
     const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage;
     if (nativeFlow) {
         try {
-            const params     = JSON.parse(nativeFlow.paramsJson || '{}');
-            const selectedId = params?.id || null;
-            if (!selectedId) return false;
-
-            // Solo manejamos IDs que empiezan con ytmp3/ytmp4
-            const cleanId = selectedId.trim();
-            if (!/^[.!#/]?(ytmp3|ytmp4)\s+https?:\/\//i.test(cleanId)) return false;
-
-            const usedPrefix = cleanId[0];
-            const [command, ...argParts] = cleanId.slice(1).split(' ');
-            const text = argParts.join(' ');
-
-            try {
-                await handler.call(conn, m, { conn, text, usedPrefix, command });
-            } catch (e) {
-                console.error('[ytsearch nativeFlow] Error:', e.message);
-            }
-            return true;
+            const params = JSON.parse(nativeFlow.paramsJson || '{}');
+            selectedId = params?.id || null;
         } catch (_) {}
-        return false;
     }
 
-    // ── Respuesta de listResponseMessage / single_select (WhatsApp viejo) ──
-    const listResp = m.message?.listResponseMessage;
-    if (listResp) {
-        const rawInput = listResp.singleSelectReply?.selectedRowId || null;
-        if (!rawInput) return false;
-
-        const cleanId = rawInput.trim();
-        if (!/^[.!#/]?(ytmp3|ytmp4)\s+https?:\/\//i.test(cleanId)) return false;
-
-        const usedPrefix = cleanId[0];
-        const [command, ...argParts] = cleanId.slice(1).split(' ');
-        const text = argParts.join(' ');
-
-        try {
-            await handler.call(conn, m, { conn, text, usedPrefix, command });
-        } catch (e) {
-            console.error('[ytsearch listResp] Error:', e.message);
-        }
-        return true;
+    if (!selectedId) {
+        selectedId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId || null;
     }
 
-    return false;
+    if (!selectedId) return false;
+
+    const cleanId = selectedId.trim();
+    const match = cleanId.match(/^[.!#/]?(ytmp3|ytmp4)\s+(https?:\/\/.+)$/i);
+    if (!match) return false;
+
+    const command    = match[1].toLowerCase();   // "ytmp3" o "ytmp4"
+    const url        = match[2].trim();
+    const usedPrefix = cleanId[0];
+
+    // Importar y ejecutar el plugin correspondiente directamente
+    try {
+        const mod = await import(`./${command === 'ytmp3' ? 'ytmp3' : 'ytmp4'}.js`);
+        const target = mod.default || mod;
+        await target.call(conn, m, { conn, text: url, usedPrefix, command, args: [url] });
+    } catch (e) {
+        console.error(`[ytsearch before] Error ejecutando ${command}:`, e.message);
+        await conn.reply(m.chat, `❌ Error al iniciar descarga: ${e.message}`, m);
+    }
+
+    return true;
 };
 
 handler.help    = ['yts <texto>'];
