@@ -38,11 +38,9 @@ const handler = async (m, { conn, text, usedPrefix: px }) => {
 
         const interactiveMessage = {
             body: {
-                text: `*—◉ Resultados obtenidos:* ${videos.length}\n*—◉ Video aleatorio:*\n*-› Title:* ${top.title}\n*-› Author:* ${top.author.name}\n*-› Views:* ${formatViews(top.views)}\n*-› Link:* ${top.url}\n*-› Imagen:* ${top.thumbnail}`.trim()
+                text: `*—◉ Resultados obtenidos:* ${videos.length}\n*—◉ Video destacado:*\n*-› Title:* ${top.title}\n*-› Author:* ${top.author.name}\n*-› Views:* ${formatViews(top.views)}\n*-› Duration:* ${top.timestamp}\n*-› Link:* ${top.url}`.trim()
             },
-            footer: {
-                text: `${global.wm}`.trim()
-            },
+            footer: { text: `${global.wm}` },
             header: {
                 title: `*< YouTube Search />*`,
                 hasMediaAttachment: true,
@@ -111,6 +109,57 @@ const handler = async (m, { conn, text, usedPrefix: px }) => {
     }
 
     await conn.sendMessage(m.chat, { react: { text: '✅', key: m.key } });
+};
+
+handler.before = async function (m, { conn }) {
+    // ── Respuesta de nativeFlowMessage / interactiveMessage (WhatsApp nuevo) ──
+    const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage;
+    if (nativeFlow) {
+        try {
+            const params     = JSON.parse(nativeFlow.paramsJson || '{}');
+            const selectedId = params?.id || null;
+            if (!selectedId) return false;
+
+            // Solo manejamos IDs que empiezan con ytmp3/ytmp4
+            const cleanId = selectedId.trim();
+            if (!/^[.!#/]?(ytmp3|ytmp4)\s+https?:\/\//i.test(cleanId)) return false;
+
+            const usedPrefix = cleanId[0];
+            const [command, ...argParts] = cleanId.slice(1).split(' ');
+            const text = argParts.join(' ');
+
+            try {
+                await handler.call(conn, m, { conn, text, usedPrefix, command });
+            } catch (e) {
+                console.error('[ytsearch nativeFlow] Error:', e.message);
+            }
+            return true;
+        } catch (_) {}
+        return false;
+    }
+
+    // ── Respuesta de listResponseMessage / single_select (WhatsApp viejo) ──
+    const listResp = m.message?.listResponseMessage;
+    if (listResp) {
+        const rawInput = listResp.singleSelectReply?.selectedRowId || null;
+        if (!rawInput) return false;
+
+        const cleanId = rawInput.trim();
+        if (!/^[.!#/]?(ytmp3|ytmp4)\s+https?:\/\//i.test(cleanId)) return false;
+
+        const usedPrefix = cleanId[0];
+        const [command, ...argParts] = cleanId.slice(1).split(' ');
+        const text = argParts.join(' ');
+
+        try {
+            await handler.call(conn, m, { conn, text, usedPrefix, command });
+        } catch (e) {
+            console.error('[ytsearch listResp] Error:', e.message);
+        }
+        return true;
+    }
+
+    return false;
 };
 
 handler.help    = ['yts <texto>'];
