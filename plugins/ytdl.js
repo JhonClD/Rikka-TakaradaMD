@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { ytDownload, buildInfoCard } from '../libraries/youtube-scraper.js';
+import { ytDownload, buildInfoCard } from '../src/libraries/youtube-scraper.js';
 
 // Calidades disponibles
 const QUAL_AUDIO = ['96', '128', '256', '320'];
