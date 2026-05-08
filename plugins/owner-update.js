@@ -1,57 +1,66 @@
-import { execSync } from 'child_process';
-import fs from 'fs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const handler = async (m, { conn, text }) => {
-  const tradutor = {
-    texto1: "_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*",
-    texto2: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Actualización finalizada exitosamente.*\n\n",
-    texto3: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Se han hecho cambios locales en archivos del bot que entran en conflicto con las actualizaciones del repositorio. Para actualizar, reinstala el bot o realiza las actualizaciones manualmente.*\n\n*Archivos en conflicto:*",
-    texto4: "_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Ocurrió un error. Por favor, inténtalo de nuevo más tarde.*"
+  const T = {
+    noChanges: `_*< PROPIETARIO - UPDATE />*_\n\n*[ ✅ ] No hay actualizaciones pendientes.*`,
+    updated:   `_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ℹ️ ] Actualización finalizada exitosamente.*\n\n`,
+    conflict:  `_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ⚠️ ] Hay cambios locales en conflicto. Reinstala el bot o actualiza manualmente.*\n\n*Archivos en conflicto:*`,
+    error:     `_*< PROPIETARIO - ACTUALIZAR />*_\n\n*[ ❌ ] Ocurrió un error. Inténtalo de nuevo más tarde.*`,
   };
 
-  try {
-    const stdout = execSync('git pull' + (m.fromMe && text ? ' ' + text : ''));
-    let messager = stdout.toString();
-    if (messager.includes('Already up to date.')) messager = tradutor.texto1;
-    if (messager.includes('Updating')) messager = tradutor.texto2 + stdout.toString();
-    conn.reply(m.chat, messager, m);
-  } catch {
-    try {
-      const status = execSync('git status --porcelain');
-      if (status.length > 0) {
-        const conflictedFiles = status
-          .toString()
-          .split('\n')
-          .filter(line => line.trim() !== '')
-          .map(line => {
-            if (
-              line.includes('.npm/') ||
-              line.includes('.cache/') ||
-              line.includes('tmp/') ||
-              line.includes('RikkaSession/') ||
-              line.includes('npm-debug.log')
-            ) return null;
-            return '*→ ' + line.slice(3) + '*';
-          })
-          .filter(Boolean);
+  // Paths a ignorar en el diff
+  const IGNORE = ['.npm/', '.cache/', 'tmp/', 'RikkaSession/', 'npm-debug.log', 'node_modules/'];
 
-        if (conflictedFiles.length > 0) {
-          const errorMessage = `${tradutor.texto3}\n\n${conflictedFiles.join('\n')}.*`;
-          await conn.reply(m.chat, errorMessage, m);
-        }
+  await conn.reply(m.chat, '⏳ Ejecutando git pull...', m);
+
+  try {
+    const extraArgs = m.fromMe && text ? ' ' + text : '';
+    const { stdout } = await execAsync(`git pull${extraArgs}`, { timeout: 30_000 });
+
+    if (stdout.includes('Already up to date.')) {
+      return conn.reply(m.chat, T.noChanges, m);
+    }
+
+    if (stdout.includes('Updating') || stdout.includes('Fast-forward')) {
+      return conn.reply(m.chat, T.updated + '```\n' + stdout.trim() + '\n```', m);
+    }
+
+    // Respuesta inesperada — mostrarla igual
+    return conn.reply(m.chat, '```\n' + stdout.trim() + '\n```', m);
+
+  } catch (pullErr) {
+    // git pull falló → revisar si hay conflictos locales
+    try {
+      const { stdout: statusOut } = await execAsync('git status --porcelain', { timeout: 10_000 });
+
+      const conflicted = statusOut
+        .split('\n')
+        .filter(line => line.trim())
+        .filter(line => !IGNORE.some(ig => line.includes(ig)))
+        .map(line => `*→ ${line.slice(3).trim()}*`);
+
+      if (conflicted.length > 0) {
+        return conn.reply(m.chat, `${T.conflict}\n\n${conflicted.join('\n')}`, m);
       }
-    } catch (error) {
-      console.error(error);
-      let errorMessage2 = tradutor.texto4;
-      if (error.message) errorMessage2 += '\n*- Mensaje de error:* ' + error.message;
-      await conn.reply(m.chat, errorMessage2, m);
+
+      // No hay conflictos pero pull igualmente falló → mostrar stderr
+      const errMsg = pullErr.stderr || pullErr.message || 'Sin detalles';
+      return conn.reply(m.chat, T.error + '\n*Error:* ' + errMsg.slice(0, 300), m);
+
+    } catch (statusErr) {
+      console.error('[update] git status error:', statusErr);
+      return conn.reply(m.chat, T.error + '\n*Error:* ' + statusErr.message.slice(0, 300), m);
     }
   }
 };
 
-handler.help = ['update'];
-handler.tags = ['owner'];
+handler.help    = ['update'];
+handler.tags    = ['owner'];
 handler.command = /^(update|actualizar|gitpull)$/i;
-handler.rowner = true;
+handler.rowner  = true;
 
 export default handler;
+                        
