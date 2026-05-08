@@ -1,7 +1,16 @@
-import fs            from 'fs';
-import { exec }      from 'child_process';
-import { promisify } from 'util';
-import { pipeline }  from 'stream';
+/**
+ * Play.js  —  Rikka-TakaradaMD
+ * Comandos: play · play2 · mp3 · mp4 · video · playaudio
+ *
+ * Backend: y2mate.js  (cnvmp3 / ogmp3 eliminados)
+ * Fix: video descargado como buffer → arregla "Este video no está disponible"
+ */
+
+import fs                  from 'fs';
+import fetch               from 'node-fetch';
+import { exec }            from 'child_process';
+import { promisify }       from 'util';
+import { pipeline }        from 'stream';
 import { createWriteStream } from 'fs';
 
 import {
@@ -15,6 +24,7 @@ const pipelineAsync = promisify(pipeline);
 
 const FLAT_WAVEFORM = new Uint8Array(64).fill(0);
 
+// ─────────────────────────────────────────────────────────────────────────────
 const handler = async (m, { conn, client, args, text, command }) => {
     const socket = conn || client;
     const query  = text || args.join(' ');
@@ -38,6 +48,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
 
         const captionInfo = buildInfoCard(video, type);
 
+        // Mostrar tarjeta de info + iniciar descarga en paralelo
         const [, { downloadUrl }] = await Promise.all([
             socket.sendMessage(m.chat, {
                 image:   { url: video.thumbnail },
@@ -48,22 +59,32 @@ const handler = async (m, { conn, client, args, text, command }) => {
 
         await socket.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
 
+        // ── VIDEO ─────────────────────────────────────────────────────────────
         if (isVideo) {
+            // Buffer obligatorio → evita "Este video no está disponible" en WhatsApp
+            const resp = await fetch(downloadUrl, {
+                headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status} al descargar el video`);
+            const buffer = Buffer.from(await resp.arrayBuffer());
+
             await socket.sendMessage(m.chat, {
-                video:    { url: downloadUrl },
+                video:    buffer,
                 caption:  `🎬 *${video.title}*`,
                 mimetype: 'video/mp4',
-                fileName: `${video.title}.mp4`,
+                fileName: `${video.title.replace(/[\\/:*?"<>|]/g, '')}.mp4`,
             }, { quoted: m });
 
+        // ── VOICE NOTE ────────────────────────────────────────────────────────
         } else if (isVoiceNote) {
             const stamp  = Date.now();
             const tmpMp3 = `./tmp_${stamp}.mp3`;
             const tmpOgg = `./tmp_${stamp}.ogg`;
 
             try {
-                const { default: fetch } = await import('node-fetch');
-                const dlRes = await fetch(downloadUrl);
+                const dlRes = await fetch(downloadUrl, {
+                    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+                });
                 if (!dlRes.ok) throw new Error(`Error al descargar audio: ${dlRes.status}`);
                 await pipelineAsync(dlRes.body, createWriteStream(tmpMp3));
 
@@ -83,11 +104,18 @@ const handler = async (m, { conn, client, args, text, command }) => {
                 [tmpMp3, tmpOgg].forEach(f => { try { fs.unlinkSync(f); } catch {} });
             }
 
+        // ── AUDIO MP3 ─────────────────────────────────────────────────────────
         } else {
+            const resp = await fetch(downloadUrl, {
+                headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status} al descargar el audio`);
+            const buffer = Buffer.from(await resp.arrayBuffer());
+
             await socket.sendMessage(m.chat, {
-                audio:    { url: downloadUrl },
+                audio:    buffer,
                 mimetype: 'audio/mpeg',
-                fileName: `${video.title}.mp3`,
+                fileName: `${video.title.replace(/[\\/:*?"<>|]/g, '')}.mp3`,
                 ptt:      false,
             }, { quoted: m });
         }
@@ -118,4 +146,3 @@ handler.tags    = ['downloader'];
 handler.command = /^(play|play2|mp3|video|mp4|playaudio)$/i;
 
 export default handler;
-                
