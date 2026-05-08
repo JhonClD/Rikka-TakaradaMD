@@ -6,7 +6,7 @@
 // ║   .hlatest                  → últimos lanzamientos          ║
 // ╚══════════════════════════════════════════════════════════════╝
 
-import fetch from 'node-fetch'
+import nodeFetch from 'node-fetch'
 import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@whiskeysockets/baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
@@ -18,16 +18,66 @@ import fs from 'fs'
 import path from 'path'
 import { tmpdir } from 'os'
 import https from 'https'
-// puppeteer-extra cargado de forma lazy para no crashear si no está instalado
-let _puppeteerExtra = null
-async function getPuppeteer() {
-  if (!_puppeteerExtra) {
-    const { default: pe }      = await import('puppeteer-extra')
-    const { default: Stealth } = await import('puppeteer-extra-plugin-stealth')
-    pe.use(Stealth())
-    _puppeteerExtra = pe
-  }
-  return _puppeteerExtra
+
+// ─── Zyte API — bypasea Cloudflare automáticamente ───────────────────────
+const ZYTE_API_KEY = '36511f73431e488aa79f6480bebaa021'
+const ZYTE_ENDPOINT = 'https://api.zyte.com/v1/extract'
+
+// ─── Cola de peticiones a hentaila.com (máx 1 a la vez, delay entre c/u) ─
+const REQUEST_DELAY = 2000   // ms entre peticiones al sitio
+let _lastRequestTime = 0
+let _queueRunning = false
+const _requestQueue = []
+
+function queuedFetch(fn) {
+    return new Promise((resolve, reject) => {
+        _requestQueue.push({ fn, resolve, reject })
+        if (!_queueRunning) _processQueue()
+    })
+}
+
+async function _processQueue() {
+    if (_requestQueue.length === 0) { _queueRunning = false; return }
+    _queueRunning = true
+    const { fn, resolve, reject } = _requestQueue.shift()
+    const now = Date.now()
+    const wait = Math.max(0, _lastRequestTime + REQUEST_DELAY - now)
+    if (wait > 0) await new Promise(r => setTimeout(r, wait))
+    _lastRequestTime = Date.now()
+    try { resolve(await fn()) } catch (e) { reject(e) }
+    _processQueue()
+}
+
+// fetchText usa Zyte para URLs de hentaila.com, fetch directo para el resto
+async function _zyteRequest(url, binary = false) {
+    const auth = Buffer.from(`${ZYTE_API_KEY}:`).toString('base64')
+    const res = await nodeFetch(ZYTE_ENDPOINT, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url, httpResponseBody: true }),
+        signal: AbortSignal.timeout(30000),
+    })
+    if (!res.ok) throw new Error(`Zyte HTTP ${res.status}`)
+    const json = await res.json()
+    const buf = Buffer.from(json.httpResponseBody, 'base64')
+    return binary ? buf : buf.toString('utf-8')
+}
+
+async function fetchViaZyte(url) {
+    return queuedFetch(() => _zyteRequest(url, false))
+}
+
+async function fetchViaZyteBinary(url) {
+    return queuedFetch(() => _zyteRequest(url, true))
+}
+
+// fetch normal con timeout para descargas directas (mega, mediafire, etc.)
+function fetch(url, opts = {}) {
+    const { timeout = 25000, ...rest } = opts
+    return nodeFetch(url, { ...rest, signal: AbortSignal.timeout(timeout) })
 }
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
@@ -133,15 +183,33 @@ _${descripcion}_
 // ─── Fetch helpers ─────────────────────────────────────────────────────────
 
 async function fetchText(url) {
-    const res = await fetch(url, {
+    // Usar Zyte para hentaila.com (bloqueado por Cloudflare en VPS)
+    if (url.includes('hentaila.com')) {
+        return fetchViaZyte(url)
+    }
+    const res = await nodeFetch(url, {
         headers: { 'User-Agent': UA, 'Accept-Language': 'es-419,es;q=0.9' },
-        agent: httpsAgent, timeout: 20000,
+        agent: httpsAgent,
+        signal: AbortSignal.timeout(20000),
     })
     return res.text()
 }
 
 async function fetchBuffer(url) {
-    const res = await fetch(url, { headers: { 'User-Agent': UA }, agent: httpsAgent, timeout: 20000 })
+    // Imágenes de hentaila.com también bloqueadas por Cloudflare — usar Zyte
+    if (url.includes('hentaila.com')) {
+        const auth = Buffer.from(`${ZYTE_API_KEY}:`).toString('base64')
+        const res = await nodeFetch(ZYTE_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, httpResponseBody: true }),
+            signal: AbortSignal.timeout(30000),
+        })
+        if (!res.ok) throw new Error(`Zyte fetchBuffer HTTP ${res.status}`)
+        const json = await res.json()
+        return Buffer.from(json.httpResponseBody, 'base64')
+    }
+    const res = await nodeFetch(url, { headers: { 'User-Agent': UA }, agent: httpsAgent, signal: AbortSignal.timeout(20000) })
     return res.buffer()
 }
 
@@ -273,75 +341,10 @@ async function buscarPorFetch(query) {
     }
 }
 
-// ─── Búsqueda con Puppeteer (fallback final) ──────────────────────────────
-
+// ─── Puppeteer deshabilitado — Zyte maneja el bypass de Cloudflare ──────
 async function buscarConPuppeteer(query) {
-    // Detectar Chromium del sistema (necesario en VPS/Docker con Pelican)
-    const chromiumPaths = [
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/data/data/com.termux/files/usr/bin/chromium-browser',
-        '/data/data/com.termux/files/usr/bin/chromium',
-    ]
-    let execPath = null
-    for (const p of chromiumPaths) {
-        if (fs.existsSync(p)) { execPath = p; break }
-    }
-    if (!execPath) {
-        console.error('[puppeteer] Chromium no encontrado. Instálalo con: apt install chromium-browser')
-        throw new Error('Chromium no disponible en el sistema (instala con: apt install chromium-browser)')
-    }
-
-    const browser = await (await getPuppeteer()).launch({
-        headless: 'new',
-        executablePath: execPath,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    })
-    const page = await browser.newPage()
-    await page.setUserAgent(UA)
-    try {
-        await page.goto(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
-            waitUntil: 'networkidle2', timeout: 50000,
-        })
-        await new Promise(r => setTimeout(r, 4000))
-
-        // Capturar el HTML renderizado y buscar slugs
-        const content = await page.content()
-        const decoded = content.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
-
-        const links = await page.evaluate(() => {
-            const results = []
-            document.querySelectorAll('a[href*="/media/"]').forEach(a => {
-                const href = a.href || ''
-                const parts = href.split('/media/')[1]?.split('/')
-                if (!parts) return
-                const slug = parts[0]
-                if (!slug || /^\d+$/.test(slug) || results.find(r => r.slug === slug)) return
-                const titleEl = a.querySelector('h3, h2, .title, [class*="title"], p') || a
-                const title = titleEl.innerText?.trim() || slug.replace(/-/g, ' ')
-                results.push({ slug, title })
-            })
-            return results
-        })
-
-        // También buscar en el HTML serializado por si Svelte lo embebió
-        const extraRe = /"slug":"([^"]+)"(?:[^}]{0,300}?"title":"([^"]+)")?/g
-        let m
-        while ((m = extraRe.exec(decoded)) !== null) {
-            const slug = m[1], title = m[2] || m[1].replace(/-/g, ' ')
-            if (slug && !links.find(r => r.slug === slug) && !slug.includes('/'))
-                links.push({ slug, title })
-        }
-
-        await browser.close()
-        return links
-    } catch (err) {
-        await browser.close()
-        console.error('[Puppeteer]', err.message)
-        return []
-    }
+    console.warn('[Puppeteer] Deshabilitado. Zyte ya bypasea Cloudflare.')
+    return []
 }
 
 // ─── Búsqueda principal: combina todos los métodos ────────────────────────
@@ -351,10 +354,8 @@ async function buscarHentaiLA(query) {
     const variaciones = generarSlugVariaciones(query)
     for (const slug of variaciones) {
         try {
-            const res = await fetch(`${BASE}/media/${slug}`, {
-                method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 6000,
-            })
-            if (res.status === 200) {
+            const _html = await fetchViaZyte(`${BASE}/media/${slug}`)
+            if (_html && _html.length > 500) {
                 console.log(`[SLUG] ✅ Encontrado directo: ${slug}`)
                 return [{ slug, title: slug.replace(/-/g, ' ') }]
             }
@@ -563,13 +564,13 @@ async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus
 
     // Lista priorizada de servidores a intentar
     const servidores = [
-        ...links.mega.map(u => ({ tipo: 'mega', url: u })),
         ...links.mediafire.map(u => ({ tipo: 'mediafire', url: u })),
         ...links.fireload.map(u => ({ tipo: 'fireload', url: u })),
         ...links.fichier.map(u => ({ tipo: '1fichier', url: u })),
         ...links.mp4upload.map(u => ({ tipo: 'mp4upload', url: u })),
         ...links.yourupload.map(u => ({ tipo: 'yourupload', url: u })),
         ...links.otros.map(u => ({ tipo: 'directo', url: u })),
+        ...links.mega.map(u => ({ tipo: 'mega', url: u })),  // MEGA al final (más lento)
     ]
 
     let tempPath = null
@@ -704,7 +705,12 @@ async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus
 // ─── Flujo completo: buscar → portada → descargar ─────────────────────────
 
 async function flujoCompleto(m, conn, info, episodio, statusKey) {
-    const updateStatus = async txt => conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+    const updateStatus = async txt => {
+        try {
+            if (statusKey) await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+            else await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
+        } catch (_) { await conn.sendMessage(m.chat, { text: txt }, { quoted: m }) }
+    }
 
     // Msg 2: portada con info
     await updateStatus(`🖼️ _Cargando portada de *${info.title}*..._`)
@@ -789,13 +795,15 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         const slugIntent = cleanQuery.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
 
         // ── Intento directo por slug ───────────────────────────────────────
-        const direct = await fetch(`${BASE}/media/${slugIntent}`, {
-            method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 8000,
-        }).catch(() => ({ status: 0 }))
+        let _directOk = false
+        try {
+            const _html = await fetchViaZyte(`${BASE}/media/${slugIntent}`)
+            _directOk = _html && _html.length > 500
+        } catch (_) {}
 
         let info = null
 
-        if (direct.status === 200) {
+        if (_directOk) {
             await updateStatus(`✅ _Encontrado! Cargando info..._`)
             info = await obtenerInfoSerie(slugIntent)
         } else {
