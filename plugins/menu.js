@@ -89,7 +89,7 @@ const handler = async (m, { conn, usedPrefix }) => {
     })
     .join('\n\n');
 
-  const footer = `\n\n🌸✨ *Rikka Takarada MD* ✨🌸`;
+  const footer = `\n\n𝘉𝘺 𝘑𝘩𝘰𝘯𝘊𝘐𝘋`;
   const fullMenu = header + body + footer;
 
   const menuImage = global.imagen1 || null;
