@@ -11,7 +11,21 @@ const MAX_MESSAGE_LENGTH = 400;
 
 export default async function(m, conn = { user: {} }) {
   const _name = await conn.getName(m.sender);
-  const sender = PhoneNumber('+' + m.sender.replace('@s.whatsapp.net', '')).getNumber('international') + (_name ? ' ~' + _name : '');
+  let _senderRaw = m.sender || '';
+  if (_senderRaw.endsWith('@lid')) {
+    try {
+      const _gMeta = (await conn.groupMetadata(m.chat).catch(() => null)) || conn.chats[m.chat]?.metadata || {};
+      const _lidKey = _senderRaw.split('@')[0];
+      const _p = (_gMeta.participants || []).find(p => (p.lid || '').split('@')[0] === _lidKey);
+      if (_p?.phoneNumber) _senderRaw = _p.phoneNumber.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+      else if (_p?.id && !(_p.id).endsWith('@lid')) _senderRaw = _p.id;
+    } catch (_) {}
+  }
+  const _senderNum = _senderRaw.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '');
+  let _senderFormatted;
+  try { _senderFormatted = PhoneNumber('+' + _senderNum).getNumber('international') || _senderNum; }
+  catch (_) { _senderFormatted = _senderNum; }
+  const sender = (_senderFormatted || _senderNum || 'desconocido') + (_name ? ' ~' + _name : '');
   const chat = await conn.getName(m.chat);
   let img;
   try {
@@ -45,7 +59,7 @@ export default async function(m, conn = { user: {} }) {
     ['', ...'KMGTP'][Math.floor(Math.log(filesize) / Math.log(1000))] || '',
     sender,
     m ? m.exp : '?',
-    user ? '|' + user.exp + '|' + user.limit : '' + ('|' + user.level),
+    user ? '|' + user.exp + '|' + user.limit + '|' + user.level : '',
     m.chat + (chat ? ' ~' + chat : ''),
     m.mtype ? m.mtype.replace(/message$/i, '').replace('audio', m.msg.ptt ? 'PTT' : 'audio').replace(/^./, (v) => v.toUpperCase()) : ''
   );
@@ -149,4 +163,5 @@ const file = global.__filename(import.meta.url);
 watchFile(file, () => {
   console.log(chalk.redBright('Update \'lib/print.js\''));
 });
+
       
