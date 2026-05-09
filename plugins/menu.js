@@ -61,7 +61,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   const totalCmds  = Object.values(categories).flat().length;
 
   // --- CABECERA ---
-  let header = `━━━━━❒「 \`ᖇɩƙƙᥲ Ʈᥲɾᥲƙᥲɾᥲᑯᥲ°ᙖOƮ\` 」⋆｡ﾟ🎐\n\n`;
+  let header = `━━━━━❒「 \`ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ\` 」⋆｡ﾟ🎐\n\n`;
   header += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
   header += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
   header += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
