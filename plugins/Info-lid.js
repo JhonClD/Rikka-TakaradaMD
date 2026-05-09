@@ -1,21 +1,42 @@
 const handler = async (m, { conn }) => {
-  const sender = m.sender
+  const rawSender = m.sender
 
-  // Número limpio y formateado
-  const rawNumber = sender.split('@')[0].replace(/[^0-9]/g, '')
-  const formatted = '+' + rawNumber.replace(/(\d{2})(\d{3})(\d{3})(\d{3})/, '$1 $2 $3 $4')
+  // Resolver JID real si m.sender es un @lid
+  let realJid = rawSender
+  let lid = null
 
-  // JID estándar
+  if (rawSender?.endsWith('@lid')) {
+    lid = rawSender
+    // Buscar en contacts el JID real que tenga ese lid
+    const contacts = Object.values(conn?.contacts || {})
+    const match = contacts.find(c =>
+      c.lid === rawSender ||
+      c.lid === rawSender.split('@')[0] + '@lid'
+    )
+    if (match?.id && !match.id.endsWith('@lid')) {
+      realJid = match.id
+    }
+  } else {
+    // m.sender ya es JID normal, buscar su lid en contacts
+    const contacts = Object.values(conn?.contacts || {})
+    const match = contacts.find(c => c.id === rawSender)
+    if (match?.lid) lid = match.lid
+  }
+
+  // Número limpio desde JID real
+  const rawNumber = realJid.split('@')[0].replace(/[^0-9]/g, '')
+
+  // Formatear según longitud del número
+  let formatted
+  if (rawNumber.length <= 11) {
+    // Ej: 51925092348 → +51 925 092 348
+    formatted = '+' + rawNumber.replace(/(\d{2})(\d{3})(\d{3})(\d{3})/, '$1 $2 $3 $4')
+  } else {
+    // Número largo, solo agregar +
+    formatted = '+' + rawNumber
+  }
+
   const jid = rawNumber + '@s.whatsapp.net'
-
-  // LID: buscar en contacts
-  const contacts = Object.values(conn?.contacts || {})
-  const contactEntry = contacts.find(c =>
-    c.id === jid ||
-    c.id === sender ||
-    (c.lid && (c.lid === sender || c.lid?.split('@')[0] === sender?.split('@')[0]))
-  )
-  const lid = contactEntry?.lid || sender?.endsWith('@lid') ? sender : '_(no disponible)_'
 
   // Foto de perfil
   let pp = 'https://files.catbox.moe/leegee.jpg'
@@ -34,7 +55,7 @@ const handler = async (m, { conn }) => {
 \`${jid}\`
 
 ✧ *LID (ID Vinculado):*
-\`${lid}\`
+\`${lid || '_(no disponible)_'}\`
 
 ☆✦・*・✦・*・✦・*・✦・*・✦☆`
 
@@ -54,4 +75,3 @@ handler.tags    = ['info']
 handler.command = /^(jid|lid|myjid|miid|infojid)$/i
 
 export default handler
-  
