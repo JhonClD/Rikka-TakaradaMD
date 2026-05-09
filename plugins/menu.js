@@ -11,7 +11,18 @@ function clockString(ms) {
   const d = Math.floor(ms / 86400000);
   const h = Math.floor(ms / 3600000) % 24;
   const m = Math.floor(ms / 60000) % 60;
-  return `${d}d ${h}h ${m}m`.replace(/\b(\d)\b/g, '0$1');
+  const s = Math.floor(ms / 1000) % 60;
+  return `${d}d ${h}h ${m}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
+}
+
+function getOSName() {
+  const p = os.platform();
+  if (p === 'android' || process.env.PREFIX?.includes('com.termux')) return 'Android 🤖';
+  if (p === 'linux')  return 'Linux 🐧';
+  if (p === 'win32')  return 'Windows 🪟';
+  if (p === 'darwin') return 'macOS 🍎';
+  if (p === 'freebsd') return 'FreeBSD 😈';
+  return p;
 }
 
 const CAT_ICONS = {
@@ -36,65 +47,55 @@ function buildCategories() {
   return cats;
 }
 
-const handler = async (m, { conn, usedPrefix, args }) => {
+const handler = async (m, { conn, usedPrefix }) => {
   const prefix    = usedPrefix || '.';
-  const input     = args[0]?.toLowerCase();
+  const sender    = m.sender;
   const pushname  = m.pushName || 'Usuario';
+  const ownerNum  = global.owner?.[0]?.[0] || 'Sin definir';
   const date      = moment.tz(TIMEZONE).format('YYYY-MM-DD');
   const uptime    = clockString(process.uptime() * 1000);
+  const osName    = getOSName();
+  const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
   
   const categories = buildCategories();
-  const availableTags = Object.keys(categories).sort();
+  const totalCmds  = Object.values(categories).flat().length;
 
-  // --- CABECERA COMÚN ---
+  // --- CABECERA ---
   let header = `━━━━━❒「 \`ᖇɩƙƙᥲ Ʈᥲɾᥲƙᥲɾᥲᑯᥲ°ᙖOƮ\` 」⋆｡ﾟ🎐\n\n`;
   header += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
+  header += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
   header += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
   header += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
-  header += ` ୨୧     ꒰ \`Prefix\`    :  ${prefix}\n\n`;
-  header += `❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼\n\n`;
-
-  let content = '';
-
-  // 1. SI NO HAY ARGUMENTOS: MOSTRAR SOLO LISTA DE CATEGORÍAS
-  if (!input) {
-    content = `✨ *LISTA DE CATEGORÍAS* ✨\n\n`;
-    availableTags.forEach(tag => {
-      const icon = getIcon(tag);
-      content += `── ⟡ ˙ ${icon} *${prefix}menu ${tag}* ̟\n`;
-    });
-    content += `\n── ⟡ ˙ 📂 *${prefix}menu all* (Ver todo) ̟\n`;
-    content += `\n_Escribe un comando de la lista para ver sus funciones._`;
-  } 
+  header += ` ୨୧     ꒰ \`Sistema\`   :  ${osName}\n`;
+  header += ` ୨୧     ꒰ \`Owner\`     :  @${ownerNum}\n`;
+  header += ` ୨୧     ꒰ \`Prefix\`    :  ${prefix}\n`;
+  header += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
+  header += `❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼\n`;
   
-  // 2. SI PIDE "ALL": MOSTRAR TODO EL CUERPO
-  else if (input === 'all') {
-    content = readMore + Object.entries(categories)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([cat, cmds]) => {
-        const icon = getIcon(cat);
-        const list = [...new Set(cmds)].map(c => `── ⟡ ˙ ${prefix}${c} ̟`).join('\n');
-        return `┌─────── “ *${cat.toUpperCase()}* ${icon} „ ━━━━━━━┓\n\n${list}\n┗━━━━━━━━━━━━━━━━━━━━━━━┛`;
-      }).join('\n\n');
-  }
+  // AQUÍ SE INSERTA EL "LEER MÁS"
+  header += `${readMore}\n`;
 
-  // 3. SI PIDE UNA CATEGORÍA ESPECÍFICA
-  else if (availableTags.includes(input)) {
-    const icon = getIcon(input);
-    const list = [...new Set(categories[input])].map(c => `── ⟡ ˙ ${prefix}${c} ̟`).join('\n');
-    content = `┌─────── “ *${input.toUpperCase()}* ${icon} „ ━━━━━━━┓\n\n${list}\n┗━━━━━━━━━━━━━━━━━━━━━━━┛`;
-  }
+  // --- CUERPO ---
+  const body = Object.entries(categories)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([cat, cmds]) => {
+      const icon  = getIcon(cat);
+      const title = cat.toUpperCase();
+      const list  = [...new Set(cmds)]
+        .map(c => `── ⟡ ˙ ${prefix}${c} ̟`)
+        .join('\n');
 
-  // 4. CATEGORÍA NO ENCONTRADA
-  else {
-    return m.reply(`❌ La categoría *"${input}"* no existe.\nUsa *${prefix}menu* para ver las disponibles.`);
-  }
+      return `┌─────── “ *${title}* ${icon} „ ━━━━━━━┓ \n└➤ ✎~\n\n${list}\n┗━━━━━━━━━━━━━━━━━━━━━━━┛`;
+    })
+    .join('\n\n');
 
-  const fullMenu = header + content;
+  const footer = `\n\n🌸✨ *Rikka Takarada MD* ✨🌸`;
+  const fullMenu = header + body + footer;
+
   const menuImage = global.imagen1 || null;
-
+  
   if (menuImage) {
-    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu }, { quoted: m });
+    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu, mentions: [sender] }, { quoted: m });
   } else {
     await m.reply(fullMenu);
   }
