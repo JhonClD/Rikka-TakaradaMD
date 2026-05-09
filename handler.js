@@ -1295,7 +1295,7 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
         for (const userJid of participants) {
           try {
           let pp = await m?.conn?.profilePictureUrl(userJid, 'image').catch(_ => 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60');
-           const apii = await mconn?.conn?.getFile(pp);
+           const ppBuffer = await fetch(pp).then(r => r.arrayBuffer()).then(ab => Buffer.from(ab)).catch(_ => fs.readFileSync('./src/avatar_contact.png'));
            const antiArab = JSON.parse(fs.readFileSync('./src/antiArab.json'));
            const userPrefix = antiArab.some((prefix) => userJid.startsWith(prefix));
            const botJidClean = m?.conn?.user?.jid || '';
@@ -1322,7 +1322,11 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
            await m?.conn?.sendMessage(id, { text: `*[❗] @${userJid.split('@')[0]} ᴇɴ ᴇsᴛᴇ ɢʀᴜᴘᴏ ɴᴏ sᴇ ᴘᴇʀᴍɪᴛᴇɴ ɴᴜᴍᴇʀᴏs ᴀʀᴀʙᴇs ᴏ ʀᴀʀᴏs, ᴘᴏʀ ʟᴏ ϙᴜᴇ sᴇ ᴛᴇ sᴀᴄᴀʀᴀ ᴅᴇʟ ɢʀᴜᴘᴏ*`, mentions: [userJid] }, { quoted: fkontak2 });
            return;
             }
-            await m?.conn?.sendFile(id, apii.data, 'pp.jpg', text, null, false, { mentions: [userJid] });
+            await m?.conn?.sendMessage(id, {
+              image: ppBuffer,
+              caption: text,
+              mentions: [userJid]
+            });
           } catch (e) {
           console.log(e);
           }
