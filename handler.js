@@ -1,5 +1,4 @@
 import { generateWAMessageFromContent } from "@whiskeysockets/baileys";
-import { resolveLidToRealJid } from './src/libraries/LidResolver.js';
 import { smsg } from './src/libraries/simple.js';
 import { format } from 'util';
 import { fileURLToPath } from 'url';
@@ -711,12 +710,8 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
-    const _senderJid = await resolveLidToRealJid(m.sender, this, m.chat);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-    const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
-    const isOwner = isROwner || m.fromMe;
     const _modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-    const isMods = isOwner || _modsList.includes(_senderJid);
 
     // ── Premium: premiumTime es timestamp de expiración ──────────────────────
     const _userDb = global.db.data.users[m.sender] || {};
@@ -727,7 +722,7 @@ export async function handler(chatUpdate) {
 
     // ── Sub-bot: este número de conexión es un sub-bot si no está en owner ──
     const _thisBotJid = this.user?.jid || '';
-    const _isSubBot   = !_ownerList.includes(_thisBotJid) && global.conns?.some(c => c.user?.jid === _thisBotJid);
+    const _isSubBot   = !_ownerList.includes(_thisBotJid) && !_ownerList.some(o => _resolveLidJid(o) === _thisBotJid) && global.conns?.some(c => c.user?.jid === _thisBotJid);
 
     // Comandos permitidos para sub-bots (sin punto, se compara con command en minúsculas)
     const _subBotAllowed = new Set([
@@ -769,9 +764,13 @@ export async function handler(chatUpdate) {
           'besomejilla','coger','follar','preñar'],
     ]);
 
-    const isPrems = isROwner || isOwner || isMods || isPremium;
+    const _earlyOwnerCheck = m.fromMe || _ownerList.some(o => {
+      const resolved = (this.resolveLid?.lidCache?.get(m.sender) || m.sender);
+      return o === resolved;
+    });
+    const isPrems = _earlyOwnerCheck || isPremium;
 
-    if (opts['queque'] && m.text && !(isMods || isPrems)) {
+    if (opts['queque'] && m.text && !(_earlyOwnerCheck || isPrems)) {
       const queque = this.msgqueque; const time = 1000 * 5;
       const previousID = queque[queque.length - 1];
       queque.push(m.id || m.key.id);
@@ -824,19 +823,33 @@ export async function handler(chatUpdate) {
       this.resolveLid.bulkCacheFromParticipants(participants);
     }
 
-    const resolvedSender = await resolveLidToRealJid(m.sender, this, m.chat);
+    const _resolveLidJid = (jid) => {
+      if (!jid?.endsWith('@lid')) return jid;
+      const cached = this.resolveLid?.lidCache?.get(jid);
+      return (cached && !cached.endsWith('@lid')) ? cached : jid;
+    };
+    let resolvedSender = _resolveLidJid(m.sender);
+
+    const _senderJid = resolvedSender;
+    const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
+    const isOwner  = isROwner || m.fromMe;
+    const isMods   = isOwner || _modsList.includes(_senderJid);
+
     const user = (m.isGroup ? (
-
       participants.find((u) => conn.decodeJid(u.id || u.jid) === resolvedSender) ||
-
       participants.find((u) => u.lid && (conn.decodeJid(u.lid) === m.sender || u.lid === m.sender)) ||
-
       participants.find((u) => conn.decodeJid(u.id || u.jid) === m.sender)
     ) : {}) || {};
-    const bot = (m.isGroup ? participants.find((u) => conn.decodeJid(u.id || u.jid) == this.user.jid) : {}) || {};
-    const isRAdmin = user?.admin == 'superadmin' || false;
-    const isAdmin = isRAdmin || user?.admin == 'admin' || isROwner || false;
-    const isBotAdmin = bot?.admin || false;
+
+    const _botJidClean = this.user?.jid || '';
+    const bot = (m.isGroup ? (
+      participants.find((u) => conn.decodeJid(u.id || u.jid) === _botJidClean) ||
+      participants.find((u) => u.lid && (conn.decodeJid(u.lid) === _botJidClean || u.lid === _botJidClean))
+    ) : {}) || {};
+
+    const isRAdmin   = user?.admin === 'superadmin' || false;
+    const isAdmin    = isRAdmin || user?.admin === 'admin' || isROwner || false;
+    const isBotAdmin = bot?.admin === 'admin' || bot?.admin === 'superadmin' || false;
 
     const ___dirname = handler._pluginsDir ??= path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
     for (const name in global.plugins) {
