@@ -9,23 +9,33 @@ const urlRegex = (await import('url-regex-safe')).default({ strict: false });
 // Define una longitud máxima para el mensaje
 const MAX_MESSAGE_LENGTH = 400;
 
+function formatPhone(jid) {
+  if (!jid) return 'desconocido';
+  // Quitar sufijo de dispositivo: 51925092348:15@s.whatsapp.net → 51925092348
+  const num = jid.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '').replace(/:\d+$/, '');
+  if (!num || isNaN(num.replace(/\D/g, ''))) return num || 'desconocido';
+  try {
+    return PhoneNumber('+' + num).getNumber('international') || num;
+  } catch (_) {
+    return num;
+  }
+}
+
 export default async function(m, conn = { user: {} }) {
-  const _name = await conn.getName(m.sender);
-  let _senderRaw = m.sender || '';
-  if (_senderRaw.endsWith('@lid')) {
+  // Resolver sender real si es @lid
+  let senderJid = m.sender || '';
+  if (senderJid.endsWith('@lid')) {
     try {
-      const _gMeta = (await conn.groupMetadata(m.chat).catch(() => null)) || conn.chats[m.chat]?.metadata || {};
-      const _lidKey = _senderRaw.split('@')[0];
-      const _p = (_gMeta.participants || []).find(p => (p.lid || '').split('@')[0] === _lidKey);
-      if (_p?.phoneNumber) _senderRaw = _p.phoneNumber.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-      else if (_p?.id && !(_p.id).endsWith('@lid')) _senderRaw = _p.id;
+      const gMeta = (await conn.groupMetadata(m.chat).catch(() => null)) || conn.chats[m.chat]?.metadata || {};
+      const lidKey = senderJid.split('@')[0];
+      const p = (gMeta.participants || []).find(p => (p.lid || '').split('@')[0] === lidKey);
+      if (p?.phoneNumber) senderJid = p.phoneNumber.replace(/\D/g, '') + '@s.whatsapp.net';
+      else if (p?.id && !p.id.endsWith('@lid')) senderJid = p.id;
     } catch (_) {}
   }
-  const _senderNum = _senderRaw.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '');
-  let _senderFormatted;
-  try { _senderFormatted = PhoneNumber('+' + _senderNum).getNumber('international') || _senderNum; }
-  catch (_) { _senderFormatted = _senderNum; }
-  const sender = (_senderFormatted || _senderNum || 'desconocido') + (_name ? ' ~' + _name : '');
+
+  const _name = await conn.getName(senderJid);
+  const sender = formatPhone(senderJid) + (_name ? ' ~' + _name : '');
   const chat = await conn.getName(m.chat);
   let img;
   try {
@@ -47,7 +57,7 @@ export default async function(m, conn = { user: {} }) {
     0 :
     m.text ? m.text.length : 0) || 0;
   const user = global.db.data.users[m.sender];
-  const me = PhoneNumber('+' + (conn.user?.jid).replace('@s.whatsapp.net', '')).getNumber('international');
+  const me = formatPhone(conn.user?.jid || conn.user?.id || '');
 
   console.log(
     `▣────────────···\n│ ${chalk.hex('#7ecfff').bold('%s')}\n│⏰ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#cdb4db')('%s'))}\n│📑ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#b5ead7')('%s'))}\n│📊ㅤ${chalk.hex('#ffafcc')('%s [%s %sB]')}\n│📤ㅤ${chalk.hex('#ff85c2').bold('%s')}\n│📃ㅤ${chalk.hex('#ffd6e7')('%s%s')}\n│📥ㅤ${chalk.hex('#a8dadc').bold('%s')}\n│💬ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#ffafcc')('%s'))}\n▣────────────···`.trim(),
@@ -163,5 +173,4 @@ const file = global.__filename(import.meta.url);
 watchFile(file, () => {
   console.log(chalk.redBright('Update \'lib/print.js\''));
 });
-
-      
+            
