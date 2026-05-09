@@ -2,25 +2,21 @@
  * Play.js  —  Rikka-TakaradaMD
  * Comandos: play · play2 · mp3 · mp4 · video · playaudio
  *
- * Backend: y2mate.js  (cnvmp3 / ogmp3 eliminados)
- * Fix: video descargado como buffer → arregla "Este video no está disponible"
+ * Backend: yt-dlp (descarga) + ffprobe (duración exacta)
  */
 
 import fs                  from 'fs';
-import fetch               from 'node-fetch';
 import { exec }            from 'child_process';
 import { promisify }       from 'util';
-import { pipeline }        from 'stream';
-import { createWriteStream } from 'fs';
 
 import {
     ytSearch,
     ytDownload,
     buildInfoCard,
+    ffprobeDuration,
 } from '../src/libraries/youtube-scraper.js';
 
-const execPromise   = promisify(exec);
-const pipelineAsync = promisify(pipeline);
+const execPromise = promisify(exec);
 
 const FLAT_WAVEFORM = new Uint8Array(64).fill(0);
 
@@ -39,6 +35,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
     const type        = isVideo ? 'video' : 'audio';
 
     try {
+        // 1. Buscar el video
         const [video] = await Promise.all([
             ytSearch(query),
             socket.sendMessage(m.chat, { react: { text: '🔍', key: m.key } }),
@@ -46,57 +43,49 @@ const handler = async (m, { conn, client, args, text, command }) => {
 
         if (!video) throw new Error('No se encontró ningún video.');
 
-        const captionInfo = buildInfoCard(video, type);
-
-        // Mostrar tarjeta de info + iniciar descarga en paralelo
-        const [, { downloadUrl }] = await Promise.all([
-            socket.sendMessage(m.chat, {
-                image:   { url: video.thumbnail },
-                caption: captionInfo,
-            }, { quoted: m }),
-            ytDownload(video.url, type),
-        ]);
+        // 2. Mostrar tarjeta + reaccionar descargando
+        await socket.sendMessage(m.chat, {
+            image:   { url: video.thumbnail },
+            caption: buildInfoCard(video, type),
+        }, { quoted: m });
 
         await socket.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
 
-        // ── VIDEO ─────────────────────────────────────────────────────────────
+        // ── VIDEO (play2 / mp4 / video) ───────────────────────────────────────
         if (isVideo) {
-            // Buffer obligatorio → evita "Este video no está disponible" en WhatsApp
-            const resp = await fetch(downloadUrl, {
-                headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status} al descargar el video`);
-            const buffer = Buffer.from(await resp.arrayBuffer());
+            const { buffer, seconds, meta } = await ytDownload(video.url, 'video', { quality: '360p' });
 
             await socket.sendMessage(m.chat, {
                 video:    buffer,
-                caption:  `🎬 *${video.title}*`,
+                caption:  `🎬 *${(meta?.title || video.title)}*`,
                 mimetype: 'video/mp4',
-                fileName: `${video.title.replace(/[\\/:*?"<>|]/g, '')}.mp4`,
+                fileName: `${(meta?.title || video.title).replace(/[\\/:*?"<>|]/g, '')}.mp4`,
+                seconds,
             }, { quoted: m });
 
-        // ── VOICE NOTE ────────────────────────────────────────────────────────
+        // ── VOICE NOTE (playaudio) ────────────────────────────────────────────
         } else if (isVoiceNote) {
             const stamp  = Date.now();
-            const tmpMp3 = `./tmp_${stamp}.mp3`;
-            const tmpOgg = `./tmp_${stamp}.ogg`;
+            const tmpMp3 = `./tmp_play_${stamp}.mp3`;
+            const tmpOgg = `./tmp_play_${stamp}.ogg`;
 
             try {
-                const dlRes = await fetch(downloadUrl, {
-                    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-                });
-                if (!dlRes.ok) throw new Error(`Error al descargar audio: ${dlRes.status}`);
-                await pipelineAsync(dlRes.body, createWriteStream(tmpMp3));
+                const { buffer } = await ytDownload(video.url, 'audio');
+                fs.writeFileSync(tmpMp3, buffer);
 
                 await execPromise(
                     `ffmpeg -y -i "${tmpMp3}" -ar 16000 -ac 1 -c:a libopus -b:a 32k ` +
                     `-application voip "${tmpOgg}"`
                 );
 
+                const oggBuffer = fs.readFileSync(tmpOgg);
+                const seconds   = await ffprobeDuration(tmpOgg);
+
                 await socket.sendMessage(m.chat, {
-                    audio:    fs.readFileSync(tmpOgg),
+                    audio:    oggBuffer,
                     mimetype: 'audio/ogg; codecs=opus',
                     ptt:      true,
+                    seconds,
                     waveform: FLAT_WAVEFORM,
                 }, { quoted: m });
 
@@ -104,18 +93,15 @@ const handler = async (m, { conn, client, args, text, command }) => {
                 [tmpMp3, tmpOgg].forEach(f => { try { fs.unlinkSync(f); } catch {} });
             }
 
-        // ── AUDIO MP3 ─────────────────────────────────────────────────────────
+        // ── AUDIO MP3 (play / mp3) ────────────────────────────────────────────
         } else {
-            const resp = await fetch(downloadUrl, {
-                headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status} al descargar el audio`);
-            const buffer = Buffer.from(await resp.arrayBuffer());
+            const { buffer, seconds, meta } = await ytDownload(video.url, 'audio');
 
             await socket.sendMessage(m.chat, {
                 audio:    buffer,
                 mimetype: 'audio/mpeg',
-                fileName: `${video.title.replace(/[\\/:*?"<>|]/g, '')}.mp3`,
+                fileName: `${(meta?.title || video.title).replace(/[\\/:*?"<>|]/g, '')}.mp3`,
+                seconds,
                 ptt:      false,
             }, { quoted: m });
         }
