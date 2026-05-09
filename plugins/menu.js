@@ -1,105 +1,85 @@
-// menu.js — Rikka-TakaradaMD
 import os from 'os';
 import moment from 'moment-timezone';
 
 const TIMEZONE = 'America/Lima';
 
-// Mismo formato y fuente que ping.js → process.uptime()
+// Formato detallado: 00d 00h 00m
 function clockString(ms) {
-  const h = Math.floor(ms / 3_600_000);
-  const m = Math.floor(ms / 60_000) % 60;
-  const s = Math.floor(ms / 1_000) % 60;
-  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor(ms / 3600000) % 24;
+  const m = Math.floor(ms / 60000) % 60;
+  return `${d}d ${h}h ${m}m`.replace(/\b(\d)\b/g, '0$1'); 
 }
 
 function getOSName() {
   const p = os.platform();
+  const release = os.release().split('-')[0];
   if (p === 'android' || process.env.PREFIX?.includes('com.termux')) return 'Android 🤖';
   if (p === 'linux')  return 'Linux 🐧';
   if (p === 'win32')  return 'Windows 🪟';
   if (p === 'darwin') return 'macOS 🍎';
+  if (p === 'freebsd') return `FreeBSD ${release} 😈`;
   return p;
 }
 
 const CAT_ICONS = {
-  anime: '🎐', downloader: '📥', descargas: '📥', search: '🔍', buscadores: '🔍',
-  tools: '🛠️', herramientas: '🛠️', ai: '🤖', ia: '🤖', sticker: '🎭', stickers: '🎭',
-  game: '🎮', games: '🎮', group: '🏯', grupos: '👥', nsfw: '🔞',
-  owner: '💎', info: '💫', converter: '🪄', img: '🌸', xp: '🔮',
-  random: '⭐', otros: '📌',
+  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', 
+  ai: '🤖', sticker: '🎭', game: '🎮', group: '🏯', 
+  nsfw: '🔞', owner: '💎', info: '💫', xp: '🔮'
 };
-const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌';
 
-function buildCategories() {
-  const cats = {};
-  for (const [, plugin] of Object.entries(global.plugins || {})) {
-    if (!plugin?.command) continue;
-    const tag  = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
-    let cmds   = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : []);
-    if (!cmds.length) {
-      cmds = plugin.command instanceof RegExp
-        ? [plugin.command.source.replace(/[^a-z|]/gi, '').split('|')[0]]
-        : Array.isArray(plugin.command) ? [plugin.command[0]] : [plugin.command];
-    }
-    if (!cats[tag]) cats[tag] = [];
-    cats[tag].push(...cmds.filter(Boolean));
-  }
-  return cats;
-}
+const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌';
 
 const handler = async (m, { conn, usedPrefix }) => {
   const prefix    = usedPrefix || '.';
   const sender    = m.sender;
-  const pushname  = m.pushName || sender.replace(/@.+/, '');
-  const ownerNum  = global.owner?.[0]?.[0] || '';
-  const date      = moment.tz(TIMEZONE).format('DD/MM/YYYY');
-
-  // Uptime igual que ping.js
-  const uptime = clockString(process.uptime() * 1000);
-
+  const pushname  = m.pushName || 'Usuario';
+  const ownerNum  = global.owner?.[0]?.[0] || 'Sin definir';
+  const date      = moment.tz(TIMEZONE).format('YYYY-MM-DD');
+  
+  // Datos del sistema
+  const uptime    = clockString(process.uptime() * 1000);
   const osName    = getOSName();
-  const categories = buildCategories();
-  const totalCmds = Object.values(categories).flat().length;
+  const isPremium = global.db.data.users[m.sender]?.premium ? '✅' : '❌';
 
-  // Integrantes solo en grupo
-  let membersLine = '';
-  if (m.isGroup) {
-    const meta  = await conn.groupMetadata(m.chat).catch(() => null);
-    const count = meta?.participants?.length || '?';
-    membersLine = `│ 👥 *Integrantes:* ${count}`;
-  }
+  // Construcción de categorías
+  const cats = {};
+  Object.values(global.plugins).forEach(p => {
+    if (!p?.command) return;
+    const tag = (Array.isArray(p.tags) ? p.tags[0] : p.tags) || 'otros';
+    let cmds = Array.isArray(p.help) ? p.help : [p.help];
+    if (!cats[tag]) cats[tag] = [];
+    cats[tag].push(...cmds.filter(Boolean));
+  });
 
-  const lines = [
-    `🌸✨ *𝙍𝙞𝙠𝙠𝙖 𝙏𝙖𝙧𝙖𝙠𝙖𝙧𝙖𝙙𝙖* ✨🌸`,
-    ``,
-    `┌──────────────────`,
-    `│ 🏷️  *Nombre:* ${pushname}`,
-    `│ ⏱️  *Uptime:* ${uptime}`,
-    `│ 📅 *Fecha:* ${date}`,
-    membersLine,
-    `│ 🖥️  *Sistema:* ${osName}`,
-    `│ 👑 *Owner:* +${ownerNum}`,
-    `│ 🔰 *Prefix:* ${prefix}`,
-    `│ 📋 *Comandos:* ${totalCmds}`,
-    `└──────────────────`,
-  ].filter(l => l !== '').join('\n');
+  const totalCmds = Object.values(cats).flat().length;
 
-  const body = Object.entries(categories)
+  // Header con estilo solicitado
+  let header = `━━━━━❒「 \`ᖇɩƙƙᥲ Ʈᥲɾᥲƙᥲɾᥲᑯᥲ°ᙖOƮ\` 」⋆｡ﾟ🎐\n\n`;
+  header += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
+  header += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
+  header += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
+  header += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
+  header += ` ୨୧     ꒰ \`Sistema\`   :  ${osName}\n`;
+  header += ` ୨୧     ꒰ \`Owner\`     :  @${ownerNum}\n`;
+  header += ` ୨୧     ꒰ \`Prefix\`    :  ${prefix}\n`;
+  header += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
+  header += `❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼\n\n`;
+
+  const body = Object.entries(cats)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([cat, cmds]) => {
       const icon  = getIcon(cat);
-      const title = cat.charAt(0).toUpperCase() + cat.slice(1);
-      const list  = cmds.map(c => `┊✦ ${prefix}${c}`).join('\n');
-      return `❖––––––『${icon} *${title}*\n${list}\n╰━═┅═━––––––๑`;
+      const title = cat.toUpperCase();
+      const list  = [...new Set(cmds)].map(c => `  ┊✦ ${prefix}${c}`).join('\n');
+      return `❖──『 ${icon} *${title}* 』\n${list}\n╰━═┅═━––––––๑`;
     })
     .join('\n\n');
 
-  const footer = `\n_Usa_ *${prefix}menu* _para ver esta lista_`;
-  const fullMenu = `${lines}\n\n${body}${footer}`;
+  const fullMenu = header + body;
 
-  const menuImage = global.imagen1 || null;
-  if (menuImage) {
-    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu, mentions: [sender] }, { quoted: m });
+  if (global.imagen1) {
+    await conn.sendMessage(m.chat, { image: global.imagen1, caption: fullMenu }, { quoted: m });
   } else {
     await m.reply(fullMenu);
   }
