@@ -3,7 +3,10 @@ import moment from 'moment-timezone';
 
 const TIMEZONE = 'America/Lima';
 
-// Formato de tiempo: 00d 00h 00m
+// Carácter especial para el "Leer más"
+const more = String.fromCharCode(8206);
+const readMore = more.repeat(4001);
+
 function clockString(ms) {
   const d = Math.floor(ms / 86400000);
   const h = Math.floor(ms / 3600000) % 24;
@@ -38,12 +41,6 @@ function buildCategories() {
     if (!plugin?.command) continue;
     const tag = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
     let cmds = Array.isArray(plugin.help) ? plugin.help : (plugin.help ? [plugin.help] : []);
-    
-    if (!cmds.length) {
-      cmds = plugin.command instanceof RegExp
-        ? [plugin.command.source.replace(/[^a-z|]/gi, '').split('|')[0]]
-        : Array.isArray(plugin.command) ? [plugin.command[0]] : [plugin.command];
-    }
     if (!cats[tag]) cats[tag] = [];
     cats[tag].push(...cmds.filter(Boolean));
   }
@@ -63,7 +60,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   const categories = buildCategories();
   const totalCmds  = Object.values(categories).flat().length;
 
-  // --- CABECERA ESTILO AESTHETIC ---
+  // --- CABECERA ---
   let header = `━━━━━❒「 \`ᖇɩƙƙᥲ Ʈᥲɾᥲƙᥲɾᥲᑯᥲ°ᙖOƮ\` 」⋆｡ﾟ🎐\n\n`;
   header += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
   header += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
@@ -73,15 +70,18 @@ const handler = async (m, { conn, usedPrefix }) => {
   header += ` ୨୧     ꒰ \`Owner\`     :  @${ownerNum}\n`;
   header += ` ୨୧     ꒰ \`Prefix\`    :  ${prefix}\n`;
   header += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
-  header += `❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼\n\n`;
+  header += `❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼\n`;
+  
+  // AQUÍ SE INSERTA EL "LEER MÁS"
+  header += `${readMore}\n`;
 
-  // --- CUERPO DEL MENÚ (TARJETAS) ---
+  // --- CUERPO ---
   const body = Object.entries(categories)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([cat, cmds]) => {
       const icon  = getIcon(cat);
       const title = cat.toUpperCase();
-      const list  = [...new Set(cmds)] // Elimina duplicados
+      const list  = [...new Set(cmds)]
         .map(c => `── ⟡ ˙ ${prefix}${c} ̟`)
         .join('\n');
 
@@ -89,17 +89,13 @@ const handler = async (m, { conn, usedPrefix }) => {
     })
     .join('\n\n');
 
-  const footer = `\n\n_Usa_ *${prefix}menu* _para ver esta lista nuevamente._\n🌸✨ *Rikka Takarada MD* ✨🌸`;
+  const footer = `\n\n🌸✨ *Rikka Takarada MD* ✨🌸`;
   const fullMenu = header + body + footer;
 
   const menuImage = global.imagen1 || null;
   
   if (menuImage) {
-    await conn.sendMessage(m.chat, { 
-      image: menuImage, 
-      caption: fullMenu, 
-      mentions: [sender] 
-    }, { quoted: m });
+    await conn.sendMessage(m.chat, { image: menuImage, caption: fullMenu, mentions: [sender] }, { quoted: m });
   } else {
     await m.reply(fullMenu);
   }
