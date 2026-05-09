@@ -715,19 +715,31 @@ export async function handler(chatUpdate) {
       const resolver = this.resolveLid;
       if (!resolver) return jid;
       const lidKey = jid.split('@')[0];
+      // 1. Cache principal del LidResolver (Map interno)
       if (resolver.cache instanceof Map) {
         const entry = resolver.cache.get(lidKey);
-        if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+        if (entry?.jid && !entry.jid.endsWith('@lid') && !entry.notFound && !entry.error) return entry.jid;
       }
-      if (resolver.lidCache instanceof Map) {
-        const cached = resolver.lidCache.get(jid);
+      // 2. getUserInfo (acceso tipado al mismo cache)
+      if (typeof resolver.getUserInfo === 'function') {
+        const info = resolver.getUserInfo(lidKey);
+        if (info?.jid && !info.jid.endsWith('@lid') && !info.notFound && !info.error) return info.jid;
+      }
+      // 3. lidCache (interfaz de compatibilidad)
+      if (resolver.lidCache) {
+        const cached = resolver.lidCache.get?.(jid);
         if (cached && !cached.endsWith('@lid')) return cached;
       }
+      // 4. jidToLidMap inverso
       if (resolver.jidToLidMap instanceof Map) {
         for (const [resolvedJid, lidFull] of resolver.jidToLidMap.entries()) {
           if (lidFull === jid || lidFull?.split('@')[0] === lidKey) return resolvedJid;
         }
       }
+      // 5. conn.contacts como último fallback
+      const contacts = Object.values(this?.contacts || {});
+      const match = contacts.find(c => c.lid === jid || (c.lid && c.lid.split('@')[0] === lidKey));
+      if (match?.id && !match.id.endsWith('@lid')) return match.id;
       return jid;
     };
     const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
