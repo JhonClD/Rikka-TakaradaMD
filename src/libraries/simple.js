@@ -2700,7 +2700,6 @@ export function serialize() {
                                     } catch (e) {
                                         return '';
                                     }
-                                    }
                                 },
                                 enumerable: true,
                             },
