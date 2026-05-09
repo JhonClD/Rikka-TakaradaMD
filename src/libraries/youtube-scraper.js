@@ -1,24 +1,22 @@
 /**
  * youtube-scraper.js — Rikka-TakaradaMD
  *
- * Backend : yt-dlp (descarga) → ffmpeg (re-encode con headers correctos)
- * Duración: ffprobe -show_entries format=duration  (más confiable que JSON)
+ * Backend  : yt-dlp-exec (npm) → no requiere yt-dlp instalado en el sistema
+ *            El paquete descarga el binario automáticamente la primera vez.
+ * Encode   : ffmpeg (re-encode MP3 con Xing header / MP4 con faststart)
+ * Duración : ffprobe -show_entries format=duration  (lectura directa, sin JSON)
  *
- * Fix 0:00 : WhatsApp lee la duración DEL ARCHIVO, no del campo `seconds`.
- *            Si el MP3 no tiene Xing header (VBR sin encabezado) ffprobe devuelve 0.
- *            → Re-encodear con libmp3lame + write_xing garantiza el header correcto.
- *            → Para MP4 usamos -movflags +faststart para el átomo moov al inicio.
+ * Instalar : npm install yt-dlp-exec
  */
 
-import fs           from 'fs';
-import yts          from 'yt-search';
-import { exec }     from 'child_process';
+import fs            from 'fs';
+import yts           from 'yt-search';
+import { exec }      from 'child_process';
 import { promisify } from 'util';
+import ytDlp         from 'yt-dlp-exec';
 
-const execPromise = promisify(exec);
-
-const YTDLP_TIMEOUT  = 120_000;   // 2 min — por si el video es largo
-const FFMPEG_TIMEOUT =  60_000;   // 1 min para re-encode
+const execPromise    = promisify(exec);
+const FFMPEG_TIMEOUT = 60_000;   // 1 min para re-encode con ffmpeg
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
 
@@ -78,7 +76,7 @@ export const buildInfoCard = (meta = {}, type = 'audio') => {
     );
 };
 
-// ── ffprobe: duración directa desde format (evita problemas con streams VBR) ──
+// ── ffprobe: duración directa del contenedor ──────────────────────────────────
 export const ffprobeDuration = async (filePath) => {
     try {
         const { stdout } = await execPromise(
@@ -92,20 +90,22 @@ export const ffprobeDuration = async (filePath) => {
     }
 };
 
-// ── yt-dlp: metadata exacta para URL conocida ─────────────────────────────────
+// ── Metadata: yt-dlp-exec --dump-json ────────────────────────────────────────
 const ytdlpInfo = async (url) => {
     try {
-        const { stdout } = await execPromise(
-            `yt-dlp --dump-json --skip-download --no-playlist "${url}"`,
-            { timeout: 20_000 }
-        );
-        const d = JSON.parse(stdout.trim());
+        // ytDlp con dumpSingleJson devuelve el objeto JSON parseado directamente
+        const d = await ytDlp(url, {
+            dumpSingleJson:  true,
+            skipDownload:    true,
+            noPlaylist:      true,
+            noWarnings:      true,
+        });
         return {
             title:     d.title,
             channel:   d.uploader || d.channel || 'N/A',
             views:     d.view_count,
-            duration:  d.duration,       // segundos (número)
-            date:      d.upload_date,    // YYYYMMDD
+            duration:  d.duration,        // segundos (número)
+            date:      d.upload_date,     // YYYYMMDD
             url:       d.webpage_url || url,
             thumbnail: d.thumbnail,
             videoId:   d.id,
@@ -131,7 +131,6 @@ export const ytSearch = async (query) => {
     try {
         const match = query.match(YT_REGEX);
         if (match) {
-            // URL directa → yt-dlp dump primero (más preciso), yts como fallback
             const info = await ytdlpInfo(query);
             if (info) return info;
             const r = await yts({ videoId: match[1] });
@@ -156,25 +155,27 @@ export const ytInfo = (url) => ytSearch(url);
  */
 export const ytDownload = async (url, type = 'audio', opts = {}) => {
     const { quality = '360p' } = opts;
-    const height  = quality.replace('p', '');
-    const stamp   = Date.now();
-    const tmpBase = `./tmp_ytdl_${stamp}`;
+    const height   = quality.replace('p', '');
+    const stamp    = Date.now();
+    const tmpBase  = `./tmp_ytdl_${stamp}`;
     const tmpFiles = [];
 
     const cleanup = () =>
         tmpFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
 
     try {
-        // ─────────────────────────────────────────────────────────────────────
+        // ── AUDIO ─────────────────────────────────────────────────────────────
         if (type === 'audio') {
-            // Paso 1: yt-dlp descarga en cualquier formato nativo
-            const rawPattern = `${tmpBase}_raw.%(ext)s`;
-            await execPromise(
-                `yt-dlp --no-playlist -x -o "${rawPattern}" "${url}"`,
-                { timeout: YTDLP_TIMEOUT }
-            );
 
-            // Encontrar el archivo descargado
+            // Paso 1: yt-dlp-exec descarga el audio en formato nativo
+            await ytDlp(url, {
+                x:            true,
+                noPlaylist:   true,
+                noWarnings:   true,
+                output:       `${tmpBase}_raw.%(ext)s`,
+            });
+
+            // Buscar el archivo descargado (extensión varía según la fuente)
             const rawFile = ['mp3','m4a','webm','opus','ogg','wav','aac','flac']
                 .map(ext => `${tmpBase}_raw.${ext}`)
                 .find(f => fs.existsSync(f));
@@ -182,9 +183,10 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
             if (!rawFile) throw new Error('yt-dlp no descargó el archivo de audio.');
             tmpFiles.push(rawFile);
 
-            // Paso 2: ffmpeg → MP3 con Xing header (VBR) → duración legible por WhatsApp
+            // Paso 2: ffmpeg → MP3 con Xing header  →  duración legible por WhatsApp
             const outFile = `${tmpBase}.mp3`;
             tmpFiles.push(outFile);
+
             await execPromise(
                 `ffmpeg -y -i "${rawFile}" -vn -c:a libmp3lame -q:a 2 -write_xing 1 "${outFile}"`,
                 { timeout: FFMPEG_TIMEOUT }
@@ -199,34 +201,39 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
                 ytInfo(url),
             ]);
 
-            return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp+ffmpeg' };
+            return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp-exec+ffmpeg' };
 
-        // ─────────────────────────────────────────────────────────────────────
+        // ── VIDEO ─────────────────────────────────────────────────────────────
         } else {
-            // Paso 1: yt-dlp descarga el video
+
+            // Paso 1: yt-dlp-exec descarga el video
             const rawFile = `${tmpBase}_raw.mp4`;
             tmpFiles.push(rawFile);
-            await execPromise(
-                `yt-dlp -f "bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]` +
-                `/best[height<=${height}][ext=mp4]/best[height<=${height}]/best" ` +
-                `--merge-output-format mp4 --no-playlist -o "${rawFile}" "${url}"`,
-                { timeout: YTDLP_TIMEOUT }
-            );
+
+            await ytDlp(url, {
+                format:            `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best[height<=${height}]/best`,
+                mergeOutputFormat: 'mp4',
+                noPlaylist:        true,
+                noWarnings:        true,
+                output:            rawFile,
+            });
 
             if (!fs.existsSync(rawFile) || fs.statSync(rawFile).size === 0)
                 throw new Error('yt-dlp no descargó el video.');
 
-            // Paso 2: ffmpeg → remux con moov al inicio (faststart) → duración correcta
+            // Paso 2: ffmpeg → remux con moov al inicio (faststart) + duración correcta
             const outFile = `${tmpBase}.mp4`;
             tmpFiles.push(outFile);
+
             await execPromise(
                 `ffmpeg -y -i "${rawFile}" -c copy -movflags +faststart "${outFile}"`,
                 { timeout: FFMPEG_TIMEOUT }
             );
 
+            // Si el remux falla, usar el raw directamente
             const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0
                 ? outFile
-                : rawFile; // fallback al raw si el remux falla
+                : rawFile;
 
             const [buffer, seconds, meta] = await Promise.all([
                 Promise.resolve(fs.readFileSync(finalFile)),
@@ -234,10 +241,11 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
                 ytInfo(url),
             ]);
 
-            return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp+ffmpeg' };
+            return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp-exec+ffmpeg' };
         }
 
     } finally {
         cleanup();
     }
 };
+    
