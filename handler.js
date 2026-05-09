@@ -710,13 +710,12 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
-    // Resuelve @lid → @s.whatsapp.net para el sender y también para cualquier JID conocido
     const _resolveLidJid = (jid) => {
       if (!jid?.endsWith('@lid')) return jid;
       const cached = this.resolveLid?.lidCache?.get(jid);
       return (cached && !cached.endsWith('@lid')) ? cached : jid;
     };
-    const _senderJid = _resolveLidJid(resolvedSender || m.sender);
+    const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
