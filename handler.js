@@ -1,4 +1,5 @@
 import { generateWAMessageFromContent } from "@whiskeysockets/baileys";
+import { resolveLidToRealJid } from './src/libraries/LidResolver.js';
 import { smsg } from './src/libraries/simple.js';
 import { format } from 'util';
 import { fileURLToPath } from 'url';
@@ -710,12 +711,7 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
-    const _resolveLidJid = (jid) => {
-      if (!jid?.endsWith('@lid')) return jid;
-      const cached = this.resolveLid?.lidCache?.get(jid);
-      return (cached && !cached.endsWith('@lid')) ? cached : jid;
-    };
-    const _senderJid = _resolveLidJid(m.sender);
+    const _senderJid = await resolveLidToRealJid(m.sender, this, m.chat);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
@@ -828,11 +824,7 @@ export async function handler(chatUpdate) {
       this.resolveLid.bulkCacheFromParticipants(participants);
     }
 
-    let resolvedSender = m.sender;
-    if (m.sender?.endsWith?.('@lid') && this.resolveLid?.lidCache) {
-      const cached = this.resolveLid.lidCache.get(m.sender);
-      if (cached && !cached.endsWith?.('@lid')) resolvedSender = cached;
-    }
+    const resolvedSender = await resolveLidToRealJid(m.sender, this, m.chat);
     const user = (m.isGroup ? (
 
       participants.find((u) => conn.decodeJid(u.id || u.jid) === resolvedSender) ||
