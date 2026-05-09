@@ -710,11 +710,18 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
-    const _senderJid = m.sender;
+    // Resuelve @lid → @s.whatsapp.net para el sender y también para cualquier JID conocido
+    const _resolveLidJid = (jid) => {
+      if (!jid?.endsWith('@lid')) return jid;
+      const cached = this.resolveLid?.lidCache?.get(jid);
+      return (cached && !cached.endsWith('@lid')) ? cached : jid;
+    };
+    const _senderJid = _resolveLidJid(resolvedSender || m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
-    const isMods = isOwner || global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(_senderJid);
+    const _modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+    const isMods = isOwner || _modsList.includes(_senderJid);
 
     // ── Premium: premiumTime es timestamp de expiración ──────────────────────
     const _userDb = global.db.data.users[m.sender] || {};
