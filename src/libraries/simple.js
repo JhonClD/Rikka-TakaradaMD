@@ -60,6 +60,28 @@ export function makeWASocket(connectionOptions, options = {}) {
             },
             writable: true,
         },
+        resolveLid: {
+            value: {
+                cache: new Map(),
+                lidCache: new Map(),
+                jidToLidMap: new Map(),
+                bulkCacheFromParticipants(participants) {
+                    let count = 0;
+                    for (const p of (participants || [])) {
+                        if (!p?.id || !p?.lid) continue;
+                        const lidKey = p.lid.split('@')[0];
+                        if (!this.cache.has(lidKey)) {
+                            this.cache.set(lidKey, { jid: p.id, lid: p.lid, timestamp: Date.now() });
+                            this.jidToLidMap.set(p.id, p.lid);
+                            count++;
+                        }
+                    }
+                    return count;
+                },
+                processMessage(msg) { return msg; },
+            },
+            writable: true,
+        },
         decodeJid: {
             value(jid) {
                 if (!jid || typeof jid !== "string")
@@ -2212,9 +2234,38 @@ export function serialize() {
         isGroup: {
             get() {
                 try {
-                    return safeEndsWith(this.chat, "@g.us");
+                    return safeEndsWith(this.chat, '@g.us');
                 } catch (e) {
-                    console.error("Error en isGroup getter:", e);
+                    return false;
+                }
+            },
+            enumerable: true,
+        },
+        isNewsletter: {
+            get() {
+                try {
+                    return safeEndsWith(this.chat, '@newsletter');
+                } catch (e) {
+                    return false;
+                }
+            },
+            enumerable: true,
+        },
+        isBroadcast: {
+            get() {
+                try {
+                    return this.chat === 'status@broadcast' || safeEndsWith(this.chat, '@broadcast');
+                } catch (e) {
+                    return false;
+                }
+            },
+            enumerable: true,
+        },
+        isStatus: {
+            get() {
+                try {
+                    return this.chat === 'status@broadcast';
+                } catch (e) {
                     return false;
                 }
             },
@@ -2222,7 +2273,34 @@ export function serialize() {
         },
         sender: {
             get() {
-                return this.conn?.decodeJid(this.key?.fromMe && this.conn?.user.id || this.participant || this.key.participant || this.chat || '');
+                try {
+                    const rawJid = this.key?.fromMe
+                        ? (this.conn?.user?.id || '')
+                        : (this.participant || this.key?.participant || this.chat || '');
+                    const decoded = rawJid ? (this.conn?.decodeJid?.(rawJid) || rawJid) : '';
+                    if (!decoded) return '';
+                    if (!decoded.endsWith('@lid')) return decoded;
+                    const resolver = this.conn?.resolveLid;
+                    if (resolver) {
+                        const lidKey = decoded.split('@')[0];
+                        if (resolver.cache instanceof Map) {
+                            const entry = resolver.cache.get(lidKey);
+                            if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+                        }
+                        if (resolver.lidCache instanceof Map) {
+                            const cached = resolver.lidCache.get(decoded);
+                            if (cached && !cached.endsWith('@lid')) return cached;
+                        }
+                        if (resolver.jidToLidMap instanceof Map) {
+                            for (const [resolvedJid, lidFull] of resolver.jidToLidMap.entries()) {
+                                if (lidFull === decoded || lidFull?.split('@')[0] === lidKey) return resolvedJid;
+                            }
+                        }
+                    }
+                    return decoded;
+                } catch (e) {
+                    return '';
+                }
             },
             enumerable: true,
         },
@@ -2348,40 +2426,36 @@ export function serialize() {
         mentionedJid: {
             get() {
                 try {
-                    const mentioned = this.conn.parseMention(this.text).length > 0 ? this.conn.parseMention(this.text) : this.msg?.contextInfo?.mentionedJid || [];
-                    const groupChatId = this.chat?.endsWith("@g.us") ? this.chat : null;
-
-                    const processJid = (user) => {
+                    const fromContext = this.msg?.contextInfo?.mentionedJid || [];
+                    const fromParse = typeof this.text === 'string'
+                        ? [...this.text.matchAll(/@([0-9]{5,16})/g)].map(v => v[1] + '@s.whatsapp.net')
+                        : [];
+                    const raw = fromContext.length > 0 ? fromContext : fromParse;
+                    const resolver = this.conn?.resolveLid;
+                    return raw.map(user => {
                         try {
-                            if (user && typeof user === "object") {
-                                user = user.lid || user.jid || user.id || "";
+                            if (user && typeof user === 'object') {
+                                user = user.phoneNumber || user.lid || user.jid || user.id || '';
                             }
-                            if (typeof user === "string" && user.includes("@lid") && groupChatId) {
-                                const resolved = String.prototype.resolveLidToRealJid.call(
-                                    user,
-                                    groupChatId,
-                                    this.conn
-                                );
-                                return resolved.then(res => typeof res === "string" ? res : user);
+                            if (!user || typeof user !== 'string') return null;
+                            if (!user.endsWith('@lid')) return user;
+                            if (!resolver) return user;
+                            const lidKey = user.split('@')[0];
+                            if (resolver.cache instanceof Map) {
+                                const entry = resolver.cache.get(lidKey);
+                                if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
                             }
-                            return Promise.resolve(user);
-                        } catch (e) {
-                            console.error("Error processing JID:", user, e);
-                            return Promise.resolve(user);
+                            if (resolver.lidCache instanceof Map) {
+                                const cached = resolver.lidCache.get(user);
+                                if (cached && !cached.endsWith('@lid')) return cached;
+                            }
+                            return user;
+                        } catch {
+                            return null;
                         }
-                    };
-
-                    const processed = mentioned.map(processJid);
-
-                    return Promise.all(processed)
-                        .then(jids => jids.filter(jid => jid && typeof jid === "string"))
-                        .catch(e => {
-                            console.error("Error en mentionedJid getter:", e);
-                            return [];
-                        });
+                    }).filter(j => j && typeof j === 'string');
                 } catch (e) {
-                    console.error("Error en mentionedJid getter:", e);
-                    return Promise.resolve([]);
+                    return [];
                 }
             },
             enumerable: true,
@@ -2607,21 +2681,25 @@ export function serialize() {
                                                 this.chat;
                                         }
                                         const parsedJid = safeDecodeJid(rawParticipant, self.conn);
-                                        if (parsedJid && parsedJid.includes("@lid")) {
-                                            const groupChatId = this.chat?.endsWith("@g.us") ? this.chat : null;
-                                            if (groupChatId) {
-                                                return String.prototype.resolveLidToRealJid.call(
-                                                    parsedJid,
-                                                    groupChatId,
-                                                    self.conn
-                                                );
+                                        if (parsedJid && parsedJid.includes('@lid')) {
+                                            const resolver = self.conn?.resolveLid;
+                                            if (resolver) {
+                                                const lidKey = parsedJid.split('@')[0];
+                                                if (resolver.cache instanceof Map) {
+                                                    const entry = resolver.cache.get(lidKey);
+                                                    if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+                                                }
+                                                if (resolver.lidCache instanceof Map) {
+                                                    const cached = resolver.lidCache.get(parsedJid);
+                                                    if (cached && !cached.endsWith('@lid')) return cached;
+                                                }
                                             }
                                         }
 
                                         return parsedJid;
                                     } catch (e) {
-                                        console.error("Error en quoted sender getter:", e);
-                                        return "";
+                                        return '';
+                                    }
                                     }
                                 },
                                 enumerable: true,
@@ -2648,37 +2726,30 @@ export function serialize() {
                             },
                             mentionedJid: {
                                 get() {
-                                    const mentioned =
-                                        q?.contextInfo?.mentionedJid ||
-                                        self.getQuotedObj()?.mentionedJid || [];
-                                    const groupChatId = this.chat?.endsWith("@g.us") ? this.chat : null;
-
-                                    const processJid = (user) => {
+                                    const raw = q?.contextInfo?.mentionedJid || [];
+                                    const resolver = self.conn?.resolveLid;
+                                    return raw.map(user => {
                                         try {
-                                            if (user && typeof user === "object") {
-                                                user = user.lid || user.jid || user.id || "";
+                                            if (user && typeof user === 'object') {
+                                                user = user.phoneNumber || user.lid || user.jid || user.id || '';
                                             }
-                                            if (typeof user === "string" && user.includes("@lid") && groupChatId) {
-                                                const resolved = String.prototype.resolveLidToRealJid.call(
-                                                    user,
-                                                    groupChatId,
-                                                    self.conn
-                                                );
-                                                return resolved.then(res => typeof res === "string" ? res : user);
+                                            if (!user || typeof user !== 'string') return null;
+                                            if (!user.endsWith('@lid')) return user;
+                                            if (!resolver) return user;
+                                            const lidKey = user.split('@')[0];
+                                            if (resolver.cache instanceof Map) {
+                                                const entry = resolver.cache.get(lidKey);
+                                                if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
                                             }
-                                            return Promise.resolve(user);
-                                        } catch (e) {
-                                            console.error("Error processing JID:", user, e);
-                                            return Promise.resolve(user);
+                                            if (resolver.lidCache instanceof Map) {
+                                                const cached = resolver.lidCache.get(user);
+                                                if (cached && !cached.endsWith('@lid')) return cached;
+                                            }
+                                            return user;
+                                        } catch {
+                                            return null;
                                         }
-                                    };
-                                    const processed = mentioned.map(processJid);
-                                    return Promise.all(processed)
-                                        .then(jids => jids.filter(jid => jid && typeof jid === "string"))
-                                        .catch(e => {
-                                            console.error("Error in mentionedJid processing:", e);
-                                            return mentioned.filter(jid => jid && typeof jid === "string");
-                                        });
+                                    }).filter(j => j && typeof j === 'string');
                                 },
                                 enumerable: true,
                             },
