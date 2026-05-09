@@ -4,236 +4,257 @@ import fs from 'fs';
 import path from 'path';
 import PhoneValidator from './PhoneValidator.js';
 
-/**
- * Script para analizar y corregir números telefónicos en el archivo lidsresolve.json
- */
 class PhoneAnalyzer {
   constructor() {
     this.phoneValidator = new PhoneValidator();
-    this.cacheFile = path.join(process.cwd(), 'src', 'lidsresolve.json');
+    this.cacheFile  = path.join(process.cwd(), 'src', 'lidsresolve.json');
     this.backupFile = path.join(process.cwd(), 'src', 'lidsresolve.backup.json');
   }
 
-  /**
-   * Cargar datos del archivo JSON
-   */
+  // ─── I/O ────────────────────────────────────────────────────────────────────
+
   loadData() {
     try {
       if (!fs.existsSync(this.cacheFile)) {
         console.error(`❌ Archivo no encontrado: ${this.cacheFile}`);
         return null;
       }
-
-      const data = fs.readFileSync(this.cacheFile, 'utf8');
-      return JSON.parse(data);
-    } catch (error) {
-      console.error('❌ Error cargando datos:', error.message);
+      return JSON.parse(fs.readFileSync(this.cacheFile, 'utf8'));
+    } catch (err) {
+      console.error('❌ Error cargando datos:', err.message);
       return null;
     }
   }
 
-  /**
-   * Guardar datos al archivo JSON
-   */
   saveData(data) {
     try {
       fs.writeFileSync(this.cacheFile, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-      console.error('❌ Error guardando datos:', error.message);
+    } catch (err) {
+      console.error('❌ Error guardando datos:', err.message);
     }
   }
 
-  /**
-   * Crear respaldo del archivo original
-   */
   createBackup(data) {
     try {
       fs.writeFileSync(this.backupFile, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-      console.error('❌ Error creando respaldo:', error.message);
+      console.log(`💾 Respaldo creado: ${this.backupFile}`);
+    } catch (err) {
+      console.error('❌ Error creando respaldo:', err.message);
     }
   }
 
-  /**
-   * Analizar todas las entradas del archivo
-   */
+  // ─── Análisis ────────────────────────────────────────────────────────────────
+
   analyzeEntries(data) {
     const analysis = {
-      phoneNumbers: [],
-      realLids: [],
-      problematic: [],
-      correctable: []
+      phoneNumbers: [],   // lidKey que en realidad son números de teléfono
+      realLids:     [],   // lidKey que son LIDs reales
+      problematic:  [],   // entradas con jid que sigue siendo @lid
+      correctable:  [],   // phoneNumbers que necesitan corrección
+      stale:        [],   // entradas notFound/error que se pueden limpiar
+      alreadyFixed: [],   // phoneNumbers ya corregidos previamente
     };
 
     for (const [lidKey, entry] of Object.entries(data)) {
-      const phoneDetection = this.phoneValidator.detectPhoneInLid(lidKey);
-      
-      if (phoneDetection.isPhone) {
-        const countryInfo = this.phoneValidator.getCountryInfo(phoneDetection.phoneNumber);
-        const isProblematic = entry.notFound || entry.error || entry.jid.includes('@lid');
-        
+      // Protección contra entradas malformadas
+      if (!entry || typeof entry !== 'object') continue;
+
+      const jid = entry.jid || '';
+      const detection = this.phoneValidator.detectPhoneInLid(lidKey);
+
+      if (detection.isPhone) {
+        const countryInfo = this.phoneValidator.getCountryInfo(detection.phoneNumber);
+        const jidStillLid = jid.includes('@lid');
+        const isProblematic = entry.notFound || entry.error || jidStillLid;
+        const alreadyFixed  = entry.corrected && !isProblematic && jid.includes('@s.whatsapp.net');
+
         const phoneEntry = {
           lidKey,
-          phoneNumber: phoneDetection.phoneNumber,
-          correctJid: phoneDetection.jid,
-          currentJid: entry.jid,
-          country: countryInfo?.country || 'Desconocido',
-          countryCode: countryInfo?.code,
+          phoneNumber:  detection.phoneNumber,
+          correctJid:   detection.jid,
+          currentJid:   jid,
+          country:      countryInfo?.country || 'Desconocido',
+          countryCode:  countryInfo?.code    || '??',
           isProblematic,
-          entry
+          alreadyFixed,
+          entry,
         };
 
         analysis.phoneNumbers.push(phoneEntry);
-        
-        if (isProblematic) {
+
+        if (alreadyFixed) {
+          analysis.alreadyFixed.push(phoneEntry);
+        } else if (isProblematic) {
           analysis.correctable.push(phoneEntry);
         }
       } else {
-        analysis.realLids.push({
-          lidKey,
-          entry
-        });
+        analysis.realLids.push({ lidKey, entry });
       }
 
-      // Detectar otros problemas
-      if (entry.jid && entry.jid.includes('@lid')) {
-        analysis.problematic.push({
-          lidKey,
-          issue: 'JID contiene @lid',
-          entry
-        });
+      // Entradas sin JID útil (basura acumulada)
+      if (entry.notFound || entry.error) {
+        analysis.stale.push({ lidKey, reason: entry.notFound ? 'notFound' : 'error', entry });
+      }
+
+      // JID que sigue siendo @lid (no resuelto)
+      if (jid && jid.includes('@lid')) {
+        analysis.problematic.push({ lidKey, issue: 'JID contiene @lid', entry });
       }
     }
 
     return analysis;
   }
 
-  /**
-   * Generar reporte detallado (solo para modo verbose)
-   */
-  generateReport(analysis, verbose = false) {
-    if (!verbose) return;
+  // ─── Reporte ─────────────────────────────────────────────────────────────────
 
-    console.log('\n📊 === REPORTE DE ANÁLISIS ===\n');
-    
-    console.log(`Total de entradas: ${analysis.phoneNumbers.length + analysis.realLids.length}`);
-    console.log(`📞 Números telefónicos detectados: ${analysis.phoneNumbers.length}`);
-    console.log(`🔗 LIDs reales: ${analysis.realLids.length}`);
-    console.log(`⚠️  Entradas problemáticas: ${analysis.problematic.length}`);
-    console.log(`🔧 Entradas corregibles: ${analysis.correctable.length}`);
+  generateReport(analysis, data) {
+    const total = Object.keys(data).length;
+    console.log('\n📊 ═══════════ REPORTE DE ANÁLISIS ═══════════\n');
+    console.log(`  Total de entradas:            ${total}`);
+    console.log(`  📞 Números telefónicos:        ${analysis.phoneNumbers.length}`);
+    console.log(`     ✅ Ya corregidos:           ${analysis.alreadyFixed.length}`);
+    console.log(`     🔧 Por corregir:            ${analysis.correctable.length}`);
+    console.log(`  🔗 LIDs reales:                ${analysis.realLids.length}`);
+    console.log(`  🗑️  Entradas obsoletas (stale): ${analysis.stale.length}`);
+    console.log(`  ⚠️  JIDs sin resolver (@lid):  ${analysis.problematic.length}`);
 
+    // Por país
     if (analysis.phoneNumbers.length > 0) {
-      console.log('\n📍 === NÚMEROS POR PAÍS ===');
+      console.log('\n  📍 Números por país:');
       const countries = {};
-      
-      for (const phone of analysis.phoneNumbers) {
-        if (!countries[phone.country]) {
-          countries[phone.country] = { total: 0, problematic: 0 };
-        }
-        countries[phone.country].total++;
-        if (phone.isProblematic) {
-          countries[phone.country].problematic++;
-        }
+      for (const p of analysis.phoneNumbers) {
+        if (!countries[p.country]) countries[p.country] = { total: 0, fixed: 0, pending: 0 };
+        countries[p.country].total++;
+        if (p.alreadyFixed)   countries[p.country].fixed++;
+        if (p.isProblematic && !p.alreadyFixed) countries[p.country].pending++;
       }
-
-      for (const [country, stats] of Object.entries(countries)) {
-        console.log(`  ${country}: ${stats.total} números (${stats.problematic} problemáticos)`);
+      for (const [country, s] of Object.entries(countries)) {
+        const detail = s.pending > 0 ? ` — ${s.pending} pendiente(s)` : '';
+        console.log(`     ${country}: ${s.total} (${s.fixed} OK${detail})`);
       }
     }
 
+    // Entradas corregibles (primeras 10)
     if (analysis.correctable.length > 0) {
-      console.log('\n🔧 === ENTRADAS CORREGIBLES ===');
-      for (const correctable of analysis.correctable.slice(0, 10)) { // Mostrar solo las primeras 10
-        console.log(`  ${correctable.lidKey} (${correctable.country})`);
-        console.log(`    Actual: ${correctable.currentJid}`);
-        console.log(`    Correcto: ${correctable.correctJid}`);
+      console.log('\n  🔧 Entradas a corregir (max 10):');
+      for (const c of analysis.correctable.slice(0, 10)) {
+        console.log(`     ${c.lidKey}  [${c.country}]`);
+        console.log(`       Actual:  ${c.currentJid}`);
+        console.log(`       Correcto: ${c.correctJid}`);
       }
-      
-      if (analysis.correctable.length > 10) {
-        console.log(`  ... y ${analysis.correctable.length - 10} más`);
-      }
+      if (analysis.correctable.length > 10)
+        console.log(`     ... y ${analysis.correctable.length - 10} más`);
     }
+
+    // Entradas stale
+    if (analysis.stale.length > 0) {
+      console.log(`\n  🗑️  Entradas obsoletas (primeras 10):`);
+      for (const s of analysis.stale.slice(0, 10)) {
+        console.log(`     ${s.lidKey}  [${s.reason}]`);
+      }
+      if (analysis.stale.length > 10)
+        console.log(`     ... y ${analysis.stale.length - 10} más`);
+    }
+
+    console.log('\n══════════════════════════════════════════════\n');
   }
 
-  /**
-   * Aplicar correcciones automáticas
-   */
-  applyCorrections(data, analysis) {
-    if (analysis.correctable.length === 0) {
-      return data;
-    }
-    
+  // ─── Correcciones ────────────────────────────────────────────────────────────
+
+  applyCorrections(data, analysis, options = {}) {
     const correctedData = { ...data };
+    let fixed = 0;
+    let cleaned = 0;
 
-    for (const correction of analysis.correctable) {
-      const { lidKey, correctJid, phoneNumber, country } = correction;
-      
+    // 1. Corregir phoneNumbers problemáticos
+    for (const c of analysis.correctable) {
+      const { lidKey, correctJid, phoneNumber, country } = c;
+      // Guardar sin originalEntry para no inflar el JSON
       correctedData[lidKey] = {
-        jid: correctJid,
-        lid: `${lidKey}@lid`,
-        name: phoneNumber,
-        timestamp: Date.now(),
-        corrected: true,
-        country: country,
+        jid:         correctJid,
+        lid:         `${lidKey}@lid`,
+        name:        phoneNumber,
+        timestamp:   Date.now(),
+        corrected:   true,
+        country:     country,
         phoneNumber: phoneNumber,
-        originalEntry: correction.entry
       };
+      fixed++;
     }
 
-    return correctedData;
+    // 2. Limpiar entradas stale si se pidió
+    if (options.clean) {
+      for (const s of analysis.stale) {
+        // Solo eliminar si no fue ya corregida en el paso anterior
+        if (!analysis.correctable.find(c => c.lidKey === s.lidKey)) {
+          delete correctedData[s.lidKey];
+          cleaned++;
+        }
+      }
+    }
+
+    return { data: correctedData, fixed, cleaned };
   }
 
-  /**
-   * Ejecutar análisis completo
-   */
+  // ─── Entrada principal ───────────────────────────────────────────────────────
+
   run(options = {}) {
-    // Cargar datos
     const data = this.loadData();
     if (!data) return;
 
-    // Crear respaldo si se va a aplicar correcciones
-    if (options.fix) {
-      this.createBackup(data);
+    const analysis = this.analyzeEntries(data);
+
+    if (!options.silent) this.generateReport(analysis, data);
+
+    const nothingToDo = analysis.correctable.length === 0 &&
+                        (!options.clean || analysis.stale.length === 0);
+
+    if (nothingToDo) {
+      if (!options.silent) console.log('✅ No hay correcciones pendientes.');
+      return analysis;
     }
 
-    // Analizar entradas
-    const analysis = this.analyzeEntries(data);
-    
-    // Generar reporte solo si está en modo verbose
-    this.generateReport(analysis, options.verbose);
-
-    // Aplicar correcciones si se solicita
-    if (options.fix) {
-      const correctedData = this.applyCorrections(data, analysis);
-      this.saveData(correctedData);
-      
-      // Solo mostrar resultado si no es modo silencioso
-      if (options.verbose) {
-        console.log(`\n✅ Se aplicaron ${analysis.correctable.length} correcciones`);
+    if (options.dryRun) {
+      if (!options.silent) {
+        console.log(`🔍 Dry-run: se corregirían ${analysis.correctable.length} entradas` +
+          (options.clean ? ` y se limpiarían ${analysis.stale.length} obsoletas` : '') + '.');
       }
-    } else if (analysis.correctable.length > 0 && options.verbose) {
-      console.log(`\n💡 Para aplicar las correcciones, ejecuta con el flag --fix:`);
-      console.log(`   node analyze-phones.js --fix`);
+      return analysis;
+    }
+
+    if (options.fix) {
+      this.createBackup(data);
+      const { data: correctedData, fixed, cleaned } = this.applyCorrections(data, analysis, options);
+      this.saveData(correctedData);
+      if (!options.silent) {
+        if (fixed)   console.log(`✅ ${fixed} entradas corregidas.`);
+        if (cleaned) console.log(`🗑️  ${cleaned} entradas obsoletas eliminadas.`);
+      }
+    } else if (!options.silent) {
+      console.log(`💡 Ejecuta con --fix para aplicar ${analysis.correctable.length} correcciones.`);
+      if (analysis.stale.length > 0)
+        console.log(`   Agrega --clean para eliminar también ${analysis.stale.length} entradas obsoletas.`);
     }
 
     return analysis;
   }
 }
 
-// Ejecutar si se llama directamente
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const options = {
-    fix: args.includes('--fix') || args.includes('-f'),
-    silent: args.includes('--silent') || args.includes('-s')
+    fix:     args.includes('--fix')      || args.includes('-f'),
+    dryRun:  args.includes('--dry-run')  || args.includes('-d'),
+    clean:   args.includes('--clean')    || args.includes('-c'),
+    silent:  args.includes('--silent')   || args.includes('-s'),
   };
 
-  if (!options.silent) {
-    console.log('📱 === ANALIZADOR DE NÚMEROS TELEFÓNICOS ===');
-  }
+  if (!options.silent) console.log('📱 ═══ REPARADOR DE NÚMEROS / JIDs ═══\n');
 
-  const analyzer = new PhoneAnalyzer();
-  analyzer.run(options);
+  new PhoneAnalyzer().run(options);
 }
 
 export default PhoneAnalyzer;
+    
