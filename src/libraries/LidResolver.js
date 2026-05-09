@@ -233,11 +233,43 @@ class LidResolver {
       return lidJid.includes('@') ? lidJid : `${lidJid}@s.whatsapp.net`;
     }
 
+    const lidKey = lidJid.split('@')[0];
+
+    // Siempre revisar caché primero, independiente de si hay grupo o no
+    if (this.cache.has(lidKey)) {
+      const entry = this.cache.get(lidKey);
+      if (entry?.jid && !entry.jid.endsWith('@lid') && !entry.notFound && !entry.error) {
+        return entry.jid;
+      }
+    }
+
+    // En DM: intentar resolver desde conn.contacts (Baileys los sincroniza con lid)
     if (!groupChatId?.endsWith('@g.us')) {
+      const contacts = Object.values(this.conn?.contacts || {});
+      const match = contacts.find(c =>
+        c.lid === lidJid ||
+        (c.lid && c.lid.split('@')[0] === lidKey)
+      );
+      if (match?.id && !match.id.endsWith('@lid')) {
+        this.cache.set(lidKey, { jid: match.id, lid: lidJid, name: match.id.split('@')[0], timestamp: Date.now() });
+        this.jidToLidMap.set(match.id, lidJid);
+        this.markDirty();
+        return match.id;
+      }
+      // Fallback: onWhatsApp
+      try {
+        const contact = await this.conn?.onWhatsApp(lidJid);
+        if (contact?.[0]?.jid && !contact[0].jid.endsWith('@lid')) {
+          const resolvedJid = contact[0].jid;
+          this.cache.set(lidKey, { jid: resolvedJid, lid: lidJid, name: resolvedJid.split('@')[0], timestamp: Date.now() });
+          this.jidToLidMap.set(resolvedJid, lidJid);
+          this.markDirty();
+          return resolvedJid;
+        }
+      } catch (_) {}
       return lidJid;
     }
 
-    const lidKey = lidJid.split('@')[0];
     
     // NUEVA FUNCIONALIDAD: Verificar si el LID es realmente un número de teléfono
     const phoneDetection = this.phoneValidator.detectPhoneInLid(lidKey);
