@@ -2,7 +2,7 @@
  * Play.js  —  Rikka-TakaradaMD
  * Comandos: play · play2 · mp3 · mp4 · video · playaudio
  *
- * Backend: yt-dlp (descarga) + ffprobe (duración exacta)
+ * Backend: yt-dlp (descarga)
  */
 
 import fs                  from 'fs';
@@ -13,37 +13,33 @@ import {
     ytSearch,
     ytDownload,
     buildInfoCard,
-    ffprobeDuration,
 } from '../src/libraries/youtube-scraper.js';
 
 const execPromise = promisify(exec);
 
 const FLAT_WAVEFORM = new Uint8Array(64).fill(0);
 
-// ─────────────────────────────────────────────────────────────────────────────
 const handler = async (m, { conn, client, args, text, command }) => {
     const socket = conn || client;
     const query  = text || args.join(' ');
 
-    if (!query)
+    if (!query) {
         return socket.sendMessage(m.chat,
             { text: `《✧》 Escribe el nombre o URL del video.\n\n*Ejemplo:* .play Linkin Park` },
             { quoted: m });
+    }
 
     const isVideo     = /play2|mp4|video/i.test(command);
     const isVoiceNote = /playaudio/i.test(command);
     const type        = isVideo ? 'video' : 'audio';
 
     try {
-        // 1. Buscar el video
-        const [video] = await Promise.all([
-            ytSearch(query),
-            socket.sendMessage(m.chat, { react: { text: '🔍', key: m.key } }),
-        ]);
+        await socket.sendMessage(m.chat, { react: { text: '🔍', key: m.key } });
+
+        const video = await ytSearch(query);
 
         if (!video) throw new Error('No se encontró ningún video.');
 
-        // 2. Mostrar tarjeta + reaccionar descargando
         await socket.sendMessage(m.chat, {
             image:   { url: video.thumbnail },
             caption: buildInfoCard(video, type),
@@ -51,7 +47,6 @@ const handler = async (m, { conn, client, args, text, command }) => {
 
         await socket.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
 
-        // ── VIDEO (play2 / mp4 / video) ───────────────────────────────────────
         if (isVideo) {
             const { buffer, seconds, meta } = await ytDownload(video.url, 'video', { quality: '360p' });
 
@@ -63,7 +58,6 @@ const handler = async (m, { conn, client, args, text, command }) => {
                 seconds,
             }, { quoted: m });
 
-        // ── VOICE NOTE (playaudio) ────────────────────────────────────────────
         } else if (isVoiceNote) {
             const stamp  = Date.now();
             const tmpMp3 = `./tmp_play_${stamp}.mp3`;
@@ -79,13 +73,11 @@ const handler = async (m, { conn, client, args, text, command }) => {
                 );
 
                 const oggBuffer = fs.readFileSync(tmpOgg);
-                const seconds   = await ffprobeDuration(tmpOgg);
 
                 await socket.sendMessage(m.chat, {
                     audio:    oggBuffer,
                     mimetype: 'audio/ogg; codecs=opus',
                     ptt:      true,
-                    seconds,
                     waveform: FLAT_WAVEFORM,
                 }, { quoted: m });
 
@@ -93,7 +85,6 @@ const handler = async (m, { conn, client, args, text, command }) => {
                 [tmpMp3, tmpOgg].forEach(f => { try { fs.unlinkSync(f); } catch {} });
             }
 
-        // ── AUDIO MP3 (play / mp3) ────────────────────────────────────────────
         } else {
             const { buffer, seconds, meta } = await ytDownload(video.url, 'audio');
 
