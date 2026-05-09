@@ -11,17 +11,18 @@ global.authFile = `RikkaSession`;
 // Cambiar a true si el Bot responde a sus comandos con otros comandos.
 // Cambiar a false para usar el Bot desde el mismo numero del Bot.
 // Error de m.isBaileys marcado como false fix temporal
-global.isBaileysFail = false;
+global.isBaileysFail = true;
 
 global.defaultLenguaje = 'es';
 
 global.owner = [
   ['51925092348', '👑 Propietario 👑', true],
   ['51997149670']
+  ['584263641463']
 ];
 
 global.suittag = ['51925092348'];
-global.prems = ['84796064576'];
+global.prems = ['51925092348'];
 
 // Base Rest Api
 global.BASE_API_DELIRIUS = "https://delirius-apiofc.vercel.app";
