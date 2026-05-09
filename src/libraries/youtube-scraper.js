@@ -1,16 +1,19 @@
 /**
  * youtube-scraper.js — Rikka-TakaradaMD
- * Backend único: y2mate (rotación de servidores) + yt-dlp como fallback para video
- * ✘ cnvmp3  ✘ ogmp3  →  eliminados
+ *
+ * Backend: yt-dlp (descarga) + ffprobe (duración exacta)
+ * Metadata: yt-dlp --dump-json para URLs directas / yt-search para búsquedas de texto
  */
 
+import fs           from 'fs';
 import yts          from 'yt-search';
 import { exec }     from 'child_process';
 import { promisify } from 'util';
-import y2mate       from './y2mate.js';
 
 const execPromise = promisify(exec);
-const YTDLP_QUAL  = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best';
+
+// Tiempo máximo para yt-dlp (ms). Videos largos pueden tardar más.
+const YTDLP_TIMEOUT = 120_000;
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
 
@@ -27,9 +30,10 @@ export const formatViews = (n) => {
 
 export const formatDuration = (sec) => {
     if (!sec) return 'N/A';
+    // Si ya viene como "3:45" lo devuelve tal cual
     if (typeof sec === 'string' && /^\d+:\d+/.test(sec)) return sec;
     const s = parseInt(sec, 10);
-    if (isNaN(s)) return 'N/A';
+    if (isNaN(s) || s <= 0) return 'N/A';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const r = s % 60;
@@ -43,8 +47,8 @@ export const formatDate = (raw) => {
     const str = String(raw).replace(/-/g, '');
     if (/^\d{8}$/.test(str)) {
         const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-        const [y, mo, d] = [str.slice(0,4), str.slice(4,6), str.slice(6,8)];
-        return `${parseInt(d)} ${months[parseInt(mo) - 1]} ${y}`;
+        const mo = parseInt(str.slice(4, 6)) - 1;
+        return `${parseInt(str.slice(6, 8))} ${months[mo] ?? '?'} ${str.slice(0, 4)}`;
     }
     return raw;
 };
@@ -70,12 +74,53 @@ export const buildInfoCard = (meta = {}, type = 'audio') => {
     );
 };
 
-// ── Metadatos vía yt-search ───────────────────────────────────────────────────
+// ── ffprobe: duración exacta de un archivo local ──────────────────────────────
+export const ffprobeDuration = async (filePath) => {
+    try {
+        const { stdout } = await execPromise(
+            `ffprobe -v quiet -print_format json -show_streams "${filePath}"`
+        );
+        const data = JSON.parse(stdout);
+        // Buscar en streams; si no, usar format
+        const dur =
+            parseFloat(data.streams?.find(s => s.duration)?.duration) ||
+            parseFloat(data.format?.duration) ||
+            0;
+        return Math.round(dur);
+    } catch {
+        return 0;
+    }
+};
+
+// ── yt-dlp: metadata de una URL conocida ─────────────────────────────────────
+const ytdlpInfo = async (url) => {
+    try {
+        const { stdout } = await execPromise(
+            `yt-dlp --dump-json --skip-download --no-playlist "${url}"`,
+            { timeout: 20_000 }
+        );
+        const d = JSON.parse(stdout.trim());
+        return {
+            title:     d.title,
+            channel:   d.uploader || d.channel || 'N/A',
+            views:     d.view_count,
+            duration:  d.duration,          // segundos (número)
+            date:      d.upload_date,        // YYYYMMDD
+            url:       d.webpage_url || url,
+            thumbnail: d.thumbnail,
+            videoId:   d.id,
+        };
+    } catch {
+        return null;
+    }
+};
+
+// ── yt-search: búsqueda por texto o fallback ──────────────────────────────────
 const normalizeYts = (r) => ({
     title:     r.title,
     channel:   r.author?.name || r.channel || 'N/A',
     views:     r.views,
-    duration:  r.timestamp,
+    duration:  r.seconds || r.timestamp,    // preferir segundos si está disponible
     date:      r.ago,
     url:       r.url,
     thumbnail: r.thumbnail,
@@ -86,9 +131,14 @@ export const ytSearch = async (query) => {
     try {
         const match = query.match(YT_REGEX);
         if (match) {
+            // URL directa → intentar con yt-dlp primero (más preciso)
+            const info = await ytdlpInfo(query);
+            if (info) return info;
+            // Fallback a yts
             const r = await yts({ videoId: match[1] });
-            if (r) return normalizeYts(r);
+            return r ? normalizeYts(r) : null;
         }
+        // Búsqueda por texto → yts
         const search = await yts(query);
         const r = search.videos?.[0];
         return r ? normalizeYts(r) : null;
@@ -99,59 +149,55 @@ export const ytSearch = async (query) => {
 
 export const ytInfo = (url) => ytSearch(url);
 
-// ── yt-dlp helpers ────────────────────────────────────────────────────────────
-export const dlYtdlp = async (url, outFile) => {
-    try {
-        await execPromise(
-            `yt-dlp -f "${YTDLP_QUAL}" --merge-output-format mp4 -o "${outFile}" "${url}"`
-        );
-        return true;
-    } catch {
-        return false;
-    }
-};
-
-export const ytdlpDate = async (url) => {
-    try {
-        const { stdout } = await execPromise(`yt-dlp --print "%(upload_date)s" "${url}"`);
-        return stdout.trim() || null;
-    } catch {
-        return null;
-    }
-};
-
-// ── Descarga principal (solo y2mate) ──────────────────────────────────────────
+// ── Descarga principal con yt-dlp ─────────────────────────────────────────────
 /**
+ * Descarga audio o video con yt-dlp.
  * @param {string} url   - URL de YouTube
  * @param {string} type  - 'audio' | 'video'
- * @param {object} opts  - { quality: '360p'|'720p' }
- * @returns {{ downloadUrl, meta, provider }}
+ * @param {object} opts  - { quality: '360p'|'720p'|'1080p' }
+ * @returns {{ buffer: Buffer, seconds: number, meta: object, provider: string }}
  */
 export const ytDownload = async (url, type = 'audio', opts = {}) => {
-    const { quality } = opts;
-    const meta = await ytInfo(url);
+    const { quality = '360p' } = opts;
+    const height  = quality.replace('p', '');
+    const stamp   = Date.now();
+    const tmpBase = `./tmp_ytdl_${stamp}`;
+
+    let outFile;
 
     try {
-        let result;
         if (type === 'audio') {
-            result = await y2mate.yta(url);          // MP3 128 kbps, rota servidores
+            outFile = `${tmpBase}.mp3`;
+            await execPromise(
+                `yt-dlp -x --audio-format mp3 --audio-quality 0 ` +
+                `--no-playlist -o "${outFile}" "${url}"`,
+                { timeout: YTDLP_TIMEOUT }
+            );
         } else {
-            const q = quality || '360p';
-            result = await y2mate.ytv(url, q);       // MP4 calidad pedida
+            outFile = `${tmpBase}.mp4`;
+            await execPromise(
+                `yt-dlp -f "bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]` +
+                `/best[height<=${height}][ext=mp4]/best[height<=${height}]/best" ` +
+                `--merge-output-format mp4 --no-playlist -o "${outFile}" "${url}"`,
+                { timeout: YTDLP_TIMEOUT }
+            );
         }
 
-        if (result?.dl_link) {
-            return {
-                downloadUrl: result.dl_link,
-                meta:        meta || {},
-                provider:    `y2mate/${result.server}`,
-            };
-        }
-    } catch (e) {
-        throw new Error(`y2mate falló: ${e.message}`);
+        if (!fs.existsSync(outFile) || fs.statSync(outFile).size === 0)
+            throw new Error('yt-dlp no generó el archivo de salida.');
+
+        const [buffer, seconds, meta] = await Promise.all([
+            Promise.resolve(fs.readFileSync(outFile)),
+            ffprobeDuration(outFile),
+            ytInfo(url),
+        ]);
+
+        return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp' };
+
+    } finally {
+        // Limpiar siempre, incluso si hay error
+        [outFile, `${tmpBase}.webm`, `${tmpBase}.m4a`].forEach(f => {
+            if (f) try { fs.unlinkSync(f); } catch {}
+        });
     }
-
-    throw new Error('No se pudo obtener el enlace de descarga. Intenta más tarde.');
 };
-
-export const providers = { y2mate, ytdlp: dlYtdlp };
