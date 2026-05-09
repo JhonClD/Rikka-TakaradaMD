@@ -478,6 +478,15 @@ export async function handler(chatUpdate) {
           vodka: 0,
           wallet: 0,
           warn: 0,
+          // ── Gacha / Waifu ──────────────────────────────────────────────────
+          lastrw: 0,
+          gacha_characters: [],
+          gacha_favorite: '',
+          gacha_claimMsg: '',
+          // ── Sub-bot / Premium ──────────────────────────────────────────────
+          subbot_requested: false,
+          subbot_request_ts: 0,
+          subbot_jid: '',
           weapon: 0,
           weapondurability: 0,
           wolf: 0,
@@ -641,6 +650,14 @@ export async function handler(chatUpdate) {
           expired: 0,
           language: 'es',
           setPrimaryBot: '',
+          // ── Gacha ──────────────────────────────────────────────────────────
+          gacha: true,
+          gacha_characters: {},
+          gacha_rolls: {},
+          gacha_sales: {},
+          gacha_intercambios: [],
+          gacha_timeTrade: 0,
+          gacha_regalos: {},
         }
 
         Object.assign(chat, { ...chats, ...chat });
@@ -693,12 +710,94 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
-    const _senderJid = m.sender;
+    const _resolveLidJid = (jid) => {
+      if (!jid?.endsWith('@lid')) return jid;
+      const resolver = this.resolveLid;
+      if (!resolver) return jid;
+      const lidKey = jid.split('@')[0];
+      if (resolver.cache instanceof Map) {
+        const entry = resolver.cache.get(lidKey);
+        if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+      }
+      if (resolver.lidCache instanceof Map) {
+        const cached = resolver.lidCache.get(jid);
+        if (cached && !cached.endsWith('@lid')) return cached;
+      }
+      if (resolver.jidToLidMap instanceof Map) {
+        for (const [resolvedJid, lidFull] of resolver.jidToLidMap.entries()) {
+          if (lidFull === jid || lidFull?.split('@')[0] === lidKey) return resolvedJid;
+        }
+      }
+      return jid;
+    };
+    const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
+    const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-    const isROwner = _ownerList.includes(_senderJid) || m.fromMe;
+    const _senderPhone = _phoneOnly(_senderJid);
+    const isROwner = _ownerList.some(ownerJid => {
+      if (ownerJid === _senderJid) return true;
+      const ownerPhone = _phoneOnly(ownerJid);
+      return ownerPhone && _senderPhone && ownerPhone === _senderPhone;
+    }) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
-    const isMods = isOwner || global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(_senderJid);
-    const isPrems = isROwner || isOwner || isMods || global.db.data.users[m.sender].premiumTime > 0; // || global.db.data.users[m.sender].premium = 'true'
+    const _modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+    const isMods = isOwner || _modsList.some(modJid => {
+      if (modJid === _senderJid) return true;
+      return _phoneOnly(modJid) === _senderPhone && _senderPhone !== '';
+    });
+
+    // ── Premium: premiumTime es timestamp de expiración ──────────────────────
+    const _userDb = global.db.data.users[m.sender] || {};
+    const _premExpiry = typeof _userDb.premiumTime === 'number' ? _userDb.premiumTime : 0;
+    const isPremium = _premExpiry > Date.now();
+    // Auto-limpiar si expiró
+    if (_premExpiry > 0 && !isPremium) { _userDb.premiumTime = 0; _userDb.premium = false; }
+
+    // ── Sub-bot: este número de conexión es un sub-bot si no está en owner ──
+    const _thisBotJid = this.user?.jid || '';
+    const _isSubBot   = !_ownerList.includes(_thisBotJid) && global.conns?.some(c => c.user?.jid === _thisBotJid);
+
+    // Comandos permitidos para sub-bots (sin punto, se compara con command en minúsculas)
+    const _subBotAllowed = new Set([
+      // Sticker
+      's','sticker','st',
+      // TikTok
+      'tiktok','ttdl','tiktokdl','tiktoknowm','tt','ttnowm','tiktokaudio','tiktok2','tt2',
+      // Facebook
+      'fb','facebook','fbdl',
+      // Play (YouTube audio/video)
+      'play','play2','playaudio','mp4','video',
+      // Gacha completo
+      'rw','rollwaifu','roll','c','claim','reclamar',
+      'harem','waifus','claims','mischicas',
+      'ginfo','infogacha','gachainfo',
+      'sell','vender','buyc','buychar','comprarwaifu','wshop','haremshop','tiendawaifus',
+      'trade','intercambiar','aceptar','accept',
+      'setfav','setfavourite','favorito','charimage','waifuimage','cimage','wimage','charinfo','wifu',
+      'removesale','quitarventa','cancelsale',
+      'balance','bal','monedas','coins','deposit','depositar','withdraw','retirar',
+      'daily','diario','weekly','semanal','monthly','mensual','work','trabajar','farm',
+      // Waifu/neko imagen
+      'waifu','neko',
+      // Interacciones anime
+      ...['pat','kiss','hug','slap','fuck','bite','lick','dance','cry','blush','wave',
+          'punch','run','sleep','laugh','angry','bored','clap','coffee','cuddle',
+          'pout','sad','scared','shy','smile','stare','think','wink','eat','bleh',
+          'bonk','blowkiss','call','cold','comfort','cringe','curious','draw','dramatic',
+          'drunk','gaming','handhold','happy','heat','highfive','impregnate','jump',
+          'kill','kisscheek','love','nope','peek','push','scream','seduce','sing',
+          'sleep','smoke','smug','sniff','snuggle','spit','step','thinkhard','tickle',
+          'trip','walk','bath','bully','abrazar','besar','acariciar','morder','lamer',
+          'bailar','llorar','sonrojarse','saludar','golpear','correr','dormir',
+          'reir','enojado','aburrido','aplaudir','cafe','acurrucar','mueca',
+          'triste','asustado','timido','sonreir','fumar','escupir','pisar',
+          'caminar','guiñar','comer','nom','bañarse','molestar','pensar',
+          'muak','choca','tomarlamano','calor','jugar','dibujar','llamar',
+          'besito','tropezar','mirar','oler','curioso','consolar','embarazar',
+          'besomejilla','coger','follar','preñar'],
+    ]);
+
+    const isPrems = isROwner || isOwner || isMods || isPremium;
 
     if (opts['queque'] && m.text && !(isMods || isPrems)) {
       const queque = this.msgqueque; const time = 1000 * 5;
@@ -753,23 +852,37 @@ export async function handler(chatUpdate) {
       this.resolveLid.bulkCacheFromParticipants(participants);
     }
 
-    let resolvedSender = m.sender;
-    if (m.sender?.endsWith?.('@lid') && this.resolveLid?.lidCache) {
-      const cached = this.resolveLid.lidCache.get(m.sender);
-      if (cached && !cached.endsWith?.('@lid')) resolvedSender = cached;
-    }
+    let resolvedSender = _senderJid;
     const user = (m.isGroup ? (
-
-      participants.find((u) => conn.decodeJid(u.id || u.jid) === resolvedSender) ||
-
-      participants.find((u) => u.lid && (conn.decodeJid(u.lid) === m.sender || u.lid === m.sender)) ||
-
-      participants.find((u) => conn.decodeJid(u.id || u.jid) === m.sender)
+      participants.find((u) => {
+        const uId = conn.decodeJid(u.id || u.jid || '');
+        if (uId && uId === resolvedSender) return true;
+        if (uId && _phoneOnly(uId) === _phoneOnly(resolvedSender)) return true;
+        if (u.lid) {
+          const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
+          if (resolvedLid === resolvedSender) return true;
+          if (_phoneOnly(resolvedLid) === _phoneOnly(resolvedSender)) return true;
+        }
+        return false;
+      }) ||
+      participants.find((u) => conn.decodeJid(u.id || u.jid || '') === m.sender) ||
+      participants.find((u) => u.lid && (u.lid === m.sender || u.lid?.split('@')[0] === m.sender?.split('@')[0]))
     ) : {}) || {};
-    const bot = (m.isGroup ? participants.find((u) => conn.decodeJid(u.id || u.jid) == this.user.jid) : {}) || {};
-    const isRAdmin = user?.admin == 'superadmin' || false;
-    const isAdmin = isRAdmin || user?.admin == 'admin' || isROwner || false;
-    const isBotAdmin = bot?.admin || false;
+    const bot = (m.isGroup ? (
+      participants.find((u) => {
+        const uId = conn.decodeJid(u.id || u.jid || '');
+        if (uId && uId === this.user?.jid) return true;
+        if (uId && _phoneOnly(uId) === _phoneOnly(this.user?.id || '')) return true;
+        if (u.lid) {
+          const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
+          if (resolvedLid && _phoneOnly(resolvedLid) === _phoneOnly(this.user?.id || '')) return true;
+        }
+        return false;
+      })
+    ) : {}) || {};
+    const isRAdmin = user?.admin === 'superadmin' || false;
+    const isAdmin = isRAdmin || user?.admin === 'admin' || isROwner || false;
+    const isBotAdmin = bot?.admin === 'admin' || bot?.admin === 'superadmin' || false;
 
     const ___dirname = handler._pluginsDir ??= path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
     for (const name in global.plugins) {
@@ -867,6 +980,11 @@ export async function handler(chatUpdate) {
 
         if (!isAccept) {
           continue;
+        }
+
+        // ── Sub-bot: bloquear comandos no permitidos ─────────────────────────
+        if (_isSubBot && !_subBotAllowed.has(command)) {
+          continue; // silencioso — el sub-bot simplemente no responde
         }
 
        if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return
@@ -1016,6 +1134,8 @@ ${tradutor.texto1[1]} ${messageNumber}/3
           isAdmin,
           isBotAdmin,
           isPrems,
+          isPremium,
+          isSubBot: _isSubBot,
           chatUpdate,
           __dirname: ___dirname,
           __filename,
@@ -1137,19 +1257,30 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
   let text = '';
 
   const _normalizeJidEntry = (p) => {
-    // Si ya es string limpio, intentar parsear como JSON por si viene serializado
     if (typeof p === 'string') {
       try {
         const parsed = JSON.parse(p);
         if (parsed && typeof parsed === 'object') {
-          return parsed.phoneNumber || parsed.id || parsed.jid || p;
+          const phone = parsed.phoneNumber || parsed.id || parsed.jid || p;
+          return typeof phone === 'string' ? phone : p;
         }
       } catch (_) {}
+      if (p.endsWith('@lid')) {
+        const resolver = mconn?.conn?.resolveLid;
+        if (resolver) {
+          const lidKey = p.split('@')[0];
+          if (resolver.cache instanceof Map) {
+            const entry = resolver.cache.get(lidKey);
+            if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+          }
+        }
+      }
       return p;
     }
-    // Si es objeto directo (Baileys a veces pasa {id, jid, lid, admin})
     if (p && typeof p === 'object') {
-      return p.id || p.jid || p.phoneNumber || '';
+      const phone = p.phoneNumber ? (p.phoneNumber.includes('@') ? p.phoneNumber : p.phoneNumber + '@s.whatsapp.net') : '';
+      const id = p.id || p.jid || '';
+      return phone || id || '';
     }
     return String(p);
   };
@@ -1164,11 +1295,24 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
         for (const userJid of participants) {
           try {
           let pp = await m?.conn?.profilePictureUrl(userJid, 'image').catch(_ => 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60');
-           const apii = await mconn?.conn?.getFile(pp);
+           const ppBuffer = await fetch(pp).then(r => r.arrayBuffer()).then(ab => Buffer.from(ab)).catch(_ => fs.readFileSync('./src/avatar_contact.png'));
            const antiArab = JSON.parse(fs.readFileSync('./src/antiArab.json'));
            const userPrefix = antiArab.some((prefix) => userJid.startsWith(prefix));
-           const botTt2 = groupMetadata?.participants?.find((u) => m?.conn?.decodeJid(u.id) == m?.conn?.user?.jid) || {};
-           const isBotAdminNn = botTt2?.admin === 'admin' || false;
+           const botJidClean = m?.conn?.user?.jid || '';
+           const botPhoneClean = botJidClean.replace(/[^0-9]/g, '');
+           const botTt2 = groupMetadata?.participants?.find((u) => {
+             const uId = m?.conn?.decodeJid(u.id || u.jid || '');
+             if (uId === botJidClean) return true;
+             const uPhone = uId.replace(/[^0-9]/g, '');
+             if (uPhone && botPhoneClean && uPhone === botPhoneClean) return true;
+             if (u.lid) {
+               const resolvedLid = _normalizeJidEntry(u.lid);
+               const resolvedPhone = resolvedLid.replace(/[^0-9]/g, '');
+               if (resolvedPhone && botPhoneClean && resolvedPhone === botPhoneClean) return true;
+             }
+             return false;
+           }) || {};
+           const isBotAdminNn = botTt2?.admin === 'admin' || botTt2?.admin === 'superadmin' || false;
            text = (action === 'add' ? (chat.sWelcome || tradutor.texto1 || conn.welcome || 'Welcome, @user!').replace('@subject', await m?.conn?.getName(id)).replace('@desc', groupMetadata?.desc?.toString() || '*𝚂𝙸𝙽 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝙲𝙸𝙾𝙽*').replace('@user', '@' + userJid.split('@')[0]) :
             (chat.sBye || tradutor.texto2 || conn.bye || 'Bye, @user!')).replace('@user', '@' + userJid.split('@')[0]);
             if (userPrefix && chat.antiArab && botTt.restrict && isBotAdminNn && action === 'add') {
@@ -1178,7 +1322,11 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
            await m?.conn?.sendMessage(id, { text: `*[❗] @${userJid.split('@')[0]} ᴇɴ ᴇsᴛᴇ ɢʀᴜᴘᴏ ɴᴏ sᴇ ᴘᴇʀᴍɪᴛᴇɴ ɴᴜᴍᴇʀᴏs ᴀʀᴀʙᴇs ᴏ ʀᴀʀᴏs, ᴘᴏʀ ʟᴏ ϙᴜᴇ sᴇ ᴛᴇ sᴀᴄᴀʀᴀ ᴅᴇʟ ɢʀᴜᴘᴏ*`, mentions: [userJid] }, { quoted: fkontak2 });
            return;
             }
-            await m?.conn?.sendFile(id, apii.data, 'pp.jpg', text, null, false, { mentions: [userJid] });
+            await m?.conn?.sendMessage(id, {
+              image: ppBuffer,
+              caption: text,
+              mentions: [userJid]
+            });
           } catch (e) {
           console.log(e);
           }
@@ -1245,31 +1393,33 @@ export async function groupsUpdate(groupsUpdate) {
 export async function callUpdate(callUpdate) {}
 
 export async function deleteUpdate(message) {
-  const datas = global
-  const id = message?.participant 
-  const tradutor = { texto1: ['', '', '', '', '', ''] }
-
-  let d = new Date(new Date + 3600000)
-  let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' })
-  let time = d.toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true })
+  const tradutor = { texto1: ['', '', '', '', '', ''] };
+  let d = new Date(new Date() + 3600000);
+  let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' });
+  let time = d.toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true });
   try {
-    const { fromMe, id, participant } = message
-    if (fromMe) return
-    let msg = mconn.conn.serializeM(mconn.conn.loadMessage(id))
-    let chat = global.db.data.chats[msg?.chat] || {}
-    if (!chat?.antidelete) return
-    if (!msg) return
-    if (!msg?.isGroup) return
+    const fromMe = message?.key?.fromMe;
+    const msgId = message?.key?.id;
+    const participant = message?.participant || message?.key?.participant || '';
+    if (fromMe) return;
+    if (!msgId) return;
+    let msg = mconn.conn.serializeM(mconn.conn.loadMessage(msgId));
+    if (!msg) return;
+    let chat = global.db.data.chats[msg?.chat] || {};
+    if (!chat?.antidelete) return;
+    if (!msg?.isGroup) return;
+    const participantNum = participant.split('@')[0];
     const antideleteMessage = `${tradutor.texto1[0]}
-${tradutor.texto1[1]} @${participant.split`@`[0]}
+${tradutor.texto1[1]} @${participantNum}
 ${tradutor.texto1[2]} ${time}
-${tradutor.texto1[3]} ${date}\n
+${tradutor.texto1[3]} ${date}
+
 ${tradutor.texto1[4]}
 ${tradutor.texto1[5]}`.trim();
-    await mconn.conn.sendMessage(msg.chat, { text: antideleteMessage, mentions: [participant] }, { quoted: msg })
-    mconn.conn.copyNForward(msg.chat, msg).catch(e => console.log(e, msg))
+    await mconn.conn.sendMessage(msg.chat, { text: antideleteMessage, mentions: participant ? [participant] : [] }, { quoted: msg });
+    mconn.conn.copyNForward(msg.chat, msg).catch(e => console.log(e, msg));
   } catch (e) {
-    console.error(e)
+    console.error(e);
   }
 }
 
