@@ -129,6 +129,6 @@ const handler = async (m, { conn, text, args }) => {
 handler.help    = ['update', 'update --force'];
 handler.tags    = ['owner'];
 handler.command = /^(update|actualizar|gitpull)$/i;
-handler.rowner  = false;
+handler.rowner  = true;
 
 export default handler;
