@@ -590,6 +590,7 @@ const connectionOptions = {
 
 global.conn = makeWASocket(connectionOptions);
 const lidResolver = new LidResolver(global.conn);
+global.conn.resolveLid = lidResolver;
 
 // Ejecutar análisis y corrección automática al inicializar (SILENCIOSO)
 setTimeout(async () => {
@@ -880,6 +881,7 @@ global.reloadHandler = async function (restatConn) {
     store?.bind(conn);
     // Reinicializar lidResolver con la nueva conexión
     lidResolver.conn = global.conn;
+    global.conn.resolveLid = lidResolver;
     isInit = true;
   }
   if (!isInit) {
