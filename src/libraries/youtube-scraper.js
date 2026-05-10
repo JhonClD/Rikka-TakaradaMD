@@ -252,6 +252,75 @@ const providerMP3Now = async (ytUrl, type) => {
     return await fetchBuffer(dlUrl, { 'Referer': PAGE });
 };
 
+// ── Provider: SSYouTube / SaveFrom (video + audio) ───────────────────────────
+const providerSSYouTube = async (ytUrl, type) => {
+    const SF_API  = 'https://worker.sf-tools.com/savefrom.php';
+    const ORIGIN  = 'https://ssyoutube.com';
+    const REFERER = 'https://ssyoutube.com/';
+
+    const body = new URLSearchParams({
+        sf_url:            ytUrl,
+        sf_submit:         '',
+        new:               '2',
+        lang:              'es',
+        app:               '',
+        tool:              'pc',
+        channel:           'main',
+        id_ru_fast_show:   '0',
+    });
+
+    const res = await fetch(SF_API, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent':   UA,
+            'Origin':       ORIGIN,
+            'Referer':      REFERER,
+        },
+        body: body.toString(),
+        signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) throw new Error(`ssyoutube HTTP ${res.status}`);
+
+    const raw = await res.text();
+
+    // La respuesta puede ser JSON puro o JSONP con callback
+    let json;
+    try {
+        json = JSON.parse(raw);
+    } catch {
+        const match = raw.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error(`ssyoutube: respuesta no parseable — ${raw.slice(0, 120)}`);
+        json = JSON.parse(match[0]);
+    }
+
+    const links = json?.url;
+    if (!Array.isArray(links) || links.length === 0)
+        throw new Error(`ssyoutube: sin enlaces — ${JSON.stringify(json).slice(0, 150)}`);
+
+    let chosen;
+
+    if (type === 'audio') {
+        chosen = links.find(l => l.ext === 'mp3')
+            || links.find(l => /m4a|aac|ogg|opus/.test(l.ext || ''))
+            || links.find(l => l.audio === true && l.ext !== 'mp4');
+    } else {
+        const mp4s = links.filter(l => l.ext === 'mp4' && l.audio !== false);
+        chosen = mp4s.find(l => /720/.test(l.quality || ''))
+            || mp4s.find(l => /480/.test(l.quality || ''))
+            || mp4s[0]
+            || links[0];
+    }
+
+    if (!chosen) throw new Error('ssyoutube: no se encontró formato adecuado');
+
+    const dlUrl = chosen.url;
+    if (!dlUrl || !dlUrl.startsWith('http'))
+        throw new Error(`ssyoutube: URL inválida — ${JSON.stringify(chosen).slice(0, 100)}`);
+
+    return await fetchBuffer(dlUrl, { 'Referer': REFERER });
+};
+
 const providerCobalt = async (ytUrl, type) => {
     const res = await fetch('https://api.cobalt.tools/', {
         method: 'POST',
@@ -385,6 +454,7 @@ const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
     const entries = [
         { name: 'ytdown',           fn: () => providerYTDown(ytUrl, type) },
         { name: 'mp3now',           fn: () => providerMP3Now(ytUrl, type) },
+        { name: 'ssyoutube',        fn: () => providerSSYouTube(ytUrl, type) },
         { name: 'cobalt.tools',     fn: () => providerCobalt(ytUrl, type) },
         { name: 'cobalt-instances', fn: () => providerCobaltAlt(ytUrl, type) },
         { name: 'y2mate',           fn: () => providerY2mate(ytUrl, type) },
@@ -453,4 +523,3 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-    
