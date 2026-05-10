@@ -2,12 +2,16 @@ import fs            from 'fs';
 import yts           from 'yt-search';
 import { exec }      from 'child_process';
 import { promisify } from 'util';
+import os            from 'os';
+import path          from 'path';
 
 const execPromise    = promisify(exec);
 const FFMPEG_TIMEOUT = 60_000;
-
+const TMP_DIR        = os.tmpdir();
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 export const ffprobeDuration = async (filePath) => {
     try {
@@ -142,15 +146,81 @@ const ffmpegVideo = async (rawFile, outFile) => {
     } catch { fs.copyFileSync(rawFile, outFile); }
 };
 
-// ── Providers ─────────────────────────────────────────────────────────────────
-
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Provider: YTDown (video MP4) ──────────────────────────────────────────────
+// ── Provider 1: yt-dlp (el más fiable) ───────────────────────────────────────
+// Requiere yt-dlp instalado: pip install yt-dlp  /  pkg install yt-dlp (Termux)
+const providerYtDlp = async (ytUrl, type) => {
+    const stamp   = Date.now();
+    const outFile = path.join(TMP_DIR, `ytdlp_${stamp}.%(ext)s`);
+
+    let cmd;
+    if (type === 'audio') {
+        cmd = `yt-dlp -x --audio-format mp3 --audio-quality 128K ` +
+              `--no-playlist -o "${outFile}" "${ytUrl}"`;
+    } else {
+        cmd = `yt-dlp -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/` +
+              `best[height<=720][ext=mp4]/best[height<=720]" ` +
+              `--merge-output-format mp4 --no-playlist -o "${outFile}" "${ytUrl}"`;
+    }
+
+    await execPromise(cmd, { timeout: 120_000 });
+
+    const ext      = type === 'audio' ? 'mp3' : 'mp4';
+    const realFile = outFile.replace('%(ext)s', ext);
+
+    if (!fs.existsSync(realFile) || fs.statSync(realFile).size === 0)
+        throw new Error('yt-dlp: archivo de salida vacío o no encontrado');
+
+    const buf = fs.readFileSync(realFile);
+    fs.unlinkSync(realFile);
+    return buf;
+};
+
+// ── Provider 2: Cobalt (instancias sin JWT) ───────────────────────────────────
+// Estas instancias comunitarias aún no requieren autenticación
+const providerCobaltAlt = async (ytUrl, type) => {
+    const instances = [
+        'https://cobalt.api.timelessnesses.me',
+        'https://cobalt.tools.nadeko.net',
+        'https://capi.oak.icu',
+        'https://cobalt.uku.lol',
+        'https://cobalt.fyoal.com',
+    ];
+
+    for (const base of instances) {
+        try {
+            const res = await fetch(`${base}/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept':       'application/json',
+                    'User-Agent':   UA,
+                },
+                body: JSON.stringify({
+                    url:          ytUrl,
+                    downloadMode: type === 'audio' ? 'audio' : 'auto',
+                    audioFormat:  'mp3',
+                    audioBitrate: '128',
+                    videoQuality: '720',
+                }),
+                signal: AbortSignal.timeout(25_000),
+            });
+            if (!res.ok) continue;
+            const json = await res.json();
+            if (!['tunnel', 'redirect', 'stream'].includes(json.status)) continue;
+            const buf = await fetchBuffer(json.url);
+            if (buf && buf.length > 10_000) return buf;
+        } catch { /* siguiente instancia */ }
+    }
+    throw new Error('cobalt-alt: todas las instancias fallaron');
+};
+
+// ── Provider 3: YTDown (video MP4) ───────────────────────────────────────────
 const providerYTDown = async (ytUrl, type) => {
     if (type === 'audio') throw new Error('ytdown: solo soporta video');
-    const BASE   = 'https://app.ytdown.to';
-    const PAGE   = `${BASE}/es29/`;
+    const BASE = 'https://app.ytdown.to';
+    const PAGE = `${BASE}/es29/`;
 
     const pageRes = await fetch(PAGE, {
         headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml' },
@@ -159,12 +229,9 @@ const providerYTDown = async (ytUrl, type) => {
     if (!pageRes.ok) throw new Error(`ytdown page HTTP ${pageRes.status}`);
     const html = await pageRes.text();
 
-    // Extraer CSRF token del formulario
     const token = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] || '';
-
-    // Buscar endpoint de conversión en el action del form o en scripts
     const actionRaw = html.match(/action="([^"]*\/(?:convert|download|process)[^"]*)"/i)?.[1]
-        || html.match(/url\s*:\s*["']([^"']*\/(?:convert|download|process)[^"']*)["']/i)?.[1]
+        || html.match(/url\s*:\s*["']([^"']*\/(?:convert|download|process)[^"']*)['"]/i)?.[1]
         || '/convert';
     const action = actionRaw.startsWith('http') ? actionRaw : `${BASE}${actionRaw}`;
 
@@ -174,10 +241,10 @@ const providerYTDown = async (ytUrl, type) => {
     const convRes = await fetch(action, {
         method: 'POST',
         headers: {
-            'Content-Type':      'application/x-www-form-urlencoded',
-            'User-Agent':        UA,
-            'Referer':           PAGE,
-            'X-Requested-With':  'XMLHttpRequest',
+            'Content-Type':     'application/x-www-form-urlencoded',
+            'User-Agent':       UA,
+            'Referer':          PAGE,
+            'X-Requested-With': 'XMLHttpRequest',
         },
         body,
         signal: AbortSignal.timeout(40_000),
@@ -200,7 +267,123 @@ const providerYTDown = async (ytUrl, type) => {
     return await fetchBuffer(dlUrl, { 'Referer': PAGE });
 };
 
-// ── Provider: MP3Now (audio MP3) ──────────────────────────────────────────────
+// ── Provider 4: loader.to (video + audio) ────────────────────────────────────
+const providerLoaderTo = async (ytUrl, type) => {
+    const BASE    = 'https://loader.to';
+    const REFERER = `${BASE}/`;
+    const fmt     = type === 'audio' ? 'mp3' : '720';
+
+    const startRes = await fetch(
+        `${BASE}/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}&api=dfcb6d76f2f2a12c83a82a4de3bc75e8`,
+        { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(15_000) }
+    );
+    if (!startRes.ok) throw new Error(`loader.to start HTTP ${startRes.status}`);
+    const start = await startRes.json();
+    if (!start.id) throw new Error(`loader.to: sin id — ${JSON.stringify(start).slice(0, 100)}`);
+
+    for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 3_000));
+        const progRes = await fetch(
+            `${BASE}/ajax/progress.php?id=${start.id}`,
+            { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(10_000) }
+        );
+        if (!progRes.ok) continue;
+        const prog = await progRes.json();
+        if (prog.download_url) return await fetchBuffer(prog.download_url, { Referer: REFERER });
+        if (prog.success === false) throw new Error('loader.to: falló la conversión');
+    }
+    throw new Error('loader.to: timeout esperando conversión');
+};
+
+// ── Provider 5: yt5s.com (video + audio) ─────────────────────────────────────
+const providerYt5s = async (ytUrl, type) => {
+    const BASE    = 'https://yt5s.io';
+    const REFERER = `${BASE}/`;
+    const H = {
+        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent':       UA,
+        'Referer':          REFERER,
+    };
+
+    const searchRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
+        method: 'POST', headers: H,
+        body:   `q=${encodeURIComponent(ytUrl)}&vt=home`,
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!searchRes.ok) throw new Error(`yt5s search HTTP ${searchRes.status}`);
+    const search = await searchRes.json();
+    if (search.status !== 'Ok') throw new Error(`yt5s search: ${search.mess || JSON.stringify(search).slice(0, 80)}`);
+
+    const vid = search.vid;
+    let k;
+
+    if (type === 'audio') {
+        const mp3 = search.links?.mp3?.mp3128 || Object.values(search.links?.mp3 || {})[0];
+        k = mp3?.k;
+    } else {
+        const mp4 = search.links?.mp4;
+        k = mp4?.['720']?.k || mp4?.['480']?.k || mp4?.['360']?.k
+            || Object.values(mp4 || {})[0]?.k;
+    }
+    if (!k) throw new Error('yt5s: no se encontró k para el formato solicitado');
+
+    const convRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
+        method: 'POST', headers: H,
+        body:   `vid=${vid}&k=${encodeURIComponent(k)}`,
+        signal: AbortSignal.timeout(40_000),
+    });
+    if (!convRes.ok) throw new Error(`yt5s convert HTTP ${convRes.status}`);
+    const conv = await convRes.json();
+    if (!conv.dlink) throw new Error(`yt5s: sin dlink — ${JSON.stringify(conv).slice(0, 100)}`);
+
+    return await fetchBuffer(conv.dlink, { Referer: REFERER });
+};
+
+// ── Provider 6: y2down.cc (video + audio) ────────────────────────────────────
+const providerY2down = async (ytUrl, type) => {
+    const BASE    = 'https://y2down.cc';
+    const REFERER = `${BASE}/`;
+
+    const res = await fetch(`${BASE}/api/single/v3`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'User-Agent':   UA,
+            'Referer':      REFERER,
+            'Origin':       BASE,
+        },
+        body: JSON.stringify({ url: ytUrl }),
+        signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) throw new Error(`y2down HTTP ${res.status}`);
+
+    const json = await res.json();
+    const links = json?.links || json?.data || [];
+
+    if (!Array.isArray(links) || links.length === 0)
+        throw new Error(`y2down: sin resultados — ${JSON.stringify(json).slice(0, 120)}`);
+
+    let chosen;
+    if (type === 'audio') {
+        chosen = links.find(l => /mp3/i.test(l.type || l.ext || ''))
+            || links.find(l => /audio/i.test(l.type || ''));
+    } else {
+        const vids = links.filter(l => /mp4/i.test(l.type || l.ext || ''));
+        chosen = vids.find(l => /720/.test(l.quality || ''))
+            || vids.find(l => /480/.test(l.quality || ''))
+            || vids[0] || links[0];
+    }
+    if (!chosen) throw new Error('y2down: sin formato adecuado');
+
+    const dlUrl = chosen.url || chosen.link || chosen.download;
+    if (!dlUrl || !dlUrl.startsWith('http'))
+        throw new Error(`y2down: URL inválida — ${JSON.stringify(chosen).slice(0, 80)}`);
+
+    return await fetchBuffer(dlUrl, { Referer: REFERER });
+};
+
+// ── Provider 7: MP3Now (audio) ────────────────────────────────────────────────
 const providerMP3Now = async (ytUrl, type) => {
     if (type === 'video') throw new Error('mp3now: solo soporta audio');
     const BASE = 'https://mp3now.com';
@@ -214,9 +397,7 @@ const providerMP3Now = async (ytUrl, type) => {
     const html = await pageRes.text();
 
     const token = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] || '';
-
     const actionRaw = html.match(/action="([^"]*\/(?:convert|download|process|mp3)[^"]*)"/i)?.[1]
-        || html.match(/url\s*:\s*["']([^"']*\/(?:convert|download|process)[^"']*)["']/i)?.[1]
         || '/convert';
     const action = actionRaw.startsWith('http') ? actionRaw : `${BASE}${actionRaw}`;
 
@@ -226,10 +407,10 @@ const providerMP3Now = async (ytUrl, type) => {
     const convRes = await fetch(action, {
         method: 'POST',
         headers: {
-            'Content-Type':      'application/x-www-form-urlencoded',
-            'User-Agent':        UA,
-            'Referer':           PAGE,
-            'X-Requested-With':  'XMLHttpRequest',
+            'Content-Type':     'application/x-www-form-urlencoded',
+            'User-Agent':       UA,
+            'Referer':          PAGE,
+            'X-Requested-With': 'XMLHttpRequest',
         },
         body,
         signal: AbortSignal.timeout(40_000),
@@ -252,379 +433,18 @@ const providerMP3Now = async (ytUrl, type) => {
     return await fetchBuffer(dlUrl, { 'Referer': PAGE });
 };
 
-// ── Provider: SSYouTube / SaveFrom (video + audio) ───────────────────────────
-const providerSSYouTube = async (ytUrl, type) => {
-    const SF_API  = 'https://worker.sf-tools.com/savefrom.php';
-    const ORIGIN  = 'https://ssyoutube.com';
-    const REFERER = 'https://ssyoutube.com/';
-
-    const body = new URLSearchParams({
-        sf_url:            ytUrl,
-        sf_submit:         '',
-        new:               '2',
-        lang:              'es',
-        app:               '',
-        tool:              'pc',
-        channel:           'main',
-        id_ru_fast_show:   '0',
-    });
-
-    const res = await fetch(SF_API, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent':   UA,
-            'Origin':       ORIGIN,
-            'Referer':      REFERER,
-        },
-        body: body.toString(),
-        signal: AbortSignal.timeout(25_000),
-    });
-    if (!res.ok) throw new Error(`ssyoutube HTTP ${res.status}`);
-
-    const raw = await res.text();
-
-    // La respuesta puede ser JSON puro o JSONP con callback
-    let json;
-    try {
-        json = JSON.parse(raw);
-    } catch {
-        const match = raw.match(/\{[\s\S]*\}/);
-        if (!match) throw new Error(`ssyoutube: respuesta no parseable — ${raw.slice(0, 120)}`);
-        json = JSON.parse(match[0]);
-    }
-
-    const links = json?.url;
-    if (!Array.isArray(links) || links.length === 0)
-        throw new Error(`ssyoutube: sin enlaces — ${JSON.stringify(json).slice(0, 150)}`);
-
-    let chosen;
-
-    if (type === 'audio') {
-        chosen = links.find(l => l.ext === 'mp3')
-            || links.find(l => /m4a|aac|ogg|opus/.test(l.ext || ''))
-            || links.find(l => l.audio === true && l.ext !== 'mp4');
-    } else {
-        const mp4s = links.filter(l => l.ext === 'mp4' && l.audio !== false);
-        chosen = mp4s.find(l => /720/.test(l.quality || ''))
-            || mp4s.find(l => /480/.test(l.quality || ''))
-            || mp4s[0]
-            || links[0];
-    }
-
-    if (!chosen) throw new Error('ssyoutube: no se encontró formato adecuado');
-
-    const dlUrl = chosen.url;
-    if (!dlUrl || !dlUrl.startsWith('http'))
-        throw new Error(`ssyoutube: URL inválida — ${JSON.stringify(chosen).slice(0, 100)}`);
-
-    return await fetchBuffer(dlUrl, { 'Referer': REFERER });
-};
-
-const providerCobalt = async (ytUrl, type) => {
-    const res = await fetch('https://api.cobalt.tools/', {
-        method: 'POST',
-        headers: {
-            'Content-Type':  'application/json',
-            'Accept':        'application/json',
-            'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Origin':        'https://cobalt.tools',
-            'Referer':       'https://cobalt.tools/',
-        },
-        body: JSON.stringify({
-            url:           ytUrl,
-            downloadMode:  type === 'audio' ? 'audio' : 'auto',
-            audioFormat:   'mp3',
-            audioBitrate:  '128',
-            videoQuality:  '720',
-            filenameStyle: 'pretty',
-        }),
-        signal: AbortSignal.timeout(25_000),
-    });
-    if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`cobalt HTTP ${res.status}: ${body.slice(0, 120)}`);
-    }
-    const json = await res.json();
-    if (!['tunnel', 'redirect', 'stream'].includes(json.status))
-        throw new Error(`cobalt status "${json.status}": ${json.error?.code || JSON.stringify(json).slice(0, 80)}`);
-    return await fetchBuffer(json.url, { 'Referer': 'https://cobalt.tools/' });
-};
-
-const providerCobaltAlt = async (ytUrl, type) => {
-    const instances = [
-        'https://cobalt.api.timelessnesses.me',
-        'https://cobalt.tools.nadeko.net',
-        'https://api.cobalt.tools',
-    ];
-    for (const base of instances) {
-        try {
-            const res = await fetch(`${base}/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept':       'application/json',
-                    'Origin':       base.replace('api.', ''),
-                },
-                body: JSON.stringify({
-                    url:          ytUrl,
-                    downloadMode: type === 'audio' ? 'audio' : 'auto',
-                    audioFormat:  'mp3',
-                    audioBitrate: '128',
-                }),
-                signal: AbortSignal.timeout(20_000),
-            });
-            if (!res.ok) continue;
-            const json = await res.json();
-            if (!['tunnel', 'redirect', 'stream'].includes(json.status)) continue;
-            return await fetchBuffer(json.url);
-        } catch {}
-    }
-    throw new Error('cobalt-alt: todas las instancias fallaron');
-};
-
-const providerY2mate = async (ytUrl, type) => {
-    const vid = ytUrl.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
-    if (!vid) throw new Error('y2mate: no se pudo extraer video ID');
-
-    const HEADERS = {
-        'Content-Type':      'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With':  'XMLHttpRequest',
-        'Referer':           'https://www.y2mate.com/',
-        'User-Agent':        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    };
-
-    const analyzeRes = await fetch('https://www.y2mate.com/mates/analyzeV2/ajax', {
-        method: 'POST',
-        headers: HEADERS,
-        body: `k_query=https://www.youtube.com/watch?v=${vid}&k_page=home&hl=en&q_auto=0`,
-        signal: AbortSignal.timeout(20_000),
-    });
-    if (!analyzeRes.ok) throw new Error(`y2mate analyze HTTP ${analyzeRes.status}`);
-    const analyze = await analyzeRes.json();
-    if (!analyze.vid) throw new Error('y2mate: analyze sin vid');
-
-    const fmtMap = type === 'audio' ? (analyze.links?.mp3 || {}) : (analyze.links?.mp4 || {});
-    const fmtKey = type === 'audio' ? '128' : '720';
-    const fmt    = fmtMap[fmtKey] || Object.values(fmtMap)[0];
-    if (!fmt?.k) throw new Error('y2mate: sin formato disponible');
-
-    const convertRes = await fetch('https://www.y2mate.com/mates/convertV2/index', {
-        method: 'POST',
-        headers: HEADERS,
-        body: `vid=${analyze.vid}&k=${fmt.k}`,
-        signal: AbortSignal.timeout(40_000),
-    });
-    if (!convertRes.ok) throw new Error(`y2mate convert HTTP ${convertRes.status}`);
-    const convert = await convertRes.json();
-    if (!convert.dlink) throw new Error(`y2mate: sin dlink — ${JSON.stringify(convert).slice(0, 80)}`);
-
-    return await fetchBuffer(convert.dlink, { 'Referer': 'https://www.y2mate.com/' });
-};
-
-const providerCnvMp3 = async (ytUrl, type) => {
-    const BASE = 'https://cnvmp3.com';
-    const fmt  = type === 'audio' ? 'mp3' : 'mp4';
-
-    const pushRes = await fetch(`${BASE}/api/convert`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Referer':      `${BASE}/`,
-            'User-Agent':   'Mozilla/5.0',
-        },
-        body: JSON.stringify({ url: ytUrl, format: fmt, quality: type === 'audio' ? '128' : '720' }),
-        signal: AbortSignal.timeout(15_000),
-    });
-    if (!pushRes.ok) throw new Error(`cnvmp3 HTTP ${pushRes.status}`);
-    const push = await pushRes.json();
-
-    const fileUrl = push.url || push.download || push.link || push.file;
-    if (!fileUrl) throw new Error(`cnvmp3: respuesta inesperada: ${JSON.stringify(push).slice(0, 100)}`);
-
-    return await fetchBuffer(fileUrl.startsWith('http') ? fileUrl : `${BASE}${fileUrl}`, {
-        'Referer': `${BASE}/`,
-    });
-};
-
-
-// ── Provider: yt1s (video + audio) ───────────────────────────────────────────
-// Flujo: POST ajaxSearch → obtener vid+k → POST ajaxConvert → dlink
-const providerYt1s = async (ytUrl, type) => {
-    const BASE    = 'https://www.yt1s.com';
-    const REFERER = `${BASE}/`;
-    const H = {
-        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'User-Agent':       UA,
-        'Referer':          REFERER,
-    };
-
-    // Paso 1: buscar video y obtener formatos
-    const searchRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
-        method:  'POST',
-        headers: H,
-        body:    `q=${encodeURIComponent(ytUrl)}&vt=home`,
-        signal:  AbortSignal.timeout(20_000),
-    });
-    if (!searchRes.ok) throw new Error(`yt1s search HTTP ${searchRes.status}`);
-    const search = await searchRes.json();
-    if (search.status !== 'Ok') throw new Error(`yt1s search: ${search.mess || JSON.stringify(search).slice(0, 80)}`);
-
-    const vid = search.vid;
-    let k;
-
-    if (type === 'audio') {
-        const mp3 = search.links?.mp3?.mp3128 || Object.values(search.links?.mp3 || {})[0];
-        k = mp3?.k;
-    } else {
-        const mp4 = search.links?.mp4;
-        k = mp4?.['720']?.k || mp4?.['480']?.k || mp4?.['360']?.k
-            || Object.values(mp4 || {})[0]?.k;
-    }
-    if (!k) throw new Error('yt1s: no se encontró k para el formato solicitado');
-
-    // Paso 2: convertir y obtener dlink
-    const convRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
-        method:  'POST',
-        headers: H,
-        body:    `vid=${vid}&k=${encodeURIComponent(k)}`,
-        signal:  AbortSignal.timeout(40_000),
-    });
-    if (!convRes.ok) throw new Error(`yt1s convert HTTP ${convRes.status}`);
-    const conv = await convRes.json();
-    if (!conv.dlink) throw new Error(`yt1s: sin dlink — ${JSON.stringify(conv).slice(0, 100)}`);
-
-    return await fetchBuffer(conv.dlink, { Referer: REFERER });
-};
-
-// ── Provider: loader.to (video + audio) ──────────────────────────────────────
-// API pública con polling de progreso
-const providerLoaderTo = async (ytUrl, type) => {
-    const BASE    = 'https://loader.to';
-    const REFERER = `${BASE}/`;
-    const fmt     = type === 'audio' ? 'mp3' : '720';
-
-    // Iniciar descarga
-    const startRes = await fetch(
-        `${BASE}/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}&api=dfcb6d76f2f2a12c83a82a4de3bc75e8`,
-        {
-            headers: { 'User-Agent': UA, 'Referer': REFERER },
-            signal:  AbortSignal.timeout(15_000),
-        }
-    );
-    if (!startRes.ok) throw new Error(`loader.to start HTTP ${startRes.status}`);
-    const start = await startRes.json();
-    if (!start.id) throw new Error(`loader.to: sin id — ${JSON.stringify(start).slice(0, 100)}`);
-
-    // Polling hasta que progreso sea 100
-    for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 3_000));
-        const progRes = await fetch(
-            `${BASE}/ajax/progress.php?id=${start.id}`,
-            { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(10_000) }
-        );
-        if (!progRes.ok) continue;
-        const prog = await progRes.json();
-        if (prog.download_url) {
-            return await fetchBuffer(prog.download_url, { Referer: REFERER });
-        }
-        if (prog.success === false) throw new Error(`loader.to: falló la conversión`);
-    }
-    throw new Error('loader.to: timeout esperando conversión');
-};
-
-// ── Provider: 9xbuddy (video + audio) ────────────────────────────────────────
-const provider9xBuddy = async (ytUrl, type) => {
-    const BASE    = 'https://9xbuddy.in';
-    const REFERER = `${BASE}/`;
-
-    const res = await fetch(
-        `${BASE}/process?url=${encodeURIComponent(ytUrl)}`,
-        {
-            headers: { 'User-Agent': UA, 'Referer': REFERER, 'Accept': 'application/json' },
-            signal:  AbortSignal.timeout(25_000),
-        }
-    );
-    if (!res.ok) throw new Error(`9xbuddy HTTP ${res.status}`);
-    const json = await res.json();
-
-    const items = json?.data || json?.links || json?.result || [];
-    if (!Array.isArray(items) || items.length === 0)
-        throw new Error(`9xbuddy: sin resultados — ${JSON.stringify(json).slice(0, 120)}`);
-
-    let chosen;
-    if (type === 'audio') {
-        chosen = items.find(i => /mp3/i.test(i.ext || i.format || i.type || ''))
-            || items.find(i => /audio/i.test(i.type || ''));
-    } else {
-        const vids = items.filter(i => /mp4/i.test(i.ext || i.format || i.type || ''));
-        chosen = vids.find(i => /720/.test(i.quality || i.size || ''))
-            || vids.find(i => /480/.test(i.quality || i.size || ''))
-            || vids[0] || items[0];
-    }
-    if (!chosen) throw new Error('9xbuddy: sin formato adecuado');
-
-    const dlUrl = chosen.url || chosen.link || chosen.download;
-    if (!dlUrl || !dlUrl.startsWith('http'))
-        throw new Error(`9xbuddy: URL inválida — ${JSON.stringify(chosen).slice(0, 80)}`);
-
-    return await fetchBuffer(dlUrl, { Referer: REFERER });
-};
-
-// ── Provider: tomp3.cc (audio) ────────────────────────────────────────────────
-// Mismo motor que yt1s con endpoints propios
-const providerToMp3 = async (ytUrl, type) => {
-    if (type === 'video') throw new Error('tomp3: solo soporta audio');
-    const BASE    = 'https://tomp3.cc';
-    const REFERER = `${BASE}/`;
-    const H = {
-        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'User-Agent':       UA,
-        'Referer':          REFERER,
-    };
-
-    const searchRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
-        method: 'POST', headers: H,
-        body:   `q=${encodeURIComponent(ytUrl)}&vt=home`,
-        signal: AbortSignal.timeout(20_000),
-    });
-    if (!searchRes.ok) throw new Error(`tomp3 search HTTP ${searchRes.status}`);
-    const search = await searchRes.json();
-    if (search.status !== 'Ok') throw new Error(`tomp3 search: ${search.mess || ''}`);
-
-    const mp3 = search.links?.mp3?.mp3128 || Object.values(search.links?.mp3 || {})[0];
-    if (!mp3?.k) throw new Error('tomp3: sin k de audio');
-
-    const convRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
-        method: 'POST', headers: H,
-        body:   `vid=${search.vid}&k=${encodeURIComponent(mp3.k)}`,
-        signal: AbortSignal.timeout(40_000),
-    });
-    if (!convRes.ok) throw new Error(`tomp3 convert HTTP ${convRes.status}`);
-    const conv = await convRes.json();
-    if (!conv.dlink) throw new Error(`tomp3: sin dlink`);
-
-    return await fetchBuffer(conv.dlink, { Referer: REFERER });
-};
-
 // ── Cadena de providers ───────────────────────────────────────────────────────
 
 const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
     const errors  = [];
     const entries = [
-        { name: 'ytdown',           fn: () => providerYTDown(ytUrl, type) },
-        { name: 'mp3now',           fn: () => providerMP3Now(ytUrl, type) },
-        { name: 'ssyoutube',        fn: () => providerSSYouTube(ytUrl, type) },
-        { name: 'yt1s',             fn: () => providerYt1s(ytUrl, type) },
-        { name: 'loader.to',        fn: () => providerLoaderTo(ytUrl, type) },
-        { name: '9xbuddy',          fn: () => provider9xBuddy(ytUrl, type) },
-        { name: 'tomp3',            fn: () => providerToMp3(ytUrl, type) },
-        { name: 'cobalt.tools',     fn: () => providerCobalt(ytUrl, type) },
+        { name: 'yt-dlp',          fn: () => providerYtDlp(ytUrl, type) },
         { name: 'cobalt-instances', fn: () => providerCobaltAlt(ytUrl, type) },
-        { name: 'y2mate',           fn: () => providerY2mate(ytUrl, type) },
-        { name: 'cnvmp3',           fn: () => providerCnvMp3(ytUrl, type) },
+        { name: 'ytdown',          fn: () => providerYTDown(ytUrl, type) },
+        { name: 'yt5s',            fn: () => providerYt5s(ytUrl, type) },
+        { name: 'y2down',          fn: () => providerY2down(ytUrl, type) },
+        { name: 'loader.to',       fn: () => providerLoaderTo(ytUrl, type) },
+        { name: 'mp3now',          fn: () => providerMP3Now(ytUrl, type) },
     ];
 
     for (const { name, fn } of entries) {
@@ -649,7 +469,7 @@ const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
 export const ytDownload = async (url, type = 'audio', opts = {}) => {
     const { quality = '360p' } = opts;
     const stamp    = Date.now();
-    const tmpBase  = `./tmp_ytdl_${stamp}`;
+    const tmpBase  = path.join(TMP_DIR, `ytdl_${stamp}`);
     const tmpFiles = [];
     const cleanup  = () =>
         tmpFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
