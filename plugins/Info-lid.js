@@ -7,42 +7,31 @@ const handler = async (m, { conn }) => {
 
   if (isLid) {
     lid = rawSender
-
-    // 1) Método nativo de este fork de Baileys: LIDMappingStore
-    //    Tiene caché LRU + base de datos persistente de mappings lid ↔ PN
-    try {
-      const pn = await conn?.signalRepository?.lidMapping?.getPNForLID(rawSender)
-      if (pn && !pn.endsWith('@lid')) {
-        realJid = pn
+    // Usar el LidResolver del bot (conn.resolveLid) — tiene caché persistente
+    // y fallback a onWhatsApp(), mucho más confiable que conn.contacts (siempre vacío)
+    if (conn?.resolveLid?.resolveLid) {
+      const resolved = await conn.resolveLid.resolveLid(rawSender, m.chat)
+      if (resolved && !resolved.endsWith('@lid')) {
+        realJid = resolved
       }
-    } catch {}
-
-    // 2) Fallback: LidResolver propio del bot (lidsresolve.json)
-    if (realJid.endsWith('@lid') && conn?.resolveLid?.resolveLid) {
-      try {
-        const resolved = await conn.resolveLid.resolveLid(rawSender, m.chat)
-        if (resolved && !resolved.endsWith('@lid')) {
-          realJid = resolved
-        }
-      } catch {}
     }
-
   } else {
-    // JID normal → buscar su LID vía LIDMappingStore
-    try {
-      const lidResult = await conn?.signalRepository?.lidMapping?.getLIDForPN(rawSender)
-      if (lidResult) lid = lidResult
-    } catch {}
-
-    // Fallback: LidResolver del bot
-    if (!lid && conn?.resolveLid?.findLidByJid) {
-      lid = conn.resolveLid.findLidByJid(rawSender) || null
+    // JID normal → buscar su LID en la caché del LidResolver
+    if (conn?.resolveLid?.findLidByJid) {
+      const foundLid = conn.resolveLid.findLidByJid(rawSender)
+      if (foundLid) lid = foundLid
+    }
+    // Fallback: también buscar vía conn.lid si está disponible
+    if (!lid && conn?.lid?.findLidByJid) {
+      const foundLid = conn.lid.findLidByJid(rawSender)
+      if (foundLid) lid = foundLid
     }
   }
 
   // Número limpio desde JID real
   const rawNumber = realJid.split('@')[0].replace(/[^0-9]/g, '')
 
+  // Formatear número
   let formatted
   if (rawNumber.length <= 11) {
     formatted = '+' + rawNumber.replace(/(\d{2})(\d{3})(\d{3})(\d{3})/, '$1 $2 $3 $4')
@@ -58,10 +47,10 @@ const handler = async (m, { conn }) => {
     try { pp = await conn.profilePictureUrl(jid, 'preview') } catch {}
   }
 
-  // Aviso si el LID no pudo resolverse
+  // Advertencia si el LID no pudo resolverse (realJid sigue siendo el LID)
   const notResolved = isLid && realJid.endsWith('@lid')
   const warnLine = notResolved
-    ? `\n\n⚠️ _LID sin resolver: aún no hay mapping guardado para este usuario._`
+    ? `\n\n⚠️ _LID sin resolver: no está en la caché aún. Envía un mensaje al bot primero para que se registre._`
     : ''
 
   const caption = `╔═════✰⋆⋅☆⋅⋆✰═════╗
@@ -81,7 +70,11 @@ const handler = async (m, { conn }) => {
 
   await conn.sendMessage(
     m.chat,
-    { image: { url: pp }, caption, mentions: [jid] },
+    {
+      image: { url: pp },
+      caption,
+      mentions: [jid],
+    },
     { quoted: m }
   )
 }
