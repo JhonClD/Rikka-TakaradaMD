@@ -148,8 +148,25 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 const extractApicAusasUrl = (json) => {
     const d = json?.data || json;
-    return d.url || d.download || d.link || d.file || d.downloadUrl ||
-           d.video || d.audio || d.stream || d.mp4 || d.mp3 || null;
+    const isUrl = (v) => typeof v === 'string' && v.startsWith('http');
+
+    for (const key of ['url','download','link','file','downloadUrl','video','audio','stream','mp4','mp3']) {
+        if (isUrl(d[key])) return d[key];
+    }
+
+    const scanObj = (obj, depth = 0) => {
+        if (depth > 3) return null;
+        for (const val of Object.values(obj || {})) {
+            if (isUrl(val)) return val;
+            if (val && typeof val === 'object') {
+                const found = scanObj(val, depth + 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    };
+
+    return scanObj(d);
 };
 
 const providerApicAusasV2 = async (ytUrl, type, quality) => {
@@ -374,3 +391,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
+    
