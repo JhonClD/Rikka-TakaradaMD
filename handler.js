@@ -712,9 +712,15 @@ export async function handler(chatUpdate) {
 
     const _resolveLidJid = (jid) => {
       if (!jid?.endsWith('@lid')) return jid;
+      const lidKey = jid.split('@')[0];
+      // 0. LIDMappingStore nativo de Baileys (LRU síncrono — fuente más confiable)
+      const mappingCache = this?.signalRepository?.lidMapping?.mappingCache;
+      if (mappingCache) {
+        const pnUser = mappingCache.get(`lid:${lidKey}`);
+        if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+      }
       const resolver = this.resolveLid;
       if (!resolver) return jid;
-      const lidKey = jid.split('@')[0];
       // 1. Cache principal del LidResolver (Map interno)
       if (resolver.cache instanceof Map) {
         const entry = resolver.cache.get(lidKey);
@@ -746,9 +752,17 @@ export async function handler(chatUpdate) {
     const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const _senderPhone = _phoneOnly(_senderJid);
-    // Fallback LID: si el JID no se resolvió, buscar en contacts por lid
+    // Fallback LID: si el JID no se resolvió, intentar vía LIDMappingStore y contacts
     const _resolvedFromContacts = _senderJid?.endsWith('@lid')
       ? (() => {
+          // Primero: LIDMappingStore nativo de Baileys
+          const mappingCache = this?.signalRepository?.lidMapping?.mappingCache;
+          if (mappingCache) {
+            const lidKey = _senderJid.split('@')[0];
+            const pnUser = mappingCache.get(`lid:${lidKey}`);
+            if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+          }
+          // Fallback: contacts (siempre vacío en Baileys moderno)
           const contacts = Object.values(this?.contacts || conn?.contacts || {});
           const match = contacts.find(c => c.lid === m.sender || c.lid === _senderJid);
           return match?.id || match?.jid || null;
@@ -1288,6 +1302,14 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
         }
       } catch (_) {}
       if (p.endsWith('@lid')) {
+        // 0. LIDMappingStore nativo de Baileys
+        const mappingCache = mconn?.conn?.signalRepository?.lidMapping?.mappingCache;
+        if (mappingCache) {
+          const lidKey = p.split('@')[0];
+          const pnUser = mappingCache.get(`lid:${lidKey}`);
+          if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+        }
+        // 1. LidResolver del bot
         const resolver = mconn?.conn?.resolveLid;
         if (resolver) {
           const lidKey = p.split('@')[0];
