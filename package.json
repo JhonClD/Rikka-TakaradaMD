@@ -15,6 +15,7 @@
     "@adiwajshing/keyed-db": "^0.2.4",
     "@bochilteam/scraper": "^4.2.4",
     "@brandond/findthelyrics": "^2.0.5",
+    "@distube/ytdl-core": "^4.16.10",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@green-code/music-track-data": "^2.0.3",
     "@sefinek/google-tts-api": "*",
