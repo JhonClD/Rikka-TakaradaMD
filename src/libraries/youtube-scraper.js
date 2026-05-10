@@ -37,11 +37,12 @@ if (COOKIES_FILE) {
 
 // Flags globales que se agregan a TODOS los llamados de yt-dlp
 const YTDLP_GLOBAL_FLAGS = [
-    '--force-ipv4',                                           // evita problemas de IPv6 en VPS
-    COOKIES_FILE ? `--cookies "${COOKIES_FILE}"` : '',        // autenticación anti-bot
-    '--no-check-certificate',                                 // algunos VPS tienen cert issues
-    // tv_embedded: no requiere n-challenge Y acepta cookies (a diferencia de ios/android)
-    '--extractor-args "youtube:player_client=tv_embedded,mweb"',
+    '--force-ipv4',
+    COOKIES_FILE ? `--cookies "${COOKIES_FILE}"` : '',
+    '--no-check-certificate',
+    // android_vr bypasea el n-challenge sin necesitar JS runtime
+    // y SÍ acepta cookies (a diferencia de ios/tv_embedded en versiones viejas)
+    '--extractor-args "youtube:player_client=android_vr,web"',
 ].filter(Boolean).join(' ');
 
 // ── Auto-detección de yt-dlp (Termux + VPS) ──────────────────────────────────
@@ -246,127 +247,174 @@ const fetchBuffer = async (url, headers = {}, retries = 2) => {
     }
 };
 
-// ── Provider 1: cobalt.tools ─────────────────────────────────────────────────
-// API pública, sin key. Soporta audio MP3 directo.
+// ── Provider 1: cobalt.tools ──────────────────────────────────────────────────
+// API pública. Headers exactos que espera su backend en 2025.
 const providerCobalt = async (ytUrl, type) => {
     const res = await fetch('https://api.cobalt.tools/', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        method: 'POST',
+        headers: {
+            'Content-Type':   'application/json',
+            'Accept':         'application/json',
+            'User-Agent':     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin':         'https://cobalt.tools',
+            'Referer':        'https://cobalt.tools/',
+        },
         body: JSON.stringify({
-            url:           ytUrl,
-            downloadMode:  type === 'audio' ? 'audio' : 'auto',
-            audioFormat:   'mp3',
-            audioBitrate:  '128',
-            videoQuality:  '720',
+            url:          ytUrl,
+            downloadMode: type === 'audio' ? 'audio' : 'auto',
+            audioFormat:  'mp3',
+            audioBitrate: '128',
+            videoQuality: '720',
+            filenameStyle: 'pretty',
         }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(25_000),
     });
-    if (!res.ok) throw new Error(`cobalt HTTP ${res.status}`);
+    if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`cobalt HTTP ${res.status}: ${body.slice(0, 120)}`);
+    }
     const json = await res.json();
     if (!['tunnel', 'redirect', 'stream'].includes(json.status))
-        throw new Error(`cobalt status: ${json.status} — ${json.error?.code || ''}`);
-    return await fetchBuffer(json.url);
+        throw new Error(`cobalt status "${json.status}": ${json.error?.code || JSON.stringify(json).slice(0, 80)}`);
+    return await fetchBuffer(json.url, { 'Referer': 'https://cobalt.tools/' });
 };
 
-// ── Provider 2: apio16dlp.cnvmp3.online ──────────────────────────────────────
-// Convierte, espera el job y descarga el archivo resultante.
-const providerCnvMp3 = async (ytUrl, type) => {
-    const BASE = 'https://apio16dlp.cnvmp3.online';
-    // Paso 1: enviar la URL al convertidor
-    const convertRes = await fetch(`${BASE}/convert`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: ytUrl, format: type === 'audio' ? 'mp3' : 'mp4', quality: type === 'audio' ? '128' : '720' }),
-        signal: AbortSignal.timeout(15_000),
-    });
-    if (!convertRes.ok) throw new Error(`cnvmp3 convert HTTP ${convertRes.status}`);
-    const conv = await convertRes.json();
-
-    // El campo puede ser 'file', 'filename', 'id', 'result', 'path', etc.
-    const fileId = conv.file || conv.filename || conv.id || conv.result || conv.path;
-    if (!fileId) throw new Error(`cnvmp3: sin file ID en respuesta: ${JSON.stringify(conv)}`);
-
-    // Paso 2: descargar el archivo
-    const downloadUrl = fileId.startsWith('http')
-        ? fileId
-        : `${BASE}/downloads/download.php?file=/${fileId}`;
-
-    return await fetchBuffer(downloadUrl);
-};
-
-// ── Provider 3: loader.to ────────────────────────────────────────────────────
-const providerLoaderTo = async (ytUrl, type) => {
-    const fmt = type === 'audio' ? 'mp3' : 'mp4';
-    // Paso 1: iniciar conversión
-    const initRes = await fetch(
-        `https://loader.to/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}`,
-        { headers: { 'Referer': 'https://loader.to/' }, signal: AbortSignal.timeout(15_000) }
-    );
-    if (!initRes.ok) throw new Error(`loader.to init HTTP ${initRes.status}`);
-    const init = await initRes.json();
-    if (!init.id) throw new Error('loader.to: sin ID de job');
-
-    // Paso 2: polling hasta que esté listo (máx 60s)
-    let downloadUrl = null;
-    for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 2_000));
-        const pollRes = await fetch(
-            `https://loader.to/ajax/progress.php?id=${init.id}`,
-            { signal: AbortSignal.timeout(10_000) }
-        );
-        const poll = await pollRes.json();
-        if (poll.download_url) { downloadUrl = poll.download_url; break; }
-        if (poll.success === 0) throw new Error('loader.to: conversión fallida');
+// ── Provider 2: yt-dlp-api (instancia pública alternativa de cobalt) ──────────
+const providerCobaltAlt = async (ytUrl, type) => {
+    // Instancias públicas de cobalt mantenidas por la comunidad
+    const instances = [
+        'https://cobalt.api.timelessnesses.me',
+        'https://cobalt.tools.nadeko.net',
+        'https://api.cobalt.tools',
+    ];
+    for (const base of instances) {
+        try {
+            const res = await fetch(`${base}/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept':       'application/json',
+                    'Origin':       base.replace('api.', ''),
+                },
+                body: JSON.stringify({
+                    url:          ytUrl,
+                    downloadMode: type === 'audio' ? 'audio' : 'auto',
+                    audioFormat:  'mp3',
+                    audioBitrate: '128',
+                }),
+                signal: AbortSignal.timeout(20_000),
+            });
+            if (!res.ok) continue;
+            const json = await res.json();
+            if (!['tunnel', 'redirect', 'stream'].includes(json.status)) continue;
+            return await fetchBuffer(json.url);
+        } catch {}
     }
-    if (!downloadUrl) throw new Error('loader.to: timeout esperando conversión');
-    return await fetchBuffer(downloadUrl, { 'Referer': 'https://loader.to/' });
+    throw new Error('cobalt-alt: todas las instancias fallaron');
 };
 
-// ── Provider 4: yt1s.com ─────────────────────────────────────────────────────
-const providerYt1s = async (ytUrl, type) => {
-    const fmt = type === 'audio' ? 'mp3' : 'mp4';
-    const vid = ytUrl.match(/[?&]v=([^&]+)/)?.[1] || ytUrl.split('/').pop();
-    if (!vid) throw new Error('yt1s: no se pudo extraer video ID');
+// ── Provider 3: y2mate ────────────────────────────────────────────────────────
+// API de y2mate.com — endpoints verificados
+const providerY2mate = async (ytUrl, type) => {
+    const vid = ytUrl.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
+    if (!vid) throw new Error('y2mate: no se pudo extraer video ID');
 
-    const analyzeRes = await fetch('https://yt1s.com/api/ajaxSearch/index', {
+    const HEADERS = {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://www.y2mate.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    };
+
+    // Paso 1: obtener metadata y k-value
+    const analyzeRes = await fetch('https://www.y2mate.com/mates/analyzeV2/ajax', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://yt1s.com/' },
-        body: `q=${encodeURIComponent(ytUrl)}&vt=${fmt}`,
+        headers: HEADERS,
+        body: `k_query=https://www.youtube.com/watch?v=${vid}&k_page=home&hl=en&q_auto=0`,
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!analyzeRes.ok) throw new Error(`y2mate analyze HTTP ${analyzeRes.status}`);
+    const analyze = await analyzeRes.json();
+    if (!analyze.vid) throw new Error('y2mate: analyze sin vid');
+
+    // Elegir formato
+    const fmtMap = type === 'audio'
+        ? (analyze.links?.mp3 || {})
+        : (analyze.links?.mp4 || {});
+    const fmtKey = type === 'audio' ? '128' : '720';
+    const fmt    = fmtMap[fmtKey] || Object.values(fmtMap)[0];
+    if (!fmt?.k) throw new Error('y2mate: sin formato disponible');
+
+    // Paso 2: convertir y obtener link
+    const convertRes = await fetch('https://www.y2mate.com/mates/convertV2/index', {
+        method: 'POST',
+        headers: HEADERS,
+        body: `vid=${analyze.vid}&k=${fmt.k}`,
+        signal: AbortSignal.timeout(40_000),
+    });
+    if (!convertRes.ok) throw new Error(`y2mate convert HTTP ${convertRes.status}`);
+    const convert = await convertRes.json();
+    if (!convert.dlink) throw new Error(`y2mate: sin dlink — ${JSON.stringify(convert).slice(0, 80)}`);
+
+    return await fetchBuffer(convert.dlink, { 'Referer': 'https://www.y2mate.com/' });
+};
+
+// ── Provider 4: progressier / cnvmp3 ─────────────────────────────────────────
+// El dominio que mencionaste — intentamos endpoints comunes de cnvmp3.com
+const providerCnvMp3 = async (ytUrl, type) => {
+    const BASE = 'https://cnvmp3.com';
+    const fmt  = type === 'audio' ? 'mp3' : 'mp4';
+
+    // Flujo real de cnvmp3.com: POST con link → respuesta con job → polling
+    const pushRes = await fetch(`${BASE}/api/convert`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Referer':      `${BASE}/`,
+            'User-Agent':   'Mozilla/5.0',
+        },
+        body: JSON.stringify({ url: ytUrl, format: fmt, quality: type === 'audio' ? '128' : '720' }),
         signal: AbortSignal.timeout(15_000),
     });
-    if (!analyzeRes.ok) throw new Error(`yt1s analyze HTTP ${analyzeRes.status}`);
-    const analyze = await analyzeRes.json();
-    if (analyze.status !== 'ok') throw new Error('yt1s: analyze falló');
+    if (!pushRes.ok) throw new Error(`cnvmp3 HTTP ${pushRes.status}`);
+    const push = await pushRes.json();
 
-    // Elegir calidad: 128kbps para audio, 720p para video
-    const links = type === 'audio'
-        ? analyze.links?.mp3?.mp3128
-        : analyze.links?.mp4?.p720;
-    if (!links?.k) throw new Error('yt1s: sin formato disponible');
+    const fileUrl = push.url || push.download || push.link || push.file;
+    if (!fileUrl) throw new Error(`cnvmp3: respuesta inesperada: ${JSON.stringify(push).slice(0, 100)}`);
 
-    const convertRes = await fetch('https://yt1s.com/api/ajaxConvert/convert', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://yt1s.com/' },
-        body: `vid=${analyze.vid}&k=${links.k}`,
-        signal: AbortSignal.timeout(30_000),
+    return await fetchBuffer(fileUrl.startsWith('http') ? fileUrl : `${BASE}${fileUrl}`, {
+        'Referer': `${BASE}/`,
     });
-    if (!convertRes.ok) throw new Error(`yt1s convert HTTP ${convertRes.status}`);
-    const convert = await convertRes.json();
-    if (!convert.dlink) throw new Error('yt1s: sin download link');
-
-    return await fetchBuffer(convert.dlink, { 'Referer': 'https://yt1s.com/' });
 };
 
 // ── Cadena de providers ───────────────────────────────────────────────────────
-// Se intenta cada uno en orden; si falla se loguea y pasa al siguiente.
 const PROVIDERS = [
-    { name: 'cobalt.tools',             fn: providerCobalt   },
-    { name: 'apio16dlp.cnvmp3.online',  fn: providerCnvMp3   },
-    { name: 'loader.to',                fn: providerLoaderTo },
-    { name: 'yt1s.com',                 fn: providerYt1s     },
+    { name: 'cobalt.tools',     fn: providerCobalt    },
+    { name: 'cobalt-instances', fn: providerCobaltAlt },
+    { name: 'y2mate',           fn: providerY2mate    },
+    { name: 'cnvmp3',           fn: providerCnvMp3    },
 ];
 
 const downloadViaProviders = async (ytUrl, type) => {
+    const errors = [];
+    for (const { name, fn } of PROVIDERS) {
+        try {
+            console.log(`[yt-providers] Intentando ${name}…`);
+            const buf = await fn(ytUrl, type);
+            if (buf && buf.length > 10_000) {
+                console.log(`[yt-providers] ✅ ${name} — ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+                return { buffer: buf, provider: name };
+            }
+            throw new Error(`Buffer muy pequeño (${buf?.length ?? 0} bytes)`);
+        } catch (e) {
+            console.warn(`[yt-providers] ❌ ${name}: ${e.message}`);
+            errors.push(`${name}: ${e.message}`);
+        }
+    }
+    throw new Error(`Todos los providers fallaron:\n${errors.join('\n')}`);
+};
+
+
     const errors = [];
     for (const { name, fn } of PROVIDERS) {
         try {
