@@ -6,8 +6,6 @@ import { promisify } from 'util';
 const execPromise    = promisify(exec);
 const FFMPEG_TIMEOUT = 60_000;
 
-const APICAUSAS_KEY  = 'nakano-212-jhon';
-const APICAUSAS_BASE = 'https://rest.apicausas.xyz';
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
 
@@ -146,48 +144,112 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 // ── Providers ─────────────────────────────────────────────────────────────────
 
-const extractApicAusasUrl = (json) => {
-    const d = json?.data || json;
-    const isUrl = (v) => typeof v === 'string' && v.startsWith('http');
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-    for (const key of ['url','download','link','file','downloadUrl','video','audio','stream','mp4','mp3']) {
-        if (isUrl(d[key])) return d[key];
+// ── Provider: YTDown (video MP4) ──────────────────────────────────────────────
+const providerYTDown = async (ytUrl, type) => {
+    if (type === 'audio') throw new Error('ytdown: solo soporta video');
+    const BASE   = 'https://app.ytdown.to';
+    const PAGE   = `${BASE}/es29/`;
+
+    const pageRes = await fetch(PAGE, {
+        headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml' },
+        signal: AbortSignal.timeout(15_000),
+    });
+    if (!pageRes.ok) throw new Error(`ytdown page HTTP ${pageRes.status}`);
+    const html = await pageRes.text();
+
+    // Extraer CSRF token del formulario
+    const token = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] || '';
+
+    // Buscar endpoint de conversión en el action del form o en scripts
+    const actionRaw = html.match(/action="([^"]*\/(?:convert|download|process)[^"]*)"/i)?.[1]
+        || html.match(/url\s*:\s*["']([^"']*\/(?:convert|download|process)[^"']*)["']/i)?.[1]
+        || '/convert';
+    const action = actionRaw.startsWith('http') ? actionRaw : `${BASE}${actionRaw}`;
+
+    const body = new URLSearchParams({ url: ytUrl });
+    if (token) body.append('_token', token);
+
+    const convRes = await fetch(action, {
+        method: 'POST',
+        headers: {
+            'Content-Type':      'application/x-www-form-urlencoded',
+            'User-Agent':        UA,
+            'Referer':           PAGE,
+            'X-Requested-With':  'XMLHttpRequest',
+        },
+        body,
+        signal: AbortSignal.timeout(40_000),
+    });
+    if (!convRes.ok) throw new Error(`ytdown convert HTTP ${convRes.status}`);
+
+    const ct = convRes.headers.get('content-type') || '';
+    let dlUrl;
+
+    if (ct.includes('json')) {
+        const j = await convRes.json();
+        dlUrl = j.url || j.download || j.link || j.file || j.mp4;
+    } else {
+        const resHtml = await convRes.text();
+        dlUrl = resHtml.match(/href="(https?:\/\/[^"]+\.mp4[^"]*)"/)?.[1]
+            || resHtml.match(/href="(https?:\/\/[^"]+(?:download|dl)[^"]*)"/i)?.[1];
     }
 
-    const scanObj = (obj, depth = 0) => {
-        if (depth > 3) return null;
-        for (const val of Object.values(obj || {})) {
-            if (isUrl(val)) return val;
-            if (val && typeof val === 'object') {
-                const found = scanObj(val, depth + 1);
-                if (found) return found;
-            }
-        }
-        return null;
-    };
-
-    return scanObj(d);
+    if (!dlUrl) throw new Error('ytdown: no se encontró URL de descarga');
+    return await fetchBuffer(dlUrl, { 'Referer': PAGE });
 };
 
-const providerApicAusasV2 = async (ytUrl, type, quality) => {
-    const q = String(quality).replace('p', '') || '720';
-    const endpoint = `${APICAUSAS_BASE}/api/v1/descargas/youtubev2?apikey=${APICAUSAS_KEY}&url=${encodeURIComponent(ytUrl)}&type=${type}&quality=${q}`;
-    const res = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const dlUrl = extractApicAusasUrl(json);
-    if (!dlUrl) throw new Error(`apicausas-v2: sin URL — ${JSON.stringify(json).slice(0, 200)}`);
-    return await fetchBuffer(dlUrl);
-};
+// ── Provider: MP3Now (audio MP3) ──────────────────────────────────────────────
+const providerMP3Now = async (ytUrl, type) => {
+    if (type === 'video') throw new Error('mp3now: solo soporta audio');
+    const BASE = 'https://mp3now.com';
+    const PAGE = `${BASE}/en2/`;
 
-const providerApicAusasV1 = async (ytUrl, type) => {
-    const endpoint = `${APICAUSAS_BASE}/api/v1/descargas/youtube?apikey=${APICAUSAS_KEY}&url=${encodeURIComponent(ytUrl)}&type=${type}`;
-    const res = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const dlUrl = extractApicAusasUrl(json);
-    if (!dlUrl) throw new Error(`apicausas-v1: sin URL — ${JSON.stringify(json).slice(0, 200)}`);
-    return await fetchBuffer(dlUrl);
+    const pageRes = await fetch(PAGE, {
+        headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml' },
+        signal: AbortSignal.timeout(15_000),
+    });
+    if (!pageRes.ok) throw new Error(`mp3now page HTTP ${pageRes.status}`);
+    const html = await pageRes.text();
+
+    const token = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] || '';
+
+    const actionRaw = html.match(/action="([^"]*\/(?:convert|download|process|mp3)[^"]*)"/i)?.[1]
+        || html.match(/url\s*:\s*["']([^"']*\/(?:convert|download|process)[^"']*)["']/i)?.[1]
+        || '/convert';
+    const action = actionRaw.startsWith('http') ? actionRaw : `${BASE}${actionRaw}`;
+
+    const body = new URLSearchParams({ url: ytUrl, format: 'mp3', quality: '128' });
+    if (token) body.append('_token', token);
+
+    const convRes = await fetch(action, {
+        method: 'POST',
+        headers: {
+            'Content-Type':      'application/x-www-form-urlencoded',
+            'User-Agent':        UA,
+            'Referer':           PAGE,
+            'X-Requested-With':  'XMLHttpRequest',
+        },
+        body,
+        signal: AbortSignal.timeout(40_000),
+    });
+    if (!convRes.ok) throw new Error(`mp3now convert HTTP ${convRes.status}`);
+
+    const ct = convRes.headers.get('content-type') || '';
+    let dlUrl;
+
+    if (ct.includes('json')) {
+        const j = await convRes.json();
+        dlUrl = j.url || j.download || j.link || j.file || j.mp3;
+    } else {
+        const resHtml = await convRes.text();
+        dlUrl = resHtml.match(/href="(https?:\/\/[^"]+\.mp3[^"]*)"/)?.[1]
+            || resHtml.match(/id="download-result"[^>]*>[\s\S]*?href="(https?:\/\/[^"]+)"/)?.[1];
+    }
+
+    if (!dlUrl) throw new Error('mp3now: no se encontró URL de descarga');
+    return await fetchBuffer(dlUrl, { 'Referer': PAGE });
 };
 
 const providerCobalt = async (ytUrl, type) => {
@@ -321,8 +383,8 @@ const providerCnvMp3 = async (ytUrl, type) => {
 const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
     const errors  = [];
     const entries = [
-        { name: 'apicausas-v2',     fn: () => providerApicAusasV2(ytUrl, type, quality) },
-        { name: 'apicausas-v1',     fn: () => providerApicAusasV1(ytUrl, type) },
+        { name: 'ytdown',           fn: () => providerYTDown(ytUrl, type) },
+        { name: 'mp3now',           fn: () => providerMP3Now(ytUrl, type) },
         { name: 'cobalt.tools',     fn: () => providerCobalt(ytUrl, type) },
         { name: 'cobalt-instances', fn: () => providerCobaltAlt(ytUrl, type) },
         { name: 'y2mate',           fn: () => providerY2mate(ytUrl, type) },
