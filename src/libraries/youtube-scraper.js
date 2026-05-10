@@ -10,6 +10,7 @@
  */
 
 import fs           from 'fs';
+import path         from 'path';
 import yts          from 'yt-search';
 import { exec }     from 'child_process';
 import { promisify } from 'util';
@@ -19,6 +20,27 @@ const FFMPEG_TIMEOUT = 60_000;   // 1 min
 const YTDLP_TIMEOUT  = 120_000;  // 2 min
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
+
+// ── Cookies de YouTube (evita el bot-check) ───────────────────────────────────
+// Coloca cookies.txt en src/ o en la raíz del bot.
+const COOKIE_CANDIDATES = [
+    path.join(process.cwd(), 'src', 'cookies.txt'),
+    path.join(process.cwd(), 'cookies.txt'),
+];
+const COOKIES_FILE = COOKIE_CANDIDATES.find(f => fs.existsSync(f)) || null;
+
+if (COOKIES_FILE) {
+    console.log(`[yt-dlp] Usando cookies: ${COOKIES_FILE}`);
+} else {
+    console.warn('[yt-dlp] ⚠️  No se encontró cookies.txt — algunas descargas pueden fallar.');
+}
+
+// Flags globales que se agregan a TODOS los llamados de yt-dlp
+const YTDLP_GLOBAL_FLAGS = [
+    '--force-ipv4',                                           // evita problemas de IPv6 en VPS
+    COOKIES_FILE ? `--cookies "${COOKIES_FILE}"` : '',        // autenticación anti-bot
+    '--no-check-certificate',                                 // algunos VPS tienen cert issues
+].filter(Boolean).join(' ');
 
 // ── Auto-detección de yt-dlp (Termux + VPS) ──────────────────────────────────
 let _ytdlpBin = null;
@@ -64,10 +86,10 @@ const findYtDlp = async () => {
     );
 };
 
-// Wrapper: ejecuta yt-dlp con los argumentos dados
+// Wrapper: ejecuta yt-dlp con los argumentos dados + flags globales
 const ytdlpExec = async (args) => {
     const bin = await findYtDlp();
-    return execPromise(`"${bin}" ${args}`, { timeout: YTDLP_TIMEOUT });
+    return execPromise(`"${bin}" ${YTDLP_GLOBAL_FLAGS} ${args}`, { timeout: YTDLP_TIMEOUT });
 };
 
 // ── ffprobe: duración directa del contenedor ──────────────────────────────────
@@ -285,4 +307,5 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-    
+
+        
