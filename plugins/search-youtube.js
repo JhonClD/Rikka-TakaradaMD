@@ -139,7 +139,7 @@ handler.before = async function (m, { conn }) {
 
     // Importar y ejecutar el plugin correspondiente directamente
     try {
-        const mod = await import(`./${command === 'ytmp3' ? 'ytmp3' : 'ytmp4'}.js`);
+        const mod = await import('./ytdl.js');
         const target = mod.default || mod;
         await target.call(conn, m, { conn, text: url, usedPrefix, command, args: [url] });
     } catch (e) {
@@ -155,3 +155,4 @@ handler.tags    = ['search'];
 handler.command = /^(ytsearch|yts|searchyt|buscaryt|videosearch|audiosearch)$/i;
 
 export default handler;
+        
