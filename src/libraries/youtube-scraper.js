@@ -40,6 +40,9 @@ const YTDLP_GLOBAL_FLAGS = [
     '--force-ipv4',                                           // evita problemas de IPv6 en VPS
     COOKIES_FILE ? `--cookies "${COOKIES_FILE}"` : '',        // autenticación anti-bot
     '--no-check-certificate',                                 // algunos VPS tienen cert issues
+    // Usar cliente iOS: no requiere el n-challenge de JavaScript
+    // (el n-challenge falla en VPS sin Node.js runtime disponible para yt-dlp)
+    '--extractor-args "youtube:player_client=ios,web"',
 ].filter(Boolean).join(' ');
 
 // ── Auto-detección de yt-dlp (Termux + VPS) ──────────────────────────────────
@@ -308,4 +311,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
     }
 };
 
-        
+                                     
