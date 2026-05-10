@@ -40,9 +40,8 @@ const YTDLP_GLOBAL_FLAGS = [
     '--force-ipv4',                                           // evita problemas de IPv6 en VPS
     COOKIES_FILE ? `--cookies "${COOKIES_FILE}"` : '',        // autenticación anti-bot
     '--no-check-certificate',                                 // algunos VPS tienen cert issues
-    // Usar cliente iOS: no requiere el n-challenge de JavaScript
-    // (el n-challenge falla en VPS sin Node.js runtime disponible para yt-dlp)
-    '--extractor-args "youtube:player_client=ios,web"',
+    // tv_embedded: no requiere n-challenge Y acepta cookies (a diferencia de ios/android)
+    '--extractor-args "youtube:player_client=tv_embedded,mweb"',
 ].filter(Boolean).join(' ');
 
 // ── Auto-detección de yt-dlp (Termux + VPS) ──────────────────────────────────
@@ -218,7 +217,175 @@ export const ytSearch = async (query) => {
 
 export const ytInfo = (url) => ytSearch(url);
 
-// ── Descarga principal ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PROVIDERS EXTERNOS — se usan antes de yt-dlp para evitar el bloqueo de IP
+// Se prueban en orden; si uno falla se pasa al siguiente.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Descarga un archivo desde una URL y lo devuelve como Buffer.
+ * Reintenta hasta 2 veces ante errores de red.
+ */
+const fetchBuffer = async (url, headers = {}, retries = 2) => {
+    for (let i = 0; i <= retries; i++) {
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+                    ...headers,
+                },
+                signal: AbortSignal.timeout(60_000),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const ab = await res.arrayBuffer();
+            return Buffer.from(ab);
+        } catch (e) {
+            if (i === retries) throw e;
+            await new Promise(r => setTimeout(r, 1500 * (i + 1)));
+        }
+    }
+};
+
+// ── Provider 1: cobalt.tools ─────────────────────────────────────────────────
+// API pública, sin key. Soporta audio MP3 directo.
+const providerCobalt = async (ytUrl, type) => {
+    const res = await fetch('https://api.cobalt.tools/', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+            url:           ytUrl,
+            downloadMode:  type === 'audio' ? 'audio' : 'auto',
+            audioFormat:   'mp3',
+            audioBitrate:  '128',
+            videoQuality:  '720',
+        }),
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`cobalt HTTP ${res.status}`);
+    const json = await res.json();
+    if (!['tunnel', 'redirect', 'stream'].includes(json.status))
+        throw new Error(`cobalt status: ${json.status} — ${json.error?.code || ''}`);
+    return await fetchBuffer(json.url);
+};
+
+// ── Provider 2: apio16dlp.cnvmp3.online ──────────────────────────────────────
+// Convierte, espera el job y descarga el archivo resultante.
+const providerCnvMp3 = async (ytUrl, type) => {
+    const BASE = 'https://apio16dlp.cnvmp3.online';
+    // Paso 1: enviar la URL al convertidor
+    const convertRes = await fetch(`${BASE}/convert`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: ytUrl, format: type === 'audio' ? 'mp3' : 'mp4', quality: type === 'audio' ? '128' : '720' }),
+        signal: AbortSignal.timeout(15_000),
+    });
+    if (!convertRes.ok) throw new Error(`cnvmp3 convert HTTP ${convertRes.status}`);
+    const conv = await convertRes.json();
+
+    // El campo puede ser 'file', 'filename', 'id', 'result', 'path', etc.
+    const fileId = conv.file || conv.filename || conv.id || conv.result || conv.path;
+    if (!fileId) throw new Error(`cnvmp3: sin file ID en respuesta: ${JSON.stringify(conv)}`);
+
+    // Paso 2: descargar el archivo
+    const downloadUrl = fileId.startsWith('http')
+        ? fileId
+        : `${BASE}/downloads/download.php?file=/${fileId}`;
+
+    return await fetchBuffer(downloadUrl);
+};
+
+// ── Provider 3: loader.to ────────────────────────────────────────────────────
+const providerLoaderTo = async (ytUrl, type) => {
+    const fmt = type === 'audio' ? 'mp3' : 'mp4';
+    // Paso 1: iniciar conversión
+    const initRes = await fetch(
+        `https://loader.to/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}`,
+        { headers: { 'Referer': 'https://loader.to/' }, signal: AbortSignal.timeout(15_000) }
+    );
+    if (!initRes.ok) throw new Error(`loader.to init HTTP ${initRes.status}`);
+    const init = await initRes.json();
+    if (!init.id) throw new Error('loader.to: sin ID de job');
+
+    // Paso 2: polling hasta que esté listo (máx 60s)
+    let downloadUrl = null;
+    for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 2_000));
+        const pollRes = await fetch(
+            `https://loader.to/ajax/progress.php?id=${init.id}`,
+            { signal: AbortSignal.timeout(10_000) }
+        );
+        const poll = await pollRes.json();
+        if (poll.download_url) { downloadUrl = poll.download_url; break; }
+        if (poll.success === 0) throw new Error('loader.to: conversión fallida');
+    }
+    if (!downloadUrl) throw new Error('loader.to: timeout esperando conversión');
+    return await fetchBuffer(downloadUrl, { 'Referer': 'https://loader.to/' });
+};
+
+// ── Provider 4: yt1s.com ─────────────────────────────────────────────────────
+const providerYt1s = async (ytUrl, type) => {
+    const fmt = type === 'audio' ? 'mp3' : 'mp4';
+    const vid = ytUrl.match(/[?&]v=([^&]+)/)?.[1] || ytUrl.split('/').pop();
+    if (!vid) throw new Error('yt1s: no se pudo extraer video ID');
+
+    const analyzeRes = await fetch('https://yt1s.com/api/ajaxSearch/index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://yt1s.com/' },
+        body: `q=${encodeURIComponent(ytUrl)}&vt=${fmt}`,
+        signal: AbortSignal.timeout(15_000),
+    });
+    if (!analyzeRes.ok) throw new Error(`yt1s analyze HTTP ${analyzeRes.status}`);
+    const analyze = await analyzeRes.json();
+    if (analyze.status !== 'ok') throw new Error('yt1s: analyze falló');
+
+    // Elegir calidad: 128kbps para audio, 720p para video
+    const links = type === 'audio'
+        ? analyze.links?.mp3?.mp3128
+        : analyze.links?.mp4?.p720;
+    if (!links?.k) throw new Error('yt1s: sin formato disponible');
+
+    const convertRes = await fetch('https://yt1s.com/api/ajaxConvert/convert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://yt1s.com/' },
+        body: `vid=${analyze.vid}&k=${links.k}`,
+        signal: AbortSignal.timeout(30_000),
+    });
+    if (!convertRes.ok) throw new Error(`yt1s convert HTTP ${convertRes.status}`);
+    const convert = await convertRes.json();
+    if (!convert.dlink) throw new Error('yt1s: sin download link');
+
+    return await fetchBuffer(convert.dlink, { 'Referer': 'https://yt1s.com/' });
+};
+
+// ── Cadena de providers ───────────────────────────────────────────────────────
+// Se intenta cada uno en orden; si falla se loguea y pasa al siguiente.
+const PROVIDERS = [
+    { name: 'cobalt.tools',             fn: providerCobalt   },
+    { name: 'apio16dlp.cnvmp3.online',  fn: providerCnvMp3   },
+    { name: 'loader.to',                fn: providerLoaderTo },
+    { name: 'yt1s.com',                 fn: providerYt1s     },
+];
+
+const downloadViaProviders = async (ytUrl, type) => {
+    const errors = [];
+    for (const { name, fn } of PROVIDERS) {
+        try {
+            console.log(`[yt-providers] Intentando ${name}…`);
+            const buf = await fn(ytUrl, type);
+            if (buf && buf.length > 10_000) {
+                console.log(`[yt-providers] ✅ ${name} — ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+                return { buffer: buf, provider: name };
+            }
+            throw new Error(`Buffer muy pequeño (${buf?.length ?? 0} bytes)`);
+        } catch (e) {
+            console.warn(`[yt-providers] ❌ ${name}: ${e.message}`);
+            errors.push(`${name}: ${e.message}`);
+        }
+    }
+    throw new Error(`Todos los providers fallaron:\n${errors.join('\n')}`);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 /**
  * @param {string} url   - URL de YouTube
  * @param {string} type  - 'audio' | 'video'
@@ -235,74 +402,111 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
     const cleanup = () =>
         tmpFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
 
-    try {
-        // ── AUDIO ─────────────────────────────────────────────────────────────
-        if (type === 'audio') {
-            // Paso 1: yt-dlp descarga el audio en el formato nativo más eficiente
-            await ytdlpExec(
-                `--no-playlist --no-warnings -x -o "${tmpBase}_raw.%(ext)s" "${url}"`
-            );
+    // Meta se obtiene en paralelo (no bloquea si falla)
+    const metaPromise = ytInfo(url).catch(() => ({}));
 
-            const rawFile = ['m4a','webm','opus','ogg','mp3','wav','aac','flac']
-                .map(ext => `${tmpBase}_raw.${ext}`)
-                .find(f => fs.existsSync(f));
-
-            if (!rawFile) throw new Error('yt-dlp no descargó el archivo de audio.');
-            tmpFiles.push(rawFile);
-
-            // Paso 2: ffmpeg → MP3 con Xing header (fija el 0:00 en WhatsApp)
-            const outFile = `${tmpBase}.mp3`;
-            tmpFiles.push(outFile);
-
+    const ffmpegAudio = async (rawFile, outFile) => {
+        try {
             await execPromise(
                 `ffmpeg -y -i "${rawFile}" -vn -c:a libmp3lame -q:a 2 -write_xing 1 "${outFile}"`,
                 { timeout: FFMPEG_TIMEOUT }
             );
+        } catch { fs.copyFileSync(rawFile, outFile); }
+    };
 
+    const ffmpegVideo = async (rawFile, outFile) => {
+        try {
+            await execPromise(
+                `ffmpeg -y -i "${rawFile}" -c copy -movflags +faststart "${outFile}"`,
+                { timeout: FFMPEG_TIMEOUT }
+            );
+        } catch { fs.copyFileSync(rawFile, outFile); }
+    };
+
+    try {
+        // ── PASO 1: providers externos (evita el bloqueo de IP de yt-dlp) ────
+        let extBuffer   = null;
+        let extProvider = null;
+        try {
+            const res = await downloadViaProviders(url, type);
+            extBuffer   = res.buffer;
+            extProvider = res.provider;
+        } catch (err) {
+            console.warn(`[ytDownload] Providers externos: ${err.message}`);
+        }
+
+        if (extBuffer) {
+            const rawFile = `${tmpBase}.ext_raw`;
+            fs.writeFileSync(rawFile, extBuffer);
+            tmpFiles.push(rawFile);
+
+            if (type === 'audio') {
+                const outFile = `${tmpBase}.mp3`;
+                tmpFiles.push(outFile);
+                await ffmpegAudio(rawFile, outFile);
+                const [buffer, seconds, meta] = await Promise.all([
+                    Promise.resolve(fs.readFileSync(outFile)),
+                    ffprobeDuration(outFile),
+                    metaPromise,
+                ]);
+                return { buffer, seconds, meta: meta || {}, provider: extProvider };
+            } else {
+                const outFile = `${tmpBase}.mp4`;
+                tmpFiles.push(outFile);
+                await ffmpegVideo(rawFile, outFile);
+                const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0 ? outFile : rawFile;
+                const [buffer, seconds, meta] = await Promise.all([
+                    Promise.resolve(fs.readFileSync(finalFile)),
+                    ffprobeDuration(finalFile),
+                    metaPromise,
+                ]);
+                return { buffer, seconds, meta: meta || {}, provider: extProvider };
+            }
+        }
+
+        // ── PASO 2: fallback yt-dlp local ────────────────────────────────────
+        console.warn('[ytDownload] Todos los providers fallaron — usando yt-dlp local…');
+
+        if (type === 'audio') {
+            await ytdlpExec(
+                `--no-playlist --no-warnings -x -o "${tmpBase}_raw.%(ext)s" "${url}"`
+            );
+            const rawFile = ['m4a','webm','opus','ogg','mp3','wav','aac','flac']
+                .map(ext => `${tmpBase}_raw.${ext}`)
+                .find(f => fs.existsSync(f));
+            if (!rawFile) throw new Error('yt-dlp no descargó el archivo de audio.');
+            tmpFiles.push(rawFile);
+            const outFile = `${tmpBase}.mp3`;
+            tmpFiles.push(outFile);
+            await ffmpegAudio(rawFile, outFile);
             if (!fs.existsSync(outFile) || fs.statSync(outFile).size === 0)
                 throw new Error('ffmpeg no pudo convertir el audio a MP3.');
-
             const [buffer, seconds, meta] = await Promise.all([
                 Promise.resolve(fs.readFileSync(outFile)),
                 ffprobeDuration(outFile),
-                ytInfo(url),
+                metaPromise,
             ]);
-
             return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp+ffmpeg' };
 
-        // ── VIDEO ─────────────────────────────────────────────────────────────
         } else {
             const rawFile = `${tmpBase}_raw.mp4`;
             tmpFiles.push(rawFile);
-
             await ytdlpExec(
                 `-f "bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]` +
                 `/best[height<=${height}][ext=mp4]/best[height<=${height}]/best" ` +
                 `--merge-output-format mp4 --no-playlist --no-warnings -o "${rawFile}" "${url}"`
             );
-
             if (!fs.existsSync(rawFile) || fs.statSync(rawFile).size === 0)
                 throw new Error('yt-dlp no descargó el video.');
-
-            // Paso 2: ffmpeg remux → moov al inicio, duración embebida
             const outFile = `${tmpBase}.mp4`;
             tmpFiles.push(outFile);
-
-            await execPromise(
-                `ffmpeg -y -i "${rawFile}" -c copy -movflags +faststart "${outFile}"`,
-                { timeout: FFMPEG_TIMEOUT }
-            );
-
-            const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0
-                ? outFile
-                : rawFile;
-
+            await ffmpegVideo(rawFile, outFile);
+            const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0 ? outFile : rawFile;
             const [buffer, seconds, meta] = await Promise.all([
                 Promise.resolve(fs.readFileSync(finalFile)),
                 ffprobeDuration(finalFile),
-                ytInfo(url),
+                metaPromise,
             ]);
-
             return { buffer, seconds, meta: meta || {}, provider: 'yt-dlp+ffmpeg' };
         }
 
@@ -310,5 +514,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-
-                                     
+                
