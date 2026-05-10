@@ -91,5 +91,13 @@
   },
   "devDependencies": {
     "eslint": "^9.37.0"
+  },
+  "overrides": {
+    "@smithy/util-middleware": "3.0.3",
+    "@smithy/util-retry": "3.0.3",
+    "@smithy/util-stream": "3.3.1",
+    "@aws-sdk/credential-provider-web-identity": "3.621.0",
+    "@aws-sdk/credential-provider-node": "3.621.0",
+    "@aws-sdk/credential-providers": "3.621.0"
   }
 }
