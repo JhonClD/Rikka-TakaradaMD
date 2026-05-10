@@ -146,14 +146,20 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 // ── Providers ─────────────────────────────────────────────────────────────────
 
+const extractApicAusasUrl = (json) => {
+    const d = json?.data || json;
+    return d.url || d.download || d.link || d.file || d.downloadUrl ||
+           d.video || d.audio || d.stream || d.mp4 || d.mp3 || null;
+};
+
 const providerApicAusasV2 = async (ytUrl, type, quality) => {
     const q = String(quality).replace('p', '') || '720';
     const endpoint = `${APICAUSAS_BASE}/api/v1/descargas/youtubev2?apikey=${APICAUSAS_KEY}&url=${encodeURIComponent(ytUrl)}&type=${type}&quality=${q}`;
     const res = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    const dlUrl = json.url || json.download || json.link || json.file || json.downloadUrl;
-    if (!dlUrl) throw new Error(`apicausas-v2: sin URL — ${JSON.stringify(json).slice(0, 120)}`);
+    const dlUrl = extractApicAusasUrl(json);
+    if (!dlUrl) throw new Error(`apicausas-v2: sin URL — ${JSON.stringify(json).slice(0, 200)}`);
     return await fetchBuffer(dlUrl);
 };
 
@@ -162,8 +168,8 @@ const providerApicAusasV1 = async (ytUrl, type) => {
     const res = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    const dlUrl = json.url || json.download || json.link || json.file || json.downloadUrl;
-    if (!dlUrl) throw new Error(`apicausas-v1: sin URL — ${JSON.stringify(json).slice(0, 120)}`);
+    const dlUrl = extractApicAusasUrl(json);
+    if (!dlUrl) throw new Error(`apicausas-v1: sin URL — ${JSON.stringify(json).slice(0, 200)}`);
     return await fetchBuffer(dlUrl);
 };
 
@@ -368,4 +374,3 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-        
