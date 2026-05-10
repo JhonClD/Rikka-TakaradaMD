@@ -1108,29 +1108,14 @@ ${Object.entries(lidDataManager.getUsersByCountry())
   }
 };
 
-const pluginFolder = global.__dirname(join(__dirname, './plugins'));
+const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 
-// Recursively collect all .js files under a directory
-function collectPluginFiles(dir) {
-  const results = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...collectPluginFiles(fullPath));
-    } else if (pluginFilter(entry.name)) {
-      results.push(fullPath);
-    }
-  }
-  return results;
-}
-
 async function filesInit() {
-  for (const filePath of collectPluginFiles(pluginFolder)) {
-    const filename = filePath.slice(pluginFolder.length + 1).replace(/\\/g, '/'); // relative key e.g. "downloaders/anime-DL.js"
+  for (const filename of readdirSync(pluginFolder).filter(pluginFilter)) {
     try {
-      const file = global.__filename(filePath);
+      const file = global.__filename(join(pluginFolder, filename));
       const module = await import(file);
       global.plugins[filename] = module.default || module;
     } catch (e) {
@@ -1143,29 +1128,25 @@ filesInit().then((_) => Object.keys(global.plugins)).catch(console.error);
 
 global.reload = async (_ev, filename) => {
   if (pluginFilter(filename)) {
-    // Search for the file across all subdirectories
-    const allFiles = collectPluginFiles(pluginFolder);
-    const matchedFile = allFiles.find(f => f.endsWith('/' + filename) || f.endsWith('\\' + filename));
-    const relativeKey = matchedFile ? matchedFile.slice(pluginFolder.length + 1).replace(/\\/g, '/') : filename;
-    const dir = matchedFile ? global.__filename(matchedFile, true) : global.__filename(join(pluginFolder, filename), true);
-    if (relativeKey in global.plugins) {
-      if (existsSync(dir)) conn.logger.info(` updated plugin - '${relativeKey}'`);
+    const dir = global.__filename(join(pluginFolder, filename), true);
+    if (filename in global.plugins) {
+      if (existsSync(dir)) conn.logger.info(` updated plugin - '${filename}'`);
       else {
-        conn.logger.warn(`deleted plugin - '${relativeKey}'`);
-        return delete global.plugins[relativeKey];
+        conn.logger.warn(`deleted plugin - '${filename}'`);
+        return delete global.plugins[filename];
       }
-    } else conn.logger.info(`new plugin - '${relativeKey}'`);
+    } else conn.logger.info(`new plugin - '${filename}'`);
     const err = syntaxerror(readFileSync(dir), filename, {
       sourceType: 'module',
       allowAwaitOutsideFunction: true,
     });
-    if (err) conn.logger.error(`syntax error while loading '${relativeKey}'\n${format(err)}`);
+    if (err) conn.logger.error(`syntax error while loading '${filename}'\n${format(err)}`);
     else {
       try {
         const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-        global.plugins[relativeKey] = module.default || module;
+        global.plugins[filename] = module.default || module;
       } catch (e) {
-        conn.logger.error(`error require plugin '${relativeKey}\n${format(e)}'`);
+        conn.logger.error(`error require plugin '${filename}\n${format(e)}'`);
       } finally {
         global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
       }
@@ -1173,8 +1154,7 @@ global.reload = async (_ev, filename) => {
   }
 };
 Object.freeze(global.reload);
-// Watch plugins folder recursively (subdirectories included)
-watch(pluginFolder, { recursive: true }, global.reload);
+watch(pluginFolder, global.reload);
 await global.reloadHandler();
 
 setInterval(async () => {
