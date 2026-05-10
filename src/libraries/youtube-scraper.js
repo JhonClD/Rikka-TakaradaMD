@@ -447,6 +447,168 @@ const providerCnvMp3 = async (ytUrl, type) => {
     });
 };
 
+
+// ── Provider: yt1s (video + audio) ───────────────────────────────────────────
+// Flujo: POST ajaxSearch → obtener vid+k → POST ajaxConvert → dlink
+const providerYt1s = async (ytUrl, type) => {
+    const BASE    = 'https://www.yt1s.com';
+    const REFERER = `${BASE}/`;
+    const H = {
+        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent':       UA,
+        'Referer':          REFERER,
+    };
+
+    // Paso 1: buscar video y obtener formatos
+    const searchRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
+        method:  'POST',
+        headers: H,
+        body:    `q=${encodeURIComponent(ytUrl)}&vt=home`,
+        signal:  AbortSignal.timeout(20_000),
+    });
+    if (!searchRes.ok) throw new Error(`yt1s search HTTP ${searchRes.status}`);
+    const search = await searchRes.json();
+    if (search.status !== 'Ok') throw new Error(`yt1s search: ${search.mess || JSON.stringify(search).slice(0, 80)}`);
+
+    const vid = search.vid;
+    let k;
+
+    if (type === 'audio') {
+        const mp3 = search.links?.mp3?.mp3128 || Object.values(search.links?.mp3 || {})[0];
+        k = mp3?.k;
+    } else {
+        const mp4 = search.links?.mp4;
+        k = mp4?.['720']?.k || mp4?.['480']?.k || mp4?.['360']?.k
+            || Object.values(mp4 || {})[0]?.k;
+    }
+    if (!k) throw new Error('yt1s: no se encontró k para el formato solicitado');
+
+    // Paso 2: convertir y obtener dlink
+    const convRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
+        method:  'POST',
+        headers: H,
+        body:    `vid=${vid}&k=${encodeURIComponent(k)}`,
+        signal:  AbortSignal.timeout(40_000),
+    });
+    if (!convRes.ok) throw new Error(`yt1s convert HTTP ${convRes.status}`);
+    const conv = await convRes.json();
+    if (!conv.dlink) throw new Error(`yt1s: sin dlink — ${JSON.stringify(conv).slice(0, 100)}`);
+
+    return await fetchBuffer(conv.dlink, { Referer: REFERER });
+};
+
+// ── Provider: loader.to (video + audio) ──────────────────────────────────────
+// API pública con polling de progreso
+const providerLoaderTo = async (ytUrl, type) => {
+    const BASE    = 'https://loader.to';
+    const REFERER = `${BASE}/`;
+    const fmt     = type === 'audio' ? 'mp3' : '720';
+
+    // Iniciar descarga
+    const startRes = await fetch(
+        `${BASE}/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}&api=dfcb6d76f2f2a12c83a82a4de3bc75e8`,
+        {
+            headers: { 'User-Agent': UA, 'Referer': REFERER },
+            signal:  AbortSignal.timeout(15_000),
+        }
+    );
+    if (!startRes.ok) throw new Error(`loader.to start HTTP ${startRes.status}`);
+    const start = await startRes.json();
+    if (!start.id) throw new Error(`loader.to: sin id — ${JSON.stringify(start).slice(0, 100)}`);
+
+    // Polling hasta que progreso sea 100
+    for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 3_000));
+        const progRes = await fetch(
+            `${BASE}/ajax/progress.php?id=${start.id}`,
+            { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(10_000) }
+        );
+        if (!progRes.ok) continue;
+        const prog = await progRes.json();
+        if (prog.download_url) {
+            return await fetchBuffer(prog.download_url, { Referer: REFERER });
+        }
+        if (prog.success === false) throw new Error(`loader.to: falló la conversión`);
+    }
+    throw new Error('loader.to: timeout esperando conversión');
+};
+
+// ── Provider: 9xbuddy (video + audio) ────────────────────────────────────────
+const provider9xBuddy = async (ytUrl, type) => {
+    const BASE    = 'https://9xbuddy.in';
+    const REFERER = `${BASE}/`;
+
+    const res = await fetch(
+        `${BASE}/process?url=${encodeURIComponent(ytUrl)}`,
+        {
+            headers: { 'User-Agent': UA, 'Referer': REFERER, 'Accept': 'application/json' },
+            signal:  AbortSignal.timeout(25_000),
+        }
+    );
+    if (!res.ok) throw new Error(`9xbuddy HTTP ${res.status}`);
+    const json = await res.json();
+
+    const items = json?.data || json?.links || json?.result || [];
+    if (!Array.isArray(items) || items.length === 0)
+        throw new Error(`9xbuddy: sin resultados — ${JSON.stringify(json).slice(0, 120)}`);
+
+    let chosen;
+    if (type === 'audio') {
+        chosen = items.find(i => /mp3/i.test(i.ext || i.format || i.type || ''))
+            || items.find(i => /audio/i.test(i.type || ''));
+    } else {
+        const vids = items.filter(i => /mp4/i.test(i.ext || i.format || i.type || ''));
+        chosen = vids.find(i => /720/.test(i.quality || i.size || ''))
+            || vids.find(i => /480/.test(i.quality || i.size || ''))
+            || vids[0] || items[0];
+    }
+    if (!chosen) throw new Error('9xbuddy: sin formato adecuado');
+
+    const dlUrl = chosen.url || chosen.link || chosen.download;
+    if (!dlUrl || !dlUrl.startsWith('http'))
+        throw new Error(`9xbuddy: URL inválida — ${JSON.stringify(chosen).slice(0, 80)}`);
+
+    return await fetchBuffer(dlUrl, { Referer: REFERER });
+};
+
+// ── Provider: tomp3.cc (audio) ────────────────────────────────────────────────
+// Mismo motor que yt1s con endpoints propios
+const providerToMp3 = async (ytUrl, type) => {
+    if (type === 'video') throw new Error('tomp3: solo soporta audio');
+    const BASE    = 'https://tomp3.cc';
+    const REFERER = `${BASE}/`;
+    const H = {
+        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent':       UA,
+        'Referer':          REFERER,
+    };
+
+    const searchRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
+        method: 'POST', headers: H,
+        body:   `q=${encodeURIComponent(ytUrl)}&vt=home`,
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!searchRes.ok) throw new Error(`tomp3 search HTTP ${searchRes.status}`);
+    const search = await searchRes.json();
+    if (search.status !== 'Ok') throw new Error(`tomp3 search: ${search.mess || ''}`);
+
+    const mp3 = search.links?.mp3?.mp3128 || Object.values(search.links?.mp3 || {})[0];
+    if (!mp3?.k) throw new Error('tomp3: sin k de audio');
+
+    const convRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
+        method: 'POST', headers: H,
+        body:   `vid=${search.vid}&k=${encodeURIComponent(mp3.k)}`,
+        signal: AbortSignal.timeout(40_000),
+    });
+    if (!convRes.ok) throw new Error(`tomp3 convert HTTP ${convRes.status}`);
+    const conv = await convRes.json();
+    if (!conv.dlink) throw new Error(`tomp3: sin dlink`);
+
+    return await fetchBuffer(conv.dlink, { Referer: REFERER });
+};
+
 // ── Cadena de providers ───────────────────────────────────────────────────────
 
 const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
@@ -455,6 +617,10 @@ const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
         { name: 'ytdown',           fn: () => providerYTDown(ytUrl, type) },
         { name: 'mp3now',           fn: () => providerMP3Now(ytUrl, type) },
         { name: 'ssyoutube',        fn: () => providerSSYouTube(ytUrl, type) },
+        { name: 'yt1s',             fn: () => providerYt1s(ytUrl, type) },
+        { name: 'loader.to',        fn: () => providerLoaderTo(ytUrl, type) },
+        { name: '9xbuddy',          fn: () => provider9xBuddy(ytUrl, type) },
+        { name: 'tomp3',            fn: () => providerToMp3(ytUrl, type) },
         { name: 'cobalt.tools',     fn: () => providerCobalt(ytUrl, type) },
         { name: 'cobalt-instances', fn: () => providerCobaltAlt(ytUrl, type) },
         { name: 'y2mate',           fn: () => providerY2mate(ytUrl, type) },
