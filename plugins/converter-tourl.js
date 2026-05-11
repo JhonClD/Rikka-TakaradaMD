@@ -16,7 +16,7 @@ async function uploadToGraph(buffer, ext, mime) {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             access_token: token,
-            title: 'WhatsApp Content',
+            title: 'WhatsApp Content ' + new Date().toLocaleDateString(),
             content: JSON.stringify(nodes)
           })
         })
@@ -81,25 +81,17 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
 }
 
 const handler = async (m, { conn, text }) => {
-  const q = m.quoted ? m.quoted : m
+  let q = m.quoted ? m.quoted : m
   let buffer
   let mime = (q.msg || q).mimetype || ''
 
-  if (text && !m.quoted) {
+  if (text) {
     buffer = Buffer.from(text, 'utf-8')
     mime = 'text/plain'
   } else {
-    // Intento de descarga de media
     buffer = await q.download?.().catch(() => null)
-    
-    // Si no es media, buscamos texto en cualquier rincón del mensaje citado
     if (!buffer) {
-      const content = q.text || 
-                      q.caption || 
-                      (q.msg && (q.msg.text || q.msg.caption || q.msg.contentText || q.msg.selectedDisplayText)) || 
-                      (m.quoted && m.quoted.text) || 
-                      ''
-      
+      const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
       if (content) {
         buffer = Buffer.from(content, 'utf-8')
         mime = 'text/plain'
@@ -107,14 +99,15 @@ const handler = async (m, { conn, text }) => {
     }
   }
 
-  if (!buffer || buffer.length === 0) throw '❌ No se encontró texto o archivo para subir.'
+  if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido para subir.'
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
   
   try {
     const { url: link, service, finalMime } = await uploadWithFallback(buffer, 'txt', mime)
-    const pesoTxt = buffer.length >= 1024 * 1024
-      ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
-      : `${(buffer.length / 1024).toFixed(1)} KB`
+    const pesoBytes = buffer.length
+    const pesoTxt = pesoBytes >= 1024 * 1024
+      ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
+      : `${(pesoBytes / 1024).toFixed(1)} KB`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
@@ -136,4 +129,4 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-    
+  
