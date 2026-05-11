@@ -27,7 +27,7 @@ import ffmpeg                          from 'fluent-ffmpeg'
 import ffmpegStatic                    from 'ffmpeg-static'
 import sharp                           from 'sharp'
 import { PDFDocument }                 from 'pdf-lib'
-import archiver                        from 'archiver'
+import * as archiver from 'archiver'
 import { execSync, execFile }          from 'child_process'
 import { promisify }                   from 'util'
 
