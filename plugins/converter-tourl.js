@@ -10,7 +10,7 @@ async function uploadToGraph(buffer, ext, mime) {
   const json = await res.json()
   const url = json?.[0]?.src
   if (url) return `https://graph.org${url}`
-  throw new Error('graph.org no devolvió enlace')
+  throw new Error('graph.org falló')
 }
 
 async function uploadTo0x0(buffer, ext, mime) {
@@ -21,7 +21,7 @@ async function uploadTo0x0(buffer, ext, mime) {
   if (!res.ok) throw new Error(`0x0.st HTTP ${res.status}`)
   const url = (await res.text()).trim()
   if (url.startsWith('http')) return url
-  throw new Error('0x0.st no devolvió enlace')
+  throw new Error('0x0.st falló')
 }
 
 async function uploadToUguu(buffer, ext, mime) {
@@ -32,7 +32,7 @@ async function uploadToUguu(buffer, ext, mime) {
   const json = await res.json()
   const url  = json?.files?.[0]?.url
   if (url) return url
-  throw new Error('uguu.se no devolvió enlace')
+  throw new Error('uguu.se falló')
 }
 
 async function uploadToTmpfiles(buffer, ext, mime) {
@@ -43,14 +43,14 @@ async function uploadToTmpfiles(buffer, ext, mime) {
   const json = await res.json()
   const url  = json?.data?.url
   if (url) return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-  throw new Error('tmpfiles.org no devolvió enlace')
+  throw new Error('tmpfiles.org falló')
 }
 
 async function uploadToGoFile(buffer, ext, mime) {
   const srv  = await fetch('https://api.gofile.io/servers')
   const srvJ = await srv.json()
   const server = srvJ?.data?.servers?.[0]?.name
-  if (!server) throw new Error('GoFile: sin servidor')
+  if (!server) throw new Error('GoFile: no server')
   const blob = new Blob([buffer], { type: mime })
   const form = new FormData()
   form.append('file', blob, `file.${ext}`)
@@ -58,11 +58,13 @@ async function uploadToGoFile(buffer, ext, mime) {
   const json = await res.json()
   const url  = json?.data?.downloadPage
   if (url) return url
-  throw new Error('GoFile no devolvió enlace')
+  throw new Error('GoFile falló')
 }
 
-async function uploadWithFallback(buffer) {
-  const { ext, mime } = (await fileTypeFromBuffer(buffer)) || { ext: 'txt', mime: 'text/plain' }
+async function uploadWithFallback(buffer, forcedExt, forcedMime) {
+  const ft = await fileTypeFromBuffer(buffer)
+  const ext = ft?.ext || forcedExt || 'txt'
+  const mime = ft?.mime || forcedMime || 'text/plain'
 
   const services = [
     { name: 'Graph.org',      fn: () => uploadToGraph(buffer, ext, mime) },
@@ -77,61 +79,58 @@ async function uploadWithFallback(buffer) {
   for (const { name, fn } of services) {
     try {
       const url = await fn()
-      if (url) return { url, service: name }
+      if (url) return { url, service: name, finalMime: mime }
     } catch (e) {
       errors.push(`${name}: ${e.message}`)
     }
   }
-  throw new Error('Todos los servidores fallaron:\n' + errors.join('\n'))
+  throw new Error('Fallo total:\n' + errors.join('\n'))
 }
 
 const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
   let mime = (q.msg || q).mimetype || ''
   let buffer
+  let forcedExt = 'txt'
 
   if (text && !m.quoted) {
     buffer = Buffer.from(text, 'utf-8')
     mime = 'text/plain'
   } else {
-    if (!mime && !q.text) throw '˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  Responde a un archivo o escribe un texto para subir.'
     buffer = await q.download?.().catch(() => null)
-    if (!buffer && q.text) {
-      buffer = Buffer.from(q.text, 'utf-8')
+    if (!buffer && (q.text || q.caption)) {
+      buffer = Buffer.from(q.text || q.caption, 'utf-8')
       mime = 'text/plain'
     }
   }
 
-  if (!buffer) throw '❌ No se pudo obtener contenido para subir.'
+  if (!buffer || buffer.length === 0) throw '❌ El contenido está vacío o no se pudo descargar.'
 
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚  Subiendo...')
-  const editStatus = async txt => {
-    try { await conn.sendMessage(m.chat, { text: txt, edit: statusKey }) } catch (_) {}
-  }
-
+  
   try {
     const pesoTxt = buffer.length >= 1024 * 1024
       ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
       : `${(buffer.length / 1024).toFixed(1)} KB`
 
-    const { url: link, service } = await uploadWithFallback(buffer)
+    const { url: link, service, finalMime } = await uploadWithFallback(buffer, forcedExt, mime)
 
     const urlObj = (() => { try { return new URL(link) } catch { return null } })()
-    const pathParts = urlObj?.pathname?.split('/').filter(Boolean) || []
-    const fileName = pathParts[pathParts.length - 1] || link.split('/').pop() || '—'
+    const fileName = urlObj?.pathname?.split('/').pop() || 'file_' + Date.now() + '.' + forcedExt
 
-    await editStatus(
-      `ִֶָ𓂃 ࣪˖ ִֶָ  *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
-      `⭑ ₊ ⭒  *NAME* ꩜  \`${fileName}\`\n` +
-      `⭑ ₊ ⭒  *SIZE* ꩜  \`${pesoTxt}\`\n` +
-      `⭑ ₊ ⭒  *TYPE* ꩜  \`${mime}\`\n` +
-      `⭑ ₊ ⭒  *SERVER* ꩜  \`${service}\`\n\n` +
-      `˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  *URL*\n` +
-      `${link}\n\n` +
-      `✧˚ ༘ ⋆｡˚  𖥔 ࣪˖`
-    )
+    await conn.sendMessage(m.chat, { 
+      text: `ִֶָ𓂃 ࣪˖ ִֶָ  *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
+            `⭑ ₊ ⭒  *NAME* ꩜  \`${fileName}\`\n` +
+            `⭑ ₊ ⭒  *SIZE* ꩜  \`${pesoTxt}\`\n` +
+            `⭑ ₊ ⭒  *TYPE* ꩜  \`${finalMime}\`\n` +
+            `⭑ ₊ ⭒  *SERVER* ꩜  \`${service}\`\n\n` +
+            `˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  *URL*\n` +
+            `${link}\n\n` +
+            `✧˚ ༘ ⋆｡˚  𖥔 ࣪˖`,
+      edit: statusKey 
+    }, { quoted: m })
   } catch (e) {
-    await editStatus(`˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  Error: ${e.message}`)
+    await conn.sendMessage(m.chat, { text: `❌ Error: ${e.message}`, edit: statusKey }, { quoted: m })
   }
 }
 
@@ -140,3 +139,4 @@ handler.tags    = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
+    
