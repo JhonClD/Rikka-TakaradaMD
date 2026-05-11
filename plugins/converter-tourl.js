@@ -74,7 +74,7 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   for (const { name, fn } of services) {
     try {
       const url = await fn()
-      if (url) return { url, service: name, finalMime: mime }
+      if (url) return { url, service: name, finalMime: mime, finalExt: ext }
     } catch (e) {}
   }
   throw new Error('Servidores fuera de servicio')
@@ -83,37 +83,41 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
 const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
   let buffer
-  let mime = (q.msg || q).mimetype || 'text/plain'
+  let mime = (q.msg || q).mimetype || ''
+  let originalName = (q.msg || q).fileName || ''
 
-  // 1. Prioridad: Texto escrito junto al comando
   if (text) {
     buffer = Buffer.from(text, 'utf-8')
-  } 
-  // 2. Prioridad: Texto en el mensaje mencionado (Si no es un archivo)
-  else if (!mime || mime === 'text/plain' || (!/image|video|audio|sticker|document/.test(mime))) {
+    mime = 'text/plain'
+  } else if (!mime || mime === 'text/plain' || (!/image|video|audio|sticker|document/.test(mime))) {
     const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
     if (content) {
       buffer = Buffer.from(content, 'utf-8')
+      mime = 'text/plain'
     }
   }
 
-  // 3. Prioridad: Si sigue vacío, intentar descargar como archivo multimedia
   if (!buffer) {
     buffer = await q.download?.().catch(() => null)
   }
 
-  if (!buffer || buffer.length === 0) throw '❌ No se encontró nada para subir (escribe algo o menciona un mensaje).'
+  if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido.'
   
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
   
   try {
-    const { url: link, service, finalMime } = await uploadWithFallback(buffer, 'txt', mime)
+    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime)
+    
+    const urlObj = (() => { try { return new URL(link) } catch { return null } })()
+    const displayFileName = originalName || urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
+    
     const pesoTxt = buffer.length >= 1024 * 1024
       ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
       : `${(buffer.length / 1024).toFixed(1)} KB`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
+            `⭑ ₊ ⭒ *NAME* ꩜ \`${displayFileName}\`\n` +
             `⭑ ₊ ⭒ *SIZE* ꩜ \`${pesoTxt}\`\n` +
             `⭑ ₊ ⭒ *TYPE* ꩜ \`${finalMime}\`\n` +
             `⭑ ₊ ⭒ *SERVER* ꩜ \`${service}\`\n\n` +
@@ -132,4 +136,4 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-        
+                           
