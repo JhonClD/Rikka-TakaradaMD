@@ -1,8 +1,25 @@
 import uploadImage from '../src/libraries/uploadImage.js'
 import { fileTypeFromBuffer } from 'file-type'
-import { format } from 'util'
 
-async function uploadToGraph(buffer, ext, mime) {
+async function uploadToGraphText(buffer) {
+  const text = buffer.toString('utf-8')
+  const body = {
+    title: 'Text Content',
+    author_name: 'Bot',
+    content: [{ tag: 'p', children: [text] }],
+    return_content: false
+  }
+  const res = await fetch('https://api.graph.org/createPage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  const json = await res.json()
+  if (json.ok && json.result?.url) return json.result.url
+  throw new Error('Graph Text falló')
+}
+
+async function uploadToGraphFile(buffer, ext, mime) {
   const blob = new Blob([buffer], { type: mime })
   const form = new FormData()
   form.append('file', blob, `file.${ext}`)
@@ -10,7 +27,7 @@ async function uploadToGraph(buffer, ext, mime) {
   const json = await res.json()
   const url = json?.[0]?.src
   if (url) return `https://graph.org${url}`
-  throw new Error('graph.org falló')
+  throw new Error('Graph File falló')
 }
 
 async function uploadTo0x0(buffer, ext, mime) {
@@ -18,7 +35,6 @@ async function uploadTo0x0(buffer, ext, mime) {
   const form = new FormData()
   form.append('file', blob, `file.${ext}`)
   const res = await fetch('https://0x0.st', { method: 'POST', body: form })
-  if (!res.ok) throw new Error(`0x0.st HTTP ${res.status}`)
   const url = (await res.text()).trim()
   if (url.startsWith('http')) return url
   throw new Error('0x0.st falló')
@@ -28,22 +44,9 @@ async function uploadToUguu(buffer, ext, mime) {
   const blob = new Blob([buffer], { type: mime })
   const form = new FormData()
   form.append('files[]', blob, `file.${ext}`)
-  const res  = await fetch('https://uguu.se/upload', { method: 'POST', body: form })
+  const res = await fetch('https://uguu.se/upload', { method: 'POST', body: form })
   const json = await res.json()
-  const url  = json?.files?.[0]?.url
-  if (url) return url
-  throw new Error('uguu.se falló')
-}
-
-async function uploadToTmpfiles(buffer, ext, mime) {
-  const blob = new Blob([buffer], { type: mime })
-  const form = new FormData()
-  form.append('file', blob, `file.${ext}`)
-  const res  = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: form })
-  const json = await res.json()
-  const url  = json?.data?.url
-  if (url) return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-  throw new Error('tmpfiles.org falló')
+  return json?.files?.[0]?.url
 }
 
 async function uploadWithFallback(buffer, forcedExt, forcedMime) {
@@ -51,13 +54,18 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   const ext = ft?.ext || forcedExt || 'txt'
   const mime = ft?.mime || forcedMime || 'text/plain'
 
-  const services = [
-    { name: 'Graph.org',      fn: () => uploadToGraph(buffer, ext, mime) },
-    { name: 'Catbox / Qu.ax', fn: () => uploadImage(buffer) },
-    { name: '0x0.st',         fn: () => uploadTo0x0(buffer, ext, mime) },
-    { name: 'uguu.se',        fn: () => uploadToUguu(buffer, ext, mime) },
-    { name: 'tmpfiles.org',   fn: () => uploadToTmpfiles(buffer, ext, mime) }
-  ]
+  const services = []
+
+  if (mime.startsWith('text/') || ext === 'txt') {
+    services.push({ name: 'Graph (Telegraph)', fn: () => uploadToGraphText(buffer) })
+  }
+
+  services.push(
+    { name: 'Graph.org (File)', fn: () => uploadToGraphFile(buffer, ext, mime) },
+    { name: 'Catbox', fn: () => uploadImage(buffer) },
+    { name: '0x0.st', fn: () => uploadTo0x0(buffer, ext, mime) },
+    { name: 'uguu.se', fn: () => uploadToUguu(buffer, ext, mime) }
+  )
 
   const errors = []
   for (const { name, fn } of services) {
@@ -75,7 +83,6 @@ const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
   let mime = (q.msg || q).mimetype || ''
   let buffer
-  let forcedExt = 'txt'
 
   if (text && !m.quoted) {
     buffer = Buffer.from(text, 'utf-8')
@@ -89,23 +96,16 @@ const handler = async (m, { conn, text }) => {
   }
 
   if (!buffer || buffer.length === 0) throw '❌ Contenido vacío.'
-
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚  Subiendo...')
   
   try {
-    const pesoBytes = buffer.length
-    const pesoTxt = pesoBytes >= 1024 * 1024
-      ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
-      : `${(pesoBytes / 1024).toFixed(1)} KB`
-
-    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, forcedExt, mime)
-
-    const urlObj = (() => { try { return new URL(link) } catch { return null } })()
-    const fileName = urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
+    const { url: link, service, finalMime } = await uploadWithFallback(buffer, 'txt', mime)
+    const pesoTxt = buffer.length >= 1024 * 1024 
+      ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB` 
+      : `${(buffer.length / 1024).toFixed(1)} KB`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ  *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
-            `⭑ ₊ ⭒  *NAME* ꩜  \`${fileName}\`\n` +
             `⭑ ₊ ⭒  *SIZE* ꩜  \`${pesoTxt}\`\n` +
             `⭑ ₊ ⭒  *TYPE* ꩜  \`${finalMime}\`\n` +
             `⭑ ₊ ⭒  *SERVER* ꩜  \`${service}\`\n\n` +
@@ -119,9 +119,8 @@ const handler = async (m, { conn, text }) => {
   }
 }
 
-handler.help    = ['tourl', 'upload']
-handler.tags    = ['converter']
+handler.help = ['tourl', 'upload']
+handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-        
