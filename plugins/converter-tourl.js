@@ -16,7 +16,7 @@ async function uploadToGraph(buffer, ext, mime) {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             access_token: token,
-            title: 'Texto de WhatsApp',
+            title: 'WhatsApp Content',
             content: JSON.stringify(nodes)
           })
         })
@@ -56,8 +56,7 @@ async function uploadToUguu(buffer, ext, mime) {
     form.append('files[]', blob, `file.${ext}`)
     const res = await fetch('https://uguu.se/upload', { method: 'POST', body: form })
     const json = await res.json()
-    const url = json?.files?.[0]?.url
-    if (url) return url
+    return json?.files?.[0]?.url
   } catch (e) {}
   throw new Error('Error en uguu.se')
 }
@@ -72,31 +71,35 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
     { name: '0x0.st', fn: () => uploadTo0x0(buffer, ext, mime) },
     { name: 'Uguu.se', fn: () => uploadToUguu(buffer, ext, mime) }
   ]
-  const errors = []
   for (const { name, fn } of services) {
     try {
       const url = await fn()
-      if (url) return { url, service: name, finalMime: mime, finalExt: ext }
-    } catch (e) {
-      errors.push(`${name}: ${e.message}`)
-    }
+      if (url) return { url, service: name, finalMime: mime }
+    } catch (e) {}
   }
-  throw new Error('Todos los servicios fallaron:\n' + errors.join('\n'))
+  throw new Error('Todos los servicios fallaron')
 }
 
 const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
   let buffer
   let mime = (q.msg || q).mimetype || ''
-  let fileName = (q.msg || q).fileName || `texto_${Date.now()}.txt`
-  
+
   if (text && !m.quoted) {
     buffer = Buffer.from(text, 'utf-8')
     mime = 'text/plain'
   } else {
+    // Intento de descarga de media
     buffer = await q.download?.().catch(() => null)
+    
+    // Si no es media, buscamos texto en cualquier rincón del mensaje citado
     if (!buffer) {
-      const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
+      const content = q.text || 
+                      q.caption || 
+                      (q.msg && (q.msg.text || q.msg.caption || q.msg.contentText || q.msg.selectedDisplayText)) || 
+                      (m.quoted && m.quoted.text) || 
+                      ''
+      
       if (content) {
         buffer = Buffer.from(content, 'utf-8')
         mime = 'text/plain'
@@ -105,15 +108,13 @@ const handler = async (m, { conn, text }) => {
   }
 
   if (!buffer || buffer.length === 0) throw '❌ No se encontró texto o archivo para subir.'
-
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
   
   try {
-    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime)
-    const pesoBytes = buffer.length
-    const pesoTxt = pesoBytes >= 1024 * 1024
-      ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
-      : `${(pesoBytes / 1024).toFixed(1)} KB`
+    const { url: link, service, finalMime } = await uploadWithFallback(buffer, 'txt', mime)
+    const pesoTxt = buffer.length >= 1024 * 1024
+      ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
+      : `${(buffer.length / 1024).toFixed(1)} KB`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
@@ -130,9 +131,9 @@ const handler = async (m, { conn, text }) => {
   }
 }
 
-handler.help = ['tourl', 'upload']
+handler.help = ['tourl']
 handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-                         
+    
