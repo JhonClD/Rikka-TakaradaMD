@@ -3,7 +3,7 @@ import { fileTypeFromBuffer } from 'file-type'
 
 async function uploadToGraph(buffer, ext, mime) {
   try {
-    const isText = mime.startsWith('text/') || ext === 'txt' || ext === 'html' || ext === 'md' || mime === 'application/json'
+    const isText = mime.startsWith('text/') || ext === 'txt' || ext === 'html' || ext === 'md' || mime === 'application/json' || mime === 'application/javascript'
     if (isText) {
       const accRes = await fetch('https://api.graph.org/createAccount?short_name=Manus&author_name=ManusBot')
       const accJson = await accRes.json()
@@ -16,7 +16,7 @@ async function uploadToGraph(buffer, ext, mime) {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             access_token: token,
-            title: 'Archivo subido',
+            title: 'Texto de WhatsApp',
             content: JSON.stringify(nodes)
           })
         })
@@ -88,19 +88,23 @@ const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
   let buffer
   let mime = (q.msg || q).mimetype || ''
+  let fileName = (q.msg || q).fileName || `texto_${Date.now()}.txt`
   
   if (text && !m.quoted) {
     buffer = Buffer.from(text, 'utf-8')
     mime = 'text/plain'
   } else {
     buffer = await q.download?.().catch(() => null)
-    if (!buffer && (q.text || q.caption)) {
-      buffer = Buffer.from(q.text || q.caption, 'utf-8')
-      mime = 'text/plain'
+    if (!buffer) {
+      const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
+      if (content) {
+        buffer = Buffer.from(content, 'utf-8')
+        mime = 'text/plain'
+      }
     }
   }
 
-  if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido para subir.'
+  if (!buffer || buffer.length === 0) throw '❌ No se encontró texto o archivo para subir.'
 
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
   
@@ -131,4 +135,4 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-    
+                         
