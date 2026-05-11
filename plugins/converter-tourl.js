@@ -1,28 +1,28 @@
 import uploadImage from '../src/libraries/uploadImage.js'
 import { fileTypeFromBuffer } from 'file-type'
-import { format } from 'util'
 
 async function uploadToGraph(buffer, ext, mime) {
   try {
-    if (mime.startsWith('text/') || ext === 'txt' || ext === 'html' || ext === 'md') {
+    const isText = mime.startsWith('text/') || ext === 'txt' || ext === 'html' || ext === 'md' || mime === 'application/json'
+    if (isText) {
       const accRes = await fetch('https://api.graph.org/createAccount?short_name=Manus&author_name=ManusBot')
       const accJson = await accRes.json()
-      if (!accJson.ok) throw new Error('No se pudo crear cuenta en graph.org')
-      const token = accJson.result.access_token
-      const text = buffer.toString('utf-8')
-      const nodes = text.split('\n').map(line => ({ tag: 'p', children: [line.trim() || { tag: 'br' }] }))
-      const content = JSON.stringify(nodes)
-      const pageRes = await fetch('https://api.graph.org/createPage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          access_token: token,
-          title: 'Upload ' + Date.now(),
-          content: content
+      if (accJson.ok) {
+        const token = accJson.result.access_token
+        const text = buffer.toString('utf-8')
+        const nodes = text.split('\n').map(line => ({ tag: 'p', children: [line.trim() || { tag: 'br' }] }))
+        const pageRes = await fetch('https://api.graph.org/createPage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            access_token: token,
+            title: 'Archivo subido',
+            content: JSON.stringify(nodes)
+          })
         })
-      })
-      const pageJson = await pageRes.json()
-      if (pageJson.ok) return pageJson.result.url
+        const pageJson = await pageRes.json()
+        if (pageJson.ok) return pageJson.result.url
+      }
     }
     const blob = new Blob([buffer], { type: mime })
     const form = new FormData()
@@ -32,40 +32,34 @@ async function uploadToGraph(buffer, ext, mime) {
     const url = json?.[0]?.src
     if (url) return `https://graph.org${url}`
   } catch (e) {}
-  throw new Error('graph.org falló')
+  throw new Error('Error en graph.org')
 }
 
 async function uploadTo0x0(buffer, ext, mime) {
-  const blob = new Blob([buffer], { type: mime })
-  const form = new FormData()
-  form.append('file', blob, `file.${ext}`)
-  const res = await fetch('https://0x0.st', { method: 'POST', body: form })
-  if (!res.ok) throw new Error(`0x0.st HTTP ${res.status}`)
-  const url = (await res.text()).trim()
-  if (url.startsWith('http')) return url
-  throw new Error('0x0.st falló')
+  try {
+    const blob = new Blob([buffer], { type: mime })
+    const form = new FormData()
+    form.append('file', blob, `file.${ext}`)
+    const res = await fetch('https://0x0.st', { method: 'POST', body: form })
+    if (res.ok) {
+      const url = (await res.text()).trim()
+      if (url.startsWith('http')) return url
+    }
+  } catch (e) {}
+  throw new Error('Error en 0x0.st')
 }
 
 async function uploadToUguu(buffer, ext, mime) {
-  const blob = new Blob([buffer], { type: mime })
-  const form = new FormData()
-  form.append('files[]', blob, `file.${ext}`)
-  const res  = await fetch('https://uguu.se/upload', { method: 'POST', body: form })
-  const json = await res.json()
-  const url  = json?.files?.[0]?.url
-  if (url) return url
-  throw new Error('uguu.se falló')
-}
-
-async function uploadToTmpfiles(buffer, ext, mime) {
-  const blob = new Blob([buffer], { type: mime })
-  const form = new FormData()
-  form.append('file', blob, `file.${ext}`)
-  const res  = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: form })
-  const json = await res.json()
-  const url  = json?.data?.url
-  if (url) return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-  throw new Error('tmpfiles.org falló')
+  try {
+    const blob = new Blob([buffer], { type: mime })
+    const form = new FormData()
+    form.append('files[]', blob, `file.${ext}`)
+    const res = await fetch('https://uguu.se/upload', { method: 'POST', body: form })
+    const json = await res.json()
+    const url = json?.files?.[0]?.url
+    if (url) return url
+  } catch (e) {}
+  throw new Error('Error en uguu.se')
 }
 
 async function uploadWithFallback(buffer, forcedExt, forcedMime) {
@@ -73,11 +67,10 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   const ext = ft?.ext || forcedExt || 'txt'
   const mime = ft?.mime || forcedMime || 'text/plain'
   const services = [
-    { name: 'Graph.org',      fn: () => uploadToGraph(buffer, ext, mime) },
-    { name: 'Catbox / Qu.ax', fn: () => uploadImage(buffer) },
-    { name: '0x0.st',         fn: () => uploadTo0x0(buffer, ext, mime) },
-    { name: 'uguu.se',        fn: () => uploadToUguu(buffer, ext, mime) },
-    { name: 'tmpfiles.org',   fn: () => uploadToTmpfiles(buffer, ext, mime) }
+    { name: 'Graph.org', fn: () => uploadToGraph(buffer, ext, mime) },
+    { name: 'Catbox', fn: () => uploadImage(buffer) },
+    { name: '0x0.st', fn: () => uploadTo0x0(buffer, ext, mime) },
+    { name: 'Uguu.se', fn: () => uploadToUguu(buffer, ext, mime) }
   ]
   const errors = []
   for (const { name, fn } of services) {
@@ -88,14 +81,14 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
       errors.push(`${name}: ${e.message}`)
     }
   }
-  throw new Error('Fallo total:\n' + errors.join('\n'))
+  throw new Error('Todos los servicios fallaron:\n' + errors.join('\n'))
 }
 
 const handler = async (m, { conn, text }) => {
   const q = m.quoted ? m.quoted : m
-  let mime = (q.msg || q).mimetype || ''
   let buffer
-  let forcedExt = 'txt'
+  let mime = (q.msg || q).mimetype || ''
+  
   if (text && !m.quoted) {
     buffer = Buffer.from(text, 'utf-8')
     mime = 'text/plain'
@@ -106,25 +99,26 @@ const handler = async (m, { conn, text }) => {
       mime = 'text/plain'
     }
   }
-  if (!buffer || buffer.length === 0) throw '❌ Contenido vacío.'
-  const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚  Subiendo...')
+
+  if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido para subir.'
+
+  const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
+  
   try {
+    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime)
     const pesoBytes = buffer.length
     const pesoTxt = pesoBytes >= 1024 * 1024
       ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
       : `${(pesoBytes / 1024).toFixed(1)} KB`
-    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, forcedExt, mime)
-    const urlObj = (() => { try { return new URL(link) } catch { return null } })()
-    const fileName = urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
+
     await conn.sendMessage(m.chat, { 
-      text: `ִֶָ𓂃 ࣪˖ ִֶָ  *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
-            `⭑ ₊ ⭒  *NAME* ꩜  \`${fileName}\`\n` +
-            `⭑ ₊ ⭒  *SIZE* ꩜  \`${pesoTxt}\`\n` +
-            `⭑ ₊ ⭒  *TYPE* ꩜  \`${finalMime}\`\n` +
-            `⭑ ₊ ⭒  *SERVER* ꩜  \`${service}\`\n\n` +
-            `˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  *URL*\n` +
+      text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
+            `⭑ ₊ ⭒ *SIZE* ꩜ \`${pesoTxt}\`\n` +
+            `⭑ ₊ ⭒ *TYPE* ꩜ \`${finalMime}\`\n` +
+            `⭑ ₊ ⭒ *SERVER* ꩜ \`${service}\`\n\n` +
+            `˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗ *URL*\n` +
             `${link}\n\n` +
-            `✧˚ ༘ ⋆｡˚  𖥔 ࣪˖`,
+            `✧˚ ༘ ⋆｡˚ 𖥔 ࣪˖`,
       edit: statusKey 
     }, { quoted: m })
   } catch (e) {
@@ -132,8 +126,8 @@ const handler = async (m, { conn, text }) => {
   }
 }
 
-handler.help    = ['tourl', 'upload']
-handler.tags    = ['converter']
+handler.help = ['tourl', 'upload']
+handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
