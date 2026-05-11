@@ -46,21 +46,6 @@ async function uploadToTmpfiles(buffer, ext, mime) {
   throw new Error('tmpfiles.org falló')
 }
 
-async function uploadToGoFile(buffer, ext, mime) {
-  const srv  = await fetch('https://api.gofile.io/servers')
-  const srvJ = await srv.json()
-  const server = srvJ?.data?.servers?.[0]?.name
-  if (!server) throw new Error('GoFile: no server')
-  const blob = new Blob([buffer], { type: mime })
-  const form = new FormData()
-  form.append('file', blob, `file.${ext}`)
-  const res  = await fetch(`https://${server}.gofile.io/contents/uploadfile`, { method: 'POST', body: form })
-  const json = await res.json()
-  const url  = json?.data?.downloadPage
-  if (url) return url
-  throw new Error('GoFile falló')
-}
-
 async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   const ft = await fileTypeFromBuffer(buffer)
   const ext = ft?.ext || forcedExt || 'txt'
@@ -71,15 +56,14 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
     { name: 'Catbox / Qu.ax', fn: () => uploadImage(buffer) },
     { name: '0x0.st',         fn: () => uploadTo0x0(buffer, ext, mime) },
     { name: 'uguu.se',        fn: () => uploadToUguu(buffer, ext, mime) },
-    { name: 'tmpfiles.org',   fn: () => uploadToTmpfiles(buffer, ext, mime) },
-    { name: 'GoFile',         fn: () => uploadToGoFile(buffer, ext, mime) },
+    { name: 'tmpfiles.org',   fn: () => uploadToTmpfiles(buffer, ext, mime) }
   ]
 
   const errors = []
   for (const { name, fn } of services) {
     try {
       const url = await fn()
-      if (url) return { url, service: name, finalMime: mime }
+      if (url) return { url, service: name, finalMime: mime, finalExt: ext }
     } catch (e) {
       errors.push(`${name}: ${e.message}`)
     }
@@ -104,19 +88,20 @@ const handler = async (m, { conn, text }) => {
     }
   }
 
-  if (!buffer || buffer.length === 0) throw '❌ El contenido está vacío o no se pudo descargar.'
+  if (!buffer || buffer.length === 0) throw '❌ Contenido vacío.'
 
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚  Subiendo...')
   
   try {
-    const pesoTxt = buffer.length >= 1024 * 1024
-      ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
-      : `${(buffer.length / 1024).toFixed(1)} KB`
+    const pesoBytes = buffer.length
+    const pesoTxt = pesoBytes >= 1024 * 1024
+      ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
+      : `${(pesoBytes / 1024).toFixed(1)} KB`
 
-    const { url: link, service, finalMime } = await uploadWithFallback(buffer, forcedExt, mime)
+    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, forcedExt, mime)
 
     const urlObj = (() => { try { return new URL(link) } catch { return null } })()
-    const fileName = urlObj?.pathname?.split('/').pop() || 'file_' + Date.now() + '.' + forcedExt
+    const fileName = urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ  *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
@@ -139,4 +124,4 @@ handler.tags    = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-    
+        
