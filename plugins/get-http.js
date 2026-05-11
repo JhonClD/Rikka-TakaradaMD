@@ -1,124 +1,100 @@
 import { format } from 'util';
 
 const MIME_MAP = {
-  video:    ['video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/quicktime'],
-  image:    ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'],
-  audio:    ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/aac'],
-  sticker:  ['image/webp'],
+  video: ['video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/mpeg', 'video/3gpp'],
+  image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff', 'image/svg+xml', 'image/x-icon', 'image/avif'],
+  audio: ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/aac', 'audio/flac', 'audio/x-wav', 'audio/webm', 'audio/amr'],
+  document: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed', 'text/plain', 'application/json']
 };
 
 const EXT_MAP = {
-  mp4: 'video', webm: 'video', avi: 'video', mkv: 'video', mov: 'video',
-  jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image',
-  mp3: 'audio', ogg: 'audio', wav: 'audio', aac: 'audio',
-  pdf: 'document', zip: 'document', rar: 'document', docx: 'document'
+  mp4: 'video', webm: 'video', avi: 'video', mkv: 'video', mov: 'video', wmv: 'video', '3gp': 'video',
+  jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', bmp: 'image', svg: 'image', ico: 'image', avif: 'image',
+  mp3: 'audio', ogg: 'audio', wav: 'audio', aac: 'audio', flac: 'audio', amr: 'audio', m4a: 'audio',
+  pdf: 'document', zip: 'document', rar: 'document', '7z': 'document', doc: 'document', docx: 'document', xls: 'document', xlsx: 'document', txt: 'document', json: 'document', exe: 'document', apk: 'document'
 };
 
-const UA_ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
-const UA_FIREFOX = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0';
-
-const HEADERS_ANDROID = {
-  'User-Agent': UA_ANDROID,
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'es-419,es;q=0.9',
-  'Connection': 'keep-alive'
-};
-
-const HEADERS_FIREFOX = {
-  'User-Agent': UA_FIREFOX,
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3',
-  'Connection': 'keep-alive'
-};
-
-async function isCFBlocked(res) {
-  if ([403, 503, 429].includes(res.status)) {
-    const txt = await res.clone().text().catch(() => '');
-    return /cloudflare|cf-ray|just a moment|checking your browser/i.test(txt);
+const HEADERS = [
+  {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1'
+  },
+  {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'es-ES,es;q=0.9'
   }
-  return false;
-}
+];
 
-async function tryDirect(url, headers, label) {
-  const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(60000) });
-  if (await isCFBlocked(res)) throw new Error('CF');
-  return { res, label };
-}
-
-async function tryCorsProxy(url) {
-  const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(80000) });
-  if (!res.ok) throw new Error('Proxy');
-  return { res, label: 'Proxy-Bypass' };
-}
+const PROXIES = [
+  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://proxy.cors.sh/${url}`
+];
 
 async function fetchWithBypass(url) {
-  try { return await tryDirect(url, HEADERS_ANDROID, 'Android'); } catch {
-    try { return await tryDirect(url, HEADERS_FIREFOX, 'Firefox'); } catch {
-      return await tryCorsProxy(url);
-    }
+  for (const headers of HEADERS) {
+    try {
+      const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(15000) });
+      if (res.ok && ![403, 503, 429].includes(res.status)) return res;
+    } catch {}
   }
+  for (const proxyFn of PROXIES) {
+    try {
+      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(20000) });
+      if (res.ok) return res;
+    } catch {}
+  }
+  throw new Error('No se pudo acceder al recurso');
 }
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) throw `❌ Uso: ${usedPrefix + command} <url>`;
   if (!/^https?:\/\//.test(text)) throw '❌ URL inválida';
 
-  await m.reply('⏳ Descargando...');
-
-  let res, label;
   try {
-    ({ res, label } = await fetchWithBypass(text));
+    const res = await fetchWithBypass(text);
+    const contentType = res.headers.get('content-type') || '';
+    const urlObj = new URL(text);
+    const ext = urlObj.pathname.split('.').pop()?.toLowerCase();
+    const fileName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
+    
+    const buf = Buffer.from(await res.arrayBuffer());
+    const sizeMB = (buf.length / (1024 * 1024)).toFixed(2);
+    const caption = `✅ *Tamaño:* ${sizeMB} MB`;
+
+    const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) || EXT_MAP[ext] || null;
+
+    if (buf.length > 100 * 1024 * 1024 || mediaType === 'document') {
+      return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName, caption }, { quoted: m });
+    }
+
+    if (mediaType === 'video') {
+      return conn.sendMessage(m.chat, { video: buf, mimetype: contentType || 'video/mp4', caption }, { quoted: m });
+    }
+    if (mediaType === 'image') {
+      return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg', caption }, { quoted: m });
+    }
+    if (mediaType === 'audio') {
+      return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
+    }
+
+    if (/text|json/.test(contentType) && buf.length < 100000) {
+      let txt = buf.toString();
+      if (contentType.includes('json')) {
+        try { txt = format(JSON.parse(txt)); } catch {}
+      }
+      return m.reply(txt.slice(0, 50000));
+    }
+
+    return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName, caption }, { quoted: m });
   } catch (e) {
     throw `❌ Error: ${e.message}`;
   }
-
-  const contentType = res.headers.get('content-type') || '';
-  const urlObj = new URL(text);
-  const ext = urlObj.pathname.split('.').pop()?.toLowerCase();
-  const fileName = urlObj.pathname.split('/').pop() || 'file_' + Date.now();
-  
-  const buf = Buffer.from(await res.arrayBuffer());
-  const sizeMB = (buf.length / (1024 * 1024)).toFixed(2);
-  const commonCap = `✅ *Peso:* ${sizeMB} MB\n_Agente: ${label}_`;
-
-  const FORCE_DOC_SIZE = 20 * 1024 * 1024;
-  const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t)))
-                    || EXT_MAP[ext]
-                    || null;
-
-  if (buf.length > FORCE_DOC_SIZE) {
-    return conn.sendMessage(m.chat, { 
-      document: buf, 
-      mimetype: contentType || 'application/octet-stream', 
-      fileName, 
-      caption: `📦 *Documento (>20MB)*\n${commonCap}` 
-    }, { quoted: m });
-  }
-
-  if (mediaType === 'video') {
-    return conn.sendMessage(m.chat, { video: buf, mimetype: contentType || 'video/mp4', caption: commonCap }, { quoted: m });
-  }
-  if (mediaType === 'image') {
-    return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg', caption: commonCap }, { quoted: m });
-  }
-  if (mediaType === 'audio') {
-    return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
-  }
-
-  if (/text|json/.test(contentType) && buf.length < 100000) {
-    let txt = buf.toString();
-    if (contentType.includes('json')) {
-        try { txt = format(JSON.parse(txt)); } catch { }
-    }
-    return m.reply(`${txt.slice(0, 50000)}\n\n${commonCap}`);
-  }
-
-  return conn.sendMessage(m.chat, { 
-    document: buf, 
-    mimetype: contentType || 'application/octet-stream', 
-    fileName, 
-    caption: commonCap 
-  }, { quoted: m });
 };
 
 handler.help = ['fetch <url>', 'get <url>'];
@@ -126,4 +102,4 @@ handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
 
 export default handler;
-      
+    
