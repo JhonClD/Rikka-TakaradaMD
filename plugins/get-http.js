@@ -58,26 +58,29 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   try {
     const res = await fetchWithBypass(text);
-    const contentType = res.headers.get('content-type') || '';
+    let contentType = res.headers.get('content-type') || '';
     const urlObj = new URL(text);
-    const ext = urlObj.pathname.split('.').pop()?.toLowerCase();
-    const fileName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
+    let ext = urlObj.pathname.split('.').pop()?.toLowerCase();
+    let fileName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
     
     const buf = Buffer.from(await res.arrayBuffer());
-    const sizeMB = (buf.length / (1024 * 1024)).toFixed(2);
-    const caption = `✅ *Tamaño:* ${sizeMB} MB`;
-
     const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) || EXT_MAP[ext] || null;
 
+    if (mediaType === 'video' && (ext === 'mp4' || contentType.includes('video/mp4'))) {
+      contentType = 'video/x-matroska';
+      fileName = fileName.replace(/\.mp4$/i, '.mkv');
+      if (!fileName.endsWith('.mkv')) fileName += '.mkv';
+    }
+
     if (buf.length > 100 * 1024 * 1024 || mediaType === 'document') {
-      return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName, caption }, { quoted: m });
+      return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
     }
 
     if (mediaType === 'video') {
-      return conn.sendMessage(m.chat, { video: buf, mimetype: contentType || 'video/mp4', caption }, { quoted: m });
+      return conn.sendMessage(m.chat, { video: buf, mimetype: contentType, fileName }, { quoted: m });
     }
     if (mediaType === 'image') {
-      return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg', caption }, { quoted: m });
+      return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
     }
     if (mediaType === 'audio') {
       return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
@@ -91,7 +94,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       return m.reply(txt.slice(0, 50000));
     }
 
-    return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName, caption }, { quoted: m });
+    return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
   } catch (e) {
     throw `❌ Error: ${e.message}`;
   }
@@ -102,4 +105,4 @@ handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
 
 export default handler;
-    
+                                                                             
