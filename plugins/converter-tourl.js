@@ -16,7 +16,7 @@ async function uploadToGraph(buffer, ext, mime) {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             access_token: token,
-            title: 'WhatsApp Content ' + new Date().toLocaleDateString(),
+            title: 'WhatsApp Content',
             content: JSON.stringify(nodes)
           })
         })
@@ -77,37 +77,40 @@ async function uploadWithFallback(buffer, forcedExt, forcedMime) {
       if (url) return { url, service: name, finalMime: mime }
     } catch (e) {}
   }
-  throw new Error('Todos los servicios fallaron')
+  throw new Error('Servidores fuera de servicio')
 }
 
 const handler = async (m, { conn, text }) => {
-  let q = m.quoted ? m.quoted : m
+  const q = m.quoted ? m.quoted : m
   let buffer
-  let mime = (q.msg || q).mimetype || ''
+  let mime = (q.msg || q).mimetype || 'text/plain'
 
+  // 1. Prioridad: Texto escrito junto al comando
   if (text) {
     buffer = Buffer.from(text, 'utf-8')
-    mime = 'text/plain'
-  } else {
-    buffer = await q.download?.().catch(() => null)
-    if (!buffer) {
-      const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
-      if (content) {
-        buffer = Buffer.from(content, 'utf-8')
-        mime = 'text/plain'
-      }
+  } 
+  // 2. Prioridad: Texto en el mensaje mencionado (Si no es un archivo)
+  else if (!mime || mime === 'text/plain' || (!/image|video|audio|sticker|document/.test(mime))) {
+    const content = q.text || q.caption || (q.msg && (q.msg.text || q.msg.caption)) || ''
+    if (content) {
+      buffer = Buffer.from(content, 'utf-8')
     }
   }
 
-  if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido para subir.'
+  // 3. Prioridad: Si sigue vacío, intentar descargar como archivo multimedia
+  if (!buffer) {
+    buffer = await q.download?.().catch(() => null)
+  }
+
+  if (!buffer || buffer.length === 0) throw '❌ No se encontró nada para subir (escribe algo o menciona un mensaje).'
+  
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
   
   try {
     const { url: link, service, finalMime } = await uploadWithFallback(buffer, 'txt', mime)
-    const pesoBytes = buffer.length
-    const pesoTxt = pesoBytes >= 1024 * 1024
-      ? `${(pesoBytes / 1024 / 1024).toFixed(2)} MB`
-      : `${(pesoBytes / 1024).toFixed(1)} KB`
+    const pesoTxt = buffer.length >= 1024 * 1024
+      ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
+      : `${(buffer.length / 1024).toFixed(1)} KB`
 
     await conn.sendMessage(m.chat, { 
       text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
@@ -129,4 +132,4 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl)$/i
 
 export default handler
-  
+        
