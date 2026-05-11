@@ -7,7 +7,7 @@ import { spawn, execSync, execFile }   from 'child_process'
 import { promisify }                   from 'util'
 import sharp                           from 'sharp'
 import { PDFDocument }                 from 'pdf-lib'
-import archiver                        from 'archiver'
+import * as archiver from 'archiver'
 import { toMP3, ffmpeg as ffBase }     from '../src/libraries/converter.js'
 
 const execFileAsync = promisify(execFile)
