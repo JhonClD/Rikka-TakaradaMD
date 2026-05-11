@@ -70,10 +70,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       contentType = 'video/x-matroska';
       fileName = fileName.replace(/\.mp4$/i, '.mkv');
       if (!fileName.endsWith('.mkv')) fileName += '.mkv';
-    }
-
-    if (buf.length > 100 * 1024 * 1024 || mediaType === 'document') {
-      return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
+      return conn.sendMessage(m.chat, { document: buf, mimetype: 'application/x-matroska', fileName }, { quoted: m });
     }
 
     if (mediaType === 'video') {
@@ -105,4 +102,4 @@ handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
 
 export default handler;
-                                                                             
+        
