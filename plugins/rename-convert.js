@@ -1,62 +1,61 @@
 import { downloadContentFromMessage } from '@whiskeysockets/baileys'
-import fs                              from 'fs-extra'
-import path                            from 'path'
-import { fileTypeFromBuffer }          from 'file-type'
-import mime                            from 'mime-types'
-import { spawn, execSync, execFile }   from 'child_process'
-import { promisify }                   from 'util'
-import sharp                           from 'sharp'
-import { PDFDocument }                 from 'pdf-lib'
+import fs from 'fs-extra'
+import path from 'path'
+import { fileTypeFromBuffer } from 'file-type'
+import mime from 'mime-types'
+import { spawn, execSync, execFile } from 'child_process'
+import { promisify } from 'util'
+import sharp from 'sharp'
+import { PDFDocument } from 'pdf-lib'
 import * as archiver from 'archiver'
-import { toMP3, ffmpeg as ffBase }     from '../src/libraries/converter.js'
+import { toMP3, ffmpeg as ffBase } from '../src/libraries/converter.js'
 
 const execFileAsync = promisify(execFile)
-
 const TMP = process.env.TMPDIR || '/tmp'
 
 const MIME_MAP = {
-  mp4:  'video/mp4',
-  mkv:  'video/x-matroska',
+  mp4: 'video/mp4',
+  mkv: 'video/x-matroska',
   webm: 'video/webm',
-  avi:  'video/x-msvideo',
-  mp3:  'audio/mpeg',
-  wav:  'audio/wav',
+  avi: 'video/x-msvideo',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
   opus: 'audio/opus',
-  ogg:  'audio/ogg',
-  m4a:  'audio/mp4',
-  png:  'image/png',
-  jpg:  'image/jpeg',
+  ogg: 'audio/ogg',
+  m4a: 'audio/mp4',
+  png: 'image/png',
+  jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
-  pdf:  'application/pdf',
-  txt:  'text/plain',
-  zip:  'application/zip',
-  rar:  'application/vnd.rar',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  zip: 'application/zip',
+  rar: 'application/vnd.rar',
   '7z': 'application/x-7z-compressed',
-  tar:  'application/x-tar',
-  gz:   'application/gzip',
-  bz2:  'application/x-bzip2',
-  xz:   'application/x-xz',
+  tar: 'application/x-tar',
+  gz: 'application/gzip',
+  bz2: 'application/x-bzip2',
+  xz: 'application/x-xz',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  doc:  'application/msword',
-  xls:  'application/vnd.ms-excel',
-  ppt:  'application/vnd.ms-powerpoint',
-  apk:  'application/vnd.android.package-archive',
+  doc: 'application/msword',
+  xls: 'application/vnd.ms-excel',
+  ppt: 'application/vnd.ms-powerpoint',
+  apk: 'application/vnd.android.package-archive',
   json: 'application/json',
-  xml:  'application/xml',
-  csv:  'text/csv',
+  xml: 'application/xml',
+  csv: 'text/csv',
   html: 'text/html',
-  js:   'application/javascript',
+  js: 'application/javascript',
 }
 
 const AUDIO_CODEC_MAP = {
-  mp3:  ['-c:a', 'libmp3lame', '-q:a', '2'],
-  wav:  ['-c:a', 'pcm_s16le'],
+  mp3: ['-c:a', 'libmp3lame', '-q:a', '2'],
+  wav: ['-c:a', 'pcm_s16le'],
   opus: ['-c:a', 'libopus', '-b:a', '128k'],
-  ogg:  ['-c:a', 'libvorbis', '-q:a', '4'],
-  m4a:  ['-c:a', 'aac', '-b:a', '192k'],
+  ogg: ['-c:a', 'libvorbis', '-q:a', '4'],
+  m4a: ['-c:a', 'aac', '-b:a', '192k'],
 }
 
 const VIDEO_ARGS = [
@@ -65,10 +64,10 @@ const VIDEO_ARGS = [
   '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-preset', 'fast',
 ]
 
-const VIDEO_EXTS   = new Set(['mp4', 'mkv', 'webm', 'avi'])
-const AUDIO_EXTS   = new Set(['mp3', 'wav', 'opus', 'ogg', 'm4a'])
-const IMAGE_EXTS   = new Set(['png', 'jpg', 'jpeg', 'webp'])
-const DOC_EXTS     = new Set(['pdf', 'txt'])
+const VIDEO_EXTS = new Set(['mp4', 'mkv', 'webm', 'avi'])
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'opus', 'ogg', 'm4a'])
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp'])
+const DOC_EXTS = new Set(['pdf', 'txt'])
 const ARCHIVE_EXTS = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'])
 
 const tmpPath = (ext) =>
@@ -77,16 +76,16 @@ const tmpPath = (ext) =>
 const getExt = (name = '') => path.extname(name).slice(1).toLowerCase()
 
 function extCat(ext) {
-  if (VIDEO_EXTS.has(ext))   return 'video'
-  if (AUDIO_EXTS.has(ext))   return 'audio'
-  if (IMAGE_EXTS.has(ext))   return 'image'
-  if (DOC_EXTS.has(ext))     return 'doc'
+  if (VIDEO_EXTS.has(ext)) return 'video'
+  if (AUDIO_EXTS.has(ext)) return 'audio'
+  if (IMAGE_EXTS.has(ext)) return 'image'
+  if (DOC_EXTS.has(ext)) return 'doc'
   if (ARCHIVE_EXTS.has(ext)) return 'archive'
   return null
 }
 
 async function cleanup(...paths) {
-  for (const p of paths) await fs.remove(p).catch(() => {})
+  for (const p of paths) await fs.remove(p).catch(() => { })
 }
 
 function sysAvailable(cmd) {
@@ -102,21 +101,26 @@ async function downloadMedia(mediaMsg, type) {
 }
 
 function detectMedia(quoted) {
-  const msg = quoted?.message || quoted || {}
-  if (msg.videoMessage)    return { type: 'video',    mediaMsg: msg.videoMessage }
-  if (msg.audioMessage)    return { type: 'audio',    mediaMsg: msg.audioMessage }
-  if (msg.imageMessage)    return { type: 'image',    mediaMsg: msg.imageMessage }
+  let msg = quoted?.message || quoted || {}
+
+  if (msg.viewOnceMessageV2) msg = msg.viewOnceMessageV2.message
+  if (msg.viewOnceMessage) msg = msg.viewOnceMessage.message
+  if (msg.ephemeralMessage) msg = msg.ephemeralMessage.message
+  if (msg.documentWithCaptionMessage) msg = msg.documentWithCaptionMessage.message
+
+  if (msg.videoMessage) return { type: 'video', mediaMsg: msg.videoMessage }
+  if (msg.audioMessage) return { type: 'audio', mediaMsg: msg.audioMessage }
+  if (msg.imageMessage) return { type: 'image', mediaMsg: msg.imageMessage }
   if (msg.documentMessage) return { type: 'document', mediaMsg: msg.documentMessage }
-  const dwc = msg.documentWithCaptionMessage?.message
-  if (dwc?.documentMessage) return { type: 'document', mediaMsg: dwc.documentMessage }
-  if (dwc?.videoMessage)    return { type: 'video',    mediaMsg: dwc.videoMessage }
+  if (msg.stickerMessage) return { type: 'sticker', mediaMsg: msg.stickerMessage }
+
   return null
 }
 
 async function sendMedia(conn, m, filePath, fileName, ext) {
   const mimeType = MIME_MAP[ext] || mime.lookup(fileName) || 'application/octet-stream'
-  const cat      = extCat(ext)
-  const opts     = { quoted: m }
+  const cat = extCat(ext)
+  const opts = { quoted: m }
 
   if (cat === 'video') {
     return conn.sendMessage(m.chat, {
@@ -142,7 +146,7 @@ async function sendMedia(conn, m, filePath, fileName, ext) {
 
 function ffAudioToMp4(buf, origExt) {
   return new Promise(async (resolve, reject) => {
-    const inPath  = tmpPath(origExt)
+    const inPath = tmpPath(origExt)
     const outPath = tmpPath('mp4')
     await fs.writeFile(inPath, buf)
     const proc = spawn('ffmpeg', [
@@ -163,7 +167,7 @@ function ffAudioToMp4(buf, origExt) {
 
 function ffImageToMp4(buf, origExt) {
   return new Promise(async (resolve, reject) => {
-    const inPath  = tmpPath(origExt)
+    const inPath = tmpPath(origExt)
     const outPath = tmpPath('mp4')
     await fs.writeFile(inPath, buf)
     const proc = spawn('ffmpeg', [
@@ -184,7 +188,7 @@ function ffImageToMp4(buf, origExt) {
 
 function createZip(inputFile, outputZip, entryName) {
   return new Promise((resolve, reject) => {
-    const output  = fs.createWriteStream(outputZip)
+    const output = fs.createWriteStream(outputZip)
     const archive = archiver('zip', { zlib: { level: 9 } })
     output.on('close', resolve)
     archive.on('error', (err) => reject(new Error(`ZIP: ${err.message}`)))
@@ -195,24 +199,24 @@ function createZip(inputFile, outputZip, entryName) {
 }
 
 async function createRar(inputFile, outputRar, entryName) {
-  const tmpDir    = path.dirname(inputFile)
+  const tmpDir = path.dirname(inputFile)
   const namedCopy = path.join(tmpDir, entryName)
   await fs.copy(inputFile, namedCopy)
   try {
     await execFileAsync('rar', ['a', '-ep', outputRar, namedCopy])
   } finally {
-    await fs.remove(namedCopy).catch(() => {})
+    await fs.remove(namedCopy).catch(() => { })
   }
 }
 
 async function create7z(inputFile, output7z, entryName) {
-  const tmpDir    = path.dirname(inputFile)
+  const tmpDir = path.dirname(inputFile)
   const namedCopy = path.join(tmpDir, entryName)
   await fs.copy(inputFile, namedCopy)
   try {
     await execFileAsync('7z', ['a', '-mx=9', output7z, namedCopy])
   } finally {
-    await fs.remove(namedCopy).catch(() => {})
+    await fs.remove(namedCopy).catch(() => { })
   }
 }
 
@@ -261,9 +265,9 @@ async function cmdRename(m, conn, args) {
 
   await m.reply('⏳ Descargando archivo...')
 
-  const buf      = await downloadMedia(media.mediaMsg, media.type)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
   const detected = await fileTypeFromBuffer(buf)
-  const origExt  = detected?.ext || getExt(getOrigName(media, null))
+  const origExt = detected?.ext || getExt(getOrigName(media, null))
 
   if (origExt === newExt) {
     const outPath = tmpPath(newExt)
@@ -277,7 +281,7 @@ async function cmdRename(m, conn, args) {
   }
 
   const origCat = extCat(origExt)
-  const newCat  = extCat(newExt)
+  const newCat = extCat(newExt)
 
   await m.reply(`⚙️ Convirtiendo \`.${origExt}\` → \`.${newExt}\`...`)
 
@@ -322,10 +326,10 @@ async function cmdToMp3(m, conn) {
 
   await m.reply('🎵 Extrayendo audio en MP3...')
 
-  const buf     = await downloadMedia(media.mediaMsg, media.type)
-  const det     = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origExt = det?.ext || 'mp4'
-  const result  = await toMP3(buf, origExt)
+  const result = await toMP3(buf, origExt)
 
   const base = media.mediaMsg.fileName
     ? path.basename(media.mediaMsg.fileName, path.extname(media.mediaMsg.fileName))
@@ -349,10 +353,10 @@ async function cmdToMp4(m, conn) {
 
   await m.reply('🎬 Convirtiendo a MP4...')
 
-  const buf     = await downloadMedia(media.mediaMsg, media.type)
-  const det     = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origExt = det?.ext || { video: 'mp4', audio: 'mp3', image: 'jpg', document: 'mp4' }[media.type] || 'bin'
-  const cat     = extCat(origExt) || media.type
+  const cat = extCat(origExt) || media.type
 
   const base = media.mediaMsg.fileName
     ? path.basename(media.mediaMsg.fileName, path.extname(media.mediaMsg.fileName))
@@ -387,10 +391,10 @@ async function cmdToPdf(m, conn) {
 
   await m.reply('📄 Generando PDF...')
 
-  const buf     = await downloadMedia(media.mediaMsg, media.type)
-  const det     = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origExt = det?.ext || getExt(media.mediaMsg.fileName || '') || 'bin'
-  const cat     = extCat(origExt) || media.type
+  const cat = extCat(origExt) || media.type
   const outPath = tmpPath('pdf')
 
   try {
@@ -401,7 +405,7 @@ async function cmdToPdf(m, conn) {
         imgEmbed = await pdfDoc.embedJpg(buf)
       } else {
         const pngBuf = await sharp(buf).png().toBuffer()
-        imgEmbed     = await pdfDoc.embedPng(pngBuf)
+        imgEmbed = await pdfDoc.embedPng(pngBuf)
       }
       const { width, height } = imgEmbed
       const page = pdfDoc.addPage([width, height])
@@ -412,13 +416,13 @@ async function cmdToPdf(m, conn) {
       const { default: PDFKit } = await import('pdfkit')
       await new Promise((resolve, reject) => {
         const doc = new PDFKit({ margin: 50 })
-        const ws  = fs.createWriteStream(outPath)
+        const ws = fs.createWriteStream(outPath)
         doc.pipe(ws)
         doc.font('Helvetica').fontSize(12)
-           .text(buf.toString('utf-8'), { align: 'left', lineGap: 4 })
+          .text(buf.toString('utf-8'), { align: 'left', lineGap: 4 })
         doc.end()
         ws.on('finish', resolve)
-        ws.on('error',  reject)
+        ws.on('error', reject)
       })
 
     } else {
@@ -458,17 +462,17 @@ async function cmdTodoc(m, conn, args) {
 
   await m.reply('📁 Preparando documento...')
 
-  const buf     = await downloadMedia(media.mediaMsg, media.type)
-  const det     = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origExt = det?.ext || getExt(media.mediaMsg.fileName || '') ||
     { video: 'mp4', audio: 'mp3', image: 'jpg', document: 'bin' }[media.type] || 'bin'
 
-  const origName   = media.mediaMsg.fileName || `archivo.${origExt}`
+  const origName = media.mediaMsg.fileName || `archivo.${origExt}`
   const customName = args.join(' ').trim()
-  const finalName  = customName || origName
-  const finalExt   = getExt(finalName) || origExt
-  const mimeType   = MIME_MAP[finalExt] || mime.lookup(finalName) || 'application/octet-stream'
-  const outPath    = tmpPath(finalExt)
+  const finalName = customName || origName
+  const finalExt = getExt(finalName) || origExt
+  const mimeType = MIME_MAP[finalExt] || mime.lookup(finalName) || 'application/octet-stream'
+  const outPath = tmpPath(finalExt)
 
   await fs.writeFile(outPath, buf)
 
@@ -497,16 +501,16 @@ async function cmdTozip(m, conn, args) {
 
   await m.reply('🗜️ Creando archivo ZIP...')
 
-  const buf      = await downloadMedia(media.mediaMsg, media.type)
-  const det      = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origName = getOrigName(media, det?.ext)
-  const origExt  = det?.ext || getExt(origName)
-  const base     = path.basename(origName, path.extname(origName))
+  const origExt = det?.ext || getExt(origName)
+  const base = path.basename(origName, path.extname(origName))
 
   const customBase = args.join(' ').trim()
-  const zipName    = customBase ? `${customBase}.zip` : `${base}.zip`
+  const zipName = customBase ? `${customBase}.zip` : `${base}.zip`
 
-  const inPath  = tmpPath(origExt || 'bin')
+  const inPath = tmpPath(origExt || 'bin')
   const outPath = tmpPath('zip')
   await fs.writeFile(inPath, buf)
 
@@ -546,16 +550,16 @@ async function cmdTorar(m, conn, args) {
 
   await m.reply('🗜️ Creando archivo RAR...')
 
-  const buf      = await downloadMedia(media.mediaMsg, media.type)
-  const det      = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origName = getOrigName(media, det?.ext)
-  const origExt  = det?.ext || getExt(origName)
-  const base     = path.basename(origName, path.extname(origName))
+  const origExt = det?.ext || getExt(origName)
+  const base = path.basename(origName, path.extname(origName))
 
   const customBase = args.join(' ').trim()
-  const rarName    = customBase ? `${customBase}.rar` : `${base}.rar`
+  const rarName = customBase ? `${customBase}.rar` : `${base}.rar`
 
-  const inPath  = tmpPath(origExt || 'bin')
+  const inPath = tmpPath(origExt || 'bin')
   const outPath = tmpPath('rar')
   await fs.writeFile(inPath, buf)
 
@@ -595,16 +599,16 @@ async function cmdTo7z(m, conn, args) {
 
   await m.reply('🗜️ Creando archivo 7Z...')
 
-  const buf      = await downloadMedia(media.mediaMsg, media.type)
-  const det      = await fileTypeFromBuffer(buf)
+  const buf = await downloadMedia(media.mediaMsg, media.type)
+  const det = await fileTypeFromBuffer(buf)
   const origName = getOrigName(media, det?.ext)
-  const origExt  = det?.ext || getExt(origName)
-  const base     = path.basename(origName, path.extname(origName))
+  const origExt = det?.ext || getExt(origName)
+  const base = path.basename(origName, path.extname(origName))
 
   const customBase = args.join(' ').trim()
-  const z7Name     = customBase ? `${customBase}.7z` : `${base}.7z`
+  const z7Name = customBase ? `${customBase}.7z` : `${base}.7z`
 
-  const inPath  = tmpPath(origExt || 'bin')
+  const inPath = tmpPath(origExt || 'bin')
   const outPath = tmpPath('7z')
   await fs.writeFile(inPath, buf)
 
@@ -626,14 +630,14 @@ let handler = async (m, { conn, args, command }) => {
   try {
     switch (command.toLowerCase()) {
       case 'rm':
-      case 'rename':  return await cmdRename(m, conn, args)
-      case 'tomp3':   return await cmdToMp3(m, conn)
-      case 'tomp4':   return await cmdToMp4(m, conn)
-      case 'topdf':   return await cmdToPdf(m, conn)
-      case 'todoc':   return await cmdTodoc(m, conn, args)
-      case 'tozip':   return await cmdTozip(m, conn, args)
-      case 'torar':   return await cmdTorar(m, conn, args)
-      case 'to7z':    return await cmdTo7z(m, conn, args)
+      case 'rename': return await cmdRename(m, conn, args)
+      case 'tomp3': return await cmdToMp3(m, conn)
+      case 'tomp4': return await cmdToMp4(m, conn)
+      case 'topdf': return await cmdToPdf(m, conn)
+      case 'todoc': return await cmdTodoc(m, conn, args)
+      case 'tozip': return await cmdTozip(m, conn, args)
+      case 'torar': return await cmdTorar(m, conn, args)
+      case 'to7z': return await cmdTo7z(m, conn, args)
     }
   } catch (err) {
     console.error('[rename-convert] Error:', err)
@@ -645,8 +649,8 @@ let handler = async (m, { conn, args, command }) => {
   }
 }
 
-handler.help    = ['rm <nombre.ext>', 'rename <nombre.ext>', 'tomp3', 'tomp4', 'topdf', 'todoc [nombre.ext]', 'tozip [nombre]', 'torar [nombre]', 'to7z [nombre]']
-handler.tags    = ['tools', 'files', 'convert', 'media', 'archive']
+handler.help = ['rm <nombre.ext>', 'rename <nombre.ext>', 'tomp3', 'tomp4', 'topdf', 'todoc [nombre.ext]', 'tozip [nombre]', 'torar [nombre]', 'to7z [nombre]']
+handler.tags = ['tools', 'files', 'convert', 'media', 'archive']
 handler.command = /^(rm|rename|tomp3|tomp4|topdf|todoc|tozip|torar|to7z)$/i
 
 export default handler
