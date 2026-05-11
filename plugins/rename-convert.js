@@ -593,55 +593,6 @@ async function cmdTo7z(m, conn, args) {
   const media = detectMedia(m.quoted)
   if (!media) return m.reply('❌ No se detectó un archivo multimedia.')
 
-  await m.reply('🗜️ Creando archivo RAR...')
-
-  const buf      = await downloadMedia(media.mediaMsg, media.type)
-  const det      = await fileTypeFromBuffer(buf)
-  const origName = getOrigName(media, det?.ext)
-  const origExt  = det?.ext || getExt(origName)
-  const base     = path.basename(origName, path.extname(origName))
-
-  const customBase = args.join(' ').trim()
-  const rarName    = customBase ? `${customBase}.rar` : `${base}.rar`
-
-  const inPath  = tmpPath(origExt || 'bin')
-  const outPath = tmpPath('rar')
-  await fs.writeFile(inPath, buf)
-
-  try {
-    await createRar(inPath, outPath, origName)
-    const stat = await fs.stat(outPath)
-    const size = (stat.size / 1024 / 1024).toFixed(2)
-
-    await conn.sendMessage(m.chat, {
-      document: { url: outPath }, fileName: rarName,
-      mimetype: 'application/vnd.rar', caption: `✅ *${rarName}*\n📦 Tamaño: ${size} MB`,
-    }, { quoted: m })
-  } finally {
-    await cleanup(inPath, outPath)
-  }
-}
-
-async function cmdTo7z(m, conn, args) {
-  if (!m.quoted) {
-    return m.reply(
-      '❌ Responde a un archivo para comprimirlo en 7Z.\n\n' +
-      '*Uso:* `.to7z [nombre opcional]`\n\n' +
-      '⚠️ Requiere: `pkg install p7zip`'
-    )
-  }
-
-  if (!sysAvailable('7z')) {
-    return m.reply(
-      '❌ El comando `7z` no está disponible en el sistema.\n\n' +
-      '*Instalar en Termux:*\n```pkg install p7zip```\n\n' +
-      '💡 Alternativa: usa `.tozip` — no requiere instalación extra.'
-    )
-  }
-
-  const media = detectMedia(m.quoted)
-  if (!media) return m.reply('❌ No se detectó un archivo multimedia.')
-
   await m.reply('🗜️ Creando archivo 7Z...')
 
   const buf      = await downloadMedia(media.mediaMsg, media.type)
