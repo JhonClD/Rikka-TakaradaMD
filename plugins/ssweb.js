@@ -1,57 +1,66 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { executablePath } from 'puppeteer'; // Importación clave
 
+// Activamos el plugin de sigilo para evitar detecciones (Cloudflare, etc.)
 puppeteer.use(StealthPlugin());
 
 const handler = async (m, { conn, text, args }) => {
-  if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web.*", m);
+  if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web para capturar.*", m);
 
+  // Validar y formatear la URL
   const url = args[0].startsWith("http") ? args[0] : "https://" + args[0];
 
   let browser;
   try {
+    // Lanzamos el navegador sin definir executablePath para que use el del entorno local
     browser = await puppeteer.launch({
-      // Esto intenta encontrar el Chromium que viene con Puppeteer automáticamente
-      executablePath: executablePath(), 
-      headless: 'new', // Recomendado para versiones recientes
+      headless: "new",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gl-drawing-for-tests',
+        '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
+        '--single-process',
         '--disable-gpu'
       ]
     });
-    
+
     const page = await browser.newPage();
 
-    // User agent para parecer un navegador real y evitar bloqueos
+    // Definimos un User-Agent real para mayor compatibilidad
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
 
+    // Configuración de pantalla (HD)
     await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
 
-    // Navegar con timeout ajustado
-    await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+    // Navegar a la web
+    await page.goto(url, { 
+      waitUntil: 'networkidle2', 
+      timeout: 40000 
+    });
 
-    // En versiones nuevas de puppeteer, waitForTimeout está deprecado. Usamos una promesa simple:
+    // Pequeña pausa para asegurar carga de imágenes dinámicas
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    const screenshotBuffer = await page.screenshot({ fullPage: false });
+    // Tomar la captura en buffer
+    const screenshotBuffer = await page.screenshot({ fullPage: false, type: 'png' });
 
+    // Enviar el resultado
     await conn.sendMessage(m.chat, {
       image: screenshotBuffer,
       caption: `𓂃 ࣪˖ 📸 *Captura de:* ${url}`
     }, { quoted: m });
 
   } catch (e) {
-    console.error("Error en Puppeteer:", e);
-    // Si el error persiste, es que el Panel no tiene las librerías de Linux necesarias
-    m.reply(`𓂃 ࣪˖ ❌ *Error de entorno:* No se encontró Chromium o faltan librerías en el servidor. Verifica el Egg de Pelican.`);
+    console.error("Error en SSWEB:", e);
+    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura.\n\n*Detalle:* ${e.message}`);
   } finally {
-    if (browser) await browser.close();
+    // Cerrar siempre el navegador para no consumir RAM innecesaria
+    if (browser) {
+      await browser.close();
+    }
   }
 };
 
