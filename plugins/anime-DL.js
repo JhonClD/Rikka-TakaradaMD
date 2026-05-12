@@ -646,28 +646,45 @@ handler.before = async function (m, { conn }) {
       }
 
       const pick = global.pendingServerPicks.get(m.chat)
-      if (!pick) return false
 
-      if (pick.owner && pick.owner !== m.sender) {
-        await conn.sendMessage(m.chat,
-          { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
-          { quoted: m, mentions: [m.sender] }
-        )
+      if (pick) {
+        if (pick.owner && pick.owner !== m.sender) {
+          await conn.sendMessage(m.chat,
+            { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
+            { quoted: m, mentions: [m.sender] }
+          )
+          return true
+        }
+
+        const sk = `${m.chat}|${m.sender}`
+        delete global.animeDlSessions[sk]
+
+        const usedPrefix = selectedId.trim()[0]
+        const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
+        const text = argParts.join(' ')
+        try {
+          await handler.call(conn, m, { conn, text, usedPrefix, command })
+        } catch (e) {
+          console.error('[animeDL before] Error ejecutando handler:', e.message)
+        }
         return true
       }
 
-      const sk = `${m.chat}|${m.sender}`
-      delete global.animeDlSessions[sk]
-
-      const usedPrefix = selectedId.trim()[0]
-      const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
-      const text = argParts.join(' ')
-      try {
-        await handler.call(conn, m, { conn, text, usedPrefix, command })
-      } catch (e) {
-        console.error('[animeDL before] Error ejecutando handler:', e.message)
+      // Sin pendingServerPick: puede ser un episodio del selector de mostrarPortadaSitioExterno
+      // El id tiene formato: ".animedl <sitioId> <nombre> <ep>"
+      if (/^[.!/#]/.test(selectedId.trim())) {
+        const usedPrefix = selectedId.trim()[0]
+        const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
+        const text = argParts.join(' ')
+        try {
+          await handler.call(conn, m, { conn, text, usedPrefix, command, args: text.split(' ') })
+        } catch (e) {
+          console.error('[animeDL before] Error ejecutando comando de episodio:', e.message)
+        }
+        return true
       }
-      return true
+
+      return false
     } catch (_) {}
     return false
   }
