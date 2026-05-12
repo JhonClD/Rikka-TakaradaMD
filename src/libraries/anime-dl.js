@@ -469,8 +469,7 @@ export async function scrapePortadaSitio(sitio, episodeUrl) {
       }).first().attr('src') || null
     }
     if (cover && !cover.startsWith('http')) {
-      const base = new URL(animePageUrl)
-      cover = `${base.origin}${cover.startsWith('/') ? '' : '/'}${cover}`
+      cover = new URL(cover, animePageUrl).toString()
     }
     return cover || null
   } catch (e) {
@@ -1803,28 +1802,27 @@ export async function scrapeJKanime(url) {
         if (!res.ok) continue
         const json   = await res.json()
 
-        if (json?.remote) {
-          try {
-            let d = json.remote
-            const pad = 4 - (d.length % 4)
-            if (pad !== 4) d += '='.repeat(pad)
-            const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
-            if (decoded.startsWith('http') && !servidores.find(s => s.url === decoded)) {
-              const finalUrl = decoded.includes('jkplayers.com') ? await resolverRedirect(decoded) : decoded
-              console.log(`[jkanime] API ${srv}: ${finalUrl.slice(0, 60)}`)
-              servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
-              continue
-            }
-          } catch (_) {}
+        // 'remote' siempre es base64 en JKanime; 'iframe'/'url' pueden ser URL directa o base64
+        const resolverCampo = async (valor) => {
+          if (!valor) return null
+          let finalVal = valor
+          if (!finalVal.startsWith('http')) {
+            try {
+              const pad = 4 - (finalVal.length % 4); if (pad !== 4) finalVal += '='.repeat(pad)
+              finalVal = Buffer.from(finalVal, 'base64').toString('utf-8').trim()
+            } catch (_) { return null }
+          }
+          if (!finalVal.startsWith('http')) return null
+          return finalVal.includes('jkplayers.com') ? await resolverRedirect(finalVal) : finalVal
         }
 
-        const embedUrl =
-          json?.source?.[0]?.file || json?.iframe || json?.url ||
-          json?.embed || json?.data?.url || json?.data?.iframe
-        if (embedUrl?.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
-          const finalUrl = embedUrl.includes('jkplayers.com') ? await resolverRedirect(embedUrl) : embedUrl
-          console.log(`[jkanime] API ${srv}: ${finalUrl.slice(0, 60)}`)
-          servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
+        for (const campo of [json?.remote, json?.source?.[0]?.file, json?.iframe, json?.url, json?.embed, json?.data?.url, json?.data?.iframe]) {
+          const finalUrl = await resolverCampo(campo)
+          if (finalUrl && !servidores.find(s => s.url === normalizarMegaUrl(finalUrl))) {
+            console.log(`[jkanime] API ${srv}: ${finalUrl.slice(0, 60)}`)
+            servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
+            break
+          }
         }
       } catch (e) { console.error(`[jkanime] API ${srv}:`, e.message) }
     }
@@ -2077,7 +2075,13 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
   console.log(`\n[yt-dlp] Descargando: ${videoUrl.slice(0, 120)}`)
 
   await new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const _ytdlpBin = [
+      '/home/container/.local/bin/yt-dlp',
+      (process.env.HOME || '') + '/.local/bin/yt-dlp',
+      '/usr/local/bin/yt-dlp',
+      'yt-dlp',
+    ].find(p => { try { fs.accessSync(p, fs.constants.X_OK); return true } catch (_) { return false } }) || 'yt-dlp'
+    const proc = spawn(_ytdlpBin, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stderrBuf = ''
     let stdoutBuf = ''
 
