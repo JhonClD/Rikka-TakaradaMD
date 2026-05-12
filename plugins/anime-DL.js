@@ -377,54 +377,18 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       })
 
       try {
-        // Construir cards del carrusel: una card por sitio que encontró el anime
-        const cards = sitiosEncontrados.map(([sitioId, resultados]) => {
-          const sitio = SITIOS.find(s => s.id === sitioId)
-          const titulo = resultados[0]?.title || nombreBusq
-
-          // Botones de la card: si AnimeFLV tiene varios resultados, un botón por resultado (max 3)
-          // Para los demás sitios, un solo botón "Seleccionar"
-          let botones
-          if (sitio.dominio === 'animeflv' && resultados.length > 1) {
-            botones = resultados.slice(0, 3).map(r => ({
-              name            : 'quick_reply',
-              buttonParamsJson: JSON.stringify({ display_text: r.title.slice(0, 20), id: `__siteselect__${sitioId}__${r.slug}` }),
-            }))
-          } else {
-            botones = [{
-              name            : 'quick_reply',
-              buttonParamsJson: JSON.stringify({
-                display_text: 'Seleccionar',
-                id          : `__siteselect__${sitioId}__${resultados[0]?.slug || resultados[0]?.url || ''}`,
-              }),
-            }]
-          }
-
-          return {
-            header: {
-              title             : sitio.nombre,
-              hasMediaAttachment: false,
-            },
-            body  : { text: titulo },
-            footer: { text: sitio.url },
-            nativeFlowMessage: {
-              buttons          : botones,
-              messageParamsJson: '',
-            },
-          }
-        })
-
         const interactiveMessage = {
-          body  : { text: `*🎌 ${nombreBusq}*\nEncontrado en ${totalSitios} sitio(s). Elige dónde ver:` },
+          body  : { text: `Encontrado en ${totalSitios} sitio(s). Elige dónde ver:` },
           footer: { text: global.wm || 'Kana Arima Bot' },
-          header: { title: nombreBusq, hasMediaAttachment: false },
-          carouselMessage: {
-            cards          : cards,
-            messageVersion : 1,
-            carouselCardType: 1,   // HSCROLL_CARDS
+          header: { title: `🎌 ${nombreBusq}`, hasMediaAttachment: false },
+          nativeFlowMessage: {
+            buttons: [{
+              name: 'single_select',
+              buttonParamsJson: JSON.stringify({ title: 'VER EN SITIO', sections }),
+            }],
+            messageParamsJson: '',
           },
         }
-
         const msg = generateWAMessageFromContent(
           m.chat,
           { viewOnceMessageV2: { message: { interactiveMessage } } },
@@ -432,7 +396,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         )
         await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
       } catch (err) {
-        console.error('[animedl carousel]', err.message)
+        console.error('[animedl multisite interactiveMsg]', err.message)
         // Fallback texto plano con letras
         let idx = 0
         const lineas = sections.flatMap(sec => {
