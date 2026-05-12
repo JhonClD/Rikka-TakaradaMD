@@ -18,9 +18,11 @@ const CONFIG = {
 };
 
 const CAT_ICONS = {
-  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', ai: '🤖', 
-  sticker: '🎭', game: '🎮', group: '🏯', nsfw: '🔞', owner: '💎', 
-  info: '💫', converter: '🪄', img: '🌸', xp: '🔮', otros: '📌'
+  anime: '🎐', downloader: '📥', descargas: '📥', search: '🔍', buscadores: '🔍',
+  tools: '🛠️', herramientas: '🛠️', ai: '🤖', ia: '🤖', sticker: '🎭', stickers: '🎭',
+  game: '🎮', games: '🎮', group: '🏯', grupos: '👥', nsfw: '🔞',
+  owner: '💎', info: '💫', converter: '🪄', img: '🌸', xp: '🔮',
+  random: '⭐', otros: '📌',
 };
 
 const more = String.fromCharCode(8206);
@@ -34,30 +36,27 @@ function clockString(ms) {
   return `${d}d ${h}h ${m}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
 }
 
+const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌';
+
 const handler = async (m, { conn, usedPrefix }) => {
-  // --- OBTENCIÓN DE DATOS DINÁMICOS (DATABASE) ---
+  // --- OBTENCIÓN DE DATOS DE LA DB (ARCHIVOS SET...) ---
   const settings = global.db.data.settings[conn.user.jid] || {};
   
-  // 1. Nombre dinámico (configurado con setname.js)
-  const botName = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
-  
-  // 2. Prefijos dinámicos (configurados con setprefix.js)
-  let displayPrefix = usedPrefix;
-  if (Array.isArray(settings.prefix)) displayPrefix = settings.prefix.join(' ');
-  if (settings.prefix === true) displayPrefix = 'Sin prefijo';
+  // Datos configurados via comandos
+  const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ'; 
+  const botNameShort = settings.namebot || 'Rikka';
+  const botLink = settings.link || 'https://api.alyacore.xyz';
+  const bannerUrl = settings.banner || global.imagen1 || null;
+  const ownerExtra = settings.ownerExtra ? `@${settings.ownerExtra.split('@')[0]}` : 'Oculto por privacidad';
 
-  // 3. Banner dinámico (configurado con setbanner.js)
-  const menuImage = settings.banner || global.imagen1 || null;
-
-  // 4. Link dinámico (configurado con setlink.js)
-  const botLink = settings.link || 'https://github.com/JhonCID';
-
+  // Variables de sistema y usuario
   const pushname = m.pushName || 'Usuario';
-  const date = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
+  const date = moment.tz(CONFIG.timezone).format('DD MMMM YYYY, hh:mm A');
   const uptime = clockString(process.uptime() * 1000);
   const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
+  const totalUsers = Object.keys(global.db.data.users).length;
 
-  // Construcción de categorías
+  // --- LÓGICA DE CATEGORÍAS ---
   const categories = {};
   Object.values(global.plugins || {}).forEach(plugin => {
     if (!plugin?.command) return;
@@ -69,42 +68,55 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const totalCmds = Object.values(categories).flat().length;
 
-  // --- CONSTRUCCIÓN DEL TEXTO ---
-  let menu = `━━━━━❒「 \`${botName}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
-  menu += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
-  menu += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
-  menu += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
-  menu += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
-  menu += ` ୨୧     ꒰ \`Prefix\`    :  ${displayPrefix}\n`;
-  menu += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n`;
-  menu += ` ୨୧     ꒰ \`Enlace\`    :  ${botLink}\n\n`;
-  menu += `${CONFIG.lineSeparator}\n${readMore}\n`;
+  // --- CONSTRUCCIÓN DEL CUERPO DEL TEXTO ---
+  let menuTexto = `¡Hola, buenas tardes i'm — ${botNameShort}! ⸜(｡˃ ᵕ ˂ )⸝♡ Soy ${botNameLong}, un gusto conocerte. Estoy aquí para lo que necesites ♡\n\n`;
+  
+  menuTexto += `❁ ⑇ ⑈ ⑉ **DEVELOPER** :: ${ownerExtra}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **TIPO** :: Public\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **SISTEMA** :: ${os.platform()}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **TIME** :: ${date}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **USERS** :: ${totalUsers}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **CMDS EJEC** :: ${totalCmds}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **UPTIME** :: ${uptime}\n`;
+  menuTexto += `❁ ⑇ ⑈ ⑉ **URL** :: ${botLink}\n\n`;
+  
+  menuTexto += `${readMore}\n`;
 
   const sortedCats = Object.keys(categories).sort();
   sortedCats.forEach(cat => {
-    const icon = CAT_ICONS[cat.toLowerCase()] || '📌';
+    const icon = getIcon(cat);
     const title = cat.toUpperCase();
     const cmds = [...new Set(categories[cat])]
       .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c}`)
       .join('\n');
 
-    menu += `${CONFIG.catBox.top.replace('{title}', title).replace('{icon}', icon)}\n`;
-    menu += `${CONFIG.catBox.mid}\n\n${cmds}\n`;
-    menu += `${CONFIG.catBox.bottom}\n\n`;
+    menuTexto += `${CONFIG.catBox.top.replace('{title}', title).replace('{icon}', icon)}\n`;
+    menuTexto += `${CONFIG.catBox.mid}\n\n${cmds}\n`;
+    menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  menu += CONFIG.footerText;
+  menuTexto += `\n${CONFIG.footerText}`;
 
-  // --- ENVÍO CON BANNER DINÁMICO ---
-  if (menuImage) {
-    await conn.sendMessage(m.chat, { 
-      image: { url: menuImage }, 
-      caption: menu, 
-      mentions: [m.sender] 
-    }, { quoted: m });
-  } else {
-    await m.reply(menu);
-  }
+  // --- ENVÍO CON ADREPLY (DISEÑO DE LA FOTO) ---
+  const messageOptions = {
+    image: bannerUrl ? { url: bannerUrl } : { url: 'https://via.placeholder.com/1280x720' },
+    caption: menuTexto,
+    mentions: [m.sender],
+    contextInfo: {
+      mentionedJid: [m.sender],
+      externalAdReply: {
+        title: `╰─► ✰ ${botNameLong} ♡`, // Título sobre la imagen
+        body: `Alya, ˚₊· ͟͟͞͞➳❥ POWERED BY | — ${botNameShort}`, // Subtítulo
+        thumbnailUrl: bannerUrl,
+        sourceUrl: botLink, // Enlace dinámico
+        mediaType: 1,
+        renderLargerThumbnail: true, // Imagen grande como la captura
+        showAdAttribution: false
+      }
+    }
+  };
+
+  return await conn.sendMessage(m.chat, messageOptions, { quoted: m });
 };
 
 handler.help = ['menu'];
@@ -112,4 +124,4 @@ handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help|start|comandos)$/i;
 
 export default handler;
-                  
+                             
