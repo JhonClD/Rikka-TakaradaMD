@@ -1,9 +1,6 @@
 import os from 'os';
 import moment from 'moment-timezone';
 
-// ==========================================
-//      CONFIGURACIÓN VISUAL (TUS SÍMBOLOS)
-// ==========================================
 const CONFIG = {
   timezone: 'America/Lima',
   headerEmoji: '🎐',
@@ -18,11 +15,8 @@ const CONFIG = {
 };
 
 const CAT_ICONS = {
-  anime: '🎐', downloader: '📥', descargas: '📥', search: '🔍', buscadores: '🔍',
-  tools: '🛠️', herramientas: '🛠️', ai: '🤖', ia: '🤖', sticker: '🎭', stickers: '🎭',
-  game: '🎮', games: '🎮', group: '🏯', grupos: '👥', nsfw: '🔞',
-  owner: '💎', info: '💫', converter: '🪄', img: '🌸', xp: '🔮',
-  random: '⭐', otros: '📌',
+  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', ai: '🤖', 
+  sticker: '🎭', game: '🎮', group: '🏯', owner: '💎', info: '💫', otros: '📌'
 };
 
 const more = String.fromCharCode(8206);
@@ -37,20 +31,19 @@ function clockString(ms) {
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
-  // --- DATOS DINÁMICOS DESDE TU BASE DE DATOS ---
   const settings = global.db.data.settings[conn.user.jid] || {};
   
+  // Datos dinámicos de tus archivos
   const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ'; 
   const botNameShort = settings.namebot || 'Rikka';
   const botLink = settings.link || 'https://github.com/JhonCID';
-  const bannerUrl = settings.banner || global.imagen1 || null;
+  const bannerUrl = settings.banner || 'https://uguu.se/default.jpg'; 
 
   const pushname = m.pushName || 'Usuario';
   const date = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
   const uptime = clockString(process.uptime() * 1000);
   const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
 
-  // Lógica de categorías
   const categories = {};
   Object.values(global.plugins || {}).forEach(plugin => {
     if (!plugin?.command) return;
@@ -62,7 +55,7 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const totalCmds = Object.values(categories).flat().length;
 
-  // --- CABECERA (TU ESTILO ORIGINAL) ---
+  // Construcción del menú (Tu estilo anterior)
   let menuTexto = `━━━━━❒「 \`${botNameLong}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
   menuTexto += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
   menuTexto += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
@@ -70,51 +63,38 @@ const handler = async (m, { conn, usedPrefix }) => {
   menuTexto += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
   menuTexto += ` ୨୧     ꒰ \`Prefix\`    :  ${usedPrefix}\n`;
   menuTexto += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
-  menuTexto += `${CONFIG.lineSeparator}\n`;
-  
-  menuTexto += `${readMore}\n`;
+  menuTexto += `${CONFIG.lineSeparator}\n${readMore}\n`;
 
-  // --- CUERPO ---
   const sortedCats = Object.keys(categories).sort();
   sortedCats.forEach(cat => {
     const icon = CAT_ICONS[cat.toLowerCase()] || '📌';
-    const title = cat.toUpperCase();
     const cmds = [...new Set(categories[cat])]
-      .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c} ̟`)
+      .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c}`)
       .join('\n');
-
-    menuTexto += `${CONFIG.catBox.top.replace('{title}', title).replace('{icon}', icon)}\n`;
+    menuTexto += `${CONFIG.catBox.top.replace('{title}', cat.toUpperCase()).replace('{icon}', icon)}\n`;
     menuTexto += `${CONFIG.catBox.mid}\n\n${cmds}\n`;
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  menuTexto += `\n${CONFIG.footerText}`;
-
-  // --- MENSAJE CON BANNER Y ADREPLY ---
-  const messageOptions = {
-    image: bannerUrl ? { url: bannerUrl } : { url: 'https://uguu.se/default.jpg' },
-    caption: menuTexto,
-    mentions: [m.sender],
+  // SOLUCIÓN: Enviar como texto con contextInfo para evitar la doble imagen
+  await conn.sendMessage(m.chat, {
+    text: menuTexto,
     contextInfo: {
-      mentionedJid: [m.sender],
       externalAdReply: {
         title: `╰─► ✰ ${botNameLong} ♡`,
         body: `Alya, ˚₊· ͟͟͞͞➳❥ POWERED BY | — ${botNameShort}`,
         thumbnailUrl: bannerUrl,
         sourceUrl: botLink,
         mediaType: 1,
-        renderLargerThumbnail: true,
+        renderLargerThumbnail: true, // Esto muestra la imagen grande una sola vez
         showAdAttribution: false
       }
     }
-  };
-
-  await conn.sendMessage(m.chat, messageOptions, { quoted: m });
+  }, { quoted: m });
 };
 
 handler.help = ['menu'];
 handler.tags = ['info'];
-handler.command = /^(menu|ayuda|help|start|comandos)$/i;
+handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
-    
