@@ -678,6 +678,163 @@ export async function fetchHtmlConPuppeteer(url) {
   }
 }
 
+// ─── Utilidades SvelteKit (AnimeAV1) ────────────────────────────────────────
+
+import vm from 'vm'
+
+function _isObj(v) { return Boolean(v) && typeof v === 'object' && !Array.isArray(v) }
+
+function _walk(value, visitor, seen = new Set()) {
+  if (!value || typeof value !== 'object') return
+  if (seen.has(value)) return
+  seen.add(value)
+  visitor(value)
+  for (const child of (Array.isArray(value) ? value : Object.values(value)))
+    _walk(child, visitor, seen)
+}
+
+function _collectArrays(root) {
+  const arrays = []
+  _walk(root, node => { if (Array.isArray(node)) arrays.push(node) })
+  return arrays
+}
+
+function _extractBalanced(text, start, open, close) {
+  let depth = 0, quote = '', escaped = false
+  for (let i = start; i < text.length; i++) {
+    const c = text[i]
+    if (quote) {
+      if (escaped) { escaped = false; continue }
+      if (c === '\\') { escaped = true; continue }
+      if (c === quote) quote = ''
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue }
+    if (c === open)  { depth++ }
+    if (c === close) { depth--; if (depth === 0) return text.slice(start, i + 1) }
+  }
+  return null
+}
+
+function _safeEval(expr) {
+  try {
+    return vm.runInNewContext(expr, Object.create(null), { timeout: 1000, displayErrors: false })
+  } catch (_) { return null }
+}
+
+/** Extrae el payload data: [...] de los scripts __sveltekit_* */
+export function extractSvelteData(html) {
+  const $ = cheerio.load(html)
+  const scripts = $('script').map((_, el) => $(el).html() || '').get()
+  for (const src of scripts) {
+    if (!src.includes('__sveltekit_') || !src.includes('data:')) continue
+    let ptr = src.indexOf('__sveltekit_')
+    while (ptr !== -1) {
+      const eq  = src.indexOf('=', ptr); if (eq === -1) break
+      const ob  = src.indexOf('{', eq);  if (ob === -1) break
+      const lit = _extractBalanced(src, ob, '{', '}')
+      if (lit) {
+        const pay = _safeEval(`(${lit})`)
+        if (pay && Array.isArray(pay.data)) return pay.data
+      }
+      ptr = src.indexOf('__sveltekit_', ptr + 12)
+    }
+    const dm = src.indexOf('data:')
+    if (dm !== -1) {
+      const ls = src.indexOf('[', dm)
+      if (ls !== -1) {
+        const ll = _extractBalanced(src, ls, '[', ']')
+        if (ll) { const p = _safeEval(`(${ll})`); if (Array.isArray(p)) return p }
+      }
+    }
+  }
+  return null
+}
+
+/** Extrae el literal de `var <name> = [.../{...}` de forma robusta */
+export function extractVarLiteral(html, varName) {
+  const marker = `var ${varName}`
+  const si = html.indexOf(marker); if (si === -1) return null
+  const eq = html.indexOf('=', si); if (eq === -1) return null
+  const slice = html.slice(eq + 1)
+  const fb = slice.search(/[\[{]/); if (fb === -1) return null
+  const open = slice[fb], close = open === '{' ? '}' : ']'
+  return _extractBalanced(slice, fb, open, close)
+}
+
+/** Captura patrón video[N] = '<iframe src="...">' de JKAnime */
+export function extractVideoIframeUrls(html) {
+  const urls = []
+  const re = /video\[\d+\]\s*=\s*(['"])([\s\S]*?)\1/g
+  let m
+  while ((m = re.exec(html)) !== null) {
+    const src = m[2].match(/src=['"]([^'"]+)['"]/i)?.[1]
+    if (src) urls.push(src)
+  }
+  return urls
+}
+
+function _normalizeLinkObj(entry, domain) {
+  if (!entry) return null
+  const raw = typeof entry === 'string' ? entry
+    : (entry.url || entry.href || entry.link || entry.embed || entry.file || entry.source || null)
+  if (!raw) return null
+  let url
+  try { url = new URL(raw, `https://${domain}`).toString() } catch (_) { return null }
+  const srvName = typeof entry === 'object'
+    ? (entry.server || entry.name || entry.provider || '')
+    : ''
+  const detected = detectarServidor(url)
+  const nombre = detected !== 'generico' ? detected
+    : (srvName || (new URL(url).hostname.replace(/^www\./, '')))
+  return { nombre: nombre.toLowerCase(), url }
+}
+
+function _inferKind(url) {
+  if (!url) return 'stream'
+  return /(embed|play\/?|m3u8|hls|player\.)/i.test(url) ? 'stream' : 'download'
+}
+
+function _parseVariantContainer(container, kindHint, domain, collector) {
+  if (!_isObj(container)) return
+  for (const [variant, value] of [['SUB', container.SUB ?? container.sub], ['DUB', container.DUB ?? container.dub]]) {
+    if (!value) continue
+    const items = Array.isArray(value) ? value : Object.values(value).flat()
+    for (const entry of items) {
+      const link = _normalizeLinkObj(entry, domain)
+      if (!link) continue
+      const kind = kindHint || _inferKind(link.url)
+      if (!collector[kind][variant].find(s => s.url === link.url))
+        collector[kind][variant].push(link)
+    }
+  }
+}
+
+/** Extrae todos los servidores del dataRoot de SvelteKit */
+export function extractLinksFromData(dataRoot, html, domain) {
+  const col = { stream: { SUB: [], DUB: [] }, download: { SUB: [], DUB: [] } }
+  _walk(dataRoot || {}, node => {
+    if (!_isObj(node)) return
+    if (node.streamLinks)   _parseVariantContainer(node.streamLinks,   'stream',   domain, col)
+    if (node.downloadLinks) _parseVariantContainer(node.downloadLinks, 'download', domain, col)
+    if (node.servers)       _parseVariantContainer(node.servers,       'stream',   domain, col)
+    const hasVariant = 'SUB' in node || 'sub' in node || 'DUB' in node || 'dub' in node
+    if (hasVariant) _parseVariantContainer(node, null, domain, col)
+  })
+  // fallback: regex directo en HTML
+  if (col.stream.SUB.length === 0 && col.download.SUB.length === 0 && html) {
+    const VIDEO_RE = /https?:\/\/(?:www\.)?(?:pixeldrain\.com|mega\.nz|mp4upload\.com|1fichier\.com|player\.[^\s"'<>]+|[^\s"'<>]*uns\.bio[^\s"'<>]*)[^\s"'<>]*/gi
+    for (const u of (html.match(VIDEO_RE) || [])) {
+      const nombre = detectarServidor(u)
+      if (!col.stream.SUB.find(s => s.url === u))
+        col.stream.SUB.push({ nombre, url: u })
+    }
+  }
+  return col
+}
+
+// ─── Fin utilidades SvelteKit ────────────────────────────────────────────────
+
 export function jsUnpack(packed) {
   try {
     const m = packed.match(/}\s*\('(.*)',\s*(.*?),\s*(\d+),\s*'(.*?)'\.split\('\|'\)/)
@@ -1058,6 +1215,26 @@ export async function extractByse(embedUrl) {
   return null
 }
 
+/** Resuelve URLs de JKPlayers con parámetro ?e=BASE64 */
+export async function resolveJKPlayerUrl(embedUrl) {
+  try {
+    const parsed = new URL(embedUrl)
+    const eParam = parsed.searchParams.get('e')
+    if (eParam) {
+      try {
+        const decoded = Buffer.from(eParam, 'base64').toString('utf-8').trim()
+        const m = decoded.match(/(https?:\/\/[^\s]+)/)
+        if (m?.[1]) return m[1].split('&')[0]
+      } catch (_) {}
+    }
+    const res  = await fetch(embedUrl, { headers: embedHeaders(embedUrl), timeout: 12000 })
+    const html = await res.text()
+    const m2   = html.match(/player\.setup\([\s\S]*?sources\s*:\s*\[\s*\{[\s\S]*?file\s*:\s*"([^"]+)"/)
+    if (m2?.[1]) return m2[1]
+  } catch (e) { console.error('[jkplayer]', e.message) }
+  return null
+}
+
 export async function resolverEmbedAVideoDirecto(embedUrl) {
   const u = embedUrl.toLowerCase()
 
@@ -1115,6 +1292,9 @@ export async function resolverEmbedAVideoDirecto(embedUrl) {
 
   if (u.includes('lulu') || u.includes('luluvdo') || u.includes('lulustream'))
     return extractByse(embedUrl)
+
+  if (u.includes('jkplayers.com') || u.includes('jkplayer'))
+    return resolveJKPlayerUrl(embedUrl)
 
   if (u.includes('cloud.mail') || u.includes('cloudfile') || u.includes('1fichier'))
     return null
@@ -1353,89 +1533,79 @@ export async function scrapeGenerico(url) {
 }
 
 export async function scrapeAnimeAV1(url) {
-  // URL de episodio: https://animeav1.com/media/{slug}/{ep}
   const html = await fetchHtml(url)
-  const $    = cheerio.load(html)
+  const $ = cheerio.load(html)
   const servidores = []
+  const domain = 'animeav1.com'
 
+  // 1. Interceptado por Puppeteer
   const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
   if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
 
-  // AnimeAV1 suele tener los servidores en un JSON embebido o en data attributes
-  // Patrón 1: JSON con lista de servidores en script
-  $('script').each((_, el) => {
-    const code = $(el).html() || ''
-
-    // Patrón: {"servers":[{"name":"...","url":"..."},...]}
-    const m1 = code.match(/"servers"\s*:\s*(\[.*?\])/s)
-    if (m1) {
-      try {
-        const lista = JSON.parse(m1[1])
-        for (const s of lista) {
-          const u = normalizarMegaUrl(s.url || s.src || s.file || '')
-          const n = s.name || s.server || s.label || detectarServidor(u)
-          if (u?.startsWith('http') && !servidores.find(x => x.url === u))
-            servidores.push({ nombre: n.toLowerCase(), url: u })
-        }
-      } catch (_) {}
+  // 2. Extracción SvelteKit (método principal)
+  const svelteData = extractSvelteData(html)
+  if (svelteData) {
+    const links = extractLinksFromData(svelteData, null, domain)
+    const allLinks = [
+      ...links.stream.SUB, ...links.stream.DUB,
+      ...links.download.SUB, ...links.download.DUB,
+    ]
+    for (const lnk of allLinks) {
+      const u = normalizarMegaUrl(lnk.url)
+      if (u && !servidores.find(s => s.url === u))
+        servidores.push({ nombre: lnk.nombre, url: u })
     }
+  }
 
-    // Patrón: videos = [[name, url], ...]  (igual que TioAnime)
-    const m2 = code.match(/var videos\s*=\s*(\[\[.*?\]\])/s)
-    if (m2) {
-      try {
-        const lista = JSON.parse(m2[1])
-        for (const item of lista) {
-          if (Array.isArray(item) && typeof item[1] === 'string' && item[1].startsWith('http')) {
-            const u = normalizarMegaUrl(item[1])
-            const n = String(item[0]).toLowerCase() || detectarServidor(u)
-            if (!servidores.find(x => x.url === u))
-              servidores.push({ nombre: n, url: u })
-          }
-        }
-      } catch (_) {}
-    }
+  // 3. Fallback: patrones legacy en <script>
+  if (servidores.length === 0) {
+    $('script').each((_, el) => {
+      const code = $(el).html() || ''
 
-    // Patrón: array genérico de objetos con url/file/src
-    if (servidores.length === 0) {
-      const m3 = code.match(/var\s+(?:videos|servers|sources)\s*=\s*(\[[\s\S]*?\]);/)
-      if (m3) {
+      // { "servers": [{name, url}] }
+      const m1 = code.match(/"servers"\s*:\s*(\[.*?\])/s)
+      if (m1) {
         try {
-          const lista = JSON.parse(m3[1])
-          for (const item of lista) {
-            const u = normalizarMegaUrl(item?.url || item?.file || item?.src || '')
-            const n = item?.name || item?.title || item?.label || item?.server || detectarServidor(u)
+          for (const s of JSON.parse(m1[1])) {
+            const u = normalizarMegaUrl(s.url || s.src || s.file || '')
+            const n = s.name || s.server || s.label || detectarServidor(u)
             if (u?.startsWith('http') && !servidores.find(x => x.url === u))
               servidores.push({ nombre: n.toLowerCase(), url: u })
           }
         } catch (_) {}
       }
-    }
-  })
 
-  // Patrón 2: botones/links con data-src o data-url
-  $('[data-src], [data-url], [data-video]').each((_, el) => {
-    const raw = $(el).attr('data-src') || $(el).attr('data-url') || $(el).attr('data-video') || ''
-    let embedUrl = raw
-    try {
-      const decoded = Buffer.from(raw, 'base64').toString('utf-8')
-      if (decoded.startsWith('http')) embedUrl = decoded
-    } catch (_) {}
-    if (embedUrl.startsWith('http') && !servidores.find(x => x.url === embedUrl)) {
-      const n = detectarServidor(embedUrl)
-      servidores.push({ nombre: n, url: embedUrl })
-    }
-  })
+      // var videos = [[name, url], ...]
+      const lit = extractVarLiteral(code, 'videos')
+      if (lit) {
+        const lista = _safeEval(`(${lit})`)
+        if (Array.isArray(lista)) {
+          for (const item of lista) {
+            if (Array.isArray(item) && typeof item[1] === 'string' && item[1].startsWith('http')) {
+              const u = normalizarMegaUrl(item[1])
+              if (!servidores.find(x => x.url === u))
+                servidores.push({ nombre: String(item[0]).toLowerCase() || detectarServidor(u), url: u })
+            }
+          }
+        }
+      }
+    })
 
-  // Patrón 3: iframes directos
-  $('iframe[src]').each((_, el) => {
-    const src = $(el).attr('src') || ''
-    if (src.startsWith('http') && !servidores.find(x => x.url === src))
-      servidores.push({ nombre: detectarServidor(src), url: src })
-  })
-
-  // Patrón 4: extracción desde scripts (fallback genérico)
-  if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
+    // data-src / data-url / iframes
+    $('[data-src],[data-url],[data-video]').each((_, el) => {
+      const raw = $(el).attr('data-src') || $(el).attr('data-url') || $(el).attr('data-video') || ''
+      let embedUrl = raw
+      try { const d = Buffer.from(raw, 'base64').toString('utf-8'); if (d.startsWith('http')) embedUrl = d } catch (_) {}
+      if (embedUrl.startsWith('http') && !servidores.find(x => x.url === embedUrl))
+        servidores.push({ nombre: detectarServidor(embedUrl), url: embedUrl })
+    })
+    $('iframe[src]').each((_, el) => {
+      const src = $(el).attr('src') || ''
+      if (src.startsWith('http') && !servidores.find(x => x.url === src))
+        servidores.push({ nombre: detectarServidor(src), url: src })
+    })
+    if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
+  }
 
   console.log(`[animeav1] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
   return servidores
@@ -1469,35 +1639,30 @@ export async function scrapeJKanime(url) {
   try {
     const html = await fetchHtml(url)
     const $ = cheerio.load(html)
-    
-    // Extraer servidores de la variable 'servers' en los scripts
-    $('script').each((_, el) => {
-      const code = $(el).html() || ''
-      if (code.includes('var servers =')) {
-        const match = code.match(/var servers = (\[.*?\]);/s)
-        if (match) {
+
+    // 1. Extracción robusta con extractVarLiteral + safeEval
+    const serversLit = extractVarLiteral(html, 'servers')
+    if (serversLit) {
+      const data = _safeEval(`(${serversLit})`)
+      if (Array.isArray(data)) {
+        for (const srv of data) {
+          if (!srv?.remote) continue
           try {
-            const data = JSON.parse(match[1])
-            data.forEach(srv => {
-              if (srv.remote) {
-                try {
-                  let d = srv.remote
-                  const pad = 4 - (d.length % 4)
-                  if (pad !== 4) d += '='.repeat(pad)
-                  const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
-                  if (decoded.startsWith('http')) {
-                    servidores.push({
-                      nombre: srv.server?.toLowerCase() || detectarServidor(decoded),
-                      url: normalizarMegaUrl(decoded)
-                    })
-                  }
-                } catch (_) {}
-              }
-            })
+            let d = srv.remote
+            const pad = 4 - (d.length % 4); if (pad !== 4) d += '='.repeat(pad)
+            const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
+            if (decoded.startsWith('http') && !servidores.find(s => s.url === normalizarMegaUrl(decoded)))
+              servidores.push({ nombre: srv.server?.toLowerCase() || detectarServidor(decoded), url: normalizarMegaUrl(decoded) })
           } catch (_) {}
         }
       }
-    })
+    }
+
+    // 2. Fallback: patrón video[N] = '<iframe src="...">'
+    for (const iframeUrl of extractVideoIframeUrls(html)) {
+      if (!servidores.find(s => s.url === iframeUrl))
+        servidores.push({ nombre: detectarServidor(iframeUrl) || 'jkplayer', url: iframeUrl })
+    }
 
     // Si no hay servidores, intentar con Puppeteer como respaldo
     if (servidores.length === 0) {
