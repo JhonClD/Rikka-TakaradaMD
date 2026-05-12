@@ -323,9 +323,12 @@ export async function scrapeInfoAnimeFLV(animeUrl) {
       if (/doblado/.test(animeUrl))   audioTags.push('Doblado')
     }
 
-    const coverUrl =
-      $('div.AnimeCover img, .cover img, figure.Bg img').first().attr('src') ||
-      $('meta[property="og:image"]').attr('content') || null
+    let coverUrl =
+      $('meta[property="og:image"]').attr('content') ||
+      $('div.AnimeCover img, .cover img, figure.Bg img, img[src*="/uploads/animes"]').first().attr('src') ||
+      null
+    if (coverUrl && !coverUrl.startsWith('http'))
+      coverUrl = `https://www3.animeflv.net${coverUrl.startsWith('/') ? '' : '/'}${coverUrl}`
 
     let episodes = []
     $('script').each((_, el) => {
@@ -456,12 +459,18 @@ export async function scrapePortadaSitio(sitio, episodeUrl) {
     let cover   = $('meta[property="og:image"]').attr('content') || null
     if (!cover) {
       cover = $(
-        'img.thumbnail, img.cover, .cover img, .anime-cover img, figure img, .AnimeCover img'
-      ).first().attr('src') || null
+        'img.thumbnail, img.cover, .cover img, .anime-cover img, figure img, .AnimeCover img,' +
+        '.imagen img, .portada img, .poster img, .anime-poster img, .sinopsis img,' +
+        'header img, .series-image img, img[src*="/uploads/"], img[src*="/animes/"],' +
+        'img[src*="cover"], img[src*="poster"], img[src*="thumbnail"]'
+      ).filter((_, el) => {
+        const src = $(el).attr('src') || ''
+        return src && !src.includes('logo') && !src.includes('icon') && !src.includes('banner') && !src.includes('bg')
+      }).first().attr('src') || null
     }
     if (cover && !cover.startsWith('http')) {
       const base = new URL(animePageUrl)
-      cover = `${base.origin}${cover}`
+      cover = `${base.origin}${cover.startsWith('/') ? '' : '/'}${cover}`
     }
     return cover || null
   } catch (e) {
@@ -1223,14 +1232,28 @@ export async function resolveJKPlayerUrl(embedUrl) {
     if (eParam) {
       try {
         const decoded = Buffer.from(eParam, 'base64').toString('utf-8').trim()
-        const m = decoded.match(/(https?:\/\/[^\s]+)/)
-        if (m?.[1]) return m[1].split('&')[0]
+        const m = decoded.match(/(https?:\/\/[^\s&]+)/)
+        if (m?.[1]) return m[1]
       } catch (_) {}
     }
     const res  = await fetch(embedUrl, { headers: embedHeaders(embedUrl), timeout: 12000 })
     const html = await res.text()
-    const m2   = html.match(/player\.setup\([\s\S]*?sources\s*:\s*\[\s*\{[\s\S]*?file\s*:\s*"([^"]+)"/)
-    if (m2?.[1]) return m2[1]
+
+    const packed = html.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
+    const code   = packed ? (jsUnpack(packed[0]) || html) : html
+
+    const patterns = [
+      /player\.setup\([\s\S]*?sources\s*:\s*\[\s*\{[\s\S]*?file\s*:\s*["']([^"']+)["']/,
+      /jwplayer\([^)]*\)\.setup\([\s\S]*?file\s*:\s*["']([^"']+)["']/,
+      /sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']/,
+      /file\s*:\s*["'](https?:\/\/[^"']+\.(?:m3u8|mp4)[^"']*)["']/i,
+      /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+      /["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+    ]
+    for (const re of patterns) {
+      const m = (code || html).match(re)
+      if (m?.[1]?.startsWith('http')) return m[1]
+    }
   } catch (e) { console.error('[jkplayer]', e.message) }
   return null
 }
@@ -1640,9 +1663,10 @@ export async function scrapeJKanime(url) {
     const html = await fetchHtml(url)
     const $ = cheerio.load(html)
 
-    // 1. Extracción robusta con extractVarLiteral + safeEval
-    const serversLit = extractVarLiteral(html, 'servers')
-    if (serversLit) {
+    // 1. Extracción robusta con extractVarLiteral + safeEval (prueba 'servers' y 'servidores')
+    for (const varName of ['servers', 'servidores']) {
+      const serversLit = extractVarLiteral(html, varName)
+      if (!serversLit) continue
       const data = _safeEval(`(${serversLit})`)
       if (Array.isArray(data)) {
         for (const srv of data) {
@@ -1655,6 +1679,7 @@ export async function scrapeJKanime(url) {
               servidores.push({ nombre: srv.server?.toLowerCase() || detectarServidor(decoded), url: normalizarMegaUrl(decoded) })
           } catch (_) {}
         }
+        if (servidores.length > 0) break
       }
     }
 
@@ -1662,6 +1687,27 @@ export async function scrapeJKanime(url) {
     for (const iframeUrl of extractVideoIframeUrls(html)) {
       if (!servidores.find(s => s.url === iframeUrl))
         servidores.push({ nombre: detectarServidor(iframeUrl) || 'jkplayer', url: iframeUrl })
+    }
+
+    // 3. Fallback adicional: buscar JSON embebido con "remote" en scripts
+    if (servidores.length === 0) {
+      $('script:not([src])').each((_, el) => {
+        const code = $(el).html() || ''
+        const arrMatch = code.match(/\[\s*\{[^}]*"remote"\s*:[^}]+\}\s*\]/)
+        if (arrMatch) {
+          try {
+            const arr = JSON.parse(arrMatch[0])
+            for (const item of arr) {
+              if (!item?.remote) continue
+              let d = item.remote
+              const pad = 4 - (d.length % 4); if (pad !== 4) d += '='.repeat(pad)
+              const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
+              if (decoded.startsWith('http') && !servidores.find(s => s.url === normalizarMegaUrl(decoded)))
+                servidores.push({ nombre: item.server?.toLowerCase() || detectarServidor(decoded), url: normalizarMegaUrl(decoded) })
+            }
+          } catch (_) {}
+        }
+      })
     }
 
     // Si no hay servidores, intentar con Puppeteer como respaldo
@@ -1726,7 +1772,31 @@ export async function scrapeJKanime(url) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
     const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
 
+    // Intentar primero el endpoint alternativo que devuelve todos los servidores a la vez
+    try {
+      const altUrl = `https://jkanime.net/ajax/servers/2/${slug}/${cap}/`
+      const altRes = await fetch(altUrl, { headers, timeout: 12000 })
+      if (altRes.ok) {
+        const altJson = await altRes.json()
+        const items = Array.isArray(altJson) ? altJson
+          : (altJson?.servers || altJson?.data || altJson?.results || [])
+        for (const item of items) {
+          if (!item?.remote) continue
+          try {
+            let d = item.remote
+            const pad = 4 - (d.length % 4); if (pad !== 4) d += '='.repeat(pad)
+            const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
+            if (decoded.startsWith('http') && !servidores.find(s => s.url === normalizarMegaUrl(decoded))) {
+              const finalUrl = decoded.includes('jkplayers.com') ? await resolverRedirect(decoded) : decoded
+              servidores.push({ nombre: item.server?.toLowerCase() || detectarServidor(finalUrl), url: normalizarMegaUrl(finalUrl) })
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (e) { console.error('[jkanime] alt API:', e.message) }
+
     for (const srv of SERVIDORES_JK) {
+      if (servidores.length >= 4) break
       try {
         const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
         const res    = await fetch(apiUrl, { headers, timeout: 12000 })
