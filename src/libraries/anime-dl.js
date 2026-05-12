@@ -75,9 +75,9 @@ export const SITIOS = [
     buscar: buscarEnAnimeFLV,  scrape: scrapeAnimeFLV,
   },
   {
-    id: 2, nombre: 'TioAnime',  dominio: 'tioanime',
-    url: 'https://tioanime.com',
-    buscar: buscarEnTioAnime,  scrape: scrapeTioAnime,
+    id: 2, nombre: 'AnimeAV1',  dominio: 'animeav1',
+    url: 'https://animeav1.com',
+    buscar: buscarEnAnimeAV1,  scrape: scrapeAnimeAV1,
   },
   {
     id: 3, nombre: 'LatAnime',  dominio: 'latanime',
@@ -169,6 +169,22 @@ export function normalizarMegaUrl(u) {
 }
 
 export const numToLetter = (i) => String.fromCharCode(97 + (i % 26))
+
+export function barraProgreso(actual, total, ancho = 16) {
+  const pct   = total > 0 ? Math.min(actual / total, 1) : 0
+  const lleno = Math.round(pct * ancho)
+  const vacio = ancho - lleno
+  const barra = '█'.repeat(lleno) + '░'.repeat(vacio)
+  return { barra, pct: (pct * 100).toFixed(1) }
+}
+
+export function formatBytes(bytes) {
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2) + ' GB'
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(2) + ' MB'
+  if (bytes >= 1024)      return (bytes / 1024).toFixed(2) + ' KB'
+  return bytes + ' B'
+}
+
 
 export async function enviarListaWA(conn, m, { title, body = '', footer, buttonText = 'SELECCIONAR', sections }) {
   const device   = getDevice(m.key.id)
@@ -416,9 +432,9 @@ export async function scrapePortadaSitio(sitio, episodeUrl) {
   try {
     let animePageUrl = null
 
-    if (sitio.dominio === 'tioanime') {
-      const match = episodeUrl.match(/\/ver\/(.+)-\d+$/)
-      if (match) animePageUrl = `https://tioanime.com/anime/${match[1]}`
+    if (sitio.dominio === 'animeav1') {
+      const match = episodeUrl.match(/\/media\/([^/]+)\/\d+/)
+      if (match) animePageUrl = `https://animeav1.com/media/${match[1]}`
     } else if (sitio.dominio === 'latanime') {
       const match = episodeUrl.match(/\/ver\/(.+)-episodio-\d+$/)
       if (match) animePageUrl = `https://latanime.org/anime/${match[1]}`
@@ -1336,41 +1352,60 @@ export async function scrapeGenerico(url) {
   return servidores
 }
 
-export async function scrapeTioAnime(url) {
+export async function scrapeAnimeAV1(url) {
+  // URL de episodio: https://animeav1.com/media/{slug}/{ep}
   const html = await fetchHtml(url)
-  const $ = cheerio.load(html)
+  const $    = cheerio.load(html)
   const servidores = []
+
   const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
   if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
 
+  // AnimeAV1 suele tener los servidores en un JSON embebido o en data attributes
+  // Patrón 1: JSON con lista de servidores en script
   $('script').each((_, el) => {
     const code = $(el).html() || ''
-    if (!code.includes('var videos')) return
 
-    const m = code.match(/var videos\s*=\s*(\[\[.*?\]\])/s)
-    if (m) {
+    // Patrón: {"servers":[{"name":"...","url":"..."},...]}
+    const m1 = code.match(/"servers"\s*:\s*(\[.*?\])/s)
+    if (m1) {
       try {
-        const lista = JSON.parse(m[1])
+        const lista = JSON.parse(m1[1])
+        for (const s of lista) {
+          const u = normalizarMegaUrl(s.url || s.src || s.file || '')
+          const n = s.name || s.server || s.label || detectarServidor(u)
+          if (u?.startsWith('http') && !servidores.find(x => x.url === u))
+            servidores.push({ nombre: n.toLowerCase(), url: u })
+        }
+      } catch (_) {}
+    }
+
+    // Patrón: videos = [[name, url], ...]  (igual que TioAnime)
+    const m2 = code.match(/var videos\s*=\s*(\[\[.*?\]\])/s)
+    if (m2) {
+      try {
+        const lista = JSON.parse(m2[1])
         for (const item of lista) {
           if (Array.isArray(item) && typeof item[1] === 'string' && item[1].startsWith('http')) {
-            const nombre = String(item[0]).toLowerCase() || detectarServidor(item[1])
             const u = normalizarMegaUrl(item[1])
-            if (!servidores.find(s => s.url === u))
-              servidores.push({ nombre, url: u })
+            const n = String(item[0]).toLowerCase() || detectarServidor(u)
+            if (!servidores.find(x => x.url === u))
+              servidores.push({ nombre: n, url: u })
           }
         }
       } catch (_) {}
     }
 
+    // Patrón: array genérico de objetos con url/file/src
     if (servidores.length === 0) {
-      const mArr = code.match(/var\s+videos\s*=\s*(\[[\s\S]*?\]);/)
-      if (mArr) {
+      const m3 = code.match(/var\s+(?:videos|servers|sources)\s*=\s*(\[[\s\S]*?\]);/)
+      if (m3) {
         try {
-          const lista = JSON.parse(mArr[1])
+          const lista = JSON.parse(m3[1])
           for (const item of lista) {
-            const u = normalizarMegaUrl(item?.url || item?.file || item?.code || '')
-            const n = item?.title || item?.label || item?.server || detectarServidor(u)
-            if (u?.startsWith('http') && !servidores.find(s => s.url === u))
+            const u = normalizarMegaUrl(item?.url || item?.file || item?.src || '')
+            const n = item?.name || item?.title || item?.label || item?.server || detectarServidor(u)
+            if (u?.startsWith('http') && !servidores.find(x => x.url === u))
               servidores.push({ nombre: n.toLowerCase(), url: u })
           }
         } catch (_) {}
@@ -1378,15 +1413,31 @@ export async function scrapeTioAnime(url) {
     }
   })
 
-  console.log(`[tioanime] ${servidores.length} servidor(es):`, servidores.map(s => `${s.nombre}=${s.url.slice(0,50)}`).join(' | '))
+  // Patrón 2: botones/links con data-src o data-url
+  $('[data-src], [data-url], [data-video]').each((_, el) => {
+    const raw = $(el).attr('data-src') || $(el).attr('data-url') || $(el).attr('data-video') || ''
+    let embedUrl = raw
+    try {
+      const decoded = Buffer.from(raw, 'base64').toString('utf-8')
+      if (decoded.startsWith('http')) embedUrl = decoded
+    } catch (_) {}
+    if (embedUrl.startsWith('http') && !servidores.find(x => x.url === embedUrl)) {
+      const n = detectarServidor(embedUrl)
+      servidores.push({ nombre: n, url: embedUrl })
+    }
+  })
 
+  // Patrón 3: iframes directos
   $('iframe[src]').each((_, el) => {
-    const src = $(el).attr('src')
-    if (src?.startsWith('http') && !servidores.find(s => s.url === src))
+    const src = $(el).attr('src') || ''
+    if (src.startsWith('http') && !servidores.find(x => x.url === src))
       servidores.push({ nombre: detectarServidor(src), url: src })
   })
 
-  extraerUrlsDeScripts($, html, servidores)
+  // Patrón 4: extracción desde scripts (fallback genérico)
+  if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
+
+  console.log(`[animeav1] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
   return servidores
 }
 
@@ -1682,35 +1733,42 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
   return null
 }
 
-export async function buscarEnTioAnime(nombre, episodio, temporada = 1) {
-  const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
-  const searchUrl = `https://tioanime.com/directorio?q=${encodeURIComponent(query)}&year=1950%2C2026&status=2&sort=recent`
-  const html = await fetchHtml(searchUrl)
-  const $    = cheerio.load(html)
+export async function buscarEnAnimeAV1(nombre, episodio, temporada = 1) {
+  // Búsqueda: https://animeav1.com/?s={query}
+  // Resultados: links tipo /media/{slug}
+  // Episodio:   /media/{slug}/{ep}
+  const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
+  try {
+    const html  = await fetchHtml(`https://animeav1.com/?s=${encodeURIComponent(query)}`)
+    const $     = cheerio.load(html)
+    const links = []
 
-  const links = []
-  $('main > ul > li, #tioanime > div > div ul > li').each((_, el) => {
-    const $el   = $(el)
-    const aTag  = $el.find('a').first()
-    const href  = aTag.attr('href') || ''
-    const title = ($el.find('h3').text() || aTag.text() || '').trim().toLowerCase()
-    if (href.includes('/anime/')) links.push({ href, title })
-  })
+    $('a[href*="/media/"]').each((_, el) => {
+      const href  = $(el).attr('href') || ''
+      const title = ($(el).attr('title') || $(el).find('h2,h3,.title,.name').text() || $(el).text()).trim().toLowerCase()
+      // Solo links de página de anime (sin número de episodio al final)
+      if (/\/media\/[^/]+$/.test(href) && !links.find(l => l.href === href))
+        links.push({ href, title })
+    })
 
-  if (links.length === 0) return null
+    if (links.length === 0) return null
 
-  const elegido   = elegirPorTemporada(links, temporada) || mejorMatch(links, nombre)
-  const slugMatch = elegido.href.match(/\/anime\/([^/]+)/)
-  if (!slugMatch) return null
-  const slug = slugMatch[1]
-  return `https://tioanime.com/ver/${slug}-${episodio}`
+    const elegido   = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
+    const slugMatch = elegido.href.match(/\/media\/([^/?#]+)/)
+    if (!slugMatch) return null
+    const slug = slugMatch[1]
+    return `https://animeav1.com/media/${slug}/${episodio}`
+  } catch (e) {
+    console.error('[animeav1] buscar:', e.message)
+    return null
+  }
 }
 
 export class MegaQuotaError extends Error {
   constructor() { super('EOVERQUOTA'); this.name = 'MegaQuotaError' }
 }
 
-export async function descargarMega(url, m, tmpDir) {
+export async function descargarMega(url, tmpDir, onProgress = null) {
   let file
   try {
     file = MegaFile.fromURL(url)
@@ -1722,15 +1780,24 @@ export async function descargarMega(url, m, tmpDir) {
   }
 
   const name     = file.name
-  const sizeH    = (file.size / 1024 / 1024).toFixed(2) + ' MB'
-  await m.reply(`📥 *Mega:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
+  const total    = file.size
+  const tempPath = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
 
-  const tempPath   = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
+  if (onProgress) await onProgress({ nombre: name, total, dld: 0, speed: 0 })
+
   const fileStream = file.download()
-  let dld = 0
+  let dld = 0, lastTime = Date.now(), lastDld = 0, speed = 0
   fileStream.on('data', chunk => {
     dld += chunk.length
-    process.stdout.write(`\r[MEGA] ${((dld / file.size) * 100).toFixed(1)}% | ${(dld / 1024 / 1024).toFixed(2)} MB`)
+    const now = Date.now()
+    const dt  = (now - lastTime) / 1000
+    if (dt >= 0.8) {
+      speed    = (dld - lastDld) / dt
+      lastTime = now
+      lastDld  = dld
+      process.stdout.write(`\r[MEGA] ${((dld / total) * 100).toFixed(1)}% | ${formatBytes(dld)} / ${formatBytes(total)}`)
+      if (onProgress) onProgress({ nombre: name, total, dld, speed }).catch(() => {})
+    }
   })
   try {
     await pipeline(fileStream, fs.createWriteStream(tempPath))
@@ -1740,6 +1807,7 @@ export async function descargarMega(url, m, tmpDir) {
     throw err
   }
   console.log(`\n[MEGA] ✅ ${name}`)
+  if (onProgress) await onProgress({ nombre: name, total, dld: total, speed, done: true }).catch(() => {})
   return tempPath
 }
 
@@ -1857,13 +1925,21 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
 
     try {
       if (/mega\.nz|mega\.co\.nz/.test(u)) {
-        await updateStatus(`📦 *Mega* detectado — descargando...`)
-        archivoPath = await descargarMega(srv.url, m, tmpDir)
+        archivoPath = await descargarMega(srv.url, tmpDir, async ({ nombre, total, dld, speed, done }) => {
+          if (done) return  // se maneja al final con el mensaje de subida
+          const { barra, pct } = barraProgreso(dld, total)
+          await updateStatus(
+            `📥 *Mega:* ${nombre}\n` +
+            `\`[${barra}] ${pct}%\`\n` +
+            `📦 ${formatBytes(dld)} / ${formatBytes(total)}\n` +
+            `⚡ ${formatBytes(speed)}/s`
+          )
+        })
         break
       }
 
       if (/mediafire\.com/.test(u)) {
-        await updateStatus(`📦 *MediaFire* detectado — obteniendo link...`)
+        await updateStatus(`🔗 *MediaFire* — obteniendo link...`)
         const { default: axios } = await import('axios')
         let mfData
         try { mfData = await mediafireDl(srv.url) }
@@ -1875,23 +1951,33 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
           const head = await axios.head(downloadUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, httpsAgent })
           sizeBytes = parseInt(head.headers['content-length'] || '0')
         } catch (_) {}
-        const sizeH = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(2) + ' MB' : '?'
-        await updateStatus(`📥 *MediaFire:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
+        // Estado inicial de descarga
+        const { barra: barra0 } = barraProgreso(0, sizeBytes)
+        await updateStatus(
+          `📥 *MediaFire:* ${name}\n` +
+          `\`[${barra0}] 0.0%\`\n` +
+          `📦 0 B / ${formatBytes(sizeBytes)}\n` +
+          `⚡ —`
+        )
         const tempPath = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
         const response = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent })
-        let dld = 0, mfLastTime = Date.now(), mfLastDld = 0
+        let dld = 0, mfLastTime = Date.now(), mfLastDld = 0, mfSpeed = 0
         response.data.on('data', chunk => {
           dld += chunk.length
           const now = Date.now()
           const dt  = (now - mfLastTime) / 1000
-          if (dt >= 0.5) {
-            const speed = ((dld - mfLastDld) / dt / 1024 / 1024).toFixed(1)
-            mfLastTime  = now
-            mfLastDld   = dld
-            const p     = sizeBytes ? ((dld / sizeBytes) * 100).toFixed(1) : '?'
-            const dlMB  = (dld / 1024 / 1024).toFixed(1)
-            const totMB = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(1) : '?'
-            process.stdout.write(`\r[MediaFire] ${p}% | ${dlMB} MB / ${totMB} MB | ${speed} MB/s`)
+          if (dt >= 0.8) {
+            mfSpeed    = (dld - mfLastDld) / dt
+            mfLastTime = now
+            mfLastDld  = dld
+            process.stdout.write(`\r[MediaFire] ${sizeBytes ? ((dld/sizeBytes)*100).toFixed(1) : '?'}% | ${formatBytes(dld)} / ${formatBytes(sizeBytes)}`)
+            const { barra, pct } = barraProgreso(dld, sizeBytes)
+            updateStatus(
+              `📥 *MediaFire:* ${name}\n` +
+              `\`[${barra}] ${pct}%\`\n` +
+              `📦 ${formatBytes(dld)} / ${formatBytes(sizeBytes)}\n` +
+              `⚡ ${formatBytes(mfSpeed)}/s`
+            ).catch(() => {})
           }
         })
         await pipeline(response.data, fs.createWriteStream(tempPath))
@@ -1963,7 +2049,35 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     const fileName = path.basename(archivoPath).replace(/_c\.mp4$/, '.mp4')
     const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · KanaArima-MD`
 
-    await updateStatus(`⬆️ Subiendo a WhatsApp...`)
+    // Calcular tamaño real del archivo para la barra de subida
+    const fileSize    = fs.statSync(archivoPath).size
+    const uploadStart = Date.now()
+
+    // Mostrar estado inicial de subida
+    const { barra: barraUp0 } = barraProgreso(0, fileSize)
+    await updateStatus(
+      `📤 *Subiendo a WhatsApp*\n` +
+      `\`[${barraUp0}] 0.0%\`\n` +
+      `📦 0 B / ${formatBytes(fileSize)}\n` +
+      `⚡ —`
+    )
+
+    // Simular progreso mientras sube (actualizamos cada 3s con estimación)
+    let uploadDone = false
+    const uploadTimer = setInterval(async () => {
+      if (uploadDone) return
+      const elapsed = (Date.now() - uploadStart) / 1000
+      // Estimamos ~3 MB/s como velocidad de subida típica a WhatsApp
+      const estimatedDld = Math.min(elapsed * 3 * 1024 * 1024, fileSize * 0.95)
+      const speed        = estimatedDld / Math.max(elapsed, 0.1)
+      const { barra, pct } = barraProgreso(estimatedDld, fileSize)
+      await updateStatus(
+        `📤 *Subiendo a WhatsApp*\n` +
+        `\`[${barra}] ${pct}%\`\n` +
+        `📦 ${formatBytes(estimatedDld)} / ${formatBytes(fileSize)}\n` +
+        `⚡ ${formatBytes(speed)}/s`
+      ).catch(() => {})
+    }, 3000)
 
     let enviado = false
     for (let intento = 1; intento <= 3; intento++) {
@@ -1972,6 +2086,8 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
           document: { url: archivoPath },
           caption, mimetype: 'video/mp4', fileName,
         }, { quoted: m })
+        uploadDone = true
+        clearInterval(uploadTimer)
         enviado = true
         await updateStatus(`✅ *¡Enviado!* ${fileName}`)
         break
@@ -1982,7 +2098,11 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
         if (isConnErr && intento < 3) {
           await updateStatus(`⏳ Conexión perdida, reconectando... (intento ${intento}/3)`)
           await new Promise(r => setTimeout(r, 10000 * intento))
-        } else throw sendErr
+        } else {
+          uploadDone = true
+          clearInterval(uploadTimer)
+          throw sendErr
+        }
       }
     }
     if (!enviado) throw new Error('No se pudo enviar tras 3 intentos')
