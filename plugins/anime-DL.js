@@ -18,6 +18,7 @@ import {
   numToLetter,
   enviarListaWA,
   buscarResultadosAnimeFLV,
+  buscarResultadosTodosSitios,
   mostrarInfoYEpisodios,
   puntuarMatch,
   parseMegaError,
@@ -65,9 +66,41 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
           { quoted: m, mentions: [m.sender] }
         )
       }
+
+      // Modo multi-sitio: calcular fila seleccionada entre todas las secciones
+      if (animeSearch.tipo === 'multisite') {
+        const idxSearch = letraInput.charCodeAt(0) - 97
+        // Reconstruir la lista plana de rows en el mismo orden que se mostró
+        const allItems = []
+        for (const [sitioId, resultados] of Object.entries(animeSearch.sitiosData)) {
+          const sitio = SITIOS.find(s => s.id === Number(sitioId))
+          if (!sitio) continue
+          if (sitio.dominio === 'animeflv') {
+            for (const r of resultados.slice(0, 5)) allItems.push({ sitioId: Number(sitioId), data: r, tipo: 'animeflv' })
+          } else {
+            allItems.push({ sitioId: Number(sitioId), data: resultados[0], tipo: 'sitio' })
+          }
+        }
+        const elegido = allItems[idxSearch]
+        if (!elegido) return m.reply(`❌ Letra inválida. Elige entre *a* y *${numToLetter(allItems.length - 1)}*.`)
+        global.pendingAnimeSearch.delete(m.chat)
+        const sitio = SITIOS.find(s => s.id === elegido.sitioId)
+        if (elegido.tipo === 'animeflv') {
+          return mostrarInfoYEpisodios(elegido.data, m, conn, usedPrefix, animeSearch.temporada)
+        } else {
+          // Para otros sitios: mostrar que está disponible y pedir episodio
+          return m.reply(
+            `✅ *${animeSearch.nombreBusq}* disponible en *${sitio?.nombre}*\n\n` +
+            `Ahora indica el episodio:\n  *.animedl ${sitio?.id} ${animeSearch.nombreBusq} <ep>*\n` +
+            `Ejemplo: *.animedl ${sitio?.id} ${animeSearch.nombreBusq} 1*`
+          )
+        }
+      }
+
+      // Modo original (solo AnimeFLV múltiples resultados)
       const idxSearch = letraInput.charCodeAt(0) - 97
-      const elegido   = animeSearch.resultados[idxSearch]
-      if (!elegido) return m.reply(`❌ Letra inválida. Elige entre *a* y *${numToLetter(animeSearch.resultados.length - 1)}*.`)
+      const elegido   = animeSearch.resultados?.[idxSearch]
+      if (!elegido) return m.reply(`❌ Letra inválida. Elige entre *a* y *${numToLetter((animeSearch.resultados?.length || 1) - 1)}*.`)
       global.pendingAnimeSearch.delete(m.chat)
       return mostrarInfoYEpisodios(elegido, m, conn, usedPrefix, animeSearch.temporada)
     }
@@ -276,49 +309,115 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       const nombreBusq = tokensSinEp.join(' ')
       if (!nombreBusq) return m.reply(`❌ Escribe el nombre del anime.\nEjemplo: *.animedl naruto*`)
 
-      const { key: statusKey } = await m.reply(`🔎 Buscando *${nombreBusq}*...`)
+      const { key: statusKey } = await m.reply(`🔎 Buscando *${nombreBusq}* en todos los sitios...`)
       const editStatus = async (txt) => {
         try { await conn.sendMessage(m.chat, { text: txt, edit: statusKey }) } catch (_) {}
       }
 
-      const resultados = await buscarResultadosAnimeFLV(nombreBusq, temporada)
+      // Buscar en TODOS los sitios en paralelo
+      const resultadosPorSitio = await buscarResultadosTodosSitios(nombreBusq, temporada)
 
-      if (resultados.length === 0) {
+      if (resultadosPorSitio.size === 0) {
         return editStatus(
-          `❌ No encontré ningún anime llamado *${nombreBusq}*.\n\n` +
+          `❌ No encontré *${nombreBusq}* en ningún sitio.\n\n` +
           `Prueba con el sitio + episodio:\n  ${usedPrefix}animedl ${nombreBusq} 1`
         )
       }
 
-      if (resultados.length === 1 || puntuarMatch(resultados[0].title, nombreBusq) >= 85) {
-        return mostrarInfoYEpisodios(resultados[0], m, conn, usedPrefix, temporada, statusKey)
+      // Para AnimeFLV que devuelve múltiples resultados, tomar el mejor match
+      // Para los demás sitios ya viene el único resultado encontrado
+      const device   = getDevice(m.key.id)
+      const isMobile = device !== 'desktop' && device !== 'web'
+
+      const sitiosEncontrados = [...resultadosPorSitio.entries()]
+      const totalSitios = sitiosEncontrados.length
+
+      await editStatus(`✅ Encontrado en *${totalSitios}* sitio(s): ${sitiosEncontrados.map(([id]) => SITIOS.find(s => s.id === id)?.nombre || id).join(', ')}`)
+
+      // Construir secciones del carrusel: una sección por sitio que encontró resultados
+      const sections = []
+      const allRows = []  // para handler.before con __siteselect__
+
+      for (const [sitioId, resultados] of sitiosEncontrados) {
+        const sitio = SITIOS.find(s => s.id === sitioId)
+        if (!sitio) continue
+
+        let rowsDelSitio
+        if (sitio.dominio === 'animeflv') {
+          // AnimeFLV puede traer múltiples resultados → mostrar hasta 5 por sitio
+          const slice = resultados.slice(0, 5)
+          rowsDelSitio = slice.map(r => ({
+            title      : r.title || nombreBusq,
+            description: sitio.nombre,
+            id         : `__siteselect__${sitioId}__${r.slug}`,
+          }))
+        } else {
+          // Otros sitios: un solo resultado (la URL del ep 1 guardada en slug)
+          rowsDelSitio = [{
+            title      : resultados[0].title || nombreBusq,
+            description: `Disponible en ${sitio.nombre}`,
+            id         : `__siteselect__${sitioId}__${resultados[0].url}`,
+          }]
+        }
+
+        sections.push({ title: `📺 ${sitio.nombre}`, rows: rowsDelSitio })
+        allRows.push(...rowsDelSitio)
       }
 
-      await editStatus(`🔍 *${resultados.length} resultados para "${nombreBusq}"* — elige uno:`)
-
-      const maxR = Math.min(resultados.length, 26)
+      // Guardar en pendingAnimeSearch con estructura extendida para multi-sitio
       global.pendingAnimeSearch.set(m.chat, {
-        resultados: resultados.slice(0, maxR),
-        nombre    : nombreBusq,
+        tipo      : 'multisite',
+        nombreBusq,
         temporada,
         owner     : m.sender,
         timestamp : Date.now(),
         usedPrefix,
+        // mapa sitioId -> resultados para recuperar en handler.before
+        sitiosData: Object.fromEntries(sitiosEncontrados),
       })
 
-      return enviarListaWA(conn, m, {
-        title     : `🔍 Resultados para "${nombreBusq}"`,
-        body      : `Encontré ${resultados.length} resultados. Elige el anime correcto:`,
-        buttonText: 'ELEGIR ANIME',
-        sections  : [{
-          title: 'Animes encontrados',
-          rows : resultados.slice(0, maxR).map(r => ({
-            title      : r.title,
-            description: r.sitio?.nombre || 'AnimeFLV',
-            id         : `__animeselect__${r.slug}`,
-          })),
-        }],
+      if (isMobile) {
+        try {
+          const interactiveMessage = {
+            body  : { text: `Encontrado en ${totalSitios} sitio(s). Elige dónde ver:` },
+            footer: { text: global.wm || 'Kana Arima Bot' },
+            header: { title: `🎌 ${nombreBusq}`, hasMediaAttachment: false },
+            nativeFlowMessage: {
+              buttons: [{
+                name: 'single_select',
+                buttonParamsJson: JSON.stringify({ title: 'VER EN SITIO', sections }),
+              }],
+              messageParamsJson: '',
+            },
+          }
+          const msg = generateWAMessageFromContent(
+            m.chat,
+            { viewOnceMessage: { message: { interactiveMessage } } },
+            { userJid: conn.user.jid, quoted: m }
+          )
+          await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
+          return
+        } catch (err) {
+          console.error('[animedl multisite interactiveMsg]', err.message)
+        }
+      }
+
+      // Fallback texto plano
+      let idx = 0
+      const lineas = sections.flatMap(sec => {
+        const cabecera = [`\n*${sec.title}*`]
+        const filas = sec.rows.map(row => {
+          const letra = numToLetter(idx++)
+          return `*${letra}.* ${row.title}  —  _${row.description}_`
+        })
+        return [...cabecera, ...filas]
       })
+      await m.reply(
+        `*🎌 ${nombreBusq} — encontrado en ${totalSitios} sitio(s):*\n` +
+        lineas.join('\n') +
+        `\n\n_Responde con la letra correspondiente_`
+      )
+      return
     }
 
     let temporada  = 1
@@ -509,10 +608,53 @@ handler.before = async function (m, { conn }) {
         }
 
         global.pendingAnimeSearch.delete(m.chat)
-        const elegido = animeSearch.resultados.find(r => r.slug === slug)
+        const elegido = animeSearch.resultados?.find(r => r.slug === slug)
         if (!elegido) return false
 
         await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
+        return true
+      }
+
+      // Carrusel multi-sitio: __siteselect__<sitioId>__<slug_o_url>
+      if (selectedId.startsWith('__siteselect__')) {
+        const animeSearch = global.pendingAnimeSearch.get(m.chat)
+        if (!animeSearch) return false
+
+        if (animeSearch.owner && animeSearch.owner !== m.sender) {
+          await conn.sendMessage(m.chat,
+            { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
+            { quoted: m, mentions: [m.sender] }
+          )
+          return true
+        }
+
+        const rest = selectedId.replace('__siteselect__', '')
+        const separatorIdx = rest.indexOf('__')
+        const sitioIdStr = rest.substring(0, separatorIdx)
+        const slugOrUrl  = rest.substring(separatorIdx + 2)
+        const sitioId    = Number(sitioIdStr)
+        const sitio      = SITIOS.find(s => s.id === sitioId)
+
+        global.pendingAnimeSearch.delete(m.chat)
+
+        if (!sitio) return false
+
+        if (sitio.dominio === 'animeflv') {
+          // AnimeFLV: tenemos el slug, buscar en los datos guardados
+          const resultados = animeSearch.sitiosData?.[sitioId] || []
+          const elegido = resultados.find(r => r.slug === slugOrUrl) || resultados[0]
+          if (elegido) {
+            await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
+          }
+        } else {
+          // Otros sitios: pedir el episodio
+          await conn.sendMessage(m.chat, {
+            text:
+              `✅ *${animeSearch.nombreBusq}* disponible en *${sitio.nombre}*\n\n` +
+              `Indica el episodio a descargar:\n  *.animedl ${sitio.id} ${animeSearch.nombreBusq} <ep>*\n` +
+              `Ejemplo: *.animedl ${sitio.id} ${animeSearch.nombreBusq} 1*`,
+          }, { quoted: m })
+        }
         return true
       }
 
