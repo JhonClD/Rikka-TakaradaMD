@@ -1001,7 +1001,7 @@ export async function scrapeLatAnime(url) {
 
   async function resolverRedirector(href) {
     const dominiosDirectos = ['mega.nz','mediafire.com','voe.sx','streamtape','filemoon',
-      'mp4upload','streamwish','dood','upstream','ok.ru','vidhide','mixdrop','gofile.io']
+      'mp4upload','streamwish','dood','upstream','ok.ru','vidhide','mixdrop','gofile.io','pixeldrain.com']
     if (dominiosDirectos.some(d => href.includes(d))) return href
 
     try {
@@ -1040,7 +1040,9 @@ export async function scrapeLatAnime(url) {
       href.includes('vidhide')    || href.includes('mixdrop')       ||
       href.includes('savefiles')  || href.includes('gofile.io')     ||
       href.includes('byse')       || href.includes('dsvplay')       ||
-      href.includes('lulu')       || href.includes('cloud')
+      href.includes('lulu')       || href.includes('cloud')         ||
+      href.includes('pixeldrain')
+
     const esRedirector = !href.includes('latanime.org') &&
       !href.includes('javascript') && !href.includes('#') &&
       (href.includes('toggle') || href.includes('redirect') ||
@@ -1209,75 +1211,97 @@ export async function scrapeJKanime(url) {
   const cap     = jkMatch?.[2]
 
   try {
-    const chromiumPaths = [
-      process.env.PUPPETEER_EXECUTABLE_PATH,
-      '/data/data/com.termux/files/usr/bin/chromium-browser',
-      '/data/data/com.termux/files/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-    ].filter(Boolean)
-    let execPath = null
-    for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
-    if (!execPath) throw new Error('Chromium no disponible')
-
-    const browser = await (await getPuppeteer()).launch({
-      headless      : 'new',
-      executablePath: execPath,
-      args          : ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    })
-    const page = await browser.newPage()
-    await page.setUserAgent(randomUA())
-    await page.setExtraHTTPHeaders(buildHeaders({ Referer: 'https://jkanime.net/' }))
-
-    await page.setRequestInterception(true)
-    page.on('request', req => {
-      if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort()
-      else req.continue()
-    })
-
-    try { await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }) } catch (_) {
-      try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }) } catch (_) {}
-    }
-
-    try { await page.waitForSelector('table tr td a[href]', { timeout: 8000 }) } catch (_) {}
-
-    const filas = await page.evaluate(() => {
-      const resultado = []
-      document.querySelectorAll('table tr').forEach(tr => {
-        const tds = tr.querySelectorAll('td')
-        if (tds.length < 4) return
-        const nombre = tds[0]?.textContent?.trim()
-        const link   = tds[3]?.querySelector('a[href]')?.href
-        if (nombre && link?.startsWith('http')) resultado.push({ nombre, link })
-      })
-      return resultado
-    })
-
-    await browser.close()
-
-    if (filas.length > 0) {
-      console.log(`[jkanime] tabla: ${filas.length} servidores:`, filas.map(f => f.nombre).join(', '))
-      const promesas = filas.map(async ({ nombre, link }) => {
-        const finalUrl = await resolverRedirect(link)
-        return {
-          nombre : nombre.toLowerCase(),
-          url    : normalizarMegaUrl(finalUrl),
-          directo: /mega\.nz|mediafire\.com|gofile\.io|savefiles\.me/.test(finalUrl),
+    const html = await fetchHtml(url)
+    const $ = cheerio.load(html)
+    
+    // Extraer servidores de la variable 'servers' en los scripts
+    $('script').each((_, el) => {
+      const code = $(el).html() || ''
+      if (code.includes('var servers =')) {
+        const match = code.match(/var servers = (\[.*?\]);/s)
+        if (match) {
+          try {
+            const data = JSON.parse(match[1])
+            data.forEach(srv => {
+              if (srv.remote) {
+                try {
+                  let d = srv.remote
+                  const pad = 4 - (d.length % 4)
+                  if (pad !== 4) d += '='.repeat(pad)
+                  const decoded = Buffer.from(d, 'base64').toString('utf-8').trim()
+                  if (decoded.startsWith('http')) {
+                    servidores.push({
+                      nombre: srv.server?.toLowerCase() || detectarServidor(decoded),
+                      url: normalizarMegaUrl(decoded)
+                    })
+                  }
+                } catch (_) {}
+              }
+            })
+          } catch (_) {}
         }
-      })
-      const resultados = await Promise.allSettled(promesas)
-      for (const r of resultados) {
-        if (r.status === 'fulfilled' && r.value?.url && !servidores.find(s => s.url === r.value.url))
-          servidores.push(r.value)
       }
-      if (servidores.length > 0) {
-        console.log(`[jkanime] ${servidores.length} URLs resueltas`)
-        return servidores
+    })
+
+    // Si no hay servidores, intentar con Puppeteer como respaldo
+    if (servidores.length === 0) {
+      const chromiumPaths = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        '/data/data/com.termux/files/usr/bin/chromium-browser',
+        '/data/data/com.termux/files/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+      ].filter(Boolean)
+      let execPath = null
+      for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
+      
+      if (execPath) {
+        const browser = await (await getPuppeteer()).launch({
+          headless      : 'new',
+          executablePath: execPath,
+          args          : ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+        })
+        const page = await browser.newPage()
+        await page.setUserAgent(randomUA())
+        await page.setExtraHTTPHeaders(buildHeaders({ Referer: 'https://jkanime.net/' }))
+
+        await page.setRequestInterception(true)
+        page.on('request', req => {
+          if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort()
+          else req.continue()
+        })
+
+        try { await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }) } catch (_) {
+          try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }) } catch (_) {}
+        }
+
+        const remoteServers = await page.evaluate(() => {
+          return typeof servers !== 'undefined' ? servers : []
+        })
+
+        await browser.close()
+
+        remoteServers.forEach(srv => {
+          if (srv.remote) {
+            try {
+              let d = srv.remote
+              const pad = 4 - (d.length % 4)
+              if (pad !== 4) d += '='.repeat(pad)
+              const decoded = atob(d).trim()
+              if (decoded.startsWith('http') && !servidores.find(s => s.url === decoded)) {
+                servidores.push({
+                  nombre: srv.server?.toLowerCase() || 'servidor',
+                  url: decoded
+                })
+              }
+            } catch (_) {}
+          }
+        })
       }
     }
-  } catch (e) { console.error('[jkanime] Puppeteer tabla:', e.message) }
+  } catch (e) { console.error('[jkanime] Scrape error:', e.message) }
 
-  if (slug && cap) {
+  if (servidores.length === 0 && slug && cap) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
     const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
 
@@ -1358,29 +1382,25 @@ export async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
 
 export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
-  const html  = await fetchHtml(`https://latanime.org/?s=${encodeURIComponent(query)}`)
+  const html  = await fetchHtml(`https://latanime.org/buscar?q=${encodeURIComponent(query)}`)
   const $     = cheerio.load(html)
 
   const links = []
-  $('a[href*="/ver/"]').each((_, el) => {
+  // Buscar en los resultados de la nueva página de búsqueda
+  $('a[href*="/anime/"]').each((_, el) => {
     const href  = $(el).attr('href') || ''
     const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-    if (href.includes('latanime.org') || href.startsWith('/ver/')) {
+    if (href.includes('/anime/') && !links.find(l => l.href === href)) {
       links.push({ href, title })
     }
-  })
-  $('article a, .card a, .anime-item a').each((_, el) => {
-    const href  = $(el).attr('href') || ''
-    const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-    if (href && !links.find(l => l.href === href)) links.push({ href, title })
   })
 
   if (links.length === 0) return null
 
   const elegido   = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
-  const slugMatch = elegido.href.match(/\/ver\/([^/]+?)(?:-episodio-\d+)?(?:\/|$)/)
+  const slugMatch = elegido.href.match(/\/anime\/([^/]+)(?:\/|$)/)
   if (!slugMatch) return null
-  const slugBase = slugMatch[1].replace(/-episodio-\d+$/, '')
+  const slugBase = slugMatch[1]
   return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
 }
 
