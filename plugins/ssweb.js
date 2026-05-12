@@ -1,25 +1,27 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { executablePath } from 'puppeteer';
 
-// Activamos el plugin de sigilo para evitar detecciones (Cloudflare, etc.)
+// Configuración del plugin de sigilo para evadir Cloudflare y detecciones
 puppeteer.use(StealthPlugin());
 
-const handler = async (m, { conn, text, args }) => {
-  if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web para capturar.*", m);
+const handler = async (m, { conn, args }) => {
+  if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web.*", m);
 
-  // Validar y formatear la URL
+  // Formatear URL
   const url = args[0].startsWith("http") ? args[0] : "https://" + args[0];
 
   let browser;
   try {
-    // Lanzamos el navegador sin definir executablePath para que use el del entorno local
     browser = await puppeteer.launch({
+      // CLAVE: Esto busca automáticamente el Chromium descargado en node_modules
+      executablePath: executablePath(),
       headless: "new",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
+        '--disable-gl-drawing-for-tests',
         '--no-first-run',
         '--no-zygote',
         '--single-process',
@@ -29,35 +31,32 @@ const handler = async (m, { conn, text, args }) => {
 
     const page = await browser.newPage();
 
-    // Definimos un User-Agent real para mayor compatibilidad
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
+    // User agent real para saltar protecciones
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36');
 
-    // Configuración de pantalla (HD)
+    // Configurar tamaño de la captura
     await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
 
-    // Navegar a la web
+    // Navegar y esperar a que la red esté inactiva (ayuda con Cloudflare)
     await page.goto(url, { 
       waitUntil: 'networkidle2', 
-      timeout: 40000 
+      timeout: 60000 
     });
 
-    // Pequeña pausa para asegurar carga de imágenes dinámicas
+    // Espera extra de 3 segundos para asegurar que carguen los elementos visuales
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // Tomar la captura en buffer
     const screenshotBuffer = await page.screenshot({ fullPage: false, type: 'png' });
 
-    // Enviar el resultado
     await conn.sendMessage(m.chat, {
       image: screenshotBuffer,
       caption: `𓂃 ࣪˖ 📸 *Captura de:* ${url}`
     }, { quoted: m });
 
   } catch (e) {
-    console.error("Error en SSWEB:", e);
-    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura.\n\n*Detalle:* ${e.message}`);
+    console.error("ERROR EN SSWEB:", e);
+    m.reply(`𓂃 ࣪˖ ❌ *Error de ejecución:* ${e.message}`);
   } finally {
-    // Cerrar siempre el navegador para no consumir RAM innecesaria
     if (browser) {
       await browser.close();
     }
