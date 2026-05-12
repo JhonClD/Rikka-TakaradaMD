@@ -26,7 +26,7 @@ const handler = async (m, { conn, text, args }) => {
     const page = await browser.newPage();
 
     // Configurar el viewport para HD
-    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 8 });
+    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
 
     // Navegar a la URL
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
