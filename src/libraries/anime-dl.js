@@ -217,6 +217,38 @@ export async function enviarListaWA(conn, m, { title, body = '', footer, buttonT
   return false
 }
 
+// Busca el anime en TODOS los sitios en paralelo y retorna un Map sitioId -> resultados[]
+export async function buscarResultadosTodosSitios(nombre, temporada = 1) {
+  const resultadosPorSitio = new Map()
+
+  // AnimeFLV tiene su propio buscador de info completa
+  const buscarEnSitio = async (sitio) => {
+    try {
+      if (sitio.dominio === 'animeflv') {
+        const res = await buscarResultadosAnimeFLV(nombre, temporada)
+        if (res.length > 0) resultadosPorSitio.set(sitio.id, res)
+        return
+      }
+      // Para los demás sitios buscamos con un episodio ficticio (1) solo para ver si el anime existe
+      const url = await sitio.buscar(nombre, 1, temporada)
+      if (url) {
+        // Extraemos slug y título del URL para armar resultado compatible
+        resultadosPorSitio.set(sitio.id, [{
+          title: nombre,
+          slug : url,          // guardamos la URL del ep 1 como slug de referencia
+          url  : url,
+          sitio,
+        }])
+      }
+    } catch (e) {
+      console.error(`[buscarTodos] ${sitio.nombre}:`, e.message)
+    }
+  }
+
+  await Promise.all(SITIOS.map(buscarEnSitio))
+  return resultadosPorSitio
+}
+
 export async function buscarResultadosAnimeFLV(nombre, temporada = 1) {
   const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
   try {
@@ -1055,8 +1087,17 @@ export async function scrapeLatAnime(url) {
   for (const { href, label } of linksDescarga) {
     const urlReal = await resolverRedirector(href)
     const urlNorm = normalizarMegaUrl(urlReal)
-    if (!servidores.find(s => s.url === urlNorm))
-      servidores.push({ nombre: label || detectarServidor(urlNorm), url: urlNorm })
+    if (!servidores.find(s => s.url === urlNorm)) {
+      // Preferir detectarServidor (identifica por dominio) sobre el label del <a>
+      // que suele ser texto genérico como "descargar", "ver", etc.
+      const detectedName = detectarServidor(urlNorm)
+      const nombre = detectedName !== 'generico'
+        ? detectedName
+        : (label && label.length > 1 && !/^(ver|descargar|aqui|click|here|descarga|link|download|opcion|opción|\d+)$/i.test(label)
+            ? label
+            : 'generico')
+      servidores.push({ nombre, url: urlNorm })
+    }
   }
 
   $('[data-src], [data-player], [data-url]').each((_, el) => {
@@ -1067,8 +1108,13 @@ export async function scrapeLatAnime(url) {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8')
       if (decoded.startsWith('http')) embedUrl = decoded
     } catch (_) {}
-    if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl))
-      servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
+    if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
+      const detectedName = detectarServidor(embedUrl)
+      const nombre = detectedName !== 'generico'
+        ? detectedName
+        : (label && label.length > 1 ? label : 'generico')
+      servidores.push({ nombre, url: embedUrl })
+    }
   })
 
   $('iframe[src]').each((_, el) => {
@@ -1077,10 +1123,37 @@ export async function scrapeLatAnime(url) {
       servidores.push({ nombre: detectarServidor(src), url: src })
   })
 
-  if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
+  // Filtrar servidores genéricos que no son dominios de streaming conocidos
+  // (probablemente son links de navegación o de la propia web)
+  const dominiosPermitidos = [
+    'mega.nz', 'mediafire.com', 'voe.sx', 'streamtape', 'filemoon',
+    'mp4upload', 'streamwish', 'wishembed', 'embedwish', 'dood', 'upstream',
+    'ok.ru', 'vidhide', 'mixdrop', 'gofile.io', 'savefiles', 'byse',
+    'dsvplay', 'lulu', 'uqload', 'vidmoly', 'yourupload', 'pixeldrain',
+    'streamtape', 'okcdn', 'okru', '.m3u8', '.mp4', '.mkv',
+  ]
+  const servidoresFiltrados = servidores.filter(s => {
+    if (s.directo) return true
+    const u = s.url.toLowerCase()
+    return dominiosPermitidos.some(d => u.includes(d))
+  })
 
-  console.log(`[latanime] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
-  return servidores
+  if (servidoresFiltrados.length === 0 && servidores.length > 0) {
+    // Si el filtro eliminó todo, conservar los que al menos tienen nombre identificado
+    const fallback = servidores.filter(s => s.nombre !== 'generico')
+    if (fallback.length > 0) {
+      console.log(`[latanime] ${fallback.length} servidor(es) (fallback):`, fallback.map(s => s.nombre).join(', '))
+      return fallback
+    }
+    // Último recurso: retornar todos
+    console.log(`[latanime] ${servidores.length} servidor(es) (sin filtrar):`, servidores.map(s => s.nombre).join(', '))
+    return servidores
+  }
+
+  if (servidoresFiltrados.length === 0) extraerUrlsDeScripts($, html, servidoresFiltrados)
+
+  console.log(`[latanime] ${servidoresFiltrados.length} servidor(es):`, servidoresFiltrados.map(s => s.nombre).join(', '))
+  return servidoresFiltrados
 }
 
 export async function scrapeGenerico(url) {
