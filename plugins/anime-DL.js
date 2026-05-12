@@ -485,97 +485,37 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const sinMegaMf = servidores.filter(s => !esMegaMf(s))
   const directas  = sinMegaMf.filter(s => s.directo && CONFIG.videoExtensions.test(s.url))
   const listaIntentos = [
-    ...megaYMf,
+    ...megaYMf,                                            // 1° Mega / MediaFire
     ...(directas.length > 0
       ? [...directas, ...sinMegaMf.filter(s => !s.directo)]
-      : sinMegaMf),
+      : sinMegaMf),                                        // 2° directo .mp4/.mkv → 3° streaming
   ]
 
   const tmpDir = path.join(process.env.TMPDIR || '/tmp', `anime_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  const servidorEmojis = { mega: '📦', mediafire: '📦', mp4upload: '📹', filemoon: '🌙',
-    streamwish: '⭐', streamtape: '📼', doodstream: '🟣', voe: '🟠', upstream: '🔵',
-    okru: '🔴', vidhide: '🟡', mixdrop: '🔵', generico: '🎬',
-    savefiles: '💾', gofile: '💾', byse: '⭐', dsvplay: '▶️', lulu: '⭐' }
-  const emoji = (nombre) => {
-    const n = nombre?.toLowerCase() || ''
-    return Object.entries(servidorEmojis).find(([k]) => n.includes(k))?.[1] || '🎬'
+  // Informar al usuario qué servidor se va a usar
+  const primerSrv = listaIntentos[0]
+  if (primerSrv) {
+    const esMF   = /mediafire\.com/.test(primerSrv.url)
+    const esMega = /mega\.nz|mega\.co\.nz/.test(primerSrv.url)
+    const emoji  = esMega ? '📦' : esMF ? '📦' : primerSrv.directo ? '⚡' : '🎬'
+    const label  = esMega ? 'Mega' : esMF ? 'MediaFire' : primerSrv.nombre?.toUpperCase()
+    const extra  = (esMega || esMF) ? ' _(preferido)_' : megaYMf.length === 0 ? ' _(Mega/MF no disponible)_' : ''
+    await m.reply(`${emoji} Servidor: *${label}*${extra}`)
   }
 
-  const sessionKey = `${m.chat}|${m.sender}`
-  global.pendingServerPicks.set(m.chat, {
+  // Descarga directa con el mejor servidor (sin pedir selección)
+  const pick = {
     servers     : listaIntentos,
     tmpDir,
     sitioElegido,
     argsParaAnime,
     timestamp   : Date.now(),
     owner       : m.sender,
-  })
-  global.animeDlSessions[sessionKey] = {
-    owner : m.sender,
-    chat  : m.chat,
-    expiry: Date.now() + 10 * 60 * 1000,
   }
-  guardarPicks()
 
-  const device   = getDevice(m.key.id)
-  const isMobile = device !== 'desktop' && device !== 'web'
-
-  if (isMobile) {
-    try {
-      const filas = listaIntentos.map((s, i) => ({
-        header     : `${emoji(s.nombre)} ${s.nombre.toUpperCase()}`,
-        title      : `${emoji(s.nombre)} ${s.nombre.toUpperCase()}${s.directo ? ' ✅' : ''}`,
-        description: s.directo ? 'Link directo — más rápido' : 'Servidor de streaming',
-        id         : `${usedPrefix}dl ${i + 1}`,
-      }))
-
-      const interactiveMessage = {
-        body  : { text: `✅ = link directo (más rápido)\nElige el servidor para descargar.` },
-        footer: { text: global.wm || 'Kana Arima Bot' },
-        header: { title: `🎬 ${sitioElegido?.nombre || 'Anime'} — ${listaIntentos.length} servidores`, hasMediaAttachment: false },
-        nativeFlowMessage: {
-          buttons: [{
-            name: 'single_select',
-            buttonParamsJson: JSON.stringify({
-              title   : 'ELEGIR SERVIDOR',
-              sections: [{
-                title          : 'Servidores disponibles',
-                highlight_label: '',
-                rows           : filas,
-              }],
-            }),
-          }],
-          messageParamsJson: '',
-        },
-      }
-
-      const msg = generateWAMessageFromContent(
-        m.chat,
-        { viewOnceMessage: { message: { interactiveMessage } } },
-        { userJid: conn.user.jid, quoted: m }
-      )
-      await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
-    } catch (err) {
-      console.error('[animedl interactiveMsg]', err.message)
-      const listaTxt = listaIntentos
-        .map((s, i) => `${emoji(s.nombre)} *${numToLetter(i)}.* ${s.nombre.toUpperCase()}${s.directo ? ' ✅' : ''}`)
-        .join('\n')
-      await m.reply(
-        `🎬 *${sitioElegido?.nombre || 'Anime'} — Servidores (${listaIntentos.length}):*\n\n` +
-        `${listaTxt}\n\n✅ = directo\n_Responde con_ *.dl <letra>* (ej: *.dl a*)`
-      )
-    }
-  } else {
-    const listaTxt = listaIntentos
-      .map((s, i) => `${emoji(s.nombre)} *${numToLetter(i)}.* ${s.nombre.toUpperCase()}${s.directo ? ' ✅' : ''}`)
-      .join('\n')
-    await m.reply(
-      `🎬 *${sitioElegido?.nombre || 'Anime'} — Servidores (${listaIntentos.length}):*\n\n` +
-      `${listaTxt}\n\n✅ = directo\n_Responde con_ *.dl <letra>* (ej: *.dl a*)`
-    )
-  }
+  return ejecutarDescargaServidor(listaIntentos, 0, pick, m, conn)
 }
 
 handler.before = async function (m, { conn }) {
@@ -639,7 +579,6 @@ handler.before = async function (m, { conn }) {
             await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
           }
         } else {
-          // Otros sitios: portada + info + selector de episodios
           await mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, animeSearch.usedPrefix || '.')
         }
         return true
@@ -670,8 +609,7 @@ handler.before = async function (m, { conn }) {
         return true
       }
 
-      // Sin pendingServerPick: puede ser un episodio del selector de mostrarPortadaSitioExterno
-      // El id tiene formato: ".animedl <sitioId> <nombre> <ep>"
+      // Sin pendingServerPick: episodio del selector de mostrarPortadaSitioExterno
       if (/^[.!/#]/.test(selectedId.trim())) {
         const usedPrefix = selectedId.trim()[0]
         const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
