@@ -321,7 +321,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       }
 
       // Para AnimeFLV que devuelve múltiples resultados, tomar el mejor match
-      // Para los demás sitios ya viene el único resultado encontrado
       const device   = getDevice(m.key.id)
       const isMobile = device !== 'desktop' && device !== 'web'
 
@@ -368,7 +367,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         owner     : m.sender,
         timestamp : Date.now(),
         usedPrefix,
-        // mapa sitioId -> resultados para recuperar en handler.before
         sitiosData: Object.fromEntries(sitiosEncontrados),
       })
 
@@ -393,7 +391,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
       } catch (err) {
         console.error('[animedl multisite interactiveMsg]', err.message)
-        // Fallback texto plano con letras
         let idx = 0
         const lineas = sections.flatMap(sec => {
           const cabecera = [`\n*${sec.title}*`]
@@ -425,10 +422,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const nombre = tokensSinEp.join(' ')
     if (!nombre) return m.reply(`❌ Falta el nombre del anime.\nEjemplo: *.animedl one piece t1 1*`)
 
-    const labelTemp  = temporada > 1 ? ` temporada *${temporada}*` : ''
-    const labelSitio = sitioElegido ? ` en *${sitioElegido.nombre}*` : ' en todos los sitios'
-
-    await m.reply(`🔎 Buscando *${nombre}*${labelTemp} ep *${episodio}*${labelSitio}...`)
+    // Se eliminó el mensaje de "Buscando solo leveling..." para un proceso más silencioso
 
     if (sitioElegido) {
       episodeUrl = await sitioElegido.buscar(nombre, episodio, temporada)
@@ -448,7 +442,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
           episodeUrl = await sitio.buscar(nombre, episodio, temporada)
           if (episodeUrl) {
             sitioElegido = sitio
-            await m.reply(`✅ Encontrado en *${sitio.nombre}*`)
+            // Opcional: m.reply(`✅ Encontrado en *${sitio.nombre}*`) si quieres confirmar el sitio hallado
             break
           }
         } catch (err) { console.error(`[busqueda] ${sitio.nombre}:`, err.message) }
@@ -462,10 +456,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     }
   }
 
-  await m.reply(
-    `📡 Extrayendo servidores de *${sitioElegido?.nombre || 'sitio desconocido'}*...\n` +
-    `🔗 ${episodeUrl}`
-  )
+  // Se eliminó el mensaje de "Extrayendo servidores de..." para un proceso más silencioso
 
   let servidores = []
   try {
@@ -485,16 +476,15 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const sinMegaMf = servidores.filter(s => !esMegaMf(s))
   const directas  = sinMegaMf.filter(s => s.directo && CONFIG.videoExtensions.test(s.url))
   const listaIntentos = [
-    ...megaYMf,                                            // 1° Mega / MediaFire
+    ...megaYMf,
     ...(directas.length > 0
       ? [...directas, ...sinMegaMf.filter(s => !s.directo)]
-      : sinMegaMf),                                        // 2° directo .mp4/.mkv → 3° streaming
+      : sinMegaMf),
   ]
 
   const tmpDir = path.join(process.env.TMPDIR || '/tmp', `anime_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  // Informar al usuario qué servidor se va a usar
   const primerSrv = listaIntentos[0]
   if (primerSrv) {
     const esMF   = /mediafire\.com/.test(primerSrv.url)
@@ -505,7 +495,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     await m.reply(`${emoji} Servidor: *${label}*${extra}`)
   }
 
-  // Descarga directa con el mejor servidor (sin pedir selección)
   const pick = {
     servers     : listaIntentos,
     tmpDir,
@@ -547,7 +536,6 @@ handler.before = async function (m, { conn }) {
         return true
       }
 
-      // Carrusel multi-sitio: __siteselect__<sitioId>__<slug_o_url>
       if (selectedId.startsWith('__siteselect__')) {
         const animeSearch = global.pendingAnimeSearch.get(m.chat)
         if (!animeSearch) return false
@@ -572,7 +560,6 @@ handler.before = async function (m, { conn }) {
         if (!sitio) return false
 
         if (sitio.dominio === 'animeflv') {
-          // AnimeFLV: tenemos el slug, buscar en los datos guardados
           const resultados = animeSearch.sitiosData?.[sitioId] || []
           const elegido = resultados.find(r => r.slug === slugOrUrl) || resultados[0]
           if (elegido) {
@@ -609,7 +596,6 @@ handler.before = async function (m, { conn }) {
         return true
       }
 
-      // Sin pendingServerPick: episodio del selector de mostrarPortadaSitioExterno
       if (/^[.!/#]/.test(selectedId.trim())) {
         const usedPrefix = selectedId.trim()[0]
         const [command, ...argParts] = selectedId.trim().slice(1).split(' ')
