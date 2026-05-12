@@ -411,64 +411,63 @@ export async function mostrarInfoYEpisodios({ url, slug: inputSlug, title: input
   })
 }
 
-// Obtiene la URL de portada desde la página del anime en cada sitio (usando og:image)
+// Obtiene la portada desde la página del anime en el sitio seleccionado (og:image)
 export async function scrapePortadaSitio(sitio, episodeUrl) {
   try {
     let animePageUrl = null
 
     if (sitio.dominio === 'tioanime') {
-      // ver/slug-ep → anime/slug
-      const m = episodeUrl.match(/\/ver\/(.+)-\d+$/)
-      if (m) animePageUrl = `https://tioanime.com/anime/${m[1]}`
+      const match = episodeUrl.match(/\/ver\/(.+)-\d+$/)
+      if (match) animePageUrl = `https://tioanime.com/anime/${match[1]}`
     } else if (sitio.dominio === 'latanime') {
-      // ver/slug-episodio-N → anime/slug
-      const m = episodeUrl.match(/\/ver\/(.+)-episodio-\d+$/)
-      if (m) animePageUrl = `https://latanime.org/anime/${m[1]}`
+      const match = episodeUrl.match(/\/ver\/(.+)-episodio-\d+$/)
+      if (match) animePageUrl = `https://latanime.org/anime/${match[1]}`
     } else if (sitio.dominio === 'jkanime') {
-      // jkanime.net/slug/ep/ → jkanime.net/slug/
-      const m = episodeUrl.match(/(https:\/\/jkanime\.net\/[^/]+)\//)
-      if (m) animePageUrl = m[1] + '/'
+      const match = episodeUrl.match(/(https:\/\/jkanime\.net\/[^/]+)\//)
+      if (match) animePageUrl = match[1] + '/'
+    } else if (sitio.dominio === 'monoschinos') {
+      const match = episodeUrl.match(/\/ver\/(.+)-capitulo-\d+/)
+      if (match) animePageUrl = `https://monoschinos2.com/anime/${match[1]}`
+    } else if (sitio.dominio === 'animedbs') {
+      const match = episodeUrl.match(/\/ver\/(.+)-\d+/)
+      if (match) animePageUrl = `https://animedbs.com/anime/${match[1]}`
     }
 
     if (!animePageUrl) return null
 
-    const html = await fetchHtml(animePageUrl)
-    const $    = cheerio.load(html)
-
-    // og:image es lo más confiable en cualquier sitio
-    let cover = $('meta[property="og:image"]').attr('content') || null
+    const html  = await fetchHtml(animePageUrl)
+    const $     = cheerio.load(html)
+    let cover   = $('meta[property="og:image"]').attr('content') || null
     if (!cover) {
       cover = $(
         'img.thumbnail, img.cover, .cover img, .anime-cover img, figure img, .AnimeCover img'
       ).first().attr('src') || null
     }
-
     if (cover && !cover.startsWith('http')) {
       const base = new URL(animePageUrl)
       cover = `${base.origin}${cover}`
     }
-
     return cover || null
   } catch (e) {
-    console.error(`[scrapePortadaSitio] ${sitio.nombre}:`, e.message)
+    console.error(`[scrapePortadaSitio] ${sitio?.nombre}:`, e.message)
     return null
   }
 }
 
 // Muestra portada + info + selector de episodios para sitios que NO son AnimeFLV.
-// Intenta la portada del propio sitio primero; si falla usa AnimeFLV como respaldo.
+// Portada: primero del sitio elegido, si falla usa AnimeFLV como respaldo.
 export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, usedPrefix) {
   let info     = null
   let coverUrl = null
 
-  // 1. Portada del sitio elegido (usa la URL del ep 1 que guardamos en sitiosData)
+  // 1. Portada del sitio elegido (usa ep1 de sitiosData para deducir URL de la página)
   const sitioData = animeSearch.sitiosData?.[sitio.id]
   const ep1Url    = sitioData?.[0]?.url || null
   if (ep1Url) {
     try { coverUrl = await scrapePortadaSitio(sitio, ep1Url) } catch (_) {}
   }
 
-  // 2. Info/episodios desde AnimeFLV (datos ya guardados o búsqueda en vivo)
+  // 2. Info y lista de episodios desde AnimeFLV
   const animeflvSitio = SITIOS.find(s => s.dominio === 'animeflv')
   const animeflvData  = animeflvSitio ? animeSearch.sitiosData?.[animeflvSitio.id] : null
 
@@ -507,7 +506,6 @@ export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, us
     (info?.audioTags?.length ? `🎙️ *Audio:* ${info.audioTags.join(' · ')}\n` : '') +
     (info?.episodes?.length  ? `📺 *Episodios disponibles:* ${info.episodes.length}` : '')
 
-  // Enviar portada con caption
   if (coverUrl) {
     try {
       await conn.sendMessage(m.chat, { image: { url: coverUrl }, caption }, { quoted: m })
@@ -519,7 +517,7 @@ export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, us
     await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
   }
 
-  // Selector de episodios igual que AnimeFLV, rutea descargas al sitio elegido
+  // Selector de episodios - los IDs apuntan directamente al sitio elegido
   if (info?.episodes?.length > 0) {
     const epSlice = info.episodes.slice(-26)
     await enviarListaWA(conn, m, {
@@ -536,7 +534,6 @@ export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, us
       }],
     })
   } else {
-    // Fallback si AnimeFLV no devuelve lista
     await conn.sendMessage(m.chat, {
       text:
         `📝 Indica el episodio a descargar:\n` +
