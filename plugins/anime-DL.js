@@ -376,47 +376,43 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         sitiosData: Object.fromEntries(sitiosEncontrados),
       })
 
-      if (isMobile) {
-        try {
-          const interactiveMessage = {
-            body  : { text: `Encontrado en ${totalSitios} sitio(s). Elige dónde ver:` },
-            footer: { text: global.wm || 'Kana Arima Bot' },
-            header: { title: `🎌 ${nombreBusq}`, hasMediaAttachment: false },
-            nativeFlowMessage: {
-              buttons: [{
-                name: 'single_select',
-                buttonParamsJson: JSON.stringify({ title: 'VER EN SITIO', sections }),
-              }],
-              messageParamsJson: '',
-            },
-          }
-          const msg = generateWAMessageFromContent(
-            m.chat,
-            { viewOnceMessage: { message: { interactiveMessage } } },
-            { userJid: conn.user.jid, quoted: m }
-          )
-          await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
-          return
-        } catch (err) {
-          console.error('[animedl multisite interactiveMsg]', err.message)
+      try {
+        const interactiveMessage = {
+          body  : { text: `Encontrado en ${totalSitios} sitio(s). Elige dónde ver:` },
+          footer: { text: global.wm || 'Kana Arima Bot' },
+          header: { title: `🎌 ${nombreBusq}`, hasMediaAttachment: false },
+          nativeFlowMessage: {
+            buttons: [{
+              name: 'single_select',
+              buttonParamsJson: JSON.stringify({ title: 'VER EN SITIO', sections }),
+            }],
+            messageParamsJson: '',
+          },
         }
-      }
-
-      // Fallback texto plano
-      let idx = 0
-      const lineas = sections.flatMap(sec => {
-        const cabecera = [`\n*${sec.title}*`]
-        const filas = sec.rows.map(row => {
-          const letra = numToLetter(idx++)
-          return `*${letra}.* ${row.title}  —  _${row.description}_`
+        const msg = generateWAMessageFromContent(
+          m.chat,
+          { viewOnceMessageV2: { message: { interactiveMessage } } },
+          { userJid: conn.user.jid, quoted: m }
+        )
+        await conn.relayMessage(m.chat, msg.message, { messageId: msg.key.id })
+      } catch (err) {
+        console.error('[animedl multisite interactiveMsg]', err.message)
+        // Fallback texto plano
+        let idx = 0
+        const lineas = sections.flatMap(sec => {
+          const cabecera = [`\n*${sec.title}*`]
+          const filas = sec.rows.map(row => {
+            const letra = numToLetter(idx++)
+            return `*${letra}.* ${row.title}  —  _${row.description}_`
+          })
+          return [...cabecera, ...filas]
         })
-        return [...cabecera, ...filas]
-      })
-      await m.reply(
-        `*🎌 ${nombreBusq} — encontrado en ${totalSitios} sitio(s):*\n` +
-        lineas.join('\n') +
-        `\n\n_Responde con la letra correspondiente_`
-      )
+        await m.reply(
+          `*🎌 ${nombreBusq} — encontrado en ${totalSitios} sitio(s):*\n` +
+          lineas.join('\n') +
+          `\n\n_Responde con la letra correspondiente_`
+        )
+      }
       return
     }
 
