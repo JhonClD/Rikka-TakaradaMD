@@ -487,7 +487,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const tmpDir = path.join(process.env.TMPDIR || '/tmp', `anime_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  return ejecutarDescargaServidor(listaIntentos, 0, pick, m, conn)
+  return ejecutarDescargaServidor(listaIntentos, 0, { tmpDir, sitioElegido, argsParaAnime }, m, conn)
 }
 
 handler.before = async function (m, { conn }) {
