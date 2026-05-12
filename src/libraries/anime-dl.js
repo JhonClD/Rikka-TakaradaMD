@@ -411,6 +411,59 @@ export async function mostrarInfoYEpisodios({ url, slug: inputSlug, title: input
   })
 }
 
+// Muestra portada + info + prompt de episodio para sitios que NO son AnimeFLV
+export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, usedPrefix) {
+  let info = null
+
+  // Intentar usar datos de AnimeFLV ya almacenados en la búsqueda
+  const animeflvSitio = SITIOS.find(s => s.dominio === 'animeflv')
+  const animeflvData  = animeflvSitio ? animeSearch.sitiosData?.[animeflvSitio.id] : null
+
+  if (animeflvData?.[0]?.url) {
+    try { info = await scrapeInfoAnimeFLV(animeflvData[0].url) } catch (_) {}
+  }
+
+  // Si no hay datos de AnimeFLV guardados, buscar en vivo solo para obtener portada/info
+  if (!info) {
+    try {
+      const resultados = await buscarResultadosAnimeFLV(animeSearch.nombreBusq, animeSearch.temporada)
+      if (resultados.length > 0) {
+        info = await scrapeInfoAnimeFLV(resultados[0].url)
+      }
+    } catch (_) {}
+  }
+
+  const titulo   = (info?.title && !/iniciar.?ses|login|register/i.test(info.title))
+    ? info.title
+    : animeSearch.nombreBusq
+
+  const descTxt  = info?.description
+    ? (info.description.length > 280
+        ? info.description.slice(0, 280).trimEnd() + '…'
+        : info.description)
+    : null
+
+  const caption =
+    `✅ *${titulo}* — disponible en *${sitio.nombre}*\n\n` +
+    (descTxt  ? `📖 *Descripción:*\n${descTxt}\n\n` : '') +
+    (info?.genres?.length ? `🏷️ *Géneros:* ${info.genres.join(', ')}\n` : '') +
+    (info?.audioTags?.length ? `🎙️ *Audio:* ${info.audioTags.join(' · ')}\n` : '') +
+    `\n📝 Indica el episodio a descargar:\n` +
+    `  *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} <ep>*\n` +
+    `Ejemplo: *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} 1*`
+
+  if (info?.coverUrl) {
+    try {
+      await conn.sendMessage(m.chat, { image: { url: info.coverUrl }, caption }, { quoted: m })
+      return
+    } catch (imgErr) {
+      console.error('[mostrarPortadaSitioExterno] imagen:', imgErr.message)
+    }
+  }
+
+  await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+}
+
 export function detectarServidor(url) {
   for (const s of CONFIG.servidoresPreferidos) {
     if (url.includes(s)) return s
