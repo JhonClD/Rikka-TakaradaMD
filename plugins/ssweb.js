@@ -1,42 +1,54 @@
-import fetch from 'node-fetch';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+puppeteer.use(StealthPlugin());
 
 const handler = async (m, { conn, text, args }) => {
   if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web.*", m);
 
   const url = args[0].startsWith("http") ? args[0] : "https://" + args[0];
 
-  const apis = [
-    `https://image.thum.io/get/width/1920/fullpage/${url}`,
-    `https://api.screenshotmachine.com/?key=c04d3a&url=${url}&dimension=1920x1080`,
-    `https://api.microlink.io?url=${encodeURIComponent(url)}&screenshot=true&meta=false&embed=screenshot.url`,
-    `https://api.lolhuman.xyz/api/SSWeb?apikey=${global.lolkeysapi}&url=${url}`
-  ];
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu'
+      ]
+    });
+    const page = await browser.newPage();
 
-  let success = false;
+    await page.setViewport({ width: 1920, height: 1080 });
 
-  for (const api of apis) {
-    try {
-      const res = await fetch(api);
-      if (!res.ok) continue;
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-      const buffer = Buffer.from(await res.arrayBuffer());
+    await page.waitForTimeout(5000);
 
-      if (buffer.length < 10000) continue;
+    const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' });
 
-      await conn.sendMessage(m.chat, { 
-        image: buffer, 
-        caption: `𓂃 ࣪˖ 📸 *Captura de:* ${url}` 
-      }, { quoted: m });
-      
-      success = true;
-      break; 
-    } catch (e) {
-      continue;
+    if (screenshotBuffer.length < 10000) {
+      throw new Error("La captura de pantalla es demasiado pequeña, posiblemente falló.");
     }
-  }
 
-  if (!success) {
-    m.reply("𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. La página puede tener protección o las APIs están saturadas.");
+    await conn.sendMessage(m.chat, {
+      image: screenshotBuffer,
+      caption: `𓂃 ࣪˖ 📸 *Captura de:* ${url}`
+    }, { quoted: m });
+
+  } catch (e) {
+    console.error("Error al tomar la captura de pantalla:", e);
+    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. ${e.message || ''}`);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 };
 
@@ -45,3 +57,4 @@ handler.tags = ["internet"];
 handler.command = /^ss(web)?f?$/i;
 
 export default handler;
+                                                             
