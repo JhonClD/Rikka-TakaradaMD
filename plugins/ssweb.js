@@ -1,52 +1,40 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { executablePath } from 'puppeteer';
 
-// Configuración del plugin de sigilo para evadir Cloudflare y detecciones
 puppeteer.use(StealthPlugin());
 
-const handler = async (m, { conn, args }) => {
+const handler = async (m, { conn, text, args }) => {
   if (!args[0]) return conn.reply(m.chat, "𓂃 ࣪˖ 📎 *Ingresa la URL del sitio web.*", m);
 
-  // Formatear URL
   const url = args[0].startsWith("http") ? args[0] : "https://" + args[0];
 
   let browser;
   try {
     browser = await puppeteer.launch({
-      // CLAVE: Esto busca automáticamente el Chromium descargado en node_modules
-      executablePath: executablePath(),
+      // RUTA EXACTA QUE ENCONTRAMOS EN TU KANAARIMA-MD
+      executablePath: './.cache/puppeteer/chrome/linux-148.0.7778.97/chrome-linux64/chrome',
       headless: "new",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gl-drawing-for-tests',
-        '--no-first-run',
-        '--no-zygote',
         '--single-process',
+        '--no-zygote',
         '--disable-gpu'
       ]
     });
 
     const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1280, height: 720 });
 
-    // User agent real para saltar protecciones
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36');
+    // Navegar y esperar carga
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    
+    // Espera extra para Cloudflare
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // Configurar tamaño de la captura
-    await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
-
-    // Navegar y esperar a que la red esté inactiva (ayuda con Cloudflare)
-    await page.goto(url, { 
-      waitUntil: 'networkidle2', 
-      timeout: 60000 
-    });
-
-    // Espera extra de 3 segundos para asegurar que carguen los elementos visuales
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    const screenshotBuffer = await page.screenshot({ fullPage: false, type: 'png' });
+    const screenshotBuffer = await page.screenshot({ type: 'png' });
 
     await conn.sendMessage(m.chat, {
       image: screenshotBuffer,
@@ -54,17 +42,16 @@ const handler = async (m, { conn, args }) => {
     }, { quoted: m });
 
   } catch (e) {
-    console.error("ERROR EN SSWEB:", e);
-    m.reply(`𓂃 ࣪˖ ❌ *Error de ejecución:* ${e.message}`);
+    console.error(e);
+    // Si sale error de "shared libraries", el problema es la imagen de Docker (Nodejs 24)
+    m.reply(`𓂃 ࣪˖ ❌ *Error:* ${e.message.includes('shared libraries') ? 'Al servidor le faltan librerías gráficas de Linux.' : e.message}`);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 };
 
 handler.help = ["ss", "ssweb"].map((v) => v + " <url>");
 handler.tags = ["internet"];
-handler.command = /^ss(web)?f?$/i;
+handler.command = /^ss(web)?$/i;
 
 export default handler;
