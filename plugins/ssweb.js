@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { executablePath } from 'puppeteer'; // Importación clave
 
 puppeteer.use(StealthPlugin());
 
@@ -11,34 +12,34 @@ const handler = async (m, { conn, text, args }) => {
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless: true, // Cambiar a 'new' para el nuevo modo headless o false para ver el navegador
+      // Esto intenta encontrar el Chromium que viene con Puppeteer automáticamente
+      executablePath: executablePath(), 
+      headless: 'new', // Recomendado para versiones recientes
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
+        '--disable-gl-drawing-for-tests',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
         '--disable-gpu'
       ]
     });
+    
     const page = await browser.newPage();
 
-    // Configurar el viewport para HD
-    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
+    // User agent para parecer un navegador real y evitar bloqueos
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
 
-    // Navegar a la URL
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
 
-    // Esperar un tiempo adicional para asegurar que todo el contenido se cargue, incluyendo Cloudflare
-    await page.waitForTimeout(5000); // Espera 5 segundos adicionales
+    // Navegar con timeout ajustado
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
 
-    const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png', quality: 100 });
+    // En versiones nuevas de puppeteer, waitForTimeout está deprecado. Usamos una promesa simple:
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-    if (screenshotBuffer.length < 10000) {
-      throw new Error("La captura de pantalla es demasiado pequeña, posiblemente falló.");
-    }
+    const screenshotBuffer = await page.screenshot({ fullPage: false });
 
     await conn.sendMessage(m.chat, {
       image: screenshotBuffer,
@@ -46,18 +47,16 @@ const handler = async (m, { conn, text, args }) => {
     }, { quoted: m });
 
   } catch (e) {
-    console.error("Error al tomar la captura de pantalla:", e);
-    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. ${e.message || 'La página puede tener protección o hubo un problema con el navegador.'}`);
+    console.error("Error en Puppeteer:", e);
+    // Si el error persiste, es que el Panel no tiene las librerías de Linux necesarias
+    m.reply(`𓂃 ࣪˖ ❌ *Error de entorno:* No se encontró Chromium o faltan librerías en el servidor. Verifica el Egg de Pelican.`);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 };
 
-handler.help = ["ss", "ssf"].map((v) => v + " <url>");
+handler.help = ["ss", "ssweb"].map((v) => v + " <url>");
 handler.tags = ["internet"];
 handler.command = /^ss(web)?f?$/i;
 
 export default handler;
-  
