@@ -89,7 +89,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         if (elegido.tipo === 'animeflv') {
           return mostrarInfoYEpisodios(elegido.data, m, conn, usedPrefix, animeSearch.temporada)
         } else {
-          // Mostrar portada + info + prompt de episodio para otros sitios
           return mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, usedPrefix)
         }
       }
@@ -640,7 +639,7 @@ handler.before = async function (m, { conn }) {
             await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
           }
         } else {
-          // Otros sitios: mostrar portada + info + prompt de episodio
+          // Otros sitios: portada + info + selector de episodios
           await mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, animeSearch.usedPrefix || '.')
         }
         return true
