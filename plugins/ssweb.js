@@ -11,7 +11,7 @@ const handler = async (m, { conn, text, args }) => {
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless: true,
+      headless: true, // Cambiar a 'new' para el nuevo modo headless o false para ver el navegador
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -25,13 +25,16 @@ const handler = async (m, { conn, text, args }) => {
     });
     const page = await browser.newPage();
 
-    await page.setViewport({ width: 1920, height: 1080 });
+    // Configurar el viewport para HD
+    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
 
+    // Navegar a la URL
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    await page.waitForTimeout(5000);
+    // Esperar un tiempo adicional para asegurar que todo el contenido se cargue, incluyendo Cloudflare
+    await page.waitForTimeout(5000); // Espera 5 segundos adicionales
 
-    const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' });
+    const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png', quality: 100 });
 
     if (screenshotBuffer.length < 10000) {
       throw new Error("La captura de pantalla es demasiado pequeña, posiblemente falló.");
@@ -44,7 +47,7 @@ const handler = async (m, { conn, text, args }) => {
 
   } catch (e) {
     console.error("Error al tomar la captura de pantalla:", e);
-    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. ${e.message || ''}`);
+    m.reply(`𓂃 ࣪˖ ❌ *Error:* No se pudo obtener la captura. ${e.message || 'La página puede tener protección o hubo un problema con el navegador.'}`);
   } finally {
     if (browser) {
       await browser.close();
@@ -57,4 +60,4 @@ handler.tags = ["internet"];
 handler.command = /^ss(web)?f?$/i;
 
 export default handler;
-                                                             
+  
