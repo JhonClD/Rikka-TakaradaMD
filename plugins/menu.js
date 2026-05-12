@@ -2,7 +2,7 @@ import os from 'os';
 import moment from 'moment-timezone';
 
 // ==========================================
-//      CONFIGURACIÓN VISUAL (EDITABLE)
+//      CONFIGURACIÓN VISUAL (TUS SÍMBOLOS)
 // ==========================================
 const CONFIG = {
   timezone: 'America/Lima',
@@ -36,27 +36,21 @@ function clockString(ms) {
   return `${d}d ${h}h ${m}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
 }
 
-const getIcon = cat => CAT_ICONS[cat?.toLowerCase()] || '📌';
-
 const handler = async (m, { conn, usedPrefix }) => {
-  // --- OBTENCIÓN DE DATOS DE LA DB (ARCHIVOS SET...) ---
+  // --- DATOS DINÁMICOS DESDE TU BASE DE DATOS ---
   const settings = global.db.data.settings[conn.user.jid] || {};
   
-  // Datos configurados via comandos
   const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ'; 
   const botNameShort = settings.namebot || 'Rikka';
-  const botLink = settings.link || 'https://api.alyacore.xyz';
+  const botLink = settings.link || 'https://github.com/JhonCID';
   const bannerUrl = settings.banner || global.imagen1 || null;
-  const ownerExtra = settings.ownerExtra ? `@${settings.ownerExtra.split('@')[0]}` : 'Oculto por privacidad';
 
-  // Variables de sistema y usuario
   const pushname = m.pushName || 'Usuario';
-  const date = moment.tz(CONFIG.timezone).format('DD MMMM YYYY, hh:mm A');
+  const date = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
   const uptime = clockString(process.uptime() * 1000);
   const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
-  const totalUsers = Object.keys(global.db.data.users).length;
 
-  // --- LÓGICA DE CATEGORÍAS ---
+  // Lógica de categorías
   const categories = {};
   Object.values(global.plugins || {}).forEach(plugin => {
     if (!plugin?.command) return;
@@ -68,26 +62,25 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const totalCmds = Object.values(categories).flat().length;
 
-  // --- CONSTRUCCIÓN DEL CUERPO DEL TEXTO ---
-  let menuTexto = `¡Hola, buenas tardes i'm — ${botNameShort}! ⸜(｡˃ ᵕ ˂ )⸝♡ Soy ${botNameLong}, un gusto conocerte. Estoy aquí para lo que necesites ♡\n\n`;
-  
-  menuTexto += `❁ ⑇ ⑈ ⑉ **DEVELOPER** :: ${ownerExtra}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **TIPO** :: Public\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **SISTEMA** :: ${os.platform()}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **TIME** :: ${date}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **USERS** :: ${totalUsers}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **CMDS EJEC** :: ${totalCmds}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **UPTIME** :: ${uptime}\n`;
-  menuTexto += `❁ ⑇ ⑈ ⑉ **URL** :: ${botLink}\n\n`;
+  // --- CABECERA (TU ESTILO ORIGINAL) ---
+  let menuTexto = `━━━━━❒「 \`${botNameLong}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
+  menuTexto += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
+  menuTexto += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
+  menuTexto += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
+  menuTexto += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
+  menuTexto += ` ୨୧     ꒰ \`Prefix\`    :  ${usedPrefix}\n`;
+  menuTexto += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
+  menuTexto += `${CONFIG.lineSeparator}\n`;
   
   menuTexto += `${readMore}\n`;
 
+  // --- CUERPO ---
   const sortedCats = Object.keys(categories).sort();
   sortedCats.forEach(cat => {
-    const icon = getIcon(cat);
+    const icon = CAT_ICONS[cat.toLowerCase()] || '📌';
     const title = cat.toUpperCase();
     const cmds = [...new Set(categories[cat])]
-      .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c}`)
+      .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c} ̟`)
       .join('\n');
 
     menuTexto += `${CONFIG.catBox.top.replace('{title}', title).replace('{icon}', icon)}\n`;
@@ -97,26 +90,26 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   menuTexto += `\n${CONFIG.footerText}`;
 
-  // --- ENVÍO CON ADREPLY (DISEÑO DE LA FOTO) ---
+  // --- MENSAJE CON BANNER Y ADREPLY ---
   const messageOptions = {
-    image: bannerUrl ? { url: bannerUrl } : { url: 'https://via.placeholder.com/1280x720' },
+    image: bannerUrl ? { url: bannerUrl } : { url: 'https://uguu.se/default.jpg' },
     caption: menuTexto,
     mentions: [m.sender],
     contextInfo: {
       mentionedJid: [m.sender],
       externalAdReply: {
-        title: `╰─► ✰ ${botNameLong} ♡`, // Título sobre la imagen
-        body: `Alya, ˚₊· ͟͟͞͞➳❥ POWERED BY | — ${botNameShort}`, // Subtítulo
+        title: `╰─► ✰ ${botNameLong} ♡`,
+        body: `Alya, ˚₊· ͟͟͞͞➳❥ POWERED BY | — ${botNameShort}`,
         thumbnailUrl: bannerUrl,
-        sourceUrl: botLink, // Enlace dinámico
+        sourceUrl: botLink,
         mediaType: 1,
-        renderLargerThumbnail: true, // Imagen grande como la captura
+        renderLargerThumbnail: true,
         showAdAttribution: false
       }
     }
   };
 
-  return await conn.sendMessage(m.chat, messageOptions, { quoted: m });
+  await conn.sendMessage(m.chat, messageOptions, { quoted: m });
 };
 
 handler.help = ['menu'];
@@ -124,4 +117,4 @@ handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help|start|comandos)$/i;
 
 export default handler;
-                             
+    
