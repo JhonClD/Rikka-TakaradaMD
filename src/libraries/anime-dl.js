@@ -411,11 +411,12 @@ export async function mostrarInfoYEpisodios({ url, slug: inputSlug, title: input
   })
 }
 
-// Muestra portada + info + prompt de episodio para sitios que NO son AnimeFLV
+// Muestra portada + info + selector de episodios para sitios que NO son AnimeFLV.
+// Obtiene la lista de episodios desde AnimeFLV pero rutea la descarga al sitio elegido.
 export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, usedPrefix) {
   let info = null
 
-  // Intentar usar datos de AnimeFLV ya almacenados en la búsqueda
+  // Reutilizar datos de AnimeFLV ya guardados en la búsqueda previa
   const animeflvSitio = SITIOS.find(s => s.dominio === 'animeflv')
   const animeflvData  = animeflvSitio ? animeSearch.sitiosData?.[animeflvSitio.id] : null
 
@@ -423,7 +424,7 @@ export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, us
     try { info = await scrapeInfoAnimeFLV(animeflvData[0].url) } catch (_) {}
   }
 
-  // Si no hay datos de AnimeFLV guardados, buscar en vivo solo para obtener portada/info
+  // Si no había datos de AnimeFLV, buscar en vivo solo para portada/info/episodios
   if (!info) {
     try {
       const resultados = await buscarResultadosAnimeFLV(animeSearch.nombreBusq, animeSearch.temporada)
@@ -433,35 +434,66 @@ export async function mostrarPortadaSitioExterno(animeSearch, sitio, m, conn, us
     } catch (_) {}
   }
 
-  const titulo   = (info?.title && !/iniciar.?ses|login|register/i.test(info.title))
+  const titulo = (info?.title && !/iniciar.?ses|login|register/i.test(info.title))
     ? info.title
     : animeSearch.nombreBusq
 
-  const descTxt  = info?.description
+  const descTxt = info?.description
     ? (info.description.length > 280
         ? info.description.slice(0, 280).trimEnd() + '…'
         : info.description)
     : null
 
-  const caption =
-    `✅ *${titulo}* — disponible en *${sitio.nombre}*\n\n` +
-    (descTxt  ? `📖 *Descripción:*\n${descTxt}\n\n` : '') +
-    (info?.genres?.length ? `🏷️ *Géneros:* ${info.genres.join(', ')}\n` : '') +
-    (info?.audioTags?.length ? `🎙️ *Audio:* ${info.audioTags.join(' · ')}\n` : '') +
-    `\n📝 Indica el episodio a descargar:\n` +
-    `  *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} <ep>*\n` +
-    `Ejemplo: *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} 1*`
-
-  if (info?.coverUrl) {
-    try {
-      await conn.sendMessage(m.chat, { image: { url: info.coverUrl }, caption }, { quoted: m })
-      return
-    } catch (imgErr) {
-      console.error('[mostrarPortadaSitioExterno] imagen:', imgErr.message)
-    }
+  // Normalizar coverUrl: puede venir relativa desde AnimeFLV
+  let coverUrl = info?.coverUrl || null
+  if (coverUrl && !coverUrl.startsWith('http')) {
+    coverUrl = `https://www3.animeflv.net${coverUrl}`
   }
 
-  await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+  const caption =
+    `✅ *${titulo}* — disponible en *${sitio.nombre}*\n\n` +
+    (descTxt ? `📖 *Descripción:*\n${descTxt}\n\n` : '') +
+    (info?.genres?.length    ? `🏷️ *Géneros:* ${info.genres.join(', ')}\n`      : '') +
+    (info?.audioTags?.length ? `🎙️ *Audio:* ${info.audioTags.join(' · ')}\n`    : '') +
+    (info?.episodes?.length  ? `📺 *Episodios disponibles:* ${info.episodes.length}` : '')
+
+  // Enviar portada con caption
+  if (coverUrl) {
+    try {
+      await conn.sendMessage(m.chat, { image: { url: coverUrl }, caption }, { quoted: m })
+    } catch (imgErr) {
+      console.error('[mostrarPortadaSitioExterno] imagen:', imgErr.message)
+      await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+    }
+  } else {
+    await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+  }
+
+  // Mostrar selector de episodios igual que AnimeFLV, pero usando el sitio elegido
+  if (info?.episodes?.length > 0) {
+    const epSlice = info.episodes.slice(-26)
+    await enviarListaWA(conn, m, {
+      title     : `📋 Episodios — ${titulo}`,
+      body      : `${info.episodes.length > 26 ? `Últimos ${epSlice.length} de ${info.episodes.length} episodios.` : ''}\nElige el episodio a descargar:`,
+      buttonText: 'VER EPISODIOS',
+      sections  : [{
+        title: 'Episodios disponibles',
+        rows : epSlice.map(ep => ({
+          title      : `Episodio ${ep}`,
+          description: '',
+          id         : `${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} ${ep}`,
+        })),
+      }],
+    })
+  } else {
+    // Fallback si AnimeFLV no devolvió lista (anime muy nuevo, etc.)
+    await conn.sendMessage(m.chat, {
+      text:
+        `📝 Indica el episodio a descargar:\n` +
+        `  *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} <ep>*\n` +
+        `Ejemplo: *${usedPrefix}animedl ${sitio.id} ${animeSearch.nombreBusq} 1*`,
+    }, { quoted: m })
+  }
 }
 
 export function detectarServidor(url) {
