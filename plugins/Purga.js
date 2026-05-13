@@ -1,34 +1,40 @@
 const handler = async (m, { conn }) => {
-  if (!m.isGroup) return m.reply('❌ Solo en grupos.')
+  if (!m.isGroup) return m.reply('❌ Este comando solo puede ejecutarse en grupos.')
 
   const groupMetadata = await conn.groupMetadata(m.chat)
   const participants = groupMetadata.participants
   
-  // Obtener admins y verificar permisos
+  // Limpiar el ID del bot para asegurar coincidencia
+  const botRealId = conn.user.id.split(':')[0] + '@s.whatsapp.net'
+  
+  // Identificar administradores
   const admins = participants.filter(p => p.admin !== null).map(p => p.id)
-  const isBotAdmin = admins.includes(conn.user.id.split(':')[0] + '@s.whatsapp.net')
-  const isAdmin = admins.includes(m.sender)
+  
+  // Verificación mejorada
+  const isBotAdmin = admins.some(ad => ad.split('@')[0] === botRealId.split('@')[0])
+  const isAdmin = admins.some(ad => ad.split('@')[0] === m.sender.split('@')[0])
 
-  if (!isAdmin) return m.reply('❌ Solo administradores.')
-  if (!isBotAdmin) return m.reply('❌ El bot debe ser admin.')
+  if (!isAdmin) return m.reply('❌ Solo los administradores pueden usar este comando.')
+  if (!isBotAdmin) return m.reply('❌ El bot necesita tener el rango de administrador para proceder.')
 
-  const botJid = conn.user.id.split(':')[0] + '@s.whatsapp.net'
-  const targets = participants.filter(p => !admins.includes(p.id) && p.id !== botJid).map(p => p.id)
+  // Filtrar miembros (excluyendo a todos los admins y al bot)
+  const targets = participants.filter(p => p.admin === null && p.id !== botRealId).map(p => p.id)
 
-  if (targets.length === 0) return m.reply('⚠️ No hay miembros para eliminar.')
+  if (targets.length === 0) return m.reply('⚠️ No hay miembros comunes para eliminar.')
 
-  await m.reply(`⚠️ *KICKALL*: Eliminando ${targets.length} miembros...`)
+  await m.reply(`⚠️ *KICKALL*: Iniciando purga de ${targets.length} miembros...`)
 
   for (const jid of targets) {
     try {
       await conn.groupParticipantsUpdate(m.chat, [jid], 'remove')
-      await new Promise(r => setTimeout(r, 1000)) // Espera 1 seg entre cada uno
+      // Delay de 1 segundo para estabilidad
+      await new Promise(r => setTimeout(r, 1000))
     } catch (e) {
-      console.error(e)
+      console.log(`Error al eliminar a ${jid}:`, e)
     }
   }
 
-  await m.reply('✅ Proceso de eliminación finalizado.')
+  await m.reply('✅ Proceso de eliminación masiva completado.')
 }
 
 handler.help = ['kickall']
