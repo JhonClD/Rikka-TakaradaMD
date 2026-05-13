@@ -7,7 +7,7 @@
  * ╰──────────────────────────────────────────────────────────╯
  */
 
-import { startSubBot } from '../src/libraries/subBotManager.js';
+import { startSubBot } from '../src/libraries/subsRikka.js';
 import fs   from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
