@@ -257,7 +257,7 @@ const providerYtdlp = async (ytUrl, type) => {
         '--no-warnings',
         '--socket-timeout', '30',
         ...(type === 'audio'
-            ? ['-x', '--audio-format', 'mp3', '--audio-quality', '128K']
+            ? ['-f', '140', '-x', '--audio-format', 'mp3']
             : ['-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4']),
         '-o', outTemplate,
         ytUrl,
