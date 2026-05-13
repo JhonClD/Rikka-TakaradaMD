@@ -1,52 +1,39 @@
-const handler = async (m, { conn, isAdmin, isRAdmin, isBotAdmin }) => {
-  if (!m.isGroup) return m.reply('❌ Este comando solo puede ejecutarse en grupos.')
-  if (!isAdmin && !isRAdmin) return m.reply('❌ Solo los administradores pueden usar este comando.')
-  if (!isBotAdmin) return m.reply('❌ El bot necesita ser administrador para realizar esta acción.')
+const handler = async (m, { conn }) => {
+  if (!m.isGroup) return m.reply('❌ Solo en grupos.')
 
-  const metadata = await conn.groupMetadata(m.chat)
+  const groupMetadata = await conn.groupMetadata(m.chat)
+  const participants = groupMetadata.participants
+  
+  // Obtener admins y verificar permisos
+  const admins = participants.filter(p => p.admin !== null).map(p => p.id)
+  const isBotAdmin = admins.includes(conn.user.id.split(':')[0] + '@s.whatsapp.net')
+  const isAdmin = admins.includes(m.sender)
+
+  if (!isAdmin) return m.reply('❌ Solo administradores.')
+  if (!isBotAdmin) return m.reply('❌ El bot debe ser admin.')
+
   const botJid = conn.user.id.split(':')[0] + '@s.whatsapp.net'
+  const targets = participants.filter(p => !admins.includes(p.id) && p.id !== botJid).map(p => p.id)
 
-  // Filtrar participantes que no sean el bot ni administradores
-  const targets = metadata.participants.filter(p => {
-    const jid = p.id
-    const isBot = jid.split('@')[0] === botJid.split('@')[0]
-    const isSpecialAdmin = p.admin === 'superadmin' || p.admin === 'admin'
-    return !isBot && !isSpecialAdmin
-  }).map(p => p.id)
+  if (targets.length === 0) return m.reply('⚠️ No hay miembros para eliminar.')
 
-  if (targets.length === 0) return m.reply('⚠️ No hay miembros para eliminar (solo quedan administradores).')
-
-  await m.reply(`⚠️ *EJECUTANDO KICKALL*\nEliminando a *${targets.length}* integrantes del grupo...`)
-
-  let removidos = 0
-  let fallidos = 0
+  await m.reply(`⚠️ *KICKALL*: Eliminando ${targets.length} miembros...`)
 
   for (const jid of targets) {
     try {
       await conn.groupParticipantsUpdate(m.chat, [jid], 'remove')
-      removidos++
-      // Delay de seguridad para evitar spam-blocks
-      await new Promise(r => setTimeout(r, 1000))
+      await new Promise(r => setTimeout(r, 1000)) // Espera 1 seg entre cada uno
     } catch (e) {
-      fallidos++
+      console.error(e)
     }
   }
 
-  const resultText = `╔═══════════════╗\n` +
-                     `  ✦ *KICKALL FINALIZADO*\n` +
-                     `╚═══════════════╝\n\n` +
-                     `✅ Usuarios eliminados: *${removidos}*\n` +
-                     `❌ Errores encontrados: *${fallidos}*\n\n` +
-                     `*Limpieza total completada.*`
-
-  await conn.sendMessage(m.chat, { text: resultText }, { quoted: m })
+  await m.reply('✅ Proceso de eliminación finalizado.')
 }
 
-handler.help    = ['kickall']
-handler.tags    = ['group']
+handler.help = ['kickall']
+handler.tags = ['group']
 handler.command = /^(kickall|eliminaratodos)$/i
-handler.group   = true
-handler.admin   = true
-handler.botAdmin = true
+handler.group = true
 
 export default handler
