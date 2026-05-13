@@ -60,28 +60,7 @@ export function makeWASocket(connectionOptions, options = {}) {
             },
             writable: true,
         },
-        resolveLid: {
-            value: {
-                cache: new Map(),
-                lidCache: new Map(),
-                jidToLidMap: new Map(),
-                bulkCacheFromParticipants(participants) {
-                    let count = 0;
-                    for (const p of (participants || [])) {
-                        if (!p?.id || !p?.lid) continue;
-                        const lidKey = p.lid.split('@')[0];
-                        if (!this.cache.has(lidKey)) {
-                            this.cache.set(lidKey, { jid: p.id, lid: p.lid, timestamp: Date.now() });
-                            this.jidToLidMap.set(p.id, p.lid);
-                            count++;
-                        }
-                    }
-                    return count;
-                },
-                processMessage(msg) { return msg; },
-            },
-            writable: true,
-        },
+
         decodeJid: {
             value(jid) {
                 if (!jid || typeof jid !== "string")
@@ -1594,79 +1573,6 @@ END:VCARD
             },
             enumerable: true,
         },
-/*parseMention: {
-    async value(text = "", groupChatId = null) {
-        try {
-            const esNumeroValido = (numero) => {
-                const len = numero.length;
-                if (len < 8 || len > 15) return false;
-                const codigosValidos = ["521", "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49", "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84", "86", "90", "91", "92", "93", "94", "95", "98", "211", "212", "213", "216", "218", "220", "221", "222", "223", "224", "225", "226", "227", "228", "229", "230", "231", "232", "233", "234", "235", "236", "237", "238", "239", "240", "241", "242", "243", "244", "245", "246", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258", "260", "261", "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298", "299", "350", "351", "352", "353", "354", "355", "356", "357", "358", "359", "370", "371", "372", "373", "374", "375", "376", "377", "378", "379", "380", "381", "382", "383", "385", "386", "387", "389", "420", "421", "423", "500", "501", "502", "503", "504", "505", "506", "507", "508", "509", "590", "591", "592", "593", "594", "595", "596", "597", "598", "599", "670", "672", "673", "674", "675", "676", "677", "678", "679", "680", "681", "682", "683", "685", "686", "687", "688", "689", "690", "691", "692", "850", "852", "853", "855", "856", "880", "886", "960", "961", "962", "963", "964", "965", "966", "967", "968", "970", "971", "972", "973", "974", "975", "976", "977", "978", "979", "992", "993", "994", "995", "996", "998"];
-                const valido = codigosValidos.some(codigo => numero.startsWith(codigo));
-                if (!valido) return false;
-                const numeroLimpio = numero.replace(/^(\d+)/, '').replace('@', '');
-                if (!/^\d+$/.test(numeroLimpio)) return false;
-                return true;
-            };
-            const resolveLidFromCache = async (jid, groupChatId) => {
-                if (!jid || !jid.toString().endsWith('@lid')) {
-                    return jid?.includes('@') ? jid : `${jid}@s.whatsapp.net`;
-                }
-                if (!groupChatId?.endsWith('@g.us')) {
-                    return jid;
-                }
-                const lidKey = jid.split('@')[0];
-                if (global.lidResolver) {
-                    const userInfo = global.lidResolver.getUserInfo(lidKey);
-                    if (userInfo && userInfo.jid && !userInfo.jid.endsWith('@lid') && !userInfo.notFound && !userInfo.error) {
-                        return userInfo.jid;
-                    }
-                    try {
-                        const resolvedJid = await global.lidResolver.resolveLid(jid, groupChatId, 2);
-                        if (resolvedJid && !resolvedJid.endsWith('@lid')) {
-                            return resolvedJid;
-                        }
-                    } catch (error) {
-                        console.log(`[parseMention] Error resolviendo ${jid}:`, error.message);
-                    }
-                }
-                if (typeof String.prototype.resolveLidToRealJid === 'function') {
-                    try {
-                        const resolved = await String.prototype.resolveLidToRealJid.call(
-                            jid, 
-                            groupChatId, 
-                            conn || this, 
-                            2, 
-                            1000
-                        );
-                        if (resolved && !resolved.endsWith('@lid')) {
-                            return resolved;
-                        }
-                    } catch (error) {
-                        console.log(`[parseMention] Error en fallback para ${jid}:`, error.message);
-                    }
-                }
-                return jid;
-            };
-            const mencionesEncontradas = text.match(/@(\d{5,20})/g) || [];
-            const mentions = [];
-            for (const m of mencionesEncontradas) {
-                const numero = m.substring(1);
-                if (esNumeroValido(numero)) {
-                    mentions.push(`${numero}@s.whatsapp.net`);
-                } else {
-                    const lidJid = `${numero}@lid`;
-                    const resolved = await resolveLidFromCache(lidJid, groupChatId);
-                    mentions.push(resolved);
-                }
-            }
-            return [...new Set(mentions.filter(mention => mention && mention.length > 0))];
-        } catch (error) {
-            console.error('[ERROR] En parseMention:', error.stack || error);
-            return [];
-        }
-    },
-    enumerable: true,
-},*/
         parseMention: {
       value(text = "") {
         try {
@@ -2926,55 +2832,6 @@ export function serialize() {
         };
 
         // Resolver problema LIDs, Fu*k You Meta - Resolve id@lid
-        String.prototype.resolveLidToRealJid = (function() {
-            const lidCache = new Map();
-            return async function(
-                groupChatId,
-                conn,
-                maxRetries = 3,
-                retryDelay = 60000,
-            ) {
-                const inputJid = this.toString();
-                if (!inputJid.endsWith("@lid") || !groupChatId?.endsWith("@g.us")) {
-                    return inputJid.includes("@") ? inputJid : `${inputJid}@s.whatsapp.net`;
-                }
-                if (lidCache.has(inputJid)) {
-                    return lidCache.get(inputJid);
-                }
-                const lidToFind = inputJid.split("@")[0];
-                let attempts = 0;
-                while (attempts < maxRetries) {
-                    try {
-                        const metadata = await conn?.groupMetadata(groupChatId);
-                        if (!metadata?.participants)
-                            throw new Error("No se obtuvieron participantes");
-                        for (const participant of metadata.participants) {
-                            try {
-                                if (!participant?.jid) continue;
-                                const contactDetails = await conn?.onWhatsApp(participant.jid);
-                                if (!contactDetails?.[0]?.lid) continue;
-                                const possibleLid = contactDetails[0].lid.split("@")[0];
-                                if (possibleLid === lidToFind) {
-                                    lidCache.set(inputJid, participant.jid);
-                                    return participant.jid;
-                                }
-                            } catch (e) {
-                                continue;
-                            }
-                        }
-                        lidCache.set(inputJid, inputJid);
-                        return inputJid;
-                    } catch (e) {
-                        if (++attempts >= maxRetries) {
-                            lidCache.set(inputJid, inputJid);
-                            return inputJid;
-                        }
-                        await new Promise((resolve) => setTimeout(resolve, retryDelay));
-                    }
-                }
-                return inputJid;
-            };
-        })();
 
         String.prototype.decodeJid = function decodeJid() {
             if (/:\d+@/gi.test(this)) {
