@@ -124,15 +124,6 @@ export async function startSubBot(
   sock.isInit  = false;
   sock.uptime  = Date.now();
 
-  sock.decodeJid = (jid) => {
-    if (!jid) return jid;
-    if (/:\d+@/gi.test(jid)) {
-      const dec = jidDecode(jid) || {};
-      return (dec.user && dec.server && `${dec.user}@${dec.server}`) || jid;
-    }
-    return jid;
-  };
-
   sock.ev.on('creds.update', saveCreds);
 
   // ── Evento de conexión ──────────────────────────────────────────────────
