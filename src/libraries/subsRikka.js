@@ -2,9 +2,13 @@
  * subsRikka.js
  * ╭──────────────────────────────────────────────╮
  * │  Sistema de Sub-Bots — Rikka-TakaradaMD      │
- * │  Basado en la arquitectura de YukiBot-MD      │
- * │  Carpeta de sesiones: ./jadibts/              │
+ * │  Carpeta de sesiones: ./jadibts/             │
  * ╰──────────────────────────────────────────────╯
+ *
+ * Fix 1: requestPairingCode se llama en el primer evento 'qr' (WS listo),
+ *        NO dentro de un qr repetido ni antes del handshake.
+ * Fix 2: messages.upsert enlaza handler.js con .bind(sock), igual que
+ *        el subBotManager original (conn.handler = mod.handler.bind(conn)).
  */
 
 import { makeWASocket } from './simple.js';
@@ -13,25 +17,23 @@ import {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason,
-  jidDecode,
 } from '@whiskeysockets/baileys';
-import qrcode from 'qrcode';
+import qrcode   from 'qrcode';
 import NodeCache from 'node-cache';
-import pino from 'pino';
-import fs from 'fs';
-import path from 'path';
-import chalk from 'chalk';
+import pino     from 'pino';
+import fs       from 'fs';
+import path     from 'path';
+import chalk    from 'chalk';
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __filename   = fileURLToPath(import.meta.url);
+const __dirname    = path.dirname(__filename);
+const HANDLER_PATH = path.join(__dirname, '../../handler.js');
+const JADIBTS_DIR  = path.join(__dirname, '../../jadibts');
 
-// ── Constantes ──────────────────────────────────────────────────────────────
-const JADIBTS_DIR = path.join(__dirname, '../../jadibts');
-const MAX_RETRIES  = 5;
-const RETRY_DELAY  = 3000;
+const MAX_RETRIES = 5;
+const RETRY_DELAY = 3000;
 
-// ── Estado global ────────────────────────────────────────────────────────────
 if (!global.conns || !Array.isArray(global.conns)) global.conns = [];
 const reintentos = {};
 
@@ -41,6 +43,51 @@ const groupCache           = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 
 const cleanJid = (jid = '') => jid.replace(/:\d+/, '').split('@')[0];
 const delay    = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── Cache del módulo handler ─────────────────────────────────────────────────
+let _cachedHandler = null;
+async function _loadHandler(forceReload = false) {
+  if (_cachedHandler && !forceReload) return _cachedHandler;
+  try {
+    const mod = await import(`${HANDLER_PATH}?update=${Date.now()}`);
+    if (mod?.handler && typeof mod.handler === 'function') {
+      _cachedHandler = mod;
+      return mod;
+    }
+    console.log(chalk.gray('╰─► ✗ [subsRikka] handler.js no exporta `handler`'));
+  } catch (e) {
+    console.log(chalk.gray(`╰─► ✗ [subsRikka] Error cargando handler.js: ${e?.message}`));
+  }
+  return null;
+}
+
+// ── Enlazar handler al socket (igual que subBotManager original) ─────────────
+async function _bindHandler(sock, forceReload = false) {
+  const mod = await _loadHandler(forceReload);
+  if (!mod) return;
+
+  // Desregistrar listeners anteriores
+  if (sock.handler)            sock.ev.off('messages.upsert',          sock.handler);
+  if (sock.participantsUpdate) sock.ev.off('group-participants.update', sock.participantsUpdate);
+  if (sock.groupsUpdate)       sock.ev.off('groups.update',             sock.groupsUpdate);
+  if (sock.onDelete)           sock.ev.off('message.delete',            sock.onDelete);
+  if (sock.callUpdate)         sock.ev.off('call',                      sock.callUpdate);
+
+  // Registrar nuevos listeners enlazados al socket
+  sock.handler            = mod.handler.bind(sock);
+  sock.participantsUpdate = mod.participantsUpdate?.bind(sock);
+  sock.groupsUpdate       = mod.groupsUpdate?.bind(sock);
+  sock.onDelete           = mod.deleteUpdate?.bind(sock);
+  sock.callUpdate         = mod.callUpdate?.bind(sock);
+
+  sock.ev.on('messages.upsert', sock.handler);
+  if (sock.participantsUpdate) sock.ev.on('group-participants.update', sock.participantsUpdate);
+  if (sock.groupsUpdate)       sock.ev.on('groups.update',             sock.groupsUpdate);
+  if (sock.onDelete)           sock.ev.on('message.delete',            sock.onDelete);
+  if (sock.callUpdate)         sock.ev.on('call',                      sock.callUpdate);
+
+  sock.subreloadHandler = (reload = true) => _bindHandler(sock, reload);
+}
 
 // ── Carga automática al iniciar ──────────────────────────────────────────────
 export async function initializeSubBots() {
@@ -59,34 +106,24 @@ export async function initializeSubBots() {
     if (global.conns.some((c) => c.userId === userId)) continue;
     try {
       console.log(chalk.hex('#dec0f1')(`╰─► ✧ Reconectando sub-bot: ${userId}`));
-      await startSubBot(null, null, '✧ Auto-reconexión', false, userId, null, {}, false);
+      await startSubBot(null, null, '', false, userId, null, {}, false);
     } catch (e) {
-      console.log(chalk.gray(`╰─► ✗ Error al iniciar sub-bot ${userId}: ${e?.message || e}`));
+      console.log(chalk.gray(`╰─► ✗ Error iniciando sub-bot ${userId}: ${e?.message || e}`));
     }
     await delay(2500);
   }
 }
 
 // ── Función principal ────────────────────────────────────────────────────────
-/**
- * @param {object|null}  m             - Mensaje de contexto (puede ser null en autoload)
- * @param {object|null}  client        - Conexión principal (puede ser null en autoload)
- * @param {string}       caption       - Texto a enviar con el QR / código
- * @param {boolean}      isCode        - true = pairing code, false = QR
- * @param {string}       phone         - Número de teléfono del sub-bot
- * @param {string|null}  chatId        - Chat donde enviar el QR/código
- * @param {object}       commandFlags  - Registro de flags por sender
- * @param {boolean}      isCommand     - Si fue invocado por comando de usuario
- */
 export async function startSubBot(
   m,
   client,
-  caption = '',
-  isCode  = false,
-  phone   = '',
-  chatId  = null,
+  caption      = '',
+  isCode       = false,
+  phone        = '',
+  chatId       = null,
   commandFlags = {},
-  isCommand = false
+  isCommand    = false
 ) {
   const id            = phone || (m?.sender || '').split('@')[0];
   const sessionFolder = path.join(JADIBTS_DIR, id);
@@ -99,118 +136,46 @@ export async function startSubBot(
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
   const { version }          = await fetchLatestBaileysVersion();
 
-  console.info = () => {};
-
   const sock = makeWASocket({
     version,
-    logger:                    pino({ level: 'silent' }),
-    printQRInTerminal:         false,
-    browser:                   ['Rikka-TakaradaMD', 'Safari', '2.0.0'],
+    logger:    pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    browser:   ['Rikka-TakaradaMD', 'Safari', '2.0.0'],
     auth: {
       creds: state.creds,
       keys:  makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    markOnlineOnConnect:       true,
+    markOnlineOnConnect:            true,
     generateHighQualityLinkPreview: true,
-    syncFullHistory:           false,
-    getMessage:                async () => '',
+    syncFullHistory:                false,
+    getMessage:                     async () => '',
     msgRetryCounterCache,
     userDevicesCache,
-    cachedGroupMetadata:       async (jid) => groupCache.get(jid),
-    keepAliveIntervalMs:       60_000,
-    maxIdleTimeMs:             120_000,
+    cachedGroupMetadata: async (jid) => groupCache.get(jid),
+    keepAliveIntervalMs: 60_000,
+    maxIdleTimeMs:       120_000,
   });
 
-  sock.isInit  = false;
-  sock.uptime  = Date.now();
+  sock.isInit = false;
+  sock.uptime = Date.now();
 
   sock.ev.on('creds.update', saveCreds);
 
-  // ── Evento de conexión ──────────────────────────────────────────────────
+  // ── FIX 1: pairing code ───────────────────────────────────────────────────
+  // requestPairingCode se debe llamar EXACTAMENTE UNA VEZ, en el primer
+  // evento 'qr' (que indica que el handshake WS completó y WA está esperando
+  // vinculación). En llamadas posteriores del mismo qr solo se ignora.
+  let pairingCodeRequested = false;
+
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, isNewLogin, qr }) => {
     if (isNewLogin) sock.isInit = false;
 
-    // ── Conectado ───────────────────────────────────────────────────────
-    if (connection === 'open') {
-      sock.uptime  = Date.now();
-      sock.isInit  = true;
-      sock.userId  = cleanJid(sock.user?.id || '');
-
-      const botDir = `${sock.userId}@s.whatsapp.net`;
-      if (!global.db?.data?.settings[botDir]) {
-        global.db.data.settings[botDir] = {};
-      }
-      global.db.data.settings[botDir].type = 'Sub';
-
-      if (!global.conns.find((c) => c.userId === sock.userId)) {
-        global.conns.push(sock);
-      }
-
-      delete reintentos[sock.userId || id];
-      await _joinChannels(sock);
-
-      console.log(
-        chalk.hex('#b2f7ef')(`╭─ ✧ Sub-bot conectado`) +
-        chalk.hex('#dec0f1')(` ❁ ${sock.userId}`)
-      );
-    }
-
-    // ── Desconectado ────────────────────────────────────────────────────
-    if (connection === 'close') {
-      const botId   = sock.userId || id;
-      const reason  = lastDisconnect?.error?.output?.statusCode
-                    || lastDisconnect?.reason
-                    || 0;
-      const intentos = (reintentos[botId] || 0) + 1;
-      reintentos[botId] = intentos;
-
-      // Sesión inválida / baneada — eliminar y no reintentar
-      if ([401, 403].includes(reason)) {
-        if (intentos <= MAX_RETRIES) {
-          console.log(chalk.gray(
-            `╰─► ⇄ Sub-bot ${botId} cerró (${reason}) — intento ${intentos}/${MAX_RETRIES}`
-          ));
-          setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
-        } else {
-          console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} falló tras ${MAX_RETRIES} intentos. Eliminando sesión.`));
-          try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
-          delete reintentos[botId];
-        }
-        return;
-      }
-
-      // Desconexiones recuperables
-      const recov = [
-        DisconnectReason.connectionClosed,
-        DisconnectReason.connectionLost,
-        DisconnectReason.timedOut,
-        DisconnectReason.connectionReplaced,
-        DisconnectReason.restartRequired,
-      ];
-      if (recov.includes(reason)) {
-        console.log(chalk.gray(`╰─► ↺ Sub-bot ${botId} reconectando...`));
-        setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
-        return;
-      }
-
-      // Sesión terminada (logout)
-      if (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession) {
-        console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} sesión cerrada. Eliminando.`));
-        try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
-        delete reintentos[botId];
-        // Remover de global.conns
-        _removeFromConns(sock);
-        return;
-      }
-
-      // Cualquier otra razón — reintentar
-      setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
-    }
-
-    // ── QR o Código de emparejamiento ──────────────────────────────────
-    if (qr && isCode && phone && client && chatId && commandFlags?.[senderId]) {
+    // ── Pairing code (una sola vez en el primer qr) ─────────────────────
+    if (qr && isCode && phone && client && chatId && commandFlags?.[senderId] && !pairingCodeRequested) {
+      pairingCodeRequested = true;
       try {
-        let code = await sock.requestPairingCode(phone);
+        const cleanPhone = phone.replace(/\D/g, '');
+        let code = await sock.requestPairingCode(cleanPhone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         const msgCap  = await m.reply(caption);
         const msgCode = await m.reply(`*${code}*`);
@@ -222,10 +187,13 @@ export async function startSubBot(
           } catch {}
         }, 60_000);
       } catch (err) {
-        console.error('╰─► ✗ [Código Error]', err);
+        pairingCodeRequested = false;
+        console.error(chalk.gray(`╰─► ✗ [Código Error] ${err?.message || err}`));
+        try { await m.reply(`╰─► ✗ Error al generar código:\n┊ _${err?.message}_`); } catch {}
       }
     }
 
+    // ── QR visual ──────────────────────────────────────────────────────
     if (qr && !isCode && client && chatId && commandFlags?.[senderId]) {
       try {
         const qrImg = await qrcode.toBuffer(qr, { scale: 8 });
@@ -239,28 +207,79 @@ export async function startSubBot(
           try { await client.sendMessage(chatId, { delete: msgQR.key }); } catch {}
         }, 60_000);
       } catch (err) {
-        console.error('╰─► ✗ [QR Error]', err);
+        console.error(chalk.gray(`╰─► ✗ [QR Error] ${err?.message || err}`));
       }
+    }
+
+    // ── Conectado ────────────────────────────────────────────────────────
+    if (connection === 'open') {
+      sock.uptime = Date.now();
+      sock.isInit = true;
+      sock.userId = cleanJid(sock.user?.id || '');
+
+      const botDir = `${sock.userId}@s.whatsapp.net`;
+      if (global.db?.data?.settings) {
+        if (!global.db.data.settings[botDir]) global.db.data.settings[botDir] = {};
+        global.db.data.settings[botDir].type = 'Sub';
+      }
+
+      if (!global.conns.find((c) => c.userId === sock.userId)) {
+        global.conns.push(sock);
+      }
+
+      delete reintentos[sock.userId || id];
+      await _joinChannels(sock);
+
+      // FIX 2: enlazar handler correctamente
+      await _bindHandler(sock);
+
+      console.log(
+        chalk.hex('#b2f7ef')('╰─► ✧ Sub-bot conectado') +
+        chalk.hex('#dec0f1')(` ❁ ${sock.userId}`)
+      );
+    }
+
+    // ── Desconectado ────────────────────────────────────────────────────
+    if (connection === 'close') {
+      const botId    = sock.userId || id;
+      const reason   = lastDisconnect?.error?.output?.statusCode
+                     || lastDisconnect?.reason
+                     || 0;
+      const intentos = (reintentos[botId] || 0) + 1;
+      reintentos[botId] = intentos;
+      _removeFromConns(sock);
+
+      if ([401, 403].includes(reason)) {
+        if (intentos <= MAX_RETRIES) {
+          console.log(chalk.gray(`╰─► ⇄ Sub-bot ${botId} cerró (${reason}) — intento ${intentos}/${MAX_RETRIES}`));
+          setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
+        } else {
+          console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} falló tras ${MAX_RETRIES} intentos. Eliminando.`));
+          try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
+          delete reintentos[botId];
+        }
+        return;
+      }
+
+      if (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession) {
+        console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} sesión terminada. Eliminando.`));
+        try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
+        delete reintentos[botId];
+        return;
+      }
+
+      // Recuperable o razón desconocida
+      console.log(chalk.gray(`╰─► ↺ Sub-bot ${botId} reconectando (razón: ${reason})...`));
+      setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
     }
   });
 
-  // ── Mensajes entrantes al sub-bot ───────────────────────────────────────
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const raw of messages) {
-      if (!raw.message) continue;
-      try {
-        // Importar handler dinámicamente igual que el subBotManager original
-        const handlerPath = path.join(__dirname, '../../handler.js');
-        const mod = await import(`${handlerPath}?t=${Date.now()}`).catch(() => null);
-        if (mod?.default) await mod.default.call(sock, raw);
-      } catch (err) {
-        console.log(chalk.gray(`╰─► ✗ Sub » ${err?.message || err}`));
-      }
-    }
+  process.on('uncaughtException', (err) => {
+    const msg = err?.message || '';
+    if (msg.includes('rate-overlimit') || msg.includes('timed out') || msg.includes('Connection Closed')) return;
+    console.error(chalk.gray('[subsRikka]'), msg.slice(0, 120));
   });
 
-  process.on('uncaughtException', console.error);
   return sock;
 }
 
@@ -279,7 +298,7 @@ async function _joinChannels(client) {
   }
 }
 
-// ── Bucle de autoload periódico (cada 60 s) ──────────────────────────────────
+// ── Watcher periódico (cada 60 s) ────────────────────────────────────────────
 export function startSubBotWatcher() {
   const run = async () => {
     if (!fs.existsSync(JADIBTS_DIR)) return;
@@ -288,7 +307,7 @@ export function startSubBotWatcher() {
       if (!fs.existsSync(credsPath)) continue;
       if (global.conns.some((c) => c.userId === userId)) continue;
       try {
-        await startSubBot(null, null, '✧ Auto-reconexión', false, userId, null, {}, false);
+        await startSubBot(null, null, '', false, userId, null, {}, false);
       } catch {}
       await delay(2500);
     }
