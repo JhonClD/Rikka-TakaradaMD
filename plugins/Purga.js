@@ -1,66 +1,65 @@
+const norm = (jid) => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '')
+
 const handler = async (m, { conn }) => {
   if (!m.isGroup) return m.reply('❌ Solo en grupos.')
 
-  // 1. Forzar obtención de metadatos actualizados
-  const metadata = await conn.groupMetadata(m.chat)
+  const metadata    = await conn.groupMetadata(m.chat)
   const participants = metadata.participants
 
-  // 2. Normalizar el ID del bot (quitar el :1 del multi-device)
-  const botJid = conn.user.id.split(':')[0] + '@s.whatsapp.net'
-  
-  // 3. Verificar internamente los permisos
-  const botInGroup = participants.find(p => p.id === botJid)
-  const senderInGroup = participants.find(p => p.id === m.sender)
+  const botNum    = norm(conn.user?.id || conn.user?.jid)
+  const senderNum = norm(m.sender)
 
-  const isBotAdmin = botInGroup?.admin === 'admin' || botInGroup?.admin === 'superadmin'
-  const isAdmin = senderInGroup?.admin === 'admin' || senderInGroup?.admin === 'superadmin'
+  const botInGroup    = participants.find(p => norm(p.id) === botNum || norm(p.lid) === botNum)
+  const senderInGroup = participants.find(p => norm(p.id) === senderNum || norm(p.lid) === senderNum)
 
-  if (!isAdmin) return m.reply('❌ Solo los administradores pueden usar este comando.')
-  if (!isBotAdmin) return m.reply('❌ El bot necesita ser administrador para expulsar miembros.')
+  const isBotAdmin    = botInGroup?.admin === 'admin' || botInGroup?.admin === 'superadmin'
+  const isSenderAdmin = senderInGroup?.admin === 'admin' || senderInGroup?.admin === 'superadmin'
 
-  // 4. Filtrar objetivos (No admins, no el bot)
+  if (!isSenderAdmin) return m.reply('❌ Solo los administradores pueden usar este comando.')
+  if (!isBotAdmin)    return m.reply('❌ El bot necesita ser administrador para expulsar miembros.')
+
   const targets = participants.filter(p => {
-    const isBot = p.id === botJid
-    const isSpecialAdmin = p.admin === 'superadmin' || p.admin === 'admin'
-    return !isBot && !isSpecialAdmin
-  }).map(p => p.id)
+    if (norm(p.id) === botNum || norm(p.lid) === botNum) return false
+    if (p.admin === 'superadmin' || p.admin === 'admin')  return false
+    return true
+  })
 
-  if (targets.length === 0) return m.reply('⚠️ No hay miembros comunes para purgar.')
+  if (!targets.length) return m.reply('⚠️ No hay miembros comunes para purgar.')
 
-  await m.reply(`🔄 Iniciando purga de *${targets.length}* miembro(s)...\n*Aviso:* Esto puede tardar un momento.`)
+  await m.reply(`🔄 Iniciando purga de *${targets.length}* miembro(s)...`)
 
   let removidos = 0
-  let fallidos = 0
+  let fallidos  = 0
 
-  for (const jid of targets) {
+  for (const p of targets) {
     try {
-      await conn.groupParticipantsUpdate(m.chat, [jid], 'remove')
+      await conn.groupParticipantsUpdate(m.chat, [p.id], 'remove')
       removidos++
-      // Delay de 1 segundo para evitar baneos o bloqueos de flujo
       await new Promise(r => setTimeout(r, 1000))
     } catch (e) {
       fallidos++
-      console.error(`Error al eliminar a ${jid}:`, e)
     }
   }
 
-  const resultText = 
-    `╔═══════════════╗\n` +
-    `  ✦ *Purga completada*\n` +
-    `╚═══════════════╝\n\n` +
-    `✅ Removidos: *${removidos}*\n` +
-    `❌ Fallidos:  *${fallidos}*\n\n` +
-    `*Operación finalizada.*`
-
-  await conn.sendMessage(m.chat, { text: resultText }, { quoted: m })
+  await conn.sendMessage(
+    m.chat,
+    {
+      text:
+        `╔═══════════════╗\n` +
+        `  ✦ *Purga completada*\n` +
+        `╚═══════════════╝\n\n` +
+        `✅ Removidos: *${removidos}*\n` +
+        `❌ Fallidos:  *${fallidos}*`,
+    },
+    { quoted: m }
+  )
 }
 
 handler.help    = ['kickall']
 handler.tags    = ['group']
 handler.command = /^(kickall|purge|purgar|limpiargrupo)$/i
 handler.group   = true
-// Desactivamos la validación automática del handler para que use la interna del plugin
-handler.admin   = false 
+handler.admin   = false
 handler.botAdmin = false
 
 export default handler
