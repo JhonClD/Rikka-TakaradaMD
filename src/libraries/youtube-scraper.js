@@ -1,11 +1,11 @@
 /**
- * youtube-scraper.js — Rikka-TakaradaMD
+ * youtube-scraper.js — Rikka-TakaradaMD (Mejorado 2026)
  * ─────────────────────────────────────
- * Providers actualizados para 2025. Orden de prioridad:
+ * Providers actualizados para 2026. Orden de prioridad:
  *
  *  1. yt-dlp local         (más confiable, sin límites)
  *  2. @distube/ytdl-core   (librería Node, sin binario externo)
- *  3. cobalt-2025          (API pública, nueva ruta /api)
+ *  3. cobalt-2026          (API pública, instancias actualizadas)
  *  4. y2mate               (scraper web actualizado)
  *  5. snapsave             (scraper web)
  *  6. tomp3.cc             (scraper web)
@@ -256,15 +256,33 @@ const providerYtdlCore = async (ytUrl, type) => {
     });
 };
 
-// ── 3. Cobalt 2025 (soporta ruta /api nueva y / vieja) ────────────────────────
-const providerCobalt2025 = async (ytUrl, type) => {
+// ── 3. Cobalt 2026 (Instancias actualizadas de cobalt.directory) ──────────────
+const providerCobalt2026 = async (ytUrl, type) => {
+    // Instancias extraídas de cobalt.directory (Mayo 2026)
     const instances = [
-        'https://cobalt.api.timelessnesses.me',
-        'https://co.wuk.sh',
-        'https://cobalt.uku.lol',
-        'https://api.cobalt.tools',
-        'https://cobalt.fyoal.com',
+        'https://grapefruit.clxxped.lol',
+        'https://nuko-c.meowing.de',
+        'https://melon.clxxped.lol',
+        'https://cobaltapi.kittycat.boo',
+        'https://lime.clxxped.lol',
+        'https://dog.kittycat.boo',
+        'https://fox.kittycat.boo',
+        'https://subito-c.meowing.de',
+        'https://cobaltapi.squair.xyz',
+        'https://cobalt.omega.wolfy.love',
+        'https://api.dl.woof.monster',
+        'https://api.cobalt.liubquanti.click',
+        'https://apicobalt.mgytr.top',
+        'https://api.cobalt.blackcat.sweeux.org',
+        'https://api.qwkuns.me',
+        'https://cobalt.alpha.wolfy.love',
+        'https://cobaltapi.cjs.nz',
+        'https://nachos.imput.net',
+        'https://kityune.imput.net',
+        'https://sunny.imput.net',
+        'https://blossom.imput.net'
     ];
+    
     for (const base of instances) {
         for (const route of ['/api', '/']) {
             try {
@@ -274,7 +292,10 @@ const providerCobalt2025 = async (ytUrl, type) => {
                     body: JSON.stringify({
                         url: ytUrl,
                         downloadMode: type === 'audio' ? 'audio' : 'auto',
-                        audioFormat: 'mp3', audioBitrate: '128', videoQuality: '720',
+                        videoQuality: '720',
+                        youtubeVideoCodec: 'h264',
+                        audioFormat: 'mp3',
+                        isAudioOnly: type === 'audio'
                     }),
                     signal: AbortSignal.timeout(20_000),
                 });
@@ -291,7 +312,7 @@ const providerCobalt2025 = async (ytUrl, type) => {
     throw new Error('cobalt: todas las instancias fallaron');
 };
 
-// ── 4. Y2Mate (2025) ──────────────────────────────────────────────────────────
+// ── 4. Y2Mate (2026) ──────────────────────────────────────────────────────────
 const providerY2Mate = async (ytUrl, type) => {
     const BASE = 'https://www.y2mate.com';
     const H = {
@@ -434,7 +455,7 @@ const downloadViaProviders = async (ytUrl, type, quality = '720p') => {
     const entries = [
         { name: 'yt-dlp',       fn: () => providerYtDlp(ytUrl, type) },
         { name: 'ytdl-core',    fn: () => providerYtdlCore(ytUrl, type) },
-        { name: 'cobalt-2025',  fn: () => providerCobalt2025(ytUrl, type) },
+        { name: 'cobalt-2026',  fn: () => providerCobalt2026(ytUrl, type) },
         { name: 'y2mate',       fn: () => providerY2Mate(ytUrl, type) },
         { name: 'snapsave',     fn: () => providerSnapSave(ytUrl, type) },
         { name: 'tomp3.cc',     fn: () => providerToMp3cc(ytUrl, type) },
