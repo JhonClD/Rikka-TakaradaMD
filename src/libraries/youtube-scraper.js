@@ -1,9 +1,14 @@
 import fs from 'fs';
 import yts from 'yt-search';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const COOKIES_FILE = path.resolve(__dirname, '../../src/cookies.txt');
 
 const execPromise = promisify(exec);
 const FFMPEG_TIMEOUT = 90_000;
@@ -228,8 +233,55 @@ const providerY2Mate = async (ytUrl, type) => {
     throw new Error('Y2Mate: falló');
 };
 
+const YTDLP_BIN = (() => {
+    const candidates = [
+        '/home/container/.local/bin/yt-dlp',
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+    ];
+    for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return 'yt-dlp';
+})();
+
+const providerYtdlp = async (ytUrl, type) => {
+    const stamp = Date.now();
+    const outTemplate = path.join(TMP_DIR, `tmp_ytdl_${stamp}_raw.%(ext)s`);
+    const cookiesArg = (fs.existsSync(COOKIES_FILE))
+        ? ['--cookies', COOKIES_FILE]
+        : [];
+    const args = [
+        ...cookiesArg,
+        '--no-playlist',
+        '--no-warnings',
+        '--socket-timeout', '30',
+        ...(type === 'audio'
+            ? ['-x', '--audio-format', 'mp3', '--audio-quality', '128K']
+            : ['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4']),
+        '-o', outTemplate,
+        ytUrl,
+    ];
+    await new Promise((resolve, reject) => {
+        execFile(YTDLP_BIN, args, { timeout: 120_000 }, (err, stdout, stderr) => {
+            if (err) return reject(new Error(`yt-dlp: ${stderr || err.message}`));
+            resolve();
+        });
+    });
+    const ext = type === 'audio' ? 'mp3' : 'mp4';
+    const outFile = path.join(TMP_DIR, `tmp_ytdl_${stamp}_raw.${ext}`);
+    const files = fs.readdirSync(TMP_DIR).filter(f => f.startsWith(`tmp_ytdl_${stamp}_raw`));
+    const found = files.map(f => path.join(TMP_DIR, f)).find(f => fs.existsSync(f));
+    if (!found) throw new Error('yt-dlp: archivo no encontrado');
+    const buf = fs.readFileSync(found);
+    try { fs.unlinkSync(found); } catch {}
+    if (!buf || buf.length < 10_000) throw new Error('yt-dlp: archivo muy pequeño');
+    return buf;
+};
+
 const downloadViaProviders = async (ytUrl, type) => {
     const providers = [
+        { name: 'ytdlp',  fn: () => providerYtdlp(ytUrl, type)  },
         { name: 'vreden', fn: () => providerVreden(ytUrl, type) },
         { name: 'cobalt', fn: () => providerCobalt(ytUrl, type) },
         { name: 'y2mate', fn: () => providerY2Mate(ytUrl, type) }
