@@ -16,7 +16,7 @@ import pino from 'pino';
 import Pino from 'pino';
 import { Boom } from '@hapi/boom';
 import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
-import { initializeSubBots } from './src/libraries/subBotManager.js';
+import { initializeSubBots, startSubBotWatcher } from './src/libraries/subsRikka.js';
 import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 import LidResolver from './src/libraries/LidResolver.js';
