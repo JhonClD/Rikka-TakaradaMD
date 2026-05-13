@@ -1,57 +1,66 @@
-const handler = async (m, { conn, isAdmin, isRAdmin, isBotAdmin }) => {
+const handler = async (m, { conn }) => {
   if (!m.isGroup) return m.reply('❌ Solo en grupos.')
-  if (!isAdmin && !isRAdmin) return m.reply('❌ Solo administradores.')
-  if (!isBotAdmin) return m.reply('❌ El bot necesita ser administrador.')
 
+  // 1. Forzar obtención de metadatos actualizados
   const metadata = await conn.groupMetadata(m.chat)
-  const botJid = conn.user.jid || conn.user.id
+  const participants = metadata.participants
 
-  const targets = metadata.participants.filter(p => {
-    const jid = p.id || p.jid
-    if (!jid) return false
-    if (jid === botJid) return false
-    if (jid.split('@')[0] === botJid.split('@')[0]) return false
-    if (p.admin === 'superadmin' || p.admin === 'admin') return false
-    return true
-  })
+  // 2. Normalizar el ID del bot (quitar el :1 del multi-device)
+  const botJid = conn.user.id.split(':')[0] + '@s.whatsapp.net'
+  
+  // 3. Verificar internamente los permisos
+  const botInGroup = participants.find(p => p.id === botJid)
+  const senderInGroup = participants.find(p => p.id === m.sender)
 
-  if (!targets.length) return m.reply('⚠️ No hay miembros que purgar.')
+  const isBotAdmin = botInGroup?.admin === 'admin' || botInGroup?.admin === 'superadmin'
+  const isAdmin = senderInGroup?.admin === 'admin' || senderInGroup?.admin === 'superadmin'
 
-  await m.reply(`🔄 Purgando ${targets.length} miembro(s)...`)
+  if (!isAdmin) return m.reply('❌ Solo los administradores pueden usar este comando.')
+  if (!isBotAdmin) return m.reply('❌ El bot necesita ser administrador para expulsar miembros.')
+
+  // 4. Filtrar objetivos (No admins, no el bot)
+  const targets = participants.filter(p => {
+    const isBot = p.id === botJid
+    const isSpecialAdmin = p.admin === 'superadmin' || p.admin === 'admin'
+    return !isBot && !isSpecialAdmin
+  }).map(p => p.id)
+
+  if (targets.length === 0) return m.reply('⚠️ No hay miembros comunes para purgar.')
+
+  await m.reply(`🔄 Iniciando purga de *${targets.length}* miembro(s)...\n*Aviso:* Esto puede tardar un momento.`)
 
   let removidos = 0
   let fallidos = 0
 
-  for (const p of targets) {
-    const jid = p.id || p.jid
+  for (const jid of targets) {
     try {
       await conn.groupParticipantsUpdate(m.chat, [jid], 'remove')
       removidos++
-      await new Promise(r => setTimeout(r, 500))
-    } catch {
+      // Delay de 1 segundo para evitar baneos o bloqueos de flujo
+      await new Promise(r => setTimeout(r, 1000))
+    } catch (e) {
       fallidos++
+      console.error(`Error al eliminar a ${jid}:`, e)
     }
   }
 
-  await conn.sendMessage(
-    m.chat,
-    {
-      text:
-        `╔═══════════════╗\n` +
-        `  ✦ *Purga completada*\n` +
-        `╚═══════════════╝\n\n` +
-        `✅ Removidos: *${removidos}*\n` +
-        `❌ Fallidos:  *${fallidos}*`,
-    },
-    { quoted: m }
-  )
+  const resultText = 
+    `╔═══════════════╗\n` +
+    `  ✦ *Purga completada*\n` +
+    `╚═══════════════╝\n\n` +
+    `✅ Removidos: *${removidos}*\n` +
+    `❌ Fallidos:  *${fallidos}*\n\n` +
+    `*Operación finalizada.*`
+
+  await conn.sendMessage(m.chat, { text: resultText }, { quoted: m })
 }
 
-handler.help    = ['purge', 'purgar']
+handler.help    = ['kickall']
 handler.tags    = ['group']
-handler.command = /^(purge|purgar|limpiargrupo)$/i
+handler.command = /^(kickall|purge|purgar|limpiargrupo)$/i
 handler.group   = true
-handler.admin   = true
-handler.botAdmin = true
+// Desactivamos la validación automática del handler para que use la interna del plugin
+handler.admin   = false 
+handler.botAdmin = false
 
 export default handler
