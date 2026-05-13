@@ -5,7 +5,7 @@ const CONFIG = {
   timezone: 'America/Lima',
   headerEmoji: '🎐',
   lineSeparator: '❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼',
-  footerText: '𝘉𝘺 𝘑𝘩𝘰𝘯𝘊𝘐𝘋',
+  footerText: '𝘙𝘪𝘬𝘬𝘢',
   catBox: {
     top: '┌─────── “ *{title}* {icon} „ ━━━━━━━┓',
     mid: '└➤ ✎~',
@@ -35,7 +35,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   
   // Datos dinámicos de tus archivos
   const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ'; 
-  const botNameShort = settings.namebot || 'Rikka';
+  const botNameShort = settings.namebot || '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
   const botLink = settings.link || 'https://github.com/JhonCID';
   const bannerUrl = settings.banner || 'https://uguu.se/default.jpg'; 
 
@@ -81,8 +81,8 @@ const handler = async (m, { conn, usedPrefix }) => {
     text: menuTexto,
     contextInfo: {
       externalAdReply: {
-        title: `╰─► ✰ ${botNameLong} ♡`,
-        body: `Alya, ˚₊· ͟͟͞͞➳❥ POWERED BY | — ${botNameShort}`,
+        title: `${botNameLong}`,
+        body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
         thumbnailUrl: bannerUrl,
         sourceUrl: botLink,
         mediaType: 1,
