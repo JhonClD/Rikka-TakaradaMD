@@ -9,6 +9,11 @@
  *        NO dentro de un qr repetido ni antes del handshake.
  * Fix 2: messages.upsert enlaza handler.js con .bind(sock), igual que
  *        el subBotManager original (conn.handler = mod.handler.bind(conn)).
+ * Fix 3: 401/403 elimina sesión INMEDIATAMENTE sin reintentar — son
+ *        desconexiones permanentes (sesión revocada). Reintentar solo
+ *        prolonga el bucle y consume cuota de WA.
+ * Fix 4: El contador de reintentos NO se borra al abrir conexión para
+ *        evitar el bucle open→401→reset→intento1/5→open→401 infinito.
  */
 
 import { makeWASocket } from './simple.js';
@@ -227,7 +232,15 @@ export async function startSubBot(
         global.conns.push(sock);
       }
 
-      delete reintentos[sock.userId || id];
+      // FIX 4: NO borrar reintentos aquí.
+      // Si los borramos en 'open', un ciclo open→401 reinicia el contador
+      // y el loop nunca termina. El contador se limpia solo cuando ya no
+      // vuelve a cerrar con error (sesión estable > 30 s).
+      const stableTimer = setTimeout(() => {
+        delete reintentos[sock.userId || id];
+      }, 30_000);
+      sock._stableTimer = stableTimer;
+
       await _joinChannels(sock);
 
       // FIX 2: enlazar handler correctamente
@@ -241,36 +254,51 @@ export async function startSubBot(
 
     // ── Desconectado ────────────────────────────────────────────────────
     if (connection === 'close') {
-      const botId    = sock.userId || id;
-      const reason   = lastDisconnect?.error?.output?.statusCode
-                     || lastDisconnect?.reason
-                     || 0;
-      const intentos = (reintentos[botId] || 0) + 1;
-      reintentos[botId] = intentos;
+      // Cancelar el timer de estabilidad si aún no disparó
+      if (sock._stableTimer) {
+        clearTimeout(sock._stableTimer);
+        sock._stableTimer = null;
+      }
+
+      const botId  = sock.userId || id;
+      const reason = lastDisconnect?.error?.output?.statusCode
+                   || lastDisconnect?.reason
+                   || 0;
+
       _removeFromConns(sock);
 
-      if ([401, 403].includes(reason)) {
-        if (intentos <= MAX_RETRIES) {
-          console.log(chalk.gray(`╰─► ⇄ Sub-bot ${botId} cerró (${reason}) — intento ${intentos}/${MAX_RETRIES}`));
-          setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
-        } else {
-          console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} falló tras ${MAX_RETRIES} intentos. Eliminando.`));
-          try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
-          delete reintentos[botId];
-        }
+      // ── FIX 3: 401 / 403 = sesión revocada permanentemente ──────────
+      // NO reintentar. Borrar la carpeta de sesión inmediatamente.
+      if (reason === 401 || reason === 403
+          || reason === DisconnectReason.loggedOut
+          || reason === DisconnectReason.badSession) {
+        console.log(chalk.red(
+          `╰─► ✗ Sub-bot ${botId} sesión revocada (${reason}). Eliminando sesión...`
+        ));
+        delete reintentos[botId];
+        try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
         return;
       }
 
-      if (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession) {
-        console.log(chalk.gray(`╰─► ✗ Sub-bot ${botId} sesión terminada. Eliminando.`));
-        try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
+      // ── Recuperable: reintentar con límite ───────────────────────────
+      const intentos = (reintentos[botId] || 0) + 1;
+      reintentos[botId] = intentos;
+
+      if (intentos > MAX_RETRIES) {
+        console.log(chalk.gray(
+          `╰─► ✗ Sub-bot ${botId} falló tras ${MAX_RETRIES} intentos. Abandonando.`
+        ));
         delete reintentos[botId];
         return;
       }
 
-      // Recuperable o razón desconocida
-      console.log(chalk.gray(`╰─► ↺ Sub-bot ${botId} reconectando (razón: ${reason})...`));
-      setTimeout(() => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand), RETRY_DELAY);
+      console.log(chalk.gray(
+        `╰─► ↺ Sub-bot ${botId} reconectando (razón: ${reason}) — intento ${intentos}/${MAX_RETRIES}...`
+      ));
+      setTimeout(
+        () => startSubBot(m, client, caption, isCode, phone, chatId, {}, isCommand),
+        RETRY_DELAY
+      );
     }
   });
 
