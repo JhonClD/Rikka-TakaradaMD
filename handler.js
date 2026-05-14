@@ -713,16 +713,61 @@ export async function handler(chatUpdate) {
     const _resolveLidJid = (jid) => {
       if (!jid?.endsWith('@lid')) return jid;
       const lidKey = jid.split('@')[0];
-      const pnUser = this?.signalRepository?.lidMapping?.mappingCache?.get(`lid:${lidKey}`);
-      if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+      // 0. LIDMappingStore nativo de Baileys (LRU síncrono — fuente más confiable)
+      const mappingCache = this?.signalRepository?.lidMapping?.mappingCache;
+      if (mappingCache) {
+        const pnUser = mappingCache.get(`lid:${lidKey}`);
+        if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+      }
+      const resolver = this.resolveLid;
+      if (!resolver) return jid;
+      // 1. Cache principal del LidResolver (Map interno)
+      if (resolver.cache instanceof Map) {
+        const entry = resolver.cache.get(lidKey);
+        if (entry?.jid && !entry.jid.endsWith('@lid') && !entry.notFound && !entry.error) return entry.jid;
+      }
+      // 2. getUserInfo (acceso tipado al mismo cache)
+      if (typeof resolver.getUserInfo === 'function') {
+        const info = resolver.getUserInfo(lidKey);
+        if (info?.jid && !info.jid.endsWith('@lid') && !info.notFound && !info.error) return info.jid;
+      }
+      // 3. lidCache (interfaz de compatibilidad)
+      if (resolver.lidCache) {
+        const cached = resolver.lidCache.get?.(jid);
+        if (cached && !cached.endsWith('@lid')) return cached;
+      }
+      // 4. jidToLidMap inverso
+      if (resolver.jidToLidMap instanceof Map) {
+        for (const [resolvedJid, lidFull] of resolver.jidToLidMap.entries()) {
+          if (lidFull === jid || lidFull?.split('@')[0] === lidKey) return resolvedJid;
+        }
+      }
+      // 5. conn.contacts como último fallback
+      const contacts = Object.values(this?.contacts || {});
+      const match = contacts.find(c => c.lid === jid || (c.lid && c.lid.split('@')[0] === lidKey));
+      if (match?.id && !match.id.endsWith('@lid')) return match.id;
       return jid;
     };
     const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
     const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const _senderPhone = _phoneOnly(_senderJid);
-    // Si el sender era LID y _resolveLidJid no lo resolvió, queda como LID (no hay más datos)
-    const _resolvedFromContacts = null;
+    // Fallback LID: si el JID no se resolvió, intentar vía LIDMappingStore y contacts
+    const _resolvedFromContacts = _senderJid?.endsWith('@lid')
+      ? (() => {
+          // Primero: LIDMappingStore nativo de Baileys
+          const mappingCache = this?.signalRepository?.lidMapping?.mappingCache;
+          if (mappingCache) {
+            const lidKey = _senderJid.split('@')[0];
+            const pnUser = mappingCache.get(`lid:${lidKey}`);
+            if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+          }
+          // Fallback: contacts (siempre vacío en Baileys moderno)
+          const contacts = Object.values(this?.contacts || conn?.contacts || {});
+          const match = contacts.find(c => c.lid === m.sender || c.lid === _senderJid);
+          return match?.id || match?.jid || null;
+        })()
+      : null;
     const _senderPhoneFinal = _resolvedFromContacts ? _phoneOnly(_resolvedFromContacts) : _senderPhone;
     const isROwner = _ownerList.some(ownerJid => {
       if (ownerJid === _senderJid) return true;
@@ -800,7 +845,7 @@ export async function handler(chatUpdate) {
       }, time);
     }
 
-    if (m.isBaileys || (global.isBaileysFail && m?.sender === mconn?.conn?.user?.jid)) {
+    if (m.isBaileys || isBaileysFail && m?.sender === mconn?.conn?.user?.jid) {
       return;
     }
 
@@ -839,6 +884,9 @@ export async function handler(chatUpdate) {
       admin: participant.admin
     }));
 
+    if (m.isGroup && participants.length > 0 && this.resolveLid?.bulkCacheFromParticipants) {
+      this.resolveLid.bulkCacheFromParticipants(participants);
+    }
 
     let resolvedSender = _senderJid;
     const user = (m.isGroup ? (
@@ -1027,7 +1075,8 @@ ${tradutor.texto1[1]} ${messageNumber}/3
         }
         const hl = _prefix;
         const adminMode = global.db.data.chats[m.chat].modoadmin;
-        if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin) return;
+        const mystica = `${plugin.botAdmin || plugin.admin || plugin.group || plugin || noPrefix || hl || m.text.slice(0, 1) == hl || plugin.command}`;
+        if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin && mystica) return;
 
         if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) {
           fail('owner', m, this);
@@ -1225,16 +1274,16 @@ ${tradutor.texto1[1]} ${messageNumber}/3
 }
 
 export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
-    const tradutor = {
-      texto1: 'Bienvenido, @user!',
-      texto2: 'Adiós, @user!',
-      texto3: '@user ahora es administrador',
-      texto4: '@user ya no es administrador',
-      texto5: 'La descripción ha sido cambiada a\n@desc',
-      texto6: 'El nombre del grupo ha sido cambiado a\n@subject',
-      texto7: 'El icono del grupo ha sido cambiado',
-      texto8: 'El enlace del grupo ha sido cambiado a\n@revoke',
-    }
+  const tradutor = {
+    texto1: '',
+    texto2: '',
+    texto3: '',
+    texto4: '',
+    texto5: '',
+    texto6: '',
+    texto7: '',
+    texto8: '',
+  }
 
   const m = mconn
   if (opts['self']) return;
@@ -1260,7 +1309,15 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
           const pnUser = mappingCache.get(`lid:${lidKey}`);
           if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
         }
-
+        // 1. LidResolver del bot
+        const resolver = mconn?.conn?.resolveLid;
+        if (resolver) {
+          const lidKey = p.split('@')[0];
+          if (resolver.cache instanceof Map) {
+            const entry = resolver.cache.get(lidKey);
+            if (entry?.jid && !entry.jid.endsWith('@lid')) return entry.jid;
+          }
+        }
       }
       return p;
     }
@@ -1300,8 +1357,8 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
              return false;
            }) || {};
            const isBotAdminNn = botTt2?.admin === 'admin' || botTt2?.admin === 'superadmin' || false;
-           text = (action === 'add' ? (chat.sWelcome || tradutor.texto1).replace('@subject', await m?.conn?.getName(id)).replace('@desc', groupMetadata?.desc?.toString() || '*𝚂𝙸𝙽 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝙲𝙸𝙾𝙽*').replace('@user', '@' + userJid.split('@')[0]) :
-            (chat.sBye || tradutor.texto2)).replace('@user', '@' + userJid.split('@')[0]);
+           text = (action === 'add' ? (chat.sWelcome || tradutor.texto1 || conn.welcome || 'Welcome, @user!').replace('@subject', await m?.conn?.getName(id)).replace('@desc', groupMetadata?.desc?.toString() || '*𝚂𝙸𝙽 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝙲𝙸𝙾𝙽*').replace('@user', '@' + userJid.split('@')[0]) :
+            (chat.sBye || tradutor.texto2 || conn.bye || 'Bye, @user!')).replace('@user', '@' + userJid.split('@')[0]);
             if (userPrefix && chat.antiArab && botTt.restrict && isBotAdminNn && action === 'add') {
            const responseb = await m.conn.groupParticipantsUpdate(id, [userJid], 'remove');
             if (responseb[0].status === '404') return;
@@ -1319,39 +1376,27 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
     case 'promote':
     case 'daradmin':
     case 'darpoder':
-      text = (chat.sPromote || tradutor.texto3);
-      {
-        let _p0 = participants[0] || '';
-        try {
-          const _parsed = JSON.parse(_p0);
-          if (_parsed && typeof _parsed === 'object') {
-            _p0 = _parsed.phoneNumber || _parsed.id || _p0;
-          }
-        } catch (_) {}
-        const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
-        text = text.replace('@user', '@' + _p0Number);
-        if (chat.detect && !chat?.isBanned) {
-          mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
-        }
-      }
-      break;
+      text = (chat.sPromote || tradutor.texto3 || conn?.spromote || '@user ```is now Admin```');
     case 'demote':
     case 'quitarpoder':
     case 'quitaradmin':
-      text = (chat?.sDemote || tradutor.texto4);
-      {
-        let _p0 = participants[0] || '';
-        try {
-          const _parsed = JSON.parse(_p0);
-          if (_parsed && typeof _parsed === 'object') {
-            _p0 = _parsed.phoneNumber || _parsed.id || _p0;
-          }
-        } catch (_) {}
-        const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
-        text = text.replace('@user', '@' + _p0Number);
-        if (chat.detect && !chat?.isBanned) {
-          mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
+      if (!text) {
+        text = (chat?.sDemote || tradutor.texto4 || conn?.sdemote || '@user ```is no longer Admin```');
+      }
+
+      let _p0 = participants[0] || '';
+
+      try {
+        const _parsed = JSON.parse(_p0);
+        if (_parsed && typeof _parsed === 'object') {
+          _p0 = _parsed.phoneNumber || _parsed.id || _p0;
         }
+      } catch (_) {}
+
+      const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
+      text = text.replace('@user', '@' + _p0Number);
+      if (chat.detect && !chat?.isBanned) {
+        mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
       }
       break;
   }
