@@ -174,33 +174,36 @@ const providerVreden = async (ytUrl, type) => {
 
 const providerCobalt = async (ytUrl, type) => {
     const instances = [
+        'https://cobalt.api.timelessnesses.me',
+        'https://co.wuk.sh',
+        'https://cobaltapi.squair.xyz',
+        'https://api.cobalt.liubquanti.click',
+        'https://cobalt.timelessnesses.me',
+        'https://sunny.imput.net',
         'https://nuko-c.meowing.de',
         'https://melon.clxxped.lol',
         'https://lime.clxxped.lol',
-        'https://fox.kittycat.boo',
-        'https://dog.kittycat.boo',
-        'https://cobaltapi.kittycat.boo',
-        'https://cobaltapi.squair.xyz',
-        'https://apicobalt.mgytr.top',
-        'https://api.cobalt.liubquanti.click',
-        'https://api.dl.woof.monster',
-        'https://api.qwkuns.me',
         'https://grapefruit.clxxped.lol',
-        'https://sunny.imput.net'
     ];
     for (const base of instances) {
         try {
             const res = await fetch(`${base}/api/json`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': UA },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': UA,
+                },
                 body: JSON.stringify({
                     url: ytUrl,
                     downloadMode: type === 'audio' ? 'audio' : 'auto',
                     videoQuality: '720',
-                    audioFormat: 'mp3'
+                    audioFormat: 'mp3',
+                    filenameStyle: 'basic',
                 }),
-                signal: AbortSignal.timeout(15_000),
+                signal: AbortSignal.timeout(20_000),
             });
+            if (!res.ok) continue;
             const json = await res.json();
             const dlUrl = json.url || json?.picker?.[0]?.url;
             if (dlUrl) return await fetchBuffer(dlUrl);
@@ -289,40 +292,53 @@ const YTDLP_BIN = (() => {
 })();
 
 const providerYtdlp = async (ytUrl, type) => {
-    const stamp = Date.now();
+    const stamp       = Date.now();
     const outTemplate = path.join(TMP_DIR, `tmp_ytdl_${stamp}_raw.%(ext)s`);
-    const cookiesArg = (fs.existsSync(COOKIES_FILE))
+    const cookiesArg  = fs.existsSync(COOKIES_FILE)
         ? ['--cookies', COOKIES_FILE]
         : [];
-    
+
     let formatArgs;
     if (type === 'audio') {
-        // Audio: mejor audio disponible, convertir a mp3
-        formatArgs = ['-f', 'bestaudio', '--extract-audio', '--audio-format', 'mp3'];
+        formatArgs = [
+            '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+            '--extract-audio',
+            '--audio-format', 'mp3',
+            '--audio-quality', '0',
+        ];
     } else {
-        // Video: mejor video+audio en mp4, o cualquier mp4, o el mejor formato
-        formatArgs = ['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4'];
+        formatArgs = [
+            '-f',
+            'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]' +
+            '/bestvideo[height<=720]+bestaudio' +
+            '/best[height<=720]' +
+            '/best',
+            '--merge-output-format', 'mp4',
+        ];
     }
-    
+
     const args = [
         ...cookiesArg,
         '--no-playlist',
         '--no-warnings',
+        '--no-check-certificate',
         '--socket-timeout', '30',
+        '--extractor-retries', '3',
+        '--fragment-retries', '5',
+        '--retry-sleep', 'fragment:2',
         '--user-agent', UA,
         ...formatArgs,
         '-o', outTemplate,
         ytUrl,
     ];
-    
+
     await new Promise((resolve, reject) => {
-        execFile(YTDLP_BIN, args, { timeout: 120_000 }, (err, stdout, stderr) => {
+        execFile(YTDLP_BIN, args, { timeout: 180_000 }, (err, stdout, stderr) => {
             if (err) return reject(new Error(`yt-dlp: ${stderr || err.message}`));
             resolve();
         });
     });
-    
-    const ext = type === 'audio' ? 'mp3' : 'mp4';
+
     const files = fs.readdirSync(TMP_DIR).filter(f => f.startsWith(`tmp_ytdl_${stamp}_raw`));
     const found = files.map(f => path.join(TMP_DIR, f)).find(f => fs.existsSync(f));
     if (!found) throw new Error('yt-dlp: archivo no encontrado');
@@ -334,12 +350,12 @@ const providerYtdlp = async (ytUrl, type) => {
 
 const downloadViaProviders = async (ytUrl, type) => {
     const providers = [
-        { name: 'ytdlp',  fn: () => providerYtdlp(ytUrl, type)  },
-        { name: 'lolhuman', fn: () => providerLolHuman(ytUrl, type) },
-        { name: 'betabotz', fn: () => providerBetaBotz(ytUrl, type) },
-        { name: 'vreden', fn: () => providerVreden(ytUrl, type) },
-        { name: 'cobalt', fn: () => providerCobalt(ytUrl, type) },
-        { name: 'y2mate', fn: () => providerY2Mate(ytUrl, type) }
+        { name: 'ytdlp',     fn: () => providerYtdlp(ytUrl, type)     },
+        { name: 'lolhuman',  fn: () => providerLolHuman(ytUrl, type)  },
+        { name: 'betabotz',  fn: () => providerBetaBotz(ytUrl, type)  },
+        { name: 'vreden',    fn: () => providerVreden(ytUrl, type)    },
+        { name: 'cobalt',    fn: () => providerCobalt(ytUrl, type)    },
+        { name: 'y2mate',    fn: () => providerY2Mate(ytUrl, type)    },
     ];
     const errors = [];
     for (const { name, fn } of providers) {
