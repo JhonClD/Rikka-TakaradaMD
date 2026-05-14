@@ -112,6 +112,17 @@ const handler = async (m, { conn, args, usedPrefix, isAdmin, isOwner }) => {
 };
 
 handler.before = async function (m, { conn, participants, groupMetadata }) {
+  if (!this.welcome) {
+    this.welcome   = '👋 ¡Bienvenido/a!\n@user';
+    this.bye       = '👋 ¡Hasta luego!\n@user';
+    this.spromote  = '*[ ℹ️ ] @user fue promovido a administrador.*';
+    this.sdemote   = '*[ ℹ️ ] @user fue degradado de administrador.*';
+    this.sDesc     = '*[ ℹ️ ] La descripción del grupo ha sido modificada.*';
+    this.sSubject  = '*[ ℹ️ ] El nombre del grupo ha sido modificado.*';
+    this.sIcon     = '*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*';
+    this.sRevoke   = '*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*';
+  }
+
   if (!m.isGroup) return;
   if (!m.messageStubType) return;
 
@@ -193,4 +204,5 @@ handler.command = ['welcome', 'bienvenida', 'setwelcome'];
 handler.group = true;
 
 export default handler;
-  
+
+    
