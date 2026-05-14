@@ -174,11 +174,18 @@ const providerVreden = async (ytUrl, type) => {
 
 const providerCobalt = async (ytUrl, type) => {
     const instances = [
-        'https://grapefruit.clxxped.lol',
         'https://nuko-c.meowing.de',
         'https://melon.clxxped.lol',
+        'https://lime.clxxped.lol',
+        'https://fox.kittycat.boo',
+        'https://dog.kittycat.boo',
         'https://cobaltapi.kittycat.boo',
-        'https://subito-c.meowing.de',
+        'https://cobaltapi.squair.xyz',
+        'https://apicobalt.mgytr.top',
+        'https://api.cobalt.liubquanti.click',
+        'https://api.dl.woof.monster',
+        'https://api.qwkuns.me',
+        'https://grapefruit.clxxped.lol',
         'https://sunny.imput.net'
     ];
     for (const base of instances) {
@@ -233,6 +240,41 @@ const providerY2Mate = async (ytUrl, type) => {
     throw new Error('Y2Mate: falló');
 };
 
+const providerLolHuman = async (ytUrl, type) => {
+    const apikeys = ['beta', '85faf717d0545d14074659ad', '0ca09158e244030623e44991'];
+    for (const key of apikeys) {
+        try {
+            const endpoint = type === 'audio' ? 'ytaudio' : 'ytvideo';
+            const res = await fetch(`https://api.lolhuman.xyz/api/${endpoint}?apikey=${key}&url=${ytUrl}`, {
+                signal: AbortSignal.timeout(20_000)
+            });
+            const json = await res.json();
+            if (json.status === 200 && json.result?.link) {
+                return await fetchBuffer(json.result.link);
+            }
+        } catch {}
+    }
+    throw new Error('LolHuman: falló');
+};
+
+const providerBetaBotz = async (ytUrl, type) => {
+    const apikeys = ['beta', 'ErlanBot'];
+    for (const key of apikeys) {
+        try {
+            const endpoint = type === 'audio' ? 'ytmp3' : 'ytmp4';
+            const res = await fetch(`https://api.betabotz.eu.org/api/download/${endpoint}?url=${ytUrl}&apikey=${key}`, {
+                signal: AbortSignal.timeout(20_000)
+            });
+            const json = await res.json();
+            if (json.status && json.result?.mp3 || json.result?.mp4) {
+                const dlUrl = type === 'audio' ? json.result.mp3 : json.result.mp4;
+                return await fetchBuffer(dlUrl);
+            }
+        } catch {}
+    }
+    throw new Error('BetaBotz: falló');
+};
+
 const YTDLP_BIN = (() => {
     const candidates = [
         '/home/container/.local/bin/yt-dlp',
@@ -282,6 +324,8 @@ const providerYtdlp = async (ytUrl, type) => {
 const downloadViaProviders = async (ytUrl, type) => {
     const providers = [
         { name: 'ytdlp',  fn: () => providerYtdlp(ytUrl, type)  },
+        { name: 'lolhuman', fn: () => providerLolHuman(ytUrl, type) },
+        { name: 'betabotz', fn: () => providerBetaBotz(ytUrl, type) },
         { name: 'vreden', fn: () => providerVreden(ytUrl, type) },
         { name: 'cobalt', fn: () => providerCobalt(ytUrl, type) },
         { name: 'y2mate', fn: () => providerY2Mate(ytUrl, type) }
@@ -322,3 +366,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
+            
