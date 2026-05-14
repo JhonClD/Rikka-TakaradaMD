@@ -64,7 +64,7 @@ global.cmenut = '❖––––––『';
 global.cmenub = '┊✦ ';
 global.cmenuf = '╰━═┅═━––––––๑\n';
 global.cmenua = '\n⌕ ❙❘❙❙❘❙❚❙❘❙❙❚❙❘❙❘❙❚❙❘❙❙❚❙❘❙❙❘❙❚❙❘ ⌕\n     ';
-global.dmenut = '*❖─┅──┅〈*';
+global.dmenut = '*❖─┅──┅〈*';
 global.dmenub = '*┊»*';
 global.dmenub2 = '*┊*';
 global.dmenuf = '*╰┅────────┅✦*';
@@ -86,10 +86,18 @@ global.flaaa = [
 ];
 //* ************************
 
+//* *******GitHub Upload***************
+// Usado por src/libraries/uploadToGithub.js (fallback en .tourl)
+// Crea un repo público vacío en GitHub y pega tu Personal Access Token (scope: repo)
+global.githubToken  = '';            // 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+global.githubUser   = 'JhonClD';     // tu usuario de GitHub
+global.githubRepo   = '';            // nombre del repo público, ej: 'rikka-uploads'
+global.githubBranch = 'main';        // rama del repo (normalmente 'main')
+//* ************************************
+
 const file = fileURLToPath(import.meta.url);
 watchFile(file, () => {
   unwatchFile(file);
   console.log(chalk.redBright('Update \'config.js\''));
   import(`${file}?update=${Date.now()}`);
 });
-
