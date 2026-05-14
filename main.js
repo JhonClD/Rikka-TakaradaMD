@@ -42,10 +42,7 @@ global.__filename = function filename(pathURL = import.meta.url, rmPrefix = plat
 }; global.__require = function require(dir = import.meta.url) {
   return createRequire(dir);
 };
-global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({ ...query, ...(apikeyqueryname ? { [apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name] } : {}) })) : '');
 global.timestamp = { start: new Date };
-global.videoList = [];
-global.videoListXXX = [];
 const __dirname = global.__dirname(import.meta.url);
 global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
 global.prefix = new RegExp('^[#!/.]')
@@ -134,7 +131,7 @@ const connectionOptions = {
   logger: pino({ level: 'silent' }),
   printQRInTerminal: opcion == '1' ? true : methodCodeQR ? true : false,
   mobile: MethodMobile,
-  browser: opcion === '1' ? ['TheMystic-Bot-MD', 'Safari', '2.0.0'] : methodCodeQR ? ['TheMystic-Bot-MD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
+  browser: opcion === '1' ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
   auth: {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -241,50 +238,7 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
   }
 });
 
-function purgeSession() {
-  let prekey = [];
-  let directorio = readdirSync("./MysticSession");
-  let filesFolderPreKeys = directorio.filter(file => file.startsWith('pre-key-'));
-  prekey = [...prekey, ...filesFolderPreKeys];
-  filesFolderPreKeys.forEach(files => unlinkSync(`./MysticSession/${files}`));
-}
 
-function purgeSessionSB() {
-  try {
-    let listaDirectorios = readdirSync('./jadibts/');
-    let SBprekey = [];
-    listaDirectorios.forEach(directorio => {
-      if (statSync(`./jadibts/${directorio}`).isDirectory()) {
-        let DSBPreKeys = readdirSync(`./jadibts/${directorio}`).filter(fileInDir => fileInDir.startsWith('pre-key-'));
-        SBprekey = [...SBprekey, ...DSBPreKeys];
-        DSBPreKeys.forEach(fileInDir => unlinkSync(`./jadibts/${directorio}/${fileInDir}`));
-      }
-    });
-  } catch (err) {
-    console.log(chalk.bold.red(`[ ℹ️ ] Algo salio mal durante la eliminación, archivos no eliminados`));
-  }
-}
-
-function purgeOldFiles() {
-  const directories = ['./MysticSession/', './jadibts/'];
-  const oneHourAgo = Date.now() - (60 * 60 * 1000);
-  directories.forEach(dir => {
-    readdirSync(dir, (err, files) => {
-      if (err) throw err;
-      files.forEach(file => {
-        const filePath = path.join(dir, file);
-        stat(filePath, (err, stats) => {
-          if (err) throw err;
-          if (stats.isFile() && stats.mtimeMs < oneHourAgo && file !== 'creds.json') {
-            unlinkSync(filePath, err => {
-              if (err) throw err;
-            });
-          }
-        });
-      });
-    });
-  });
-}
 
 async function connectionUpdate(update) {
   let isFirstConnection = '';
@@ -449,15 +403,6 @@ global.reloadHandler = async function (restatConn) {
     conn.ev.off('creds.update', conn.credsUpdate);
   }
 
-  conn.welcome = '👋 ¡Bienvenido/a!\n@user';
-  conn.bye = '👋 ¡Hasta luego!\n@user';
-  conn.spromote = '*[ ℹ️ ] @user Fue promovido a administrador.*';
-  conn.sdemote = '*[ ℹ️ ] @user Fue degradado de administrador.*';
-  conn.sDesc = '*[ ℹ️ ] La descripción del grupo ha sido modificada.*';
-  conn.sSubject = '*[ ℹ️ ] El nombre del grupo ha sido modificado.*';
-  conn.sIcon = '*[ ℹ️ ] Se ha cambiado la foto de perfil del grupo.*';
-  conn.sRevoke = '*[ ℹ️ ] El enlace de invitación al grupo ha sido restablecido.*';
-
   conn.handler = handler.handler.bind(global.conn);
 
   conn.participantsUpdate = handler.participantsUpdate.bind(global.conn);
@@ -466,14 +411,6 @@ global.reloadHandler = async function (restatConn) {
   conn.onCall = handler.callUpdate.bind(global.conn);
   conn.connectionUpdate = connectionUpdate.bind(global.conn);
   conn.credsUpdate = saveCreds.bind(global.conn, true);
-
-  const currentDateTime = new Date();
-  const messageDateTime = new Date(conn.ev);
-  if (currentDateTime >= messageDateTime) {
-    const chats = Object.entries(conn.chats).filter(([jid, chat]) => !jid.endsWith('@g.us') && chat.isChats).map((v) => v[0]);
-  } else {
-    const chats = Object.entries(conn.chats).filter(([jid, chat]) => !jid.endsWith('@g.us') && chat.isChats).map((v) => v[0]);
-  }
 
   conn.ev.on('messages.upsert', conn.handler);
   conn.ev.on('group-participants.update', conn.participantsUpdate);
@@ -547,7 +484,7 @@ setInterval(async () => {
   if (stopped === 'close' || !conn || !conn?.user) return;
   const _uptime = process.uptime() * 1000;
   const uptime = clockString(_uptime);
-  const bio = `• Activo: ${uptime} | TheMystic-Bot-MD`;
+  const bio = `• Activo: ${uptime} | Rikka-TakaradaMD`;
   await conn?.updateProfileStatus(bio).catch((_) => _);
 }, 10 * 60 * 1000); // cada 10 minutos (antes: 60s)
 
