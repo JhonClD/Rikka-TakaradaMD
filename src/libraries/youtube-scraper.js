@@ -294,25 +294,34 @@ const providerYtdlp = async (ytUrl, type) => {
     const cookiesArg = (fs.existsSync(COOKIES_FILE))
         ? ['--cookies', COOKIES_FILE]
         : [];
+    
+    let formatArgs;
+    if (type === 'audio') {
+        // Mejor audio disponible, extraer a mp3
+        formatArgs = ['-f', 'bestaudio', '--extract-audio', '--audio-format', 'mp3'];
+    } else {
+        // Para video: intentar mp4 con mejor video+audio, o cualquier mp4, o el mejor formato
+        formatArgs = ['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4'];
+    }
+    
     const args = [
         ...cookiesArg,
         '--no-playlist',
         '--no-warnings',
         '--socket-timeout', '30',
-        ...(type === 'audio'
-            ? ['-f', 'ba/b', '-x', '--audio-format', 'mp3']
-            : ['-f', 'bv+ba/b', '--merge-output-format', 'mp4']),
+        ...formatArgs,
         '-o', outTemplate,
         ytUrl,
     ];
+    
     await new Promise((resolve, reject) => {
         execFile(YTDLP_BIN, args, { timeout: 120_000 }, (err, stdout, stderr) => {
             if (err) return reject(new Error(`yt-dlp: ${stderr || err.message}`));
             resolve();
         });
     });
+    
     const ext = type === 'audio' ? 'mp3' : 'mp4';
-    const outFile = path.join(TMP_DIR, `tmp_ytdl_${stamp}_raw.${ext}`);
     const files = fs.readdirSync(TMP_DIR).filter(f => f.startsWith(`tmp_ytdl_${stamp}_raw`));
     const found = files.map(f => path.join(TMP_DIR, f)).find(f => fs.existsSync(f));
     if (!found) throw new Error('yt-dlp: archivo no encontrado');
@@ -367,4 +376,3 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-    
