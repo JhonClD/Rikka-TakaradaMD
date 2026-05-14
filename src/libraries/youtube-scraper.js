@@ -249,8 +249,9 @@ const providerLolHuman = async (ytUrl, type) => {
                 signal: AbortSignal.timeout(20_000)
             });
             const json = await res.json();
-            if (json.status === 200 && json.result?.link) {
-                return await fetchBuffer(json.result.link);
+            if (json.status === 200 && (json.result?.link || json.result)) {
+                const dlUrl = json.result?.link || json.result;
+                if (typeof dlUrl === 'string') return await fetchBuffer(dlUrl);
             }
         } catch {}
     }
@@ -266,8 +267,8 @@ const providerBetaBotz = async (ytUrl, type) => {
                 signal: AbortSignal.timeout(20_000)
             });
             const json = await res.json();
-            if (json.status && json.result?.mp3 || json.result?.mp4) {
-                const dlUrl = type === 'audio' ? json.result.mp3 : json.result.mp4;
+            if (json.status && (json.result?.mp3 || json.result?.mp4 || json.result?.url)) {
+                const dlUrl = json.result?.mp3 || json.result?.mp4 || json.result?.url;
                 return await fetchBuffer(dlUrl);
             }
         } catch {}
@@ -299,8 +300,8 @@ const providerYtdlp = async (ytUrl, type) => {
         '--no-warnings',
         '--socket-timeout', '30',
         ...(type === 'audio'
-            ? ['-f', '140', '-x', '--audio-format', 'mp3']
-            : ['-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4']),
+            ? ['-f', 'ba/b', '-x', '--audio-format', 'mp3']
+            : ['-f', 'bv+ba/b', '--merge-output-format', 'mp4']),
         '-o', outTemplate,
         ytUrl,
     ];
@@ -366,4 +367,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-            
+    
