@@ -800,7 +800,7 @@ export async function handler(chatUpdate) {
       }, time);
     }
 
-    if (m.isBaileys || isBaileysFail && m?.sender === mconn?.conn?.user?.jid) {
+    if (m.isBaileys || (global.isBaileysFail && m?.sender === mconn?.conn?.user?.jid)) {
       return;
     }
 
@@ -1027,8 +1027,7 @@ ${tradutor.texto1[1]} ${messageNumber}/3
         }
         const hl = _prefix;
         const adminMode = global.db.data.chats[m.chat].modoadmin;
-        const mystica = `${plugin.botAdmin || plugin.admin || plugin.group || plugin || noPrefix || hl || m.text.slice(0, 1) == hl || plugin.command}`;
-        if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin && mystica) return;
+        if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin) return;
 
         if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) {
           fail('owner', m, this);
@@ -1226,16 +1225,16 @@ ${tradutor.texto1[1]} ${messageNumber}/3
 }
 
 export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
-  const tradutor = {
-    texto1: '',
-    texto2: '',
-    texto3: '',
-    texto4: '',
-    texto5: '',
-    texto6: '',
-    texto7: '',
-    texto8: '',
-  }
+    const tradutor = {
+      texto1: 'Bienvenido, @user!',
+      texto2: 'Adiós, @user!',
+      texto3: '@user ahora es administrador',
+      texto4: '@user ya no es administrador',
+      texto5: 'La descripción ha sido cambiada a\n@desc',
+      texto6: 'El nombre del grupo ha sido cambiado a\n@subject',
+      texto7: 'El icono del grupo ha sido cambiado',
+      texto8: 'El enlace del grupo ha sido cambiado a\n@revoke',
+    }
 
   const m = mconn
   if (opts['self']) return;
@@ -1301,8 +1300,8 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
              return false;
            }) || {};
            const isBotAdminNn = botTt2?.admin === 'admin' || botTt2?.admin === 'superadmin' || false;
-           text = (action === 'add' ? (chat.sWelcome || tradutor.texto1 || conn.welcome || 'Welcome, @user!').replace('@subject', await m?.conn?.getName(id)).replace('@desc', groupMetadata?.desc?.toString() || '*𝚂𝙸𝙽 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝙲𝙸𝙾𝙽*').replace('@user', '@' + userJid.split('@')[0]) :
-            (chat.sBye || tradutor.texto2 || conn.bye || 'Bye, @user!')).replace('@user', '@' + userJid.split('@')[0]);
+           text = (action === 'add' ? (chat.sWelcome || tradutor.texto1).replace('@subject', await m?.conn?.getName(id)).replace('@desc', groupMetadata?.desc?.toString() || '*𝚂𝙸𝙽 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝙲𝙸𝙾𝙽*').replace('@user', '@' + userJid.split('@')[0]) :
+            (chat.sBye || tradutor.texto2)).replace('@user', '@' + userJid.split('@')[0]);
             if (userPrefix && chat.antiArab && botTt.restrict && isBotAdminNn && action === 'add') {
            const responseb = await m.conn.groupParticipantsUpdate(id, [userJid], 'remove');
             if (responseb[0].status === '404') return;
@@ -1320,27 +1319,39 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
     case 'promote':
     case 'daradmin':
     case 'darpoder':
-      text = (chat.sPromote || tradutor.texto3 || conn?.spromote || '@user ```is now Admin```');
+      text = (chat.sPromote || tradutor.texto3);
+      {
+        let _p0 = participants[0] || '';
+        try {
+          const _parsed = JSON.parse(_p0);
+          if (_parsed && typeof _parsed === 'object') {
+            _p0 = _parsed.phoneNumber || _parsed.id || _p0;
+          }
+        } catch (_) {}
+        const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
+        text = text.replace('@user', '@' + _p0Number);
+        if (chat.detect && !chat?.isBanned) {
+          mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
+        }
+      }
+      break;
     case 'demote':
     case 'quitarpoder':
     case 'quitaradmin':
-      if (!text) {
-        text = (chat?.sDemote || tradutor.texto4 || conn?.sdemote || '@user ```is no longer Admin```');
-      }
-
-      let _p0 = participants[0] || '';
-
-      try {
-        const _parsed = JSON.parse(_p0);
-        if (_parsed && typeof _parsed === 'object') {
-          _p0 = _parsed.phoneNumber || _parsed.id || _p0;
+      text = (chat?.sDemote || tradutor.texto4);
+      {
+        let _p0 = participants[0] || '';
+        try {
+          const _parsed = JSON.parse(_p0);
+          if (_parsed && typeof _parsed === 'object') {
+            _p0 = _parsed.phoneNumber || _parsed.id || _p0;
+          }
+        } catch (_) {}
+        const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
+        text = text.replace('@user', '@' + _p0Number);
+        if (chat.detect && !chat?.isBanned) {
+          mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
         }
-      } catch (_) {}
-
-      const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
-      text = text.replace('@user', '@' + _p0Number);
-      if (chat.detect && !chat?.isBanned) {
-        mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
       }
       break;
   }
