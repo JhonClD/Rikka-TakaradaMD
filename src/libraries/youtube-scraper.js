@@ -297,10 +297,10 @@ const providerYtdlp = async (ytUrl, type) => {
     
     let formatArgs;
     if (type === 'audio') {
-        // Mejor audio disponible, extraer a mp3
+        // Audio: mejor audio disponible, convertir a mp3
         formatArgs = ['-f', 'bestaudio', '--extract-audio', '--audio-format', 'mp3'];
     } else {
-        // Para video: intentar mp4 con mejor video+audio, o cualquier mp4, o el mejor formato
+        // Video: mejor video+audio en mp4, o cualquier mp4, o el mejor formato
         formatArgs = ['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4'];
     }
     
@@ -309,6 +309,7 @@ const providerYtdlp = async (ytUrl, type) => {
         '--no-playlist',
         '--no-warnings',
         '--socket-timeout', '30',
+        '--user-agent', UA,
         ...formatArgs,
         '-o', outTemplate,
         ytUrl,
