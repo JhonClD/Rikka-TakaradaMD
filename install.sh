@@ -1,16 +1,13 @@
 #!/bin/bash
-# install.sh - KanaArima-MD v2.0
-# Instalador para Termux/Linux con Baileys actualizado
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 echo -e "${CYAN}"
 echo "╔═══════════════════════════════════╗"
-echo "║     KanaArima-MD Installer v2     ║"
+echo "║   Rikka-TakaradaMD Installer      ║"
 echo "╚═══════════════════════════════════╝"
 echo -e "${NC}"
 
-# Verificar Node.js >= 20
 NODE_VER=$(node -v 2>/dev/null | sed 's/v//' | cut -d. -f1)
 if [ -z "$NODE_VER" ] || [ "$NODE_VER" -lt 20 ]; then
   echo -e "${RED}[ ❌ ] Necesitas Node.js 20 o superior.${NC}"
@@ -19,7 +16,6 @@ if [ -z "$NODE_VER" ] || [ "$NODE_VER" -lt 20 ]; then
 fi
 echo -e "${GREEN}[ ✓ ] Node.js $(node -v) detectado${NC}"
 
-# Verificar ffmpeg
 if ! command -v ffmpeg &>/dev/null; then
   echo -e "${YELLOW}[ ⚠️ ] FFmpeg no encontrado. Instalando...${NC}"
   if command -v pkg &>/dev/null; then
@@ -29,7 +25,6 @@ if ! command -v ffmpeg &>/dev/null; then
   fi
 fi
 
-# Instalar dependencias
 echo -e "${CYAN}[ ⏳ ] Instalando dependencias npm...${NC}"
 npm install --legacy-peer-deps
 
@@ -38,8 +33,7 @@ if [ $? -ne 0 ]; then
   npm install --force
 fi
 
-# Crear carpetas necesarias
-mkdir -p src/tmp MysticSession src/lidsresolve.json.bak
+mkdir -p src/tmp RikkaSession src/lidsresolve.json.bak
 touch src/lidsresolve.json 2>/dev/null || echo "{}" > src/lidsresolve.json
 
 echo -e "${GREEN}"
