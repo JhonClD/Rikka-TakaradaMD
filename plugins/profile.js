@@ -1,4 +1,5 @@
 import { xpRange } from '../src/libraries/levelling.js'
+import { areJidsSameUser, jidNormalizedUser } from '@whiskeysockets/baileys'
 
 const GENEROS = {
   m: '♂️ Masculino',
@@ -15,44 +16,56 @@ const progressBar = (pct, width = 12) => {
 
 const normalizeJid = (jid) => {
   if (!jid) return jid
-  jid = jid.split(':')[0]
-  if (!jid.includes('@')) jid += '@s.whatsapp.net'
-  return jid
+  return jidNormalizedUser(jid)
 }
 
-const getProfilePic = async (conn, jid) => {
-  const fallback = 'https://files.catbox.moe/leegee.jpg'
-  const id = normalizeJid(jid)
-  const candidates = [...new Set([
-    id,
-    conn.decodeJid ? conn.decodeJid(id) : id,
-    id?.replace('@lid', '@s.whatsapp.net'),
-  ].filter(Boolean))]
+const getTargetJid = (m) => {
+  const mentioned = m.mentionedJid?.[0] || m.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+  const quoted = m.quoted?.sender || m.message?.extendedTextMessage?.contextInfo?.participant
+  return normalizeJid(quoted || mentioned || m.sender)
+}
 
-  for (const candidate of candidates) {
+const getUserJidCandidates = (m, who) => {
+  const candidates = [
+    who,
+    m.sender,
+    m.senderPn,
+    m.senderJid,
+    m.participant,
+    m.key?.participant,
+    m.key?.participantAlt,
+    m.key?.remoteJid?.endsWith('@s.whatsapp.net') ? m.key.remoteJid : null,
+    m.quoted?.sender,
+    m.quoted?.participant,
+    m.message?.extendedTextMessage?.contextInfo?.participant,
+  ].filter(Boolean).map(normalizeJid)
+
+  return [...new Set(candidates)]
+}
+
+const getProfilePic = async (conn, candidates) => {
+  for (const jid of candidates) {
     try {
-      const url = await conn.profilePictureUrl(candidate, 'image')
-      if (url) return url
+      const pp = await conn.profilePictureUrl(jid, 'image')
+      if (pp) return pp
     } catch {}
   }
 
-  for (const candidate of candidates) {
+  for (const jid of candidates) {
     try {
-      const url = await conn.profilePictureUrl(candidate, 'preview')
-      if (url) return url
+      const pp = await conn.profilePictureUrl(jid, 'preview')
+      if (pp) return pp
     } catch {}
   }
 
-  return fallback
+  return 'https://files.catbox.moe/leegee.jpg'
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
-
-  let who = m.quoted?.sender || m.mentionedJid?.[0] || m.sender
-  who = normalizeJid(who)
-
-  const isSelf = who === normalizeJid(m.sender)
+  const who = getTargetJid(m)
+  const selfJid = normalizeJid(m.sender)
+  const isSelf = areJidsSameUser(who, selfJid)
   const name = await conn.getName(who)
 
   if (!users[who]) users[who] = {}
@@ -87,7 +100,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   const pct = Math.min(100, Math.floor((xpNow / xpNeed) * 100))
 
   const sorted = Object.entries(users).sort(([, a], [, b]) => (b.exp || 0) - (a.exp || 0))
-  const rank = sorted.findIndex(([jid]) => normalizeJid(jid) === who) + 1
+  const rank = sorted.findIndex(([jid]) => areJidsSameUser(normalizeJid(jid), who)) + 1
 
   const txt = `
 「✿」 *Perfil* ◢ ${name} ◤
@@ -106,7 +119,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  const pp = await getProfilePic(conn, who)
+  const candidates = getUserJidCandidates(m, who)
+  const pp = await getProfilePic(conn, candidates)
 
   await conn.sendMessage(
     m.chat,
