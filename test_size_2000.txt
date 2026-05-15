@@ -1,0 +1,62 @@
+import fs from 'fs';
+import yts from 'yt-search';
+import { exec, execFile, execSync } from 'child_process';
+import { promisify } from 'util';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+const execAsync  = promisify(exec);
+const TMP_DIR    = os.tmpdir();
+
+const FFMPEG_TIMEOUT   = 120_000;
+const PROVIDER_TIMEOUT = 90_000;
+const MIN_BUFFER_SIZE  = 10_000;
+const MAX_FILE_SIZE    = 200 * 1024 * 1024;
+const COOKIES_FILE     = path.resolve(__dirname, '../../src/cookies.txt');
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+let FFMPEG_BIN  = 'ffmpeg';
+let FFPROBE_BIN = 'ffprobe';
+
+(async () => {
+    try { await execAsync('ffmpeg -version', { timeout: 5_000 }); }
+    catch {
+        try {
+            const { default: p } = await import('ffmpeg-static');
+            if (p && fs.existsSync(p)) FFMPEG_BIN = p;
+        } catch {}
+    }
+    try { await execAsync('ffprobe -version', { timeout: 5_000 }); }
+    catch {
+        if (FFMPEG_BIN !== 'ffmpeg') {
+            const sidecar = FFMPEG_BIN.replace(/ffmpeg(\.exe)?$/, 'ffprobe$1');
+            if (fs.existsSync(sidecar)) FFPROBE_BIN = sidecar;
+        }
+    }
+})();
+
+const YTDLP_BIN = (() => {
+    const candidates = [
+        '/home/container/.local/bin/yt-dlp',
+        '/home/container/yt-dlp',
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+        '/data/data/com.termux/files/usr/bin/yt-dlp',
+    ];
+    for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    try {
+        const r = execSync('which yt-dlp', { timeout: 3_000 }).toString().trim();
+        if (r) return r;
+    } catch {}
+    return 'yt-dlp';
+})();
+
+export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
+
+const extractVideoId = (url) => ur
