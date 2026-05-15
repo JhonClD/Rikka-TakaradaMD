@@ -13,23 +13,46 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-const handler = async (m, { conn, args, usedPrefix, command, text }) => {
-  const users = global.db.data.users
-  
-  // Obtener who EXACTAMENTE como en el ejemplo
-  let who
-  if (m.quoted) {
-    who = m.quoted.sender
-  } else if (m.mentionedJid && m.mentionedJid[0]) {
-    who = m.mentionedJid[0]
-  } else {
-    who = m.sender
+const normalizeJid = (jid) => {
+  if (!jid) return jid
+  jid = jid.split(':')[0]
+  if (!jid.includes('@')) jid += '@s.whatsapp.net'
+  return jid
+}
+
+const getProfilePic = async (conn, jid) => {
+  const fallback = 'https://files.catbox.moe/leegee.jpg'
+  const id = normalizeJid(jid)
+  const candidates = [...new Set([
+    id,
+    conn.decodeJid ? conn.decodeJid(id) : id,
+    id?.replace('@lid', '@s.whatsapp.net'),
+  ].filter(Boolean))]
+
+  for (const candidate of candidates) {
+    try {
+      const url = await conn.profilePictureUrl(candidate, 'image')
+      if (url) return url
+    } catch {}
   }
 
-  // Normalizar JID
-  if (!who.includes('@')) who += '@s.whatsapp.net'
-  
-  const isSelf = who === m.sender
+  for (const candidate of candidates) {
+    try {
+      const url = await conn.profilePictureUrl(candidate, 'preview')
+      if (url) return url
+    } catch {}
+  }
+
+  return fallback
+}
+
+const handler = async (m, { conn, args, usedPrefix, command }) => {
+  const users = global.db.data.users
+
+  let who = m.quoted?.sender || m.mentionedJid?.[0] || m.sender
+  who = normalizeJid(who)
+
+  const isSelf = who === normalizeJid(m.sender)
   const name = await conn.getName(who)
 
   if (!users[who]) users[who] = {}
@@ -53,18 +76,18 @@ const handler = async (m, { conn, args, usedPrefix, command, text }) => {
   if (command === 'setgender') {
     if (!isSelf) return m.reply('❌ Solo puedes editar tu propio perfil.')
     const g = args[0]?.toLowerCase()
-    if (!GENEROS[g]) return m.reply(`⚧️ Géneros: *m* (Masc), *f* (Fem), *o* (Otro)`)
+    if (!GENEROS[g]) return m.reply('⚧️ Géneros: *m* (Masc), *f* (Fem), *o* (Otro)')
     u.gender = g
     return m.reply(`✅ Género guardado: *${GENEROS[g]}*`)
   }
 
   const { min, xp } = xpRange(u.level, global.multiplier || 1)
   const xpNow = Math.max(0, u.exp - min)
-  const xpNeed = xp
+  const xpNeed = xp || 1
   const pct = Math.min(100, Math.floor((xpNow / xpNeed) * 100))
 
   const sorted = Object.entries(users).sort(([, a], [, b]) => (b.exp || 0) - (a.exp || 0))
-  const rank = sorted.findIndex(([jid]) => jid === who) + 1
+  const rank = sorted.findIndex(([jid]) => normalizeJid(jid) === who) + 1
 
   const txt = `
 「✿」 *Perfil* ◢ ${name} ◤
@@ -76,22 +99,14 @@ const handler = async (m, { conn, args, usedPrefix, command, text }) => {
 ❖ Nivel » *${u.level}*
 ➨ Progreso » *${numFmt(xpNow)} ⟹ ${numFmt(xpNeed)}*
 \`[${progressBar(pct)}] ${pct}%\`
-# Puesto » *#${rank}*
+# Puesto » *#${rank || 0}*
 
 ꕥ Harem » *${u.harem}*
 ✧ Valor total » *${numFmt((u.money || 0) + (u.wallet || 0))}*
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()
 
-  // Obtener foto EXACTAMENTE como en el ejemplo
-  let pp = 'https://files.catbox.moe/leegee.jpg' // Imagen por defecto
-  try {
-    pp = await conn.profilePictureUrl(who, 'image')
-  } catch {
-    try {
-      pp = await conn.profilePictureUrl(who, 'preview')
-    } catch {}
-  }
+  const pp = await getProfilePic(conn, who)
 
   await conn.sendMessage(
     m.chat,
