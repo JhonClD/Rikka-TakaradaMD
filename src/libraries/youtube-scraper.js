@@ -294,35 +294,6 @@ const providerYtdlp = async (ytUrl, type) => {
     throw new Error(`yt-dlp: ${errors.at(-1)}`);
 };
 
-const providerDistube = async (ytUrl, type) => {
-    const ytdl = (await import('@distube/ytdl-core')).default;
-    if (!ytdl.validateURL(ytUrl)) throw new Error('distube: URL inválida');
-    const info = await ytdl.getInfo(ytUrl, {
-        requestOptions: { headers: { 'User-Agent': UA } },
-    });
-    let format;
-    if (type === 'audio') {
-        format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
-    } else {
-        try {
-            format = ytdl.chooseFormat(info.formats, { quality: '22', filter: 'videoandaudio' });
-        } catch {
-            format = ytdl.chooseFormat(info.formats, { filter: 'videoandaudio' });
-        }
-    }
-    if (!format?.url) throw new Error('distube: sin formato disponible');
-    const chunks = [];
-    await new Promise((resolve, reject) => {
-        const stream = ytdl.downloadFromInfo(info, { format });
-        const timer  = setTimeout(() => reject(new Error('distube: stream timeout')), 120_000);
-        stream.on('data',  c => chunks.push(c));
-        stream.on('end',   () => { clearTimeout(timer); resolve(); });
-        stream.on('error', e => { clearTimeout(timer); reject(e); });
-    });
-    const buf = Buffer.concat(chunks);
-    if (buf.length < MIN_BUFFER_SIZE) throw new Error('distube: buffer muy pequeño');
-    return buf;
-};
 
 const providerCobalt = async (ytUrl, type) => {
     const instances = [
@@ -367,137 +338,49 @@ const providerCobalt = async (ytUrl, type) => {
     throw new Error(`cobalt: ${errors.at(-1) ?? 'sin instancias'}`);
 };
 
-const providerSiputzx = async (ytUrl, type) => {
-    const ep = type === 'audio'
-        ? `https://api.siputzx.my.id/api/d/ytmp3?url=${encodeURIComponent(ytUrl)}`
-        : `https://api.siputzx.my.id/api/d/ytmp4?url=${encodeURIComponent(ytUrl)}`;
-    const res  = await fetch(ep, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(25_000) });
-    if (!res.ok) throw new Error(`siputzx: HTTP ${res.status}`);
-    const json = await safeJson(res);
-    if (!json.status) throw new Error(`siputzx: ${json.message || 'sin link'}`);
-    const dlUrl = json.data?.dl || json.data?.url || json.data?.download;
-    if (!dlUrl) throw new Error('siputzx: sin URL');
-    return await fetchBuffer(dlUrl);
-};
 
-const providerNekorinn = async (ytUrl, type) => {
-    const ep = type === 'audio'
-        ? `https://api.nekorinn.my.id/downloader/ytmp3?url=${encodeURIComponent(ytUrl)}`
-        : `https://api.nekorinn.my.id/downloader/ytmp4?url=${encodeURIComponent(ytUrl)}`;
-    const res  = await fetch(ep, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(25_000) });
-    if (!res.ok) throw new Error(`nekorinn: HTTP ${res.status}`);
-    const json = await safeJson(res);
-    const dlUrl = json.result?.url || json.download || json.data?.url;
-    if (!dlUrl) throw new Error('nekorinn: sin URL');
-    return await fetchBuffer(dlUrl);
-};
 
-const providerAioMedia = async (ytUrl, type) => {
-    const BASE = 'https://aiomedia.me';
-    const res  = await fetch(`${BASE}/api/download`, {
+
+
+
+
+
+
+
+const providerVidsSave = async (ytUrl, type) => {
+    const res = await fetch('https://api.vidssave.com/api/contentsite_api/media/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'User-Agent': UA, 'Referer': `${BASE}/` },
-        body:   JSON.stringify({ url: ytUrl, format: type === 'audio' ? 'mp3' : 'mp4' }),
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': UA,
+            'Referer': 'https://vidssave.com/',
+            'Origin': 'https://vidssave.com'
+        },
+        body: new URLSearchParams({
+            auth: '20250901majwlqo',
+            domain: 'api-ak.vidssave.com',
+            origin: 'cache',
+            link: ytUrl
+        }),
         signal: AbortSignal.timeout(25_000),
     });
-    if (!res.ok) throw new Error(`aiomedia: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`vidssave: HTTP ${res.status}`);
     const json = await safeJson(res);
-    const dlUrl = json?.data?.url || json?.url || json?.download;
-    if (!dlUrl) throw new Error('aiomedia: sin URL');
-    return await fetchBuffer(dlUrl, { Referer: BASE });
-};
-
-const providerRuhend = async (ytUrl, type) => {
-    const mod = await import('ruhend-scraper');
-    const fn  = type === 'audio'
-        ? (mod.ytmp3 || mod.default?.ytmp3)
-        : (mod.ytmp4 || mod.default?.ytmp4);
-    if (typeof fn !== 'function') throw new Error('ruhend: función no disponible');
-    const res   = await fn(ytUrl);
-    const dlUrl = res?.result?.dl || res?.result?.url || res?.dl || res?.url;
-    if (!dlUrl) throw new Error('ruhend: sin URL');
-    return await fetchBuffer(dlUrl);
-};
-
-const providerNabati = async (ytUrl, type) => {
-    const ep = type === 'audio'
-        ? `https://api.nabatisinyal.com/download/ytmp3?url=${encodeURIComponent(ytUrl)}`
-        : `https://api.nabatisinyal.com/download/ytmp4?url=${encodeURIComponent(ytUrl)}`;
-    const res  = await fetch(ep, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(25_000) });
-    if (!res.ok) throw new Error(`nabati: HTTP ${res.status}`);
-    const json = await safeJson(res);
-    const dlUrl = json?.data?.url || json?.result?.url || json?.url;
-    if (!dlUrl) throw new Error('nabati: sin URL');
-    return await fetchBuffer(dlUrl);
-};
-
-const providerSaveFrom = async (ytUrl, type) => {
-    if (!extractVideoId(ytUrl)) throw new Error('savefrom: ID inválido');
-    const res = await fetch(
-        `https://sfrom.net/api/button/?app=videodownloader&lang=es&url=${encodeURIComponent(ytUrl)}`,
-        {
-            headers: { 'User-Agent': UA, 'Referer': 'https://en.savefrom.net/', 'Origin': 'https://en.savefrom.net' },
-            signal: AbortSignal.timeout(25_000),
-        }
-    );
-    if (!res.ok) throw new Error(`savefrom: HTTP ${res.status}`);
-    const json  = await safeJson(res);
-    const links = json?.links ?? [];
-    if (!links.length) throw new Error('savefrom: sin links');
+    const resources = json.data?.resources || [];
+    if (!resources.length) throw new Error('vidssave: sin recursos');
+    
+    let best;
     if (type === 'audio') {
-        const audio = links.find(l => /\.mp3|mp3|audio/i.test(l.url || l.type));
-        if (audio?.url) return await fetchBuffer(audio.url, { Referer: 'https://en.savefrom.net/' });
+        best = resources.find(r => r.type === 'audio' && r.format === 'MP3') || resources.find(r => r.type === 'audio');
+    } else {
+        const sorted = resources
+            .filter(r => r.type === 'video' && r.format === 'MP4')
+            .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+        best = sorted.find(r => parseInt(r.quality) <= 720) || sorted[0];
     }
-    const sorted = links
-        .filter(l => l.url && /mp4/i.test(l.type || l.url))
-        .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
-    const best = sorted.find(l => parseInt(l.quality) <= 720) || sorted[0];
-    if (best?.url) return await fetchBuffer(best.url, { Referer: 'https://en.savefrom.net/' });
-    throw new Error('savefrom: sin link válido');
-};
-
-const providerBochil = async (ytUrl, type) => {
-    const mod = await import('@bochilteam/scraper');
-    const fn  = type === 'audio'
-        ? (mod.ytmp3 || mod.default?.ytmp3)
-        : (mod.ytmp4 || mod.default?.ytmp4);
-    if (typeof fn !== 'function') throw new Error('bochil: función no disponible');
-    const res   = await fn(ytUrl);
-    const dlUrl = res?.link || res?.url || res?.download;
-    if (!dlUrl) throw new Error('bochil: sin URL');
-    return await fetchBuffer(dlUrl);
-};
-
-const providerLolHuman = async (ytUrl, type) => {
-    const keys = ['beta', '85faf717d0545d14074659ad', '0ca09158e244030623e44991'];
-    for (const key of keys) {
-        try {
-            const ep   = type === 'audio' ? 'ytaudio' : 'ytvideo';
-            const res  = await fetch(`https://api.lolhuman.xyz/api/${ep}?apikey=${key}&url=${ytUrl}`, { signal: AbortSignal.timeout(20_000) });
-            const json = await safeJson(res);
-            if (json.status === 200) {
-                const dlUrl = json.result?.link || json.result;
-                if (typeof dlUrl === 'string') return await fetchBuffer(dlUrl);
-            }
-        } catch {}
-    }
-    throw new Error('lolhuman: falló');
-};
-
-const providerBetaBotz = async (ytUrl, type) => {
-    const keys = ['beta', 'ErlanBot'];
-    for (const key of keys) {
-        try {
-            const ep   = type === 'audio' ? 'ytmp3' : 'ytmp4';
-            const res  = await fetch(`https://api.betabotz.eu.org/api/download/${ep}?url=${ytUrl}&apikey=${key}`, { signal: AbortSignal.timeout(20_000) });
-            const json = await safeJson(res);
-            if (json.status) {
-                const dlUrl = json.result?.mp3 || json.result?.mp4 || json.result?.url;
-                if (dlUrl) return await fetchBuffer(dlUrl);
-            }
-        } catch {}
-    }
-    throw new Error('betabotz: fallÃ³');
+    
+    if (!best?.download_url) throw new Error('vidssave: sin link de descarga');
+    return await fetchBuffer(best.download_url, { Referer: 'https://vidssave.com/' });
 };
 
 const runProvider = (name, fn, ytUrl, type) =>
@@ -507,27 +390,19 @@ const downloadViaProviders = async (ytUrl, type) => {
     const errors = {};
     try {
         const result = await Promise.any([
-            runProvider('ytdlp',   providerYtdlp,   ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'   })),
-            runProvider('distube', providerDistube, ytUrl, type).then(b => ({ buf: b, provider: 'distube' })),
-            runProvider('cobalt',  providerCobalt,  ytUrl, type).then(b => ({ buf: b, provider: 'cobalt'  })),
+            runProvider('vidssave', providerVidsSave, ytUrl, type).then(b => ({ buf: b, provider: 'vidssave' })),
+            runProvider('cobalt',   providerCobalt,   ytUrl, type).then(b => ({ buf: b, provider: 'cobalt'   })),
+            runProvider('ytdlp',    providerYtdlp,    ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'    })),
         ]);
         if (result.buf?.length > MIN_BUFFER_SIZE) return { buffer: result.buf, provider: result.provider };
     } catch (agg) {
-        for (const e of (agg.errors ?? [])) {
-            errors[e.message?.split(':')[0] ?? 'unknown'] = e.message;
+        if (agg.errors) {
+            for (const e of agg.errors) {
+                errors[e.message?.split(':')[0] ?? 'unknown'] = e.message;
+            }
         }
     }
-    const sequential = [
-        { name: 'siputzx',  fn: providerSiputzx  },
-        { name: 'nekorinn', fn: providerNekorinn  },
-        { name: 'aiomedia', fn: providerAioMedia  },
-        { name: 'ruhend',   fn: providerRuhend    },
-        { name: 'nabati',   fn: providerNabati    },
-        { name: 'savefrom', fn: providerSaveFrom  },
-        { name: 'bochil',   fn: providerBochil    },
-        { name: 'lolhuman', fn: providerLolHuman  },
-        { name: 'betabotz', fn: providerBetaBotz  },
-    ];
+    const sequential = [];
     for (const { name, fn } of sequential) {
         try {
             const buf = await runProvider(name, fn, ytUrl, type);
@@ -574,3 +449,4 @@ export const ytDownload = async (url, type = 'audio') => {
         cleanup();
     }
 };
+
