@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const execAsync  = promisify(exec);jdjdjd
+const execAsync  = promisify(exec);
 const TMP_DIR    = os.tmpdir();
 
 const API_KEY    = 'nakano-212-jhon';
