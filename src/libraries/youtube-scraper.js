@@ -497,7 +497,43 @@ const providerBetaBotz = async (ytUrl, type) => {
             }
         } catch {}
     }
-    throw new Error('betabotz: fallÃ³');
+    throw new Error('betabotz: falló');
+};
+
+const providerVidsSave = async (ytUrl, type) => {
+    const res = await fetch('https://api.vidssave.com/api/contentsite_api/media/parse', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': UA,
+            'Referer': 'https://vidssave.com/',
+            'Origin': 'https://vidssave.com'
+        },
+        body: new URLSearchParams({
+            auth: '20250901majwlqo',
+            domain: 'api-ak.vidssave.com',
+            origin: 'cache',
+            link: ytUrl
+        }),
+        signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) throw new Error(`vidssave: HTTP ${res.status}`);
+    const json = await safeJson(res);
+    const resources = json.data?.resources || [];
+    if (!resources.length) throw new Error('vidssave: sin recursos');
+    
+    let best;
+    if (type === 'audio') {
+        best = resources.find(r => r.type === 'audio' && r.format === 'MP3') || resources.find(r => r.type === 'audio');
+    } else {
+        const sorted = resources
+            .filter(r => r.type === 'video' && r.format === 'MP4')
+            .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+        best = sorted.find(r => parseInt(r.quality) <= 720) || sorted[0];
+    }
+    
+    if (!best?.download_url) throw new Error('vidssave: sin link de descarga');
+    return await fetchBuffer(best.download_url, { Referer: 'https://vidssave.com/' });
 };
 
 const runProvider = (name, fn, ytUrl, type) =>
@@ -527,6 +563,7 @@ const downloadViaProviders = async (ytUrl, type) => {
         { name: 'bochil',   fn: providerBochil    },
         { name: 'lolhuman', fn: providerLolHuman  },
         { name: 'betabotz', fn: providerBetaBotz  },
+        { name: 'vidssave', fn: providerVidsSave  },
     ];
     for (const { name, fn } of sequential) {
         try {
