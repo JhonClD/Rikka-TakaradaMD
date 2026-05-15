@@ -1,5 +1,4 @@
 import fs from 'fs';
-import yts from 'yt-search';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
@@ -12,10 +11,13 @@ const __dirname  = path.dirname(__filename);
 const execAsync  = promisify(exec);
 const TMP_DIR    = os.tmpdir();
 
+// --- CONFIGURACIÓN ---
 const API_KEY    = 'nakano-212-jhon';
 const API_BASE   = 'https://rest.apicausas.xyz/api/v1/descargas/youtube';
 
 let FFPROBE_BIN = 'ffprobe';
+
+// Inicialización de binarios
 (async () => {
     try { await execAsync('ffprobe -version', { timeout: 5_000 }); }
     catch {
@@ -33,19 +35,9 @@ export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|short
 
 const extractVideoId = (url) => url.match(YT_REGEX)?.[1] ?? null;
 
-export const ffprobeDuration = async (filePath) => {
-    try {
-        const { stdout } = await execAsync(
-            `"${FFPROBE_BIN}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
-            { timeout: 10_000 }
-        );
-        const d = parseFloat(stdout.trim());
-        return isNaN(d) || d <= 0 ? 0 : Math.round(d);
-    } catch { return 0; }
-};
-
+// --- UTILIDADES ---
 export const formatViews = (n) => {
-    if (n == null) return 'N/A';
+    if (n == null) return '0';
     const v = parseInt(n, 10);
     if (isNaN(v)) return String(n);
     if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}B`;
@@ -55,9 +47,9 @@ export const formatViews = (n) => {
 };
 
 export const formatDuration = (sec) => {
-    if (!sec) return 'N/A';
+    if (!sec) return '00:00';
     const s = parseInt(sec, 10);
-    if (isNaN(s) || s <= 0) return 'N/A';
+    if (isNaN(s) || s <= 0) return '00:00';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const r = s % 60;
@@ -66,16 +58,11 @@ export const formatDuration = (sec) => {
         : `${m}:${String(r).padStart(2, '0')}`;
 };
 
-export const formatDate = (raw) => {
-    if (!raw) return 'N/A';
-    return raw; 
-};
-
 export const buildInfoCard = (meta = {}, type = 'audio') => {
-    const icon    = type === 'video' ? '🎬 YOUTUBE VIDEO' : '♪ YOUTUBE AUDIO';
+    const icon = type === 'video' ? '🎬 YOUTUBE VIDEO' : '♪ YOUTUBE AUDIO';
     return (
 `╭━━━〔 ${icon} 〕━━━⬣
-┃ ◈ *Título:* ${meta.title || 'Sin título'}
+┃ ◈ *Título:* ${meta.title || 'N/A'}
 ┃ ✦ *Canal:* ${meta.channel || 'N/A'}
 ┃ ✧ *Vistas:* ${formatViews(meta.views)}
 ┃ ◷ *Duración:* ${formatDuration(meta.duration)}
@@ -85,62 +72,74 @@ export const buildInfoCard = (meta = {}, type = 'audio') => {
     );
 };
 
-export const ytSearch = async (query) => {
-    try {
-        const match = query.match(YT_REGEX);
-        if (match) {
-            const r = await yts({ videoId: match[1] });
-            return r ? { ...r, channel: r.author?.name } : null;
-        }
-        const search = await yts(query);
-        const r = search.videos?.[0];
-        return r ? { ...r, channel: r.author?.name } : null;
-    } catch { return null; }
-};
-
+// --- FUNCIÓN DE DESCARGA ---
 export const ytDownload = async (url, type = 'audio') => {
-    if (!url || !YT_REGEX.test(url)) throw new Error('URL de YouTube no válida');
+    const videoId = extractVideoId(url);
+    if (!videoId) throw new Error('URL de YouTube no válida o ID no encontrado');
+    
+    // Forzamos URL limpia para evitar errores de caché en la API
+    const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
     try {
-        const apiUrl = `${API_BASE}?apikey=${API_KEY}&url=${encodeURIComponent(url)}&type=${type}`;
-        const response = await fetch(apiUrl);
+        const apiUrl = `${API_BASE}?apikey=${API_KEY}&url=${encodeURIComponent(cleanUrl)}&type=${type}`;
+        
+        const response = await fetch(apiUrl, { 
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(45_000) 
+        });
+
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+        
         const json = await response.json();
 
-        // Según tu screenshot, la data viene en json.data
-        if (!json.status || !json.data?.download?.url) {
-            throw new Error(json.msg || 'No se pudo obtener el enlace de descarga.');
+        // Validación basada en el JSON de tu captura
+        if (!json.status || !json.data || !json.data.download || !json.data.download.url) {
+            throw new Error(json.msg || json.message || 'No se recibió un enlace de descarga válido.');
         }
 
-        const data = json.data;
-        const fileRes = await fetch(data.download.url, { signal: AbortSignal.timeout(120_000) });
+        const { data } = json;
+        const downloadUrl = data.download.url;
+
+        // Descarga del archivo
+        const fileRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(180_000) });
+        if (!fileRes.ok) throw new Error(`Fallo al descargar archivo: ${fileRes.status}`);
+        
         const buffer = Buffer.from(await fileRes.arrayBuffer());
 
-        // Guardar temporal para obtener duración real
-        const stamp = Date.now();
-        const tmpFile = path.join(TMP_DIR, `ytdl_${stamp}.${type === 'audio' ? 'mp3' : 'mp4'}`);
-        fs.writeFileSync(tmpFile, buffer);
-
-        let realSeconds = 0;
+        // Verificación de duración con ffprobe (Opcional, para precisión extra)
+        let finalSeconds = data.duration || 0;
+        const tmpFile = path.join(TMP_DIR, `ytdl_${Date.now()}.${type === 'audio' ? 'mp3' : 'mp4'}`);
+        
         try {
-            realSeconds = await ffprobeDuration(tmpFile);
+            fs.writeFileSync(tmpFile, buffer);
+            const { stdout } = await execAsync(
+                `"${FFPROBE_BIN}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${tmpFile}"`,
+                { timeout: 10_000 }
+            );
+            const d = parseFloat(stdout.trim());
+            if (!isNaN(d) && d > 0) finalSeconds = Math.round(d);
+        } catch (e) {
+            // Si falla ffprobe, usamos la duración que dio la API
         } finally {
             if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
         }
 
-        const meta = {
-            title: data.title || 'Sin título',
-            channel: data.uploader || 'N/A',
-            views: data.views || 0,
-            duration: realSeconds || data.duration || 0,
-            url: url,
-            thumbnail: data.thumbnail || '',
-            videoId: data.id || extractVideoId(url)
+        return {
+            buffer,
+            seconds: finalSeconds,
+            meta: {
+                title: data.title || 'Sin título',
+                channel: data.uploader || 'N/A',
+                views: data.views || 0,
+                duration: finalSeconds,
+                url: cleanUrl,
+                thumbnail: data.thumbnail || '',
+                videoId: videoId
+            },
+            provider: 'apicausas'
         };
 
-        return { buffer, seconds: meta.duration, meta, provider: 'apicausas' };
-
     } catch (error) {
-        throw new Error(`[Error API]: ${error.message}`);
+        throw new Error(`[Error API Causas]: ${error.message}`);
     }
 };
-            
