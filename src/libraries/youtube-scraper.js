@@ -1,3 +1,4 @@
+
 import fs from 'fs';
 import yts from 'yt-search';
 import { exec, execFile, execSync } from 'child_process';
@@ -9,8 +10,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const execAsync = promisify(exec);
-const TMP_DIR   = os.tmpdir();
+const execAsync  = promisify(exec);
+const TMP_DIR    = os.tmpdir();
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
 const FFMPEG_TIMEOUT   = 120_000;
@@ -25,7 +26,6 @@ let FFMPEG_BIN  = 'ffmpeg';
 let FFPROBE_BIN = 'ffprobe';
 
 (async () => {
-    // ffmpeg
     try {
         await execAsync('ffmpeg -version', { timeout: 5_000 });
     } catch {
@@ -34,7 +34,6 @@ let FFPROBE_BIN = 'ffprobe';
             if (p && fs.existsSync(p)) FFMPEG_BIN = p;
         } catch {}
     }
-    // ffprobe — busca al lado de ffmpeg-static si es un path absoluto
     try {
         await execAsync('ffprobe -version', { timeout: 5_000 });
     } catch {
@@ -67,12 +66,13 @@ export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|short
 
 const extractVideoId = (url) => url.match(YT_REGEX)?.[1] ?? null;
 
-/** Envuelve una promesa con un timeout; rechaza con `msg` si se excede. */
 const withTimeout = (ms, promise, msg = 'timeout') =>
     Promise.race([
         promise,
         new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms)),
     ]);
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export const ffprobeDuration = async (filePath) => {
     try {
@@ -167,10 +167,6 @@ export const ytSearch = async (query) => {
 
 export const ytInfo = (url) => ytSearch(url);
 
-/**
- * Obtiene metadata directamente de yt-dlp (--print-json, sin descargar).
- * Más precisa que yts; se usa cuando yt-dlp es el proveedor ganador.
- */
 const ytdlpMeta = async (url) => {
     const cookiesArg = fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
     return new Promise((resolve) => {
@@ -212,7 +208,7 @@ const fetchBuffer = async (url, headers = {}, retries = 2) => {
             return buf;
         } catch (e) {
             if (i === retries) throw e;
-            await new Promise(r => setTimeout(r, 1_500 * (i + 1)));
+            await sleep(1_500 * (i + 1));
         }
     }
 };
@@ -236,7 +232,11 @@ const ffmpegVideo = async (rawFile, outFile) => {
     } catch { fs.copyFileSync(rawFile, outFile); }
 };
 
-/* ─── Providers ──────────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════════
+   ─── PROVIDERS ────────────────────────────────────────────────────────────
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. yt-dlp (binario local) ────────────────────────────────────────────── */
 const runYtdlp = async (args, stamp) => {
     await new Promise((resolve, reject) => {
         execFile(YTDLP_BIN, args, { timeout: 180_000 }, (err, _out, stderr) => {
@@ -280,10 +280,14 @@ const providerYtdlp = async (ytUrl, type) => {
         '--merge-output-format', 'mp4',
     ];
 
+    // 7 estrategias de player_client — 2025
     const strategies = [
         ['--extractor-args', 'youtube:player_client=android_vr,ios'],
-        ['--extractor-args', 'youtube:player_client=tv,android'],
+        ['--extractor-args', 'youtube:player_client=tv_embedded,android'],
         ['--extractor-args', 'youtube:player_client=ios,mweb'],
+        ['--extractor-args', 'youtube:player_client=web_creator,android_vr'],
+        ['--extractor-args', 'youtube:player_client=android_testsuite,ios'],
+        ['--extractor-args', 'youtube:player_client=mediaconnect,android'],
         [],
     ];
 
@@ -305,47 +309,206 @@ const providerYtdlp = async (ytUrl, type) => {
     throw new Error(`yt-dlp: ${errors.at(-1)}`);
 };
 
+/* ── 2. Cobalt (v7 API + 15 instancias) ───────────────────────────────────── */
 const providerCobalt = async (ytUrl, type) => {
     const instances = [
-        'https://cobalt.api.timelessnesses.me',
-        'https://co.wuk.sh',
-        'https://cobaltapi.squair.xyz',
-        'https://api.cobalt.liubquanti.click',
-        'https://sunny.imput.net',
-        'https://nuko-c.meowing.de',
-        'https://melon.clxxped.lol',
-        'https://lime.clxxped.lol',
-        'https://grapefruit.clxxped.lol',
+        // v7: POST / con Accept: application/json
+        { base: 'https://cobalt.api.timelessnesses.me', v: 7 },
+        { base: 'https://api.cobalt.tools',             v: 7 },
+        { base: 'https://cobalt.drgns.space',           v: 7 },
+        { base: 'https://co.wuk.sh',                    v: 7 },
+        { base: 'https://cobalt.aloha.gay',             v: 7 },
+        { base: 'https://cobaltapi.squair.xyz',         v: 7 },
+        { base: 'https://api.cobalt.liubquanti.click',  v: 7 },
+        { base: 'https://cobalt.serv00.net',            v: 7 },
+        { base: 'https://cobalt.nadeko.net',            v: 7 },
+        { base: 'https://cobalt.lunar.icu',             v: 7 },
+        // v6 fallback: POST /api/json
+        { base: 'https://sunny.imput.net',              v: 6 },
+        { base: 'https://nuko-c.meowing.de',            v: 6 },
+        { base: 'https://melon.clxxped.lol',            v: 6 },
+        { base: 'https://lime.clxxped.lol',             v: 6 },
+        { base: 'https://grapefruit.clxxped.lol',       v: 6 },
     ];
+
     const errors = [];
-    for (const base of instances) {
+
+    for (const { base, v } of instances) {
         try {
-            const res = await fetch(`${base}/api/json`, {
+            const endpoint = v === 7 ? `${base}/` : `${base}/api/json`;
+            const body = v === 7
+                ? {
+                    url: ytUrl,
+                    downloadMode: type === 'audio' ? 'audio' : 'auto',
+                    videoQuality: '720',
+                    audioFormat: 'mp3',
+                    filenameStyle: 'basic',
+                    youtubeHLS: false,
+                  }
+                : {
+                    url: ytUrl,
+                    downloadMode: type === 'audio' ? 'audio' : 'auto',
+                    videoQuality: '720',
+                    audioFormat: 'mp3',
+                    filenameStyle: 'basic',
+                  };
+
+            const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                     'User-Agent': UA,
                 },
-                body: JSON.stringify({
-                    url: ytUrl,
-                    downloadMode: type === 'audio' ? 'audio' : 'auto',
-                    videoQuality: '720',
-                    audioFormat: 'mp3',
-                    filenameStyle: 'basic',
-                }),
+                body: JSON.stringify(body),
                 signal: AbortSignal.timeout(20_000),
             });
+
             if (!res.ok) { errors.push(`${base}: HTTP ${res.status}`); continue; }
             const json  = await res.json();
             const dlUrl = json.url || json?.picker?.[0]?.url;
             if (dlUrl) return await fetchBuffer(dlUrl);
-            errors.push(`${base}: sin URL`);
+            errors.push(`${base}: sin URL (status=${json.status})`);
         } catch (e) { errors.push(`${base}: ${e.message}`); }
     }
     throw new Error(`cobalt: ${errors.at(-1) ?? 'sin instancias'}`);
 };
 
+/* ── 3. SaveFrom.net ──────────────────────────────────────────────────────── */
+const providerSaveFrom = async (ytUrl, type) => {
+    const videoId = extractVideoId(ytUrl);
+    if (!videoId) throw new Error('savefrom: ID inválido');
+
+    const sfUrl = `https://sfrom.net/api/button/?app=videodownloader&lang=es&url=${encodeURIComponent(ytUrl)}`;
+    const res = await fetch(sfUrl, {
+        headers: {
+            'User-Agent': UA,
+            'Referer': 'https://en.savefrom.net/',
+            'Origin': 'https://en.savefrom.net',
+        },
+        signal: AbortSignal.timeout(25_000),
+    });
+
+    if (!res.ok) throw new Error(`savefrom: HTTP ${res.status}`);
+    const json = await res.json();
+    const links = json?.links ?? [];
+    if (!links.length) throw new Error('savefrom: sin links');
+
+    if (type === 'audio') {
+        const audio = links.find(l => /\.mp3|mp3|audio/i.test(l.url || l.type));
+        if (audio?.url) return await fetchBuffer(audio.url, { Referer: 'https://en.savefrom.net/' });
+    }
+
+    const sorted = links
+        .filter(l => l.url && /mp4/i.test(l.type || l.url))
+        .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+
+    const best720 = sorted.find(l => parseInt(l.quality) <= 720) || sorted[0];
+    if (best720?.url) return await fetchBuffer(best720.url, { Referer: 'https://en.savefrom.net/' });
+    throw new Error('savefrom: sin link válido');
+};
+
+/* ── 4. loader.to ─────────────────────────────────────────────────────────── */
+const providerLoaderTo = async (ytUrl, type) => {
+    const format = type === 'audio' ? 'mp3' : 'mp4';
+
+    const initRes = await fetch(
+        `https://loader.to/api/button/?url=${encodeURIComponent(ytUrl)}&f=${format}`,
+        { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(20_000) }
+    );
+
+    if (!initRes.ok) throw new Error(`loader.to init: HTTP ${initRes.status}`);
+    const initJson = await initRes.json();
+    const id = initJson?.id;
+    if (!id) throw new Error('loader.to: sin ID de tarea');
+
+    for (let i = 0; i < 30; i++) {
+        await sleep(3_000);
+        const statusRes = await fetch(
+            `https://loader.to/api/info/?format=${format}&url=${encodeURIComponent(ytUrl)}&id=${id}`,
+            { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(15_000) }
+        );
+        if (!statusRes.ok) continue;
+        const statusJson = await statusRes.json();
+        if (statusJson?.success && statusJson?.download_url) {
+            return await fetchBuffer(statusJson.download_url);
+        }
+    }
+    throw new Error('loader.to: timeout esperando descarga');
+};
+
+/* ── 5. SnapSave ──────────────────────────────────────────────────────────── */
+const providerSnapSave = async (ytUrl, type) => {
+    const res = await fetch('https://snap-save.app/api/download', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': UA,
+            'Referer': 'https://snap-save.app/',
+        },
+        body: JSON.stringify({ url: ytUrl }),
+        signal: AbortSignal.timeout(25_000),
+    });
+
+    if (!res.ok) throw new Error(`snapsave: HTTP ${res.status}`);
+    const json = await res.json();
+
+    if (type === 'audio') {
+        const audio = json?.data?.audios?.[0] || json?.data?.audio;
+        if (audio?.url) return await fetchBuffer(audio.url, { Referer: 'https://snap-save.app/' });
+        throw new Error('snapsave: sin link de audio');
+    }
+
+    const videos = json?.data?.videos ?? json?.data ?? [];
+    const arr    = Array.isArray(videos) ? videos : [];
+    const v720   = arr.find(v => String(v.quality).includes('720')) || arr[0];
+    if (v720?.url) return await fetchBuffer(v720.url, { Referer: 'https://snap-save.app/' });
+    throw new Error('snapsave: sin link de video');
+};
+
+/* ── 6. yt1s.com ──────────────────────────────────────────────────────────── */
+const providerYt1s = async (ytUrl, type) => {
+    const videoId = extractVideoId(ytUrl);
+    if (!videoId) throw new Error('yt1s: ID inválido');
+
+    const format = type === 'audio' ? 'mp3' : 'mp4';
+    const BASE   = 'https://yt1s.com';
+
+    const aRes = await fetch(`${BASE}/api/ajaxSearch/index`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': UA,
+            'Referer': `${BASE}/`,
+        },
+        body: new URLSearchParams({ q: ytUrl, vt: format }),
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!aRes.ok) throw new Error(`yt1s analyze: HTTP ${aRes.status}`);
+    const aJson = await aRes.json();
+
+    const kLink = type === 'audio'
+        ? (aJson.links?.mp3?.mp3128 || Object.values(aJson.links?.mp3 || {})[0])
+        : (aJson.links?.mp4?.['720p'] || aJson.links?.mp4?.['360p'] || Object.values(aJson.links?.mp4 || {})[0]);
+
+    if (!kLink?.k) throw new Error('yt1s: sin clave de conversión');
+
+    const cRes = await fetch(`${BASE}/api/ajaxConvert/convert`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': UA,
+            'Referer': `${BASE}/`,
+        },
+        body: new URLSearchParams({ vid: aJson.vid || videoId, k: kLink.k }),
+        signal: AbortSignal.timeout(30_000),
+    });
+    const cJson = await cRes.json();
+    if (cJson.dlink) return await fetchBuffer(cJson.dlink, { Referer: BASE });
+    throw new Error('yt1s: sin dlink');
+};
+
+/* ── 7. Vreden (@vreden/youtube_scraper) ──────────────────────────────────── */
 const providerVreden = async (ytUrl, type) => {
     const { ytmp3, ytmp4 } = await import('@vreden/youtube_scraper');
     const res = type === 'audio' ? await ytmp3(ytUrl) : await ytmp4(ytUrl);
@@ -353,6 +516,7 @@ const providerVreden = async (ytUrl, type) => {
     throw new Error('vreden: sin link');
 };
 
+/* ── 8. LolHuman ──────────────────────────────────────────────────────────── */
 const providerLolHuman = async (ytUrl, type) => {
     const keys = ['beta', '85faf717d0545d14074659ad', '0ca09158e244030623e44991'];
     for (const key of keys) {
@@ -372,6 +536,7 @@ const providerLolHuman = async (ytUrl, type) => {
     throw new Error('lolhuman: falló');
 };
 
+/* ── 9. BetaBotz ──────────────────────────────────────────────────────────── */
 const providerBetaBotz = async (ytUrl, type) => {
     const keys = ['beta', 'ErlanBot'];
     for (const key of keys) {
@@ -391,9 +556,11 @@ const providerBetaBotz = async (ytUrl, type) => {
     throw new Error('betabotz: falló');
 };
 
+/* ── 10. Y2Mate ────────────────────────────────────────────────────────────── */
 const providerY2Mate = async (ytUrl, type) => {
     const BASE = 'https://www.y2mate.com';
     if (!extractVideoId(ytUrl)) throw new Error('y2mate: ID inválido');
+
     const aRes = await fetch(`${BASE}/mates/analyzeV2/ajax`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
@@ -405,6 +572,7 @@ const providerY2Mate = async (ytUrl, type) => {
         ? (analyze.links?.mp3?.mp3128 || Object.values(analyze.links?.mp3 || {})[0])?.k
         : (analyze.links?.mp4?.['720'] || analyze.links?.mp4?.['360'] || Object.values(analyze.links?.mp4 || {})[0])?.k;
     if (!k) throw new Error('y2mate: sin k');
+
     const cRes = await fetch(`${BASE}/mates/convertV2/index`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
@@ -416,15 +584,43 @@ const providerY2Mate = async (ytUrl, type) => {
     throw new Error('y2mate: falló');
 };
 
-/* ─── Provider orchestration ─────────────────────────────────────────────── */
+/* ── 11. Ndown.io ─────────────────────────────────────────────────────────── */
+const providerNdown = async (ytUrl, type) => {
+    const videoId = extractVideoId(ytUrl);
+    if (!videoId) throw new Error('ndown: ID inválido');
 
-/**
- * Envuelve un provider con timeout individual.
- * @param {string}   name
- * @param {Function} fn
- * @param {string}   ytUrl
- * @param {string}   type
- */
+    const res = await fetch(
+        `https://ndown.io/api/download?url=${encodeURIComponent(ytUrl)}&type=${type === 'audio' ? 'mp3' : 'mp4'}`,
+        { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(25_000) }
+    );
+    if (!res.ok) throw new Error(`ndown: HTTP ${res.status}`);
+    const json = await res.json();
+    const dlUrl = json?.data?.downloadUrl || json?.url;
+    if (!dlUrl) throw new Error('ndown: sin URL');
+    return await fetchBuffer(dlUrl, { Referer: 'https://ndown.io/' });
+};
+
+/* ── 12. YtDl API (hemn.me) ───────────────────────────────────────────────── */
+const providerYtDlAPI = async (ytUrl, type) => {
+    const videoId = extractVideoId(ytUrl);
+    if (!videoId) throw new Error('ytdlapi: ID inválido');
+
+    const fmt = type === 'audio' ? 'mp3' : 'mp4';
+    const res = await fetch(
+        `https://ytdl.hemn.me/api/convert?url=${encodeURIComponent(ytUrl)}&format=${fmt}&quality=720`,
+        { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30_000) }
+    );
+    if (!res.ok) throw new Error(`ytdlapi: HTTP ${res.status}`);
+    const json = await res.json();
+    const dlUrl = json?.download_url || json?.url;
+    if (!dlUrl) throw new Error('ytdlapi: sin URL');
+    return await fetchBuffer(dlUrl);
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ─── Provider orchestration ───────────────────────────────────────────────
+   ═══════════════════════════════════════════════════════════════════════════ */
+
 const runProvider = (name, fn, ytUrl, type) =>
     withTimeout(
         PROVIDER_TIMEOUT,
@@ -433,31 +629,47 @@ const runProvider = (name, fn, ytUrl, type) =>
     );
 
 /**
- * Descarga vía lista de proveedores.
- * - Los dos primeros (yt-dlp + cobalt) se lanzan en paralelo: gana el que responda primero.
- * - Si ambos fallan, el resto se intenta secuencialmente.
+ * Estrategia multi-proveedor:
+ *
+ *  Fase 1 (paralelo):  yt-dlp  +  Cobalt v7  +  SaveFrom
+ *                      → gana el primero que entregue buffer válido
+ *
+ *  Fase 2 (secuencial): loader.to → SnapSave → yt1s → Vreden
+ *                        → LolHuman → BetaBotz → Y2Mate → NDown → YtDlAPI
+ *
+ *  Total de providers disponibles: 12
  */
 const downloadViaProviders = async (ytUrl, type) => {
-    const sequential = [
-        { name: 'lolhuman', fn: providerLolHuman },
-        { name: 'betabotz', fn: providerBetaBotz },
-        { name: 'vreden',   fn: providerVreden   },
-        { name: 'y2mate',   fn: providerY2Mate   },
-    ];
     const errors = {};
 
-    // ── Fase 1: yt-dlp vs cobalt en paralelo ──────────────────────────────
+    // ── Fase 1: carrera entre los 3 más rápidos ────────────────────────────
     try {
-        const buf = await Promise.any([
-            runProvider('ytdlp',  providerYtdlp,  ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'  })),
-            runProvider('cobalt', providerCobalt, ytUrl, type).then(b => ({ buf: b, provider: 'cobalt' })),
+        const result = await Promise.any([
+            runProvider('ytdlp',    providerYtdlp,    ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'    })),
+            runProvider('cobalt',   providerCobalt,   ytUrl, type).then(b => ({ buf: b, provider: 'cobalt'   })),
+            runProvider('savefrom', providerSaveFrom, ytUrl, type).then(b => ({ buf: b, provider: 'savefrom' })),
         ]);
-        if (buf.buf?.length > MIN_BUFFER_SIZE) return { buffer: buf.buf, provider: buf.provider };
+        if (result.buf?.length > MIN_BUFFER_SIZE) return { buffer: result.buf, provider: result.provider };
     } catch (agg) {
-        for (const e of (agg.errors ?? [])) errors[e.message?.split(':')[0] ?? 'unknown'] = e.message;
+        for (const e of (agg.errors ?? [])) {
+            const key = e.message?.split(':')[0] ?? 'unknown';
+            errors[key] = e.message;
+        }
     }
 
     // ── Fase 2: proveedores secundarios secuenciales ───────────────────────
+    const sequential = [
+        { name: 'loaderto',  fn: providerLoaderTo  },
+        { name: 'snapsave',  fn: providerSnapSave  },
+        { name: 'yt1s',      fn: providerYt1s      },
+        { name: 'vreden',    fn: providerVreden    },
+        { name: 'lolhuman',  fn: providerLolHuman  },
+        { name: 'betabotz',  fn: providerBetaBotz  },
+        { name: 'y2mate',    fn: providerY2Mate    },
+        { name: 'ndown',     fn: providerNdown     },
+        { name: 'ytdlapi',   fn: providerYtDlAPI   },
+    ];
+
     for (const { name, fn } of sequential) {
         try {
             const buf = await runProvider(name, fn, ytUrl, type);
@@ -488,8 +700,6 @@ export const ytDownload = async (url, type = 'audio') => {
     const tmpFiles = [];
     const cleanup  = () => tmpFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
 
-    // Lanzar metadata en paralelo con la descarga
-    // Si yt-dlp gana la carrera, intentamos reemplazar con su metadata más precisa
     const ytsMetaPromise = ytInfo(url).catch(() => null);
 
     try {
@@ -500,23 +710,19 @@ export const ytDownload = async (url, type = 'audio') => {
         tmpFiles.push(rawFile, outFile);
         fs.writeFileSync(rawFile, rawBuf);
 
-        // Procesar con ffmpeg + obtener metadata + duración en paralelo
         const [, seconds, ytsMeta, dlpMeta] = await Promise.all([
             type === 'audio' ? ffmpegAudio(rawFile, outFile) : ffmpegVideo(rawFile, outFile),
-            ffprobeDuration(rawFile),          // duración desde el raw (más rápido)
+            ffprobeDuration(rawFile),
             ytsMetaPromise,
             provider === 'ytdlp' ? ytdlpMeta(url) : Promise.resolve(null),
         ]);
 
         const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0 ? outFile : rawFile;
         const buffer    = fs.readFileSync(finalFile);
-
-        // yt-dlp meta tiene prioridad (más precisa), con yts como fallback
-        const meta = dlpMeta || ytsMeta || {};
+        const meta      = dlpMeta || ytsMeta || {};
 
         return { buffer, seconds, meta, provider };
     } finally {
         cleanup();
     }
 };
-                            
