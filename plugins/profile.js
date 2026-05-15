@@ -1,10 +1,6 @@
 import { xpRange } from '../src/libraries/levelling.js'
-import {
-  resolveAnyJid,
-  getLidForJidAsync,
-  isPhoneJid,
-  cleanJid,
-} from '../src/funcion/lid-resolver.js'
+
+const DEFAULT_PP = 'https://files.catbox.moe/leegee.jpg'
 
 const GENEROS = {
   m: '♂️ Masculino',
@@ -19,6 +15,25 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
+const cleanJid = (jid) => {
+  if (!jid || typeof jid !== 'string') return jid
+  jid = jid.trim()
+  if (/:\d+@/.test(jid)) {
+    const [user, server] = jid.split('@')
+    return `${user.split(':')[0]}@${server}`
+  }
+  return jid
+}
+
+const isLid = (jid) => typeof jid === 'string' && jid.endsWith('@lid')
+const isPhone = (jid) => typeof jid === 'string' && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@c.us'))
+
+const toUserJid = (userRaw) => {
+  userRaw = cleanJid(userRaw)
+  if (!userRaw) return userRaw
+  return userRaw.includes('@') ? userRaw : `${userRaw}@s.whatsapp.net`
+}
+
 const getRawTarget = (m) => {
   return m.quoted?.sender
     || m.quoted?.participant
@@ -28,6 +43,117 @@ const getRawTarget = (m) => {
     || m.sender
 }
 
+const getPhoneFromLidMapping = async (jid, conn) => {
+  jid = cleanJid(jid)
+  if (!isLid(jid)) return null
+
+  try {
+    const pn = await conn?.signalRepository?.lidMapping?.getPNForLID?.(jid)
+    if (pn && typeof pn === 'string' && !pn.endsWith('@lid')) {
+      return cleanJid(pn.includes('@') ? pn : `${pn}@s.whatsapp.net`)
+    }
+  } catch {}
+
+  try {
+    const lidKey = jid.split('@')[0]
+    const pnUser = conn?.signalRepository?.lidMapping?.mappingCache?.get?.(`lid:${lidKey}`)
+    if (pnUser && typeof pnUser === 'string') {
+      return cleanJid(pnUser.includes('@') ? pnUser : `${pnUser}@s.whatsapp.net`)
+    }
+  } catch {}
+
+  try {
+    const lidKey = jid.split('@')[0]
+    const pnUser = global?.conn?.signalRepository?.lidMapping?.mappingCache?.get?.(`lid:${lidKey}`)
+    if (pnUser && typeof pnUser === 'string') {
+      return cleanJid(pnUser.includes('@') ? pnUser : `${pnUser}@s.whatsapp.net`)
+    }
+  } catch {}
+
+  return null
+}
+
+const getLidFromPhoneMapping = async (jid, conn) => {
+  jid = cleanJid(jid)
+  if (!isPhone(jid)) return null
+
+  try {
+    const lid = await conn?.signalRepository?.lidMapping?.getLIDForPN?.(jid)
+    if (lid && typeof lid === 'string') {
+      return cleanJid(lid.includes('@') ? lid : `${lid}@lid`)
+    }
+  } catch {}
+
+  try {
+    const pn = jid.split('@')[0]
+    const lid = conn?.signalRepository?.lidMapping?.mappingCache?.get?.(`pn:${pn}`)
+    if (lid && typeof lid === 'string') {
+      return cleanJid(lid.includes('@') ? lid : `${lid}@lid`)
+    }
+  } catch {}
+
+  try {
+    const pn = jid.split('@')[0]
+    const lid = global?.conn?.signalRepository?.lidMapping?.mappingCache?.get?.(`pn:${pn}`)
+    if (lid && typeof lid === 'string') {
+      return cleanJid(lid.includes('@') ? lid : `${lid}@lid`)
+    }
+  } catch {}
+
+  return null
+}
+
+const resolveFromParticipants = async (jid, conn, chat) => {
+  jid = cleanJid(jid)
+  if (!jid || !chat?.endsWith?.('@g.us')) return null
+
+  let metadata = null
+
+  try {
+    metadata = conn.chats?.[chat]?.metadata || await conn.groupMetadata(chat)
+  } catch {}
+
+  const participants = metadata?.participants || []
+  if (!participants.length) return null
+
+  const raw = jid.split('@')[0]
+
+  for (const p of participants) {
+    const id = cleanJid(p.id || p.jid || '')
+    const lid = cleanJid(p.lid || '')
+    const phoneNumber = p.phoneNumber
+      ? cleanJid(p.phoneNumber.includes('@') ? p.phoneNumber : `${p.phoneNumber}@s.whatsapp.net`)
+      : ''
+
+    if (id === jid && isPhone(id)) return id
+    if (phoneNumber === jid && isPhone(phoneNumber)) return phoneNumber
+    if (lid === jid && phoneNumber) return phoneNumber
+    if (lid === jid && id && isPhone(id)) return id
+    if (id === jid && phoneNumber) return phoneNumber
+    if (lid?.split('@')[0] === raw && phoneNumber) return phoneNumber
+    if (id?.split('@')[0] === raw && isPhone(id)) return id
+    if (phoneNumber?.split('@')[0] === raw) return phoneNumber
+  }
+
+  return null
+}
+
+const resolveUserJid = async (userRaw, conn, chat) => {
+  let jid = toUserJid(userRaw)
+
+  if (isPhone(jid)) {
+    return jid.endsWith('@c.us') ? `${jid.split('@')[0]}@s.whatsapp.net` : jid
+  }
+
+  const fromParticipants = await resolveFromParticipants(jid, conn, chat)
+  if (fromParticipants && isPhone(fromParticipants)) return fromParticipants
+
+  const fromMapping = await getPhoneFromLidMapping(jid, conn)
+  if (fromMapping && isPhone(fromMapping)) return fromMapping
+
+  return jid
+}
+
 const sameUser = (a, b) => {
   a = cleanJid(a)
   b = cleanJid(b)
@@ -35,19 +161,14 @@ const sameUser = (a, b) => {
   if (!a || !b) return false
   if (a === b) return true
 
-  const ax = a.split('@')[0]
-  const bx = b.split('@')[0]
-
-  return ax === bx
+  return a.split('@')[0] === b.split('@')[0]
 }
 
-const getProfilePic = async (conn, realJid, lid) => {
-  const fallback = 'https://files.catbox.moe/leegee.jpg'
-  const candidates = [...new Set([realJid, lid].filter(Boolean).map(cleanJid))]
+const getProfilePic = async (conn, userJid, lid) => {
+  const candidates = [...new Set([userJid, lid].filter(Boolean).map(cleanJid))]
 
   for (const jid of candidates) {
-    if (!jid || !isPhoneJid(jid)) continue
-
+    if (!jid || !isPhone(jid)) continue
     try {
       const pp = await conn.profilePictureUrl(jid, 'image')
       if (pp) return pp
@@ -55,24 +176,23 @@ const getProfilePic = async (conn, realJid, lid) => {
   }
 
   for (const jid of candidates) {
-    if (!jid || !isPhoneJid(jid)) continue
-
+    if (!jid || !isPhone(jid)) continue
     try {
       const pp = await conn.profilePictureUrl(jid, 'preview')
       if (pp) return pp
     } catch {}
   }
 
-  return fallback
+  return DEFAULT_PP
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
 
   const rawTarget = getRawTarget(m)
-  const who = await resolveAnyJid(rawTarget, conn, m.chat)
-  const sender = await resolveAnyJid(m.sender, conn, m.chat)
-  const lid = isPhoneJid(who) ? await getLidForJidAsync(who, conn) : null
+  const who = await resolveUserJid(rawTarget, conn, m.chat)
+  const sender = await resolveUserJid(m.sender, conn, m.chat)
+  const lid = await getLidFromPhoneMapping(who, conn)
 
   const isSelf = sameUser(who, sender)
   const name = await conn.getName(who)
