@@ -56,7 +56,6 @@ export const formatViews = (n) => {
 
 export const formatDuration = (sec) => {
     if (!sec) return 'N/A';
-    if (typeof sec === 'string' && /^\d+:\d+/.test(sec)) return sec;
     const s = parseInt(sec, 10);
     if (isNaN(s) || s <= 0) return 'N/A';
     const h = Math.floor(s / 3600);
@@ -69,122 +68,79 @@ export const formatDuration = (sec) => {
 
 export const formatDate = (raw) => {
     if (!raw) return 'N/A';
-    const str = String(raw).replace(/-/g, '');
-    if (/^\d{8}$/.test(str)) {
-        const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-        const mo = parseInt(str.slice(4, 6)) - 1;
-        return `${parseInt(str.slice(6, 8))} ${months[mo] ?? '?'} ${str.slice(0, 4)}`;
-    }
-    return raw;
+    return raw; 
 };
 
 export const buildInfoCard = (meta = {}, type = 'audio') => {
     const icon    = type === 'video' ? '🎬 YOUTUBE VIDEO' : '♪ YOUTUBE AUDIO';
-    const title   = meta.title   || 'Sin título';
-    const channel = meta.channel || 'N/A';
-    const views   = formatViews(meta.views);
-    const dur     = formatDuration(meta.duration || meta.timestamp);
-    const date    = formatDate(meta.date || meta.upload_date || meta.ago);
-    const link    = meta.url || '';
     return (
 `╭━━━〔 ${icon} 〕━━━⬣
-┃ ◈ *Título:* ${title}
-┃ ✦ *Canal:* ${channel}
-┃ ✧ *Vistas:* ${views}
-┃ ◷ *Duración:* ${dur}
-┃ ⊞ *Lanzamiento:* ${date}
-┃ ∞ *Link:* ${link}
+┃ ◈ *Título:* ${meta.title || 'Sin título'}
+┃ ✦ *Canal:* ${meta.channel || 'N/A'}
+┃ ✧ *Vistas:* ${formatViews(meta.views)}
+┃ ◷ *Duración:* ${formatDuration(meta.duration)}
+┃ ⊞ *ID:* ${meta.videoId || 'N/A'}
+┃ ∞ *Link:* ${meta.url || ''}
 ╰━━━━━━━━━━━━━━━━━━━⬣`
     );
 };
-
-const normalizeYts = (r) => ({
-    title:    r.title,
-    channel:  r.author?.name || r.channel || 'N/A',
-    views:    r.views,
-    duration: r.seconds || r.timestamp,
-    date:     r.ago,
-    url:      r.url,
-    thumbnail: r.thumbnail,
-    videoId:  r.videoId,
-});
 
 export const ytSearch = async (query) => {
     try {
         const match = query.match(YT_REGEX);
         if (match) {
             const r = await yts({ videoId: match[1] });
-            return r ? normalizeYts(r) : null;
+            return r ? { ...r, channel: r.author?.name } : null;
         }
         const search = await yts(query);
         const r = search.videos?.[0];
-        return r ? normalizeYts(r) : null;
+        return r ? { ...r, channel: r.author?.name } : null;
     } catch { return null; }
 };
 
-export const ytInfo = (url) => ytSearch(url);
-
 export const ytDownload = async (url, type = 'audio') => {
-    if (!url || typeof url !== 'string') throw new Error('URL inválida');
-    if (type !== 'audio' && type !== 'video') throw new Error('type debe ser "audio" o "video"');
-    if (!YT_REGEX.test(url) && !extractVideoId(url)) throw new Error('No es una URL de YouTube válida');
-
-    const ytsMetaPromise = ytInfo(url).catch(() => null);
+    if (!url || !YT_REGEX.test(url)) throw new Error('URL de YouTube no válida');
 
     try {
         const apiUrl = `${API_BASE}?apikey=${API_KEY}&url=${encodeURIComponent(url)}&type=${type}`;
-        
-        const res = await fetch(apiUrl, {
-            headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(60_000)
-        });
+        const response = await fetch(apiUrl);
+        const json = await response.json();
 
-        if (!res.ok) throw new Error(`API de descarga respondió HTTP ${res.status}`);
-        
-        const json = await res.json();
-        if (!json.status || !json.result?.url) {
-            throw new Error(json.message || 'La API externa no retornó un enlace de descarga válido.');
+        // Según tu screenshot, la data viene en json.data
+        if (!json.status || !json.data?.download?.url) {
+            throw new Error(json.msg || 'No se pudo obtener el enlace de descarga.');
         }
 
-        const fileRes = await fetch(json.result.url, {
-            signal: AbortSignal.timeout(90_000)
-        });
-        if (!fileRes.ok) throw new Error(`Error al descargar el archivo desde el servidor secundario (HTTP ${fileRes.status})`);
-        
+        const data = json.data;
+        const fileRes = await fetch(data.download.url, { signal: AbortSignal.timeout(120_000) });
         const buffer = Buffer.from(await fileRes.arrayBuffer());
 
+        // Guardar temporal para obtener duración real
         const stamp = Date.now();
-        const tmpFile = path.join(TMP_DIR, `ytdl_api_${stamp}.${type === 'audio' ? 'mp3' : 'mp4'}`);
+        const tmpFile = path.join(TMP_DIR, `ytdl_${stamp}.${type === 'audio' ? 'mp3' : 'mp4'}`);
         fs.writeFileSync(tmpFile, buffer);
 
-        let seconds = 0;
+        let realSeconds = 0;
         try {
-            seconds = await ffprobeDuration(tmpFile);
+            realSeconds = await ffprobeDuration(tmpFile);
         } finally {
-            try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+            if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
         }
 
-        const ytsMeta = await ytsMetaPromise;
         const meta = {
-            title:     json.result.title || ytsMeta?.title || 'Sin título',
-            channel:   ytsMeta?.channel || 'N/A',
-            views:     ytsMeta?.views || 0,
-            duration:  seconds || ytsMeta?.duration || 0,
-            date:      ytsMeta?.date || 'N/A',
-            url:       url,
-            thumbnail: ytsMeta?.thumbnail || '',
-            videoId:   extractVideoId(url)
+            title: data.title || 'Sin título',
+            channel: data.uploader || 'N/A',
+            views: data.views || 0,
+            duration: realSeconds || data.duration || 0,
+            url: url,
+            thumbnail: data.thumbnail || '',
+            videoId: data.id || extractVideoId(url)
         };
 
-        return { 
-            buffer, 
-            seconds: meta.duration, 
-            meta, 
-            provider: 'apicausas' 
-        };
+        return { buffer, seconds: meta.duration, meta, provider: 'apicausas' };
 
     } catch (error) {
-        throw new Error(`[Error API Causas]: ${error.message}`);
+        throw new Error(`[Error API]: ${error.message}`);
     }
 };
-                                   
+            
