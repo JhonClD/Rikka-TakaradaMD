@@ -1,9 +1,9 @@
 import { xpRange } from '../src/libraries/levelling.js'
 import {
-  resolveToPhoneJidAsync,
+  resolveAnyJid,
   getLidForJidAsync,
-  isLidJid,
   isPhoneJid,
+  cleanJid,
 } from '../src/funcion/lid-resolver.js'
 
 const GENEROS = {
@@ -19,13 +19,6 @@ const progressBar = (pct, width = 12) => {
   return '▓'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-const cleanJid = (jid) => {
-  if (!jid || typeof jid !== 'string') return jid
-  jid = jid.split(':')[0]
-  if (!jid.includes('@')) jid += '@s.whatsapp.net'
-  return jid
-}
-
 const getRawTarget = (m) => {
   return m.quoted?.sender
     || m.quoted?.participant
@@ -35,30 +28,26 @@ const getRawTarget = (m) => {
     || m.sender
 }
 
-const resolveTarget = async (jid, conn) => {
-  jid = cleanJid(jid)
+const sameUser = (a, b) => {
+  a = cleanJid(a)
+  b = cleanJid(b)
 
-  let lid = null
-  let realJid = jid
+  if (!a || !b) return false
+  if (a === b) return true
 
-  if (isLidJid(jid)) {
-    lid = jid
-    realJid = await resolveToPhoneJidAsync(jid, conn)
-  } else if (isPhoneJid(jid)) {
-    lid = await getLidForJidAsync(jid, conn)
-  }
+  const ax = a.split('@')[0]
+  const bx = b.split('@')[0]
 
-  if (!realJid || isLidJid(realJid)) realJid = jid
-  realJid = cleanJid(realJid)
-
-  return { jid, realJid, lid }
+  return ax === bx
 }
 
 const getProfilePic = async (conn, realJid, lid) => {
   const fallback = 'https://files.catbox.moe/leegee.jpg'
-  const candidates = [...new Set([realJid, lid].filter(Boolean))]
+  const candidates = [...new Set([realJid, lid].filter(Boolean).map(cleanJid))]
 
   for (const jid of candidates) {
+    if (!jid || !isPhoneJid(jid)) continue
+
     try {
       const pp = await conn.profilePictureUrl(jid, 'image')
       if (pp) return pp
@@ -66,6 +55,8 @@ const getProfilePic = async (conn, realJid, lid) => {
   }
 
   for (const jid of candidates) {
+    if (!jid || !isPhoneJid(jid)) continue
+
     try {
       const pp = await conn.profilePictureUrl(jid, 'preview')
       if (pp) return pp
@@ -75,22 +66,15 @@ const getProfilePic = async (conn, realJid, lid) => {
   return fallback
 }
 
-const sameUser = (a, b) => {
-  if (!a || !b) return false
-  const ax = cleanJid(a).split('@')[0]
-  const bx = cleanJid(b).split('@')[0]
-  return ax === bx || cleanJid(a) === cleanJid(b)
-}
-
 const handler = async (m, { conn, args, usedPrefix, command }) => {
   const users = global.db.data.users
 
   const rawTarget = getRawTarget(m)
-  const { realJid, lid } = await resolveTarget(rawTarget, conn)
-  const { realJid: senderRealJid } = await resolveTarget(m.sender, conn)
+  const who = await resolveAnyJid(rawTarget, conn, m.chat)
+  const sender = await resolveAnyJid(m.sender, conn, m.chat)
+  const lid = isPhoneJid(who) ? await getLidForJidAsync(who, conn) : null
 
-  const who = realJid
-  const isSelf = sameUser(who, senderRealJid)
+  const isSelf = sameUser(who, sender)
   const name = await conn.getName(who)
 
   if (!users[who]) users[who] = {}
@@ -105,16 +89,26 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
   if (command === 'setbirth') {
     if (!isSelf) return m.reply('❌ Solo puedes editar tu propio perfil.')
+
     const raw = args[0]
-    if (!raw || !/^\d{1,2}\/\d{1,2}(\/\d{4})?$/.test(raw)) return m.reply(`🗓️ Usa: *${usedPrefix + command} DD/MM*`)
+
+    if (!raw || !/^\d{1,2}\/\d{1,2}(\/\d{4})?$/.test(raw)) {
+      return m.reply(`🗓️ Usa: *${usedPrefix + command} DD/MM*`)
+    }
+
     u.birthday = raw
     return m.reply(`✅ Cumpleaños guardado: *${u.birthday}*`)
   }
 
   if (command === 'setgender') {
     if (!isSelf) return m.reply('❌ Solo puedes editar tu propio perfil.')
+
     const g = args[0]?.toLowerCase()
-    if (!GENEROS[g]) return m.reply('⚧️ Géneros: *m* (Masc), *f* (Fem), *o* (Otro)')
+
+    if (!GENEROS[g]) {
+      return m.reply('⚧️ Géneros: *m* (Masc), *f* (Fem), *o* (Otro)')
+    }
+
     u.gender = g
     return m.reply(`✅ Género guardado: *${GENEROS[g]}*`)
   }
@@ -124,7 +118,10 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   const xpNeed = xp || 1
   const pct = Math.min(100, Math.floor((xpNow / xpNeed) * 100))
 
-  const sorted = Object.entries(users).sort(([, a], [, b]) => (b.exp || 0) - (a.exp || 0))
+  const sorted = Object.entries(users).sort(([, a], [, b]) => {
+    return (b.exp || 0) - (a.exp || 0)
+  })
+
   const rank = sorted.findIndex(([jid]) => sameUser(jid, who)) + 1
 
   const txt = `
