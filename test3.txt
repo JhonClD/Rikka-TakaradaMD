@@ -1,0 +1,152 @@
+import fs from 'fs';
+import yts from 'yt-search';
+import { exec, execFile, execSync } from 'child_process';
+import { promisify } from 'util';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+const execAsync  = promisify(exec);
+const TMP_DIR    = os.tmpdir();
+
+const FFMPEG_TIMEOUT   = 120_000;
+const PROVIDER_TIMEOUT = 90_000;
+const MIN_BUFFER_SIZE  = 10_000;
+const MAX_FILE_SIZE    = 200 * 1024 * 1024;
+const COOKIES_FILE     = path.resolve(__dirname, '../../src/cookies.txt');
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+let FFMPEG_BIN  = 'ffmpeg';
+let FFPROBE_BIN = 'ffprobe';
+
+(async () => {
+    try { await execAsync('ffmpeg -version', { timeout: 5_000 }); }
+    catch {
+        try {
+            const { default: p } = await import('ffmpeg-static');
+            if (p && fs.existsSync(p)) FFMPEG_BIN = p;
+        } catch {}
+    }
+    try { await execAsync('ffprobe -version', { timeout: 5_000 }); }
+    catch {
+        if (FFMPEG_BIN !== 'ffmpeg') {
+            const sidecar = FFMPEG_BIN.replace(/ffmpeg(\.exe)?$/, 'ffprobe$1');
+            if (fs.existsSync(sidecar)) FFPROBE_BIN = sidecar;
+        }
+    }
+})();
+
+const YTDLP_BIN = (() => {
+    const candidates = [
+        '/home/container/.local/bin/yt-dlp',
+        '/home/container/yt-dlp',
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+        '/data/data/com.termux/files/usr/bin/yt-dlp',
+    ];
+    for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    try {
+        const r = execSync('which yt-dlp', { timeout: 3_000 }).toString().trim();
+        if (r) return r;
+    } catch {}
+    return 'yt-dlp';
+})();
+
+export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
+
+const extractVideoId = (url) => url.match(YT_REGEX)?.[1] ?? null;
+
+const withTimeout = (ms, promise, msg = 'timeout') =>
+    Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms)),
+    ]);
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+export const ffprobeDuration = async (filePath) => {
+    try {
+        const { stdout } = await execAsync(
+            `"${FFPROBE_BIN}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+            { timeout: 10_000 }
+        );
+        const d = parseFloat(stdout.trim());
+        return isNaN(d) || d <= 0 ? 0 : Math.round(d);
+    } catch { return 0; }
+};
+
+export const formatViews = (n) => {
+    if (n == null) return 'N/A';
+    const v = parseInt(n, 10);
+    if (isNaN(v)) return String(n);
+    if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}B`;
+    if (v >= 1_000_000)     return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000)         return `${(v / 1_000).toFixed(1)}K`;
+    return v.toLocaleString('es');
+};
+
+export const formatDuration = (sec) => {
+    if (!sec) return 'N/A';
+    if (typeof sec === 'string' && /^\d+:\d+/.test(sec)) return sec;
+    const s = parseInt(sec, 10);
+    if (isNaN(s) || s <= 0) return 'N/A';
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
+        : `${m}:${String(r).padStart(2, '0')}`;
+};
+
+export const formatDate = (raw) => {
+    if (!raw) return 'N/A';
+    const str = String(raw).replace(/-/g, '');
+    if (/^\d{8}$/.test(str)) {
+        const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+        const mo = parseInt(str.slice(4, 6)) - 1;
+        return `${parseInt(str.slice(6, 8))} ${months[mo] ?? '?'} ${str.slice(0, 4)}`;
+    }
+    return raw;
+};
+
+export const buildInfoCard = (meta = {}, type = 'audio') => {
+    const icon    = type === 'video' ? '🎬 YOUTUBE VIDEO' : '♪ YOUTUBE AUDIO';
+    const title   = meta.title   || 'Sin título';
+    const channel = meta.channel || 'N/A';
+    const views   = formatViews(meta.views);
+    const dur     = formatDuration(meta.duration || meta.timestamp);
+    const date    = formatDate(meta.date || meta.upload_date || meta.ago);
+    const link    = meta.url || '';
+    return (
+`╭━━━〔 ${icon} 〕━━━⬣
+┃ ◈ *Título:* ${title}
+┃ ✦ *Canal:* ${channel}
+┃ ✧ *Vistas:* ${views}
+┃ ◷ *Duración:* ${dur}
+┃ ⊞ *Lanzamiento:* ${date}
+┃ ∞ *Link:* ${link}
+╰━━━━━━━━━━━━━━━━━━━⬣`
+    );
+};
+
+const normalizeYts = (r) => ({
+    title:    r.title,
+    channel:  r.author?.name || r.channel || 'N/A',
+    views:    r.views,
+    duration: r.seconds || r.timestamp,
+    date:     r.ago,
+    url:      r.url,
+    thumbnail: r.thumbnail,
+    videoId:  r.videoId,
+});
+
+export const ytSearch = async (query) => {
+    try {
+        const match = query.match(YT_REGEX);
+        if (match) {
+            const r = 
