@@ -543,17 +543,20 @@ const downloadViaProviders = async (ytUrl, type) => {
     const errors = {};
     try {
         const result = await Promise.any([
-            runProvider('ytdlp',   providerYtdlp,   ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'   })),
-            runProvider('distube', providerDistube, ytUrl, type).then(b => ({ buf: b, provider: 'distube' })),
-            runProvider('cobalt',  providerCobalt,  ytUrl, type).then(b => ({ buf: b, provider: 'cobalt'  })),
+            runProvider('vidssave', providerVidsSave, ytUrl, type).then(b => ({ buf: b, provider: 'vidssave' })),
+            runProvider('cobalt',   providerCobalt,   ytUrl, type).then(b => ({ buf: b, provider: 'cobalt'   })),
+            runProvider('ytdlp',    providerYtdlp,    ytUrl, type).then(b => ({ buf: b, provider: 'ytdlp'    })),
         ]);
         if (result.buf?.length > MIN_BUFFER_SIZE) return { buffer: result.buf, provider: result.provider };
     } catch (agg) {
-        for (const e of (agg.errors ?? [])) {
-            errors[e.message?.split(':')[0] ?? 'unknown'] = e.message;
+        if (agg.errors) {
+            for (const e of agg.errors) {
+                errors[e.message?.split(':')[0] ?? 'unknown'] = e.message;
+            }
         }
     }
     const sequential = [
+        { name: 'distube',  fn: providerDistube  },
         { name: 'siputzx',  fn: providerSiputzx  },
         { name: 'nekorinn', fn: providerNekorinn  },
         { name: 'aiomedia', fn: providerAioMedia  },
@@ -563,7 +566,6 @@ const downloadViaProviders = async (ytUrl, type) => {
         { name: 'bochil',   fn: providerBochil    },
         { name: 'lolhuman', fn: providerLolHuman  },
         { name: 'betabotz', fn: providerBetaBotz  },
-        { name: 'vidssave', fn: providerVidsSave  },
     ];
     for (const { name, fn } of sequential) {
         try {
