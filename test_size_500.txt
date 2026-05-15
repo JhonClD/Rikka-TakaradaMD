@@ -1,0 +1,18 @@
+import fs from 'fs';
+import yts from 'yt-search';
+import { exec, execFile, execSync } from 'child_process';
+import { promisify } from 'util';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+const execAsync  = promisify(exec);
+const TMP_DIR    = os.tmpdir();
+
+const FFMPEG_TIMEOUT   = 120_000;
+const PROVIDER_TIMEOUT = 90_000;
+const MIN_BUFFER_SIZE  = 10_000;
+const MA
