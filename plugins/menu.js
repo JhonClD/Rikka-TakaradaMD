@@ -1,8 +1,7 @@
 import moment from 'moment-timezone';
-import { readFileSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { createCanvas, loadImage } from 'canvas';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
@@ -35,31 +34,15 @@ function clockString(ms) {
   return `${d}d ${h}h ${mm}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
 }
 
-function getBannerBuffer() {
-  if (existsSync(BANNER_PATH)) return readFileSync(BANNER_PATH);
-  if (global.bannerBuffer) return global.bannerBuffer;
-  return global.imagen1 || null;
-}
-
-// Redimensiona a 300x150 JPEG usando canvas (nativo en el bot)
-async function makeThumbnail(buffer) {
-  try {
-    const img = await loadImage(buffer);
-    const canvas = createCanvas(300, 150);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, 300, 150);
-    return canvas.toBuffer('image/jpeg', { quality: 0.7 });
-  } catch {
-    return null;
-  }
-}
-
 const handler = async (m, { conn, usedPrefix }) => {
   const settings = global.db.data.settings[conn.user.jid] || {};
 
   const botNameLong  = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
   const botNameShort = settings.namebot || '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
   const botLink      = settings.link    || 'https://github.com/JhonCID';
+  // URL de ImgBB guardada por .setbanner (o vacío si no hay)
+  const bannerUrl    = (settings.banner && settings.banner.startsWith('http'))
+    ? settings.banner : null;
 
   const pushname  = m.pushName || 'Usuario';
   const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
@@ -97,9 +80,6 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  const rawBanner = getBannerBuffer();
-  const thumb = rawBanner ? await makeThumbnail(rawBanner) : null;
-
   await conn.sendMessage(m.chat, {
     text: menuTexto,
     contextInfo: {
@@ -110,7 +90,7 @@ const handler = async (m, { conn, usedPrefix }) => {
         mediaType: 1,
         renderLargerThumbnail: true,
         showAdAttribution: false,
-        ...(thumb ? { jpegThumbnail: thumb.toString('base64') } : {})
+        ...(bannerUrl ? { thumbnailUrl: bannerUrl } : {})
       }
     }
   }, { quoted: m });
