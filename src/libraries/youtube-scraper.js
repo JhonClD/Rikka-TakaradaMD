@@ -108,6 +108,25 @@ export const ytSearch = async (query) => {
 
 export const ytInfo = (url) => ytSearch(url);
 
+// ── Mapeo de calidad → formato loader.to ─────────────────────────────────────
+// Video soportado: 144 240 360 480 720 1080 1440 4k
+// Audio soportado: mp3 m4a webm aac flac opus ogg wav
+
+const AUDIO_FORMATS = new Set(['mp3','m4a','webm','aac','flac','opus','ogg','wav']);
+
+const resolveFormat = (type, quality = '720p') => {
+    if (type === 'audio') {
+        const q = quality.toLowerCase();
+        return AUDIO_FORMATS.has(q) ? q : 'mp3';
+    }
+    // video: extraer número o '4k'
+    const q = quality.toString().toLowerCase().replace('p', '');
+    const valid = ['144','240','360','480','720','1080','1440','4k'];
+    return valid.includes(q) ? q : '720';
+};
+
+// ── Fetch con reintentos ──────────────────────────────────────────────────────
+
 const fetchBuffer = async (url, headers = {}, retries = 3) => {
     for (let i = 0; i <= retries; i++) {
         try {
@@ -128,13 +147,18 @@ const fetchBuffer = async (url, headers = {}, retries = 3) => {
     }
 };
 
+// ── FFmpeg ────────────────────────────────────────────────────────────────────
+
 const ffmpegAudio = async (rawFile, outFile) => {
     try {
         await execPromise(
             `ffmpeg -y -i "${rawFile}" -vn -c:a libmp3lame -q:a 2 -write_xing 1 "${outFile}"`,
             { timeout: FFMPEG_TIMEOUT }
         );
-    } catch { fs.copyFileSync(rawFile, outFile); }
+    } catch (e) {
+        console.warn(`[ffmpeg] audio falló, copiando raw: ${e.message}`);
+        fs.copyFileSync(rawFile, outFile);
+    }
 };
 
 const ffmpegVideo = async (rawFile, outFile) => {
@@ -143,16 +167,19 @@ const ffmpegVideo = async (rawFile, outFile) => {
             `ffmpeg -y -i "${rawFile}" -c copy -movflags +faststart "${outFile}"`,
             { timeout: FFMPEG_TIMEOUT }
         );
-    } catch { fs.copyFileSync(rawFile, outFile); }
+    } catch (e) {
+        console.warn(`[ffmpeg] video falló, copiando raw: ${e.message}`);
+        fs.copyFileSync(rawFile, outFile);
+    }
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Provider: loader.to (video + audio) ──────────────────────────────────────
-const providerLoaderTo = async (ytUrl, type) => {
+// ── Provider: loader.to ───────────────────────────────────────────────────────
+
+const providerLoaderTo = async (ytUrl, fmt) => {
     const BASE    = 'https://loader.to';
     const REFERER = `${BASE}/`;
-    const fmt     = type === 'audio' ? 'mp3' : '720';
 
     const startRes = await fetch(
         `${BASE}/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}&api=dfcb6d76f2f2a12c83a82a4de3bc75e8`,
@@ -162,29 +189,55 @@ const providerLoaderTo = async (ytUrl, type) => {
     const start = await startRes.json();
     if (!start.id) throw new Error(`loader.to: sin id — ${JSON.stringify(start).slice(0, 100)}`);
 
-    // 40 intentos × 4s = hasta ~2 min 40s esperando la conversión
-    for (let i = 0; i < 40; i++) {
-        await new Promise(r => setTimeout(r, 4_000));
+    console.log(`[loader.to] id=${start.id} fmt=${fmt}`);
+
+    // Polling adaptativo: 1s×5 → 2s×5 → 3s×5 → 5s×∞  (tope 3 min)
+    const intervals = [
+        ...Array(5).fill(1_000),
+        ...Array(5).fill(2_000),
+        ...Array(5).fill(3_000),
+    ];
+    const getDelay = (i) => intervals[i] ?? 5_000;
+    const MAX_MS   = 3 * 60 * 1_000;
+    const t0       = Date.now();
+    let   lastPct  = -1;
+
+    for (let i = 0; Date.now() - t0 < MAX_MS; i++) {
+        await new Promise(r => setTimeout(r, getDelay(i)));
+
         const progRes = await fetch(
             `${BASE}/ajax/progress.php?id=${start.id}`,
             { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(20_000) }
         );
         if (!progRes.ok) continue;
+
         const prog = await progRes.json();
-        if (prog.download_url) return await fetchBuffer(prog.download_url, { Referer: REFERER });
+
+        // Loguear progreso solo cuando cambia
+        const pct = prog.progress ?? prog.percent ?? null;
+        if (pct !== null && pct !== lastPct) {
+            console.log(`[loader.to] progreso: ${pct}%`);
+            lastPct = pct;
+        }
+
+        if (prog.download_url) {
+            console.log(`[loader.to] ✅ listo en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+            return await fetchBuffer(prog.download_url, { Referer: REFERER });
+        }
         if (prog.success === false) throw new Error('loader.to: falló la conversión');
     }
-    throw new Error('loader.to: timeout esperando conversión');
+    throw new Error('loader.to: timeout esperando conversión (3 min)');
 };
 
-// ── Provider único ────────────────────────────────────────────────────────────
+// ── Descarga ──────────────────────────────────────────────────────────────────
 
-const downloadViaProviders = async (ytUrl, type) => {
-    console.log('[yt-providers] Intentando loader.to…');
+const downloadViaProviders = async (ytUrl, type, quality) => {
+    const fmt = resolveFormat(type, quality);
+    console.log(`[yt-providers] loader.to — fmt=${fmt}`);
     try {
-        const buf = await providerLoaderTo(ytUrl, type);
+        const buf = await providerLoaderTo(ytUrl, fmt);
         if (buf && buf.length > 10_000) {
-            console.log(`[yt-providers] ✅ loader.to — ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+            console.log(`[yt-providers] ✅ ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
             return { buffer: buf, provider: 'loader.to' };
         }
         throw new Error(`Buffer muy pequeño (${buf?.length ?? 0} bytes)`);
@@ -197,13 +250,14 @@ const downloadViaProviders = async (ytUrl, type) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const ytDownload = async (url, type = 'audio', opts = {}) => {
-    const { quality = '360p' } = opts;
+    const { quality = type === 'audio' ? 'mp3' : '720p' } = opts;
     const stamp    = Date.now();
     const tmpBase  = path.join(TMP_DIR, `ytdl_${stamp}`);
     const tmpFiles = [];
     const cleanup  = () =>
         tmpFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
 
+    // Lanzar búsqueda de metadata en paralelo con la descarga
     const metaPromise = ytInfo(url).catch(() => ({}));
 
     try {
@@ -227,7 +281,8 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
             tmpFiles.push(rawFile, outFile);
             fs.writeFileSync(rawFile, rawBuf);
             await ffmpegVideo(rawFile, outFile);
-            const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0 ? outFile : rawFile;
+            const finalFile = fs.existsSync(outFile) && fs.statSync(outFile).size > 0
+                ? outFile : rawFile;
             const [buffer, seconds, meta] = await Promise.all([
                 Promise.resolve(fs.readFileSync(finalFile)),
                 ffprobeDuration(finalFile),
@@ -239,4 +294,4 @@ export const ytDownload = async (url, type = 'audio', opts = {}) => {
         cleanup();
     }
 };
-            
+        
