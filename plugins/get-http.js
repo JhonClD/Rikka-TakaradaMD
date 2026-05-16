@@ -1,3 +1,4 @@
+
 import { format } from 'util';
 
 const MIME_MAP = {
@@ -36,6 +37,14 @@ const PROXIES = [
   (url) => `https://proxy.cors.sh/${url}`
 ];
 
+const MAX_VIDEO_SIZE = 60 * 1024 * 1024; // 60 MB
+
+// Palabras clave que identifican un botón/enlace de descarga
+const DOWNLOAD_KEYWORDS = /descargar|download|baixar|télécharger|scarica|unduh|pobierz|скачать/i;
+
+// Extensiones de archivo descargable
+const DOWNLOADABLE_EXT = /\.(mp4|webm|mkv|avi|mov|mp3|ogg|wav|aac|flac|m4a|pdf|zip|rar|7z|apk|exe|doc|docx|xls|xlsx|png|jpg|jpeg|gif|webp)(\?.*)?$/i;
+
 async function fetchWithBypass(url) {
   for (const headers of HEADERS) {
     try {
@@ -52,6 +61,98 @@ async function fetchWithBypass(url) {
   throw new Error('No se pudo acceder al recurso');
 }
 
+/**
+ * Busca en el HTML un enlace de descarga directo.
+ * Estrategia (en orden de prioridad):
+ *  1. <a download href="..."> con extensión descargable
+ *  2. <a href="..."> cuyo texto/atributos coincidan con palabras clave de descarga
+ *  3. Cualquier href con extensión descargable
+ *  4. <source src="..."> o <video src="...">
+ */
+function extractDownloadUrl(html, baseUrl) {
+  const base = new URL(baseUrl);
+
+  const toAbsolute = (href) => {
+    if (!href) return null;
+    try {
+      return new URL(href, base).href;
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. <a download href="..."> con extensión descargable
+  const dlAttrRe = /<a[^>]+download[^>]*href=["']([^"']+)["'][^>]*>|<a[^>]+href=["']([^"']+)["'][^>]*download[^>]*>/gi;
+  let m;
+  while ((m = dlAttrRe.exec(html)) !== null) {
+    const href = m[1] || m[2];
+    if (href && DOWNLOADABLE_EXT.test(href)) {
+      const abs = toAbsolute(href);
+      if (abs) return abs;
+    }
+  }
+
+  // 2. <a href="..."> con texto o atributos que indiquen descarga + extensión descargable
+  const linkRe = /<a([^>]*)>([\s\S]*?)<\/a>/gi;
+  while ((m = linkRe.exec(html)) !== null) {
+    const attrs = m[1];
+    const inner = m[2].replace(/<[^>]+>/g, '').trim();
+    const hrefMatch = attrs.match(/href=["']([^"']+)["']/i);
+    if (!hrefMatch) continue;
+    const href = hrefMatch[1];
+    if ((DOWNLOAD_KEYWORDS.test(inner) || DOWNLOAD_KEYWORDS.test(attrs)) && DOWNLOADABLE_EXT.test(href)) {
+      const abs = toAbsolute(href);
+      if (abs) return abs;
+    }
+  }
+
+  // 3. Cualquier href con extensión descargable
+  const anyHrefRe = /href=["']([^"']+)["']/gi;
+  while ((m = anyHrefRe.exec(html)) !== null) {
+    if (DOWNLOADABLE_EXT.test(m[1])) {
+      const abs = toAbsolute(m[1]);
+      if (abs) return abs;
+    }
+  }
+
+  // 4. <source src> / <video src>
+  const srcRe = /(?:source|video)[^>]+src=["']([^"']+)["']/gi;
+  while ((m = srcRe.exec(html)) !== null) {
+    const abs = toAbsolute(m[1]);
+    if (abs) return abs;
+  }
+
+  return null;
+}
+
+async function sendMedia(conn, m, buf, contentType, fileName) {
+  const urlExt = fileName.split('.').pop()?.toLowerCase();
+  const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) || EXT_MAP[urlExt] || null;
+
+  if (mediaType === 'video') {
+    const isMp4 = urlExt === 'mp4' || contentType.includes('video/mp4');
+    if (isMp4 && buf.length > MAX_VIDEO_SIZE) {
+      const mkvName = fileName.replace(/\.mp4$/i, '.mkv');
+      return conn.sendMessage(m.chat, { document: buf, mimetype: 'application/x-matroska', fileName: mkvName.endsWith('.mkv') ? mkvName : mkvName + '.mkv' }, { quoted: m });
+    }
+    return conn.sendMessage(m.chat, { video: buf, mimetype: contentType, fileName }, { quoted: m });
+  }
+  if (mediaType === 'image') {
+    return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
+  }
+  if (mediaType === 'audio') {
+    return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
+  }
+  if (/text|json/.test(contentType) && buf.length < 100000) {
+    let txt = buf.toString();
+    if (contentType.includes('json')) {
+      try { txt = format(JSON.parse(txt)); } catch {}
+    }
+    return m.reply(txt.slice(0, 50000));
+  }
+  return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
+}
+
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) throw `❌ Uso: ${usedPrefix + command} <url>`;
   if (!/^https?:\/\//.test(text)) throw '❌ URL inválida';
@@ -62,38 +163,32 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     const urlObj = new URL(text);
     let ext = urlObj.pathname.split('.').pop()?.toLowerCase();
     let fileName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
-    
+
+    // ── Si la respuesta es HTML, buscar botón/enlace de descarga ──
+    if (contentType.includes('text/html')) {
+      const html = await res.text();
+      const downloadUrl = extractDownloadUrl(html, text);
+
+      if (!downloadUrl) throw 'No se encontró ningún enlace de descarga en la página.';
+
+      await m.reply(`🔍 Enlace de descarga encontrado:\n${downloadUrl}\n\n⏬ Descargando...`);
+
+      const dlRes = await fetchWithBypass(downloadUrl);
+      contentType = dlRes.headers.get('content-type') || '';
+      const dlUrlObj = new URL(downloadUrl);
+      ext = dlUrlObj.pathname.split('.').pop()?.toLowerCase();
+      fileName = dlUrlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
+
+      const buf = Buffer.from(await dlRes.arrayBuffer());
+      return sendMedia(conn, m, buf, contentType, fileName);
+    }
+
+    // ── URL directa a un archivo ──
     const buf = Buffer.from(await res.arrayBuffer());
-    const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) || EXT_MAP[ext] || null;
+    return sendMedia(conn, m, buf, contentType, fileName);
 
-    if (mediaType === 'video' && (ext === 'mp4' || contentType.includes('video/mp4'))) {
-      contentType = 'video/x-matroska';
-      fileName = fileName.replace(/\.mp4$/i, '.mkv');
-      if (!fileName.endsWith('.mkv')) fileName += '.mkv';
-      return conn.sendMessage(m.chat, { document: buf, mimetype: 'application/x-matroska', fileName }, { quoted: m });
-    }
-
-    if (mediaType === 'video') {
-      return conn.sendMessage(m.chat, { video: buf, mimetype: contentType, fileName }, { quoted: m });
-    }
-    if (mediaType === 'image') {
-      return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
-    }
-    if (mediaType === 'audio') {
-      return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
-    }
-
-    if (/text|json/.test(contentType) && buf.length < 100000) {
-      let txt = buf.toString();
-      if (contentType.includes('json')) {
-        try { txt = format(JSON.parse(txt)); } catch {}
-      }
-      return m.reply(txt.slice(0, 50000));
-    }
-
-    return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
   } catch (e) {
-    throw `❌ Error: ${e.message}`;
+    throw `❌ Error: ${e.message || e}`;
   }
 };
 
@@ -102,4 +197,4 @@ handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
 
 export default handler;
-        
+                               
