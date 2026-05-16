@@ -1,20 +1,28 @@
-import { uploadWithFallback } from '../src/libraries/uploadImage.js'
+import { uploadWithFallback, uploadToServiceByIndex, SERVICES } from '../src/libraries/uploadImage.js'
 
-const handler = async (m, { conn, text, command }) => {
+const handler = async (m, { conn, text, usedPrefix, command }) => {
   const q = m.quoted ? m.quoted : m
   let buffer
   let mime = (q.msg || q).mimetype || ''
   let originalName = (q.msg || q).fileName || ''
 
-  let preferredService = null
-  const cmd = command.toLowerCase()
-  
-  if (cmd.endsWith('2')) {
-    preferredService = 'catbox'
-  } else if (cmd.endsWith('3')) {
-    preferredService = 'quax'
-  } else if (cmd.endsWith('4')) {
-    preferredService = 'tmpfiles'
+  const numMatch = command.match(/(\d+)$/)
+  const serviceIndex = numMatch ? parseInt(numMatch[1]) - 1 : null
+  const isListCmd = /^(tourllist|urllist)$/i.test(command)
+
+  if (isListCmd) {
+    const lista = SERVICES.map((s, i) =>
+      `  *${i + 1}.* ${s.name} → \`${usedPrefix}tourl${i + 1}\``
+    ).join('\n')
+    return m.reply(
+      `✧˚ ༘ ⋆｡˚ *SERVIDORES DISPONIBLES*\n\n${lista}\n\n` +
+      `˗ˏˋ Sin número = auto (fallback) ˎˊ˗`
+    )
+  }
+
+  if (serviceIndex !== null && (serviceIndex < 0 || serviceIndex >= SERVICES.length)) {
+    const max = SERVICES.length
+    return m.reply(`❌ Servidor inválido. Usa del 1 al ${max}.\nVer lista: ${usedPrefix}tourllist`)
   }
 
   if (text) {
@@ -34,10 +42,18 @@ const handler = async (m, { conn, text, command }) => {
 
   if (!buffer || buffer.length === 0) throw '❌ No se encontró contenido.'
 
-  const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
+  const serverLabel = serviceIndex !== null
+    ? `al servidor *${SERVICES[serviceIndex].name}*`
+    : `(auto fallback)`
+
+  const { key: statusKey } = await m.reply(`✧˚ ༘ ⋆｡˚ Subiendo ${serverLabel}...`)
 
   try {
-    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime, preferredService)
+    const result = serviceIndex !== null
+      ? await uploadToServiceByIndex(buffer, serviceIndex, 'txt', mime)
+      : await uploadWithFallback(buffer, 'txt', mime)
+
+    const { url: link, service, finalMime, finalExt } = result
 
     const urlObj = (() => { try { return new URL(link) } catch { return null } })()
     const displayFileName = originalName || urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
@@ -58,13 +74,13 @@ const handler = async (m, { conn, text, command }) => {
       edit: statusKey
     }, { quoted: m })
   } catch (e) {
-    await conn.sendMessage(m.chat, { text: `❌ Error: ${e.message}`, edit: statusKey }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: `❌ Error: ${e?.message || e}`, edit: statusKey }, { quoted: m })
   }
 }
 
-handler.help = ['tourl', 'tourl2', 'tourl3', 'tourl4']
+handler.help = ['tourl', 'tourl[1-13]', 'tourllist']
 handler.tags = ['converter']
-handler.command = /^(upload|uploader|tourl)[2-4]?$/i
+handler.command = /^(upload|uploader|tourl\d*|tourllist|urllist)$/i
 
 export default handler
-      
+    
