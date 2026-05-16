@@ -33,7 +33,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
         const fileName = `${title.replace(/[\\/:*?"<>|]/g, '')}.${ext}`;
 
         await socket.sendMessage(m.chat,
-            { text: buildInfoCard(meta, type) }, { quoted: m });
+            { text: buildInfoCard(meta, type), linkPreview: null }, { quoted: m });
 
         if (isAudio) {
             await socket.sendMessage(m.chat, {
