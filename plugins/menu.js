@@ -2,6 +2,7 @@ import moment from 'moment-timezone';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createCanvas, loadImage } from 'canvas';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
@@ -38,6 +39,19 @@ function getBannerBuffer() {
   if (existsSync(BANNER_PATH)) return readFileSync(BANNER_PATH);
   if (global.bannerBuffer) return global.bannerBuffer;
   return global.imagen1 || null;
+}
+
+// Redimensiona a 300x150 JPEG usando canvas (nativo en el bot)
+async function makeThumbnail(buffer) {
+  try {
+    const img = await loadImage(buffer);
+    const canvas = createCanvas(300, 150);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, 300, 150);
+    return canvas.toBuffer('image/jpeg', { quality: 0.7 });
+  } catch {
+    return null;
+  }
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
@@ -83,16 +97,9 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  const bannerBuffer = getBannerBuffer();
+  const rawBanner = getBannerBuffer();
+  const thumb = rawBanner ? await makeThumbnail(rawBanner) : null;
 
-  // Mensaje 1: imagen del banner
-  if (bannerBuffer) {
-    await conn.sendMessage(m.chat, {
-      image: bannerBuffer,
-    }, { quoted: m });
-  }
-
-  // Mensaje 2: texto del menú con el link del creador
   await conn.sendMessage(m.chat, {
     text: menuTexto,
     contextInfo: {
@@ -102,7 +109,8 @@ const handler = async (m, { conn, usedPrefix }) => {
         sourceUrl: botLink,
         mediaType: 1,
         renderLargerThumbnail: true,
-        showAdAttribution: false
+        showAdAttribution: false,
+        ...(thumb ? { jpegThumbnail: thumb.toString('base64') } : {})
       }
     }
   }, { quoted: m });
