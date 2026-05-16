@@ -1,5 +1,14 @@
 import { fileTypeFromBuffer } from 'file-type';
 
+const TIMEOUT_MS = 120_000;
+
+function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
+}
+
 function makeBlob(buffer, mime) {
   return new Blob([buffer], { type: mime });
 }
@@ -8,13 +17,13 @@ async function uploadToGraph(buffer, ext, mime) {
   const isText = mime.startsWith('text/') || ['txt', 'html', 'md'].includes(ext)
     || ['application/json', 'application/javascript'].includes(mime);
   if (isText) {
-    const accRes = await fetch('https://api.graph.org/createAccount?short_name=Manus&author_name=ManusBot');
+    const accRes = await fetchWithTimeout('https://api.graph.org/createAccount?short_name=Manus&author_name=ManusBot');
     const accJson = await accRes.json();
     if (accJson.ok) {
       const token = accJson.result.access_token;
       const nodes = buffer.toString('utf-8').split('\n')
         .map(line => ({ tag: 'p', children: [line.trim() || { tag: 'br' }] }));
-      const pageRes = await fetch('https://api.graph.org/createPage', {
+      const pageRes = await fetchWithTimeout('https://api.graph.org/createPage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ access_token: token, title: 'WhatsApp Content', content: JSON.stringify(nodes) })
@@ -25,7 +34,7 @@ async function uploadToGraph(buffer, ext, mime) {
   }
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://graph.org/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://graph.org/upload', { method: 'POST', body: form });
   const json = await res.json();
   const url = json?.[0]?.src;
   if (url) return `https://graph.org${url}`;
@@ -36,7 +45,7 @@ async function uploadToCatbox(buffer, ext, mime) {
   const form = new FormData();
   form.append('reqtype', 'fileupload');
   form.append('fileToUpload', makeBlob(buffer, mime), `tmp.${ext}`);
-  const res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://catbox.moe/user/api.php', { method: 'POST', body: form });
   if (!res.ok) throw new Error(`Catbox HTTP ${res.status}`);
   const url = await res.text();
   if (url.startsWith('http')) return url.trim();
@@ -46,7 +55,7 @@ async function uploadToCatbox(buffer, ext, mime) {
 async function uploadToQuax(buffer, ext, mime) {
   const form = new FormData();
   form.append('files[]', makeBlob(buffer, mime), `tmp.${ext}`);
-  const res = await fetch('https://qu.ax/upload.php', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://qu.ax/upload.php', { method: 'POST', body: form });
   const json = await res.json();
   if (json?.success && json?.files?.[0]?.url) return json.files[0].url;
   throw new Error('Qu.ax no devolvió respuesta exitosa');
@@ -55,7 +64,7 @@ async function uploadToQuax(buffer, ext, mime) {
 async function uploadToDixLat(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch(`https://cdn.dix.lat/upload/tmp?ttl=86400`, {
+  const res = await fetchWithTimeout(`https://cdn.dix.lat/upload/tmp?ttl=86400`, {
     method: 'POST', body: form,
     headers: { 'User-Agent': 'Drive-Client-Temp' }
   });
@@ -67,7 +76,7 @@ async function uploadToDixLat(buffer, ext, mime) {
 async function uploadTo0x0(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://0x0.st', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://0x0.st', { method: 'POST', body: form });
   if (res.ok) {
     const url = (await res.text()).trim();
     if (url.startsWith('http')) return url;
@@ -78,7 +87,7 @@ async function uploadTo0x0(buffer, ext, mime) {
 async function uploadToUguu(buffer, ext, mime) {
   const form = new FormData();
   form.append('files[]', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://uguu.se/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://uguu.se/upload', { method: 'POST', body: form });
   const json = await res.json();
   const url = json?.files?.[0]?.url;
   if (url) return url;
@@ -89,7 +98,7 @@ async function uploadToLitterbox(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
   form.append('time', '12h');
-  const res = await fetch('https://litterbox.catbox.moe/resources/php/upload.php', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://litterbox.catbox.moe/resources/php/upload.php', { method: 'POST', body: form });
   const url = await res.text();
   if (url.startsWith('http')) return url;
   throw new Error('Litterbox falló');
@@ -98,7 +107,7 @@ async function uploadToLitterbox(buffer, ext, mime) {
 async function uploadToFileDitch(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://new.fileditch.com/upload.php', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://new.fileditch.com/upload.php', { method: 'POST', body: form });
   const json = await res.json();
   if (json?.success) return json.url;
   throw new Error('FileDitch falló');
@@ -107,7 +116,7 @@ async function uploadToFileDitch(buffer, ext, mime) {
 async function uploadToImgbox(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://imgbox.com/upload/process', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://imgbox.com/upload/process', { method: 'POST', body: form });
   const json = await res.json();
   const url = json?.files?.[0]?.url;
   if (url) return url;
@@ -117,7 +126,7 @@ async function uploadToImgbox(buffer, ext, mime) {
 async function uploadToEvoGB(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://evogb.win/api/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://evogb.win/api/upload', { method: 'POST', body: form });
   const json = await res.json();
   if (json?.success) return json.url;
   throw new Error('EvoGB falló');
@@ -128,7 +137,7 @@ async function uploadToImgBB(buffer, ext, mime) {
   const form = new FormData();
   form.append('image', makeBlob(buffer, mime), `file.${ext}`);
   form.append('key', apiKey);
-  const res = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://api.imgbb.com/1/upload', { method: 'POST', body: form });
   const json = await res.json();
   if (json?.success) return json.data.url;
   throw new Error('ImgBB falló');
@@ -137,7 +146,7 @@ async function uploadToImgBB(buffer, ext, mime) {
 async function uploadToPicsur(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://picsur.org/api/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://picsur.org/api/upload', { method: 'POST', body: form });
   const json = await res.json();
   if (json?.status === 'success') return json.url;
   throw new Error('Picsur falló');
@@ -146,7 +155,7 @@ async function uploadToPicsur(buffer, ext, mime) {
 async function uploadToPostimages(buffer, ext, mime) {
   const form = new FormData();
   form.append('file', makeBlob(buffer, mime), `file.${ext}`);
-  const res = await fetch('https://postimages.org/upload', { method: 'POST', body: form });
+  const res = await fetchWithTimeout('https://postimages.org/upload', { method: 'POST', body: form });
   const text = await res.text();
   const match = text.match(/"url":"(.*?)"/);
   if (match?.[1]) return match[1].replace(/\\/g, '');
@@ -161,7 +170,6 @@ export async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   const services = [
     { name: 'Graph.org',  fn: () => uploadToGraph(buffer, ext, mime)     },
     { name: 'Catbox',     fn: () => uploadToCatbox(buffer, ext, mime)     },
-    { name: 'Qu.ax',      fn: () => uploadToQuax(buffer, ext, mime)       },
     { name: 'Dix.lat',    fn: () => uploadToDixLat(buffer, ext, mime)     },
     { name: '0x0.st',     fn: () => uploadTo0x0(buffer, ext, mime)        },
     { name: 'Uguu.se',    fn: () => uploadToUguu(buffer, ext, mime)       },
@@ -172,6 +180,7 @@ export async function uploadWithFallback(buffer, forcedExt, forcedMime) {
     { name: 'ImgBB',      fn: () => uploadToImgBB(buffer, ext, mime)      },
     { name: 'Picsur',     fn: () => uploadToPicsur(buffer, ext, mime)     },
     { name: 'Postimages', fn: () => uploadToPostimages(buffer, ext, mime) },
+    { name: 'Qu.ax',      fn: () => uploadToQuax(buffer, ext, mime)       },
   ];
 
   for (const { name, fn } of services) {
