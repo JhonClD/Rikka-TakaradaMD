@@ -11,7 +11,6 @@ const CONFIG = {
   timezone: 'America/Lima',
   headerEmoji: '🎐',
   lineSeparator: '❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼',
-  footerText: '𝘙𝘪𝘬𝘬𝘢',
   catBox: {
     top: '┌─────── " *{title}* {icon} „ ━━━━━━━┓',
     mid: '└➤ ✎~',
@@ -29,22 +28,17 @@ const more = String.fromCharCode(8206);
 const readMore = more.repeat(4001);
 
 function clockString(ms) {
-  const d = Math.floor(ms / 86400000);
-  const h = Math.floor(ms / 3600000) % 24;
+  const d  = Math.floor(ms / 86400000);
+  const h  = Math.floor(ms / 3600000) % 24;
   const mm = Math.floor(ms / 60000) % 60;
-  const s = Math.floor(ms / 1000) % 60;
+  const s  = Math.floor(ms / 1000) % 60;
   return `${d}d ${h}h ${mm}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
 }
 
-/**
- * Obtiene el banner como Buffer.
- * Prioridad: 1) global.bannerBuffer (actualizado en caliente por setbanner)
- *            2) src/banner.jpg en disco
- *            3) global.imagen1 (menu.png por defecto)
- */
+/** Devuelve el banner como Buffer (local > global.bannerBuffer > menu.png) */
 function getBannerBuffer() {
-  if (global.bannerBuffer) return global.bannerBuffer;
   if (existsSync(BANNER_PATH)) return readFileSync(BANNER_PATH);
+  if (global.bannerBuffer)     return global.bannerBuffer;
   return global.imagen1 || null;
 }
 
@@ -91,14 +85,12 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
+  // Banner como base64 para el thumbnail (todo en UN solo mensaje)
   const bannerBuffer = getBannerBuffer();
+  const jpegThumbnail = bannerBuffer
+    ? bannerBuffer.toString('base64')
+    : undefined;
 
-  if (bannerBuffer) {
-    // Enviar imagen del banner primero
-    await conn.sendMessage(m.chat, { image: bannerBuffer }, { quoted: m });
-  }
-
-  // Enviar el texto del menú
   await conn.sendMessage(m.chat, {
     text: menuTexto,
     contextInfo: {
@@ -107,8 +99,9 @@ const handler = async (m, { conn, usedPrefix }) => {
         body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
         sourceUrl: botLink,
         mediaType: 1,
-        renderLargerThumbnail: false,
-        showAdAttribution: false
+        renderLargerThumbnail: true,
+        showAdAttribution: false,
+        ...(jpegThumbnail ? { jpegThumbnail } : {})
       }
     }
   }, { quoted: m });
@@ -119,3 +112,4 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
+
