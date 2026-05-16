@@ -1,14 +1,5 @@
 import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@whiskeysockets/baileys';
-
-const formatViews = (n) => {
-    if (!n && n !== 0) return 'N/A';
-    const num = parseInt(n, 10);
-    if (isNaN(num)) return String(n);
-    if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(1)}B`;
-    if (num >= 1_000_000)     return `${(num / 1_000_000).toFixed(1)}M`;
-    if (num >= 1_000)         return `${(num / 1_000).toFixed(1)}K`;
-    return num.toLocaleString('es');
-};
+import { formatViews } from '../src/libraries/youtube-scraper.js';
 
 const handler = async (m, { conn, text, usedPrefix: px }) => {
     if (!text) return conn.reply(m.chat,
@@ -25,7 +16,7 @@ const handler = async (m, { conn, text, usedPrefix: px }) => {
         return conn.reply(m.chat, '❌ *No se encontraron videos.*', m);
     }
 
-    const device = getDevice(m.key.id);
+    const device   = getDevice(m.key.id);
     const isMobile = device !== 'desktop' && device !== 'web';
 
     if (isMobile) {
@@ -112,7 +103,6 @@ const handler = async (m, { conn, text, usedPrefix: px }) => {
 };
 
 handler.before = async function (m, { conn }) {
-    // Extrae el selectedId tanto de nativeFlow (WA nuevo) como de listResponse (WA viejo)
     let selectedId = null;
 
     const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage;
@@ -130,16 +120,15 @@ handler.before = async function (m, { conn }) {
     if (!selectedId) return false;
 
     const cleanId = selectedId.trim();
-    const match = cleanId.match(/^[.!#/]?(ytmp3|ytmp4)\s+(https?:\/\/.+)$/i);
+    const match   = cleanId.match(/^[.!#/]?(ytmp3|ytmp4)\s+(https?:\/\/.+)$/i);
     if (!match) return false;
 
-    const command    = match[1].toLowerCase();   // "ytmp3" o "ytmp4"
+    const command    = match[1].toLowerCase();
     const url        = match[2].trim();
     const usedPrefix = cleanId[0];
 
-    // Importar y ejecutar el plugin correspondiente directamente
     try {
-        const mod = await import('./ytdl.js');
+        const mod    = await import('./ytdl.js');
         const target = mod.default || mod;
         await target.call(conn, m, { conn, text: url, usedPrefix, command, args: [url] });
     } catch (e) {
@@ -155,4 +144,4 @@ handler.tags    = ['search'];
 handler.command = /^(ytsearch|yts|searchyt|buscaryt|videosearch|audiosearch)$/i;
 
 export default handler;
-        
+            
