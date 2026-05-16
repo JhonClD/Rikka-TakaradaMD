@@ -1,27 +1,40 @@
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import fetch from 'node-fetch';
+import FormData from 'form-data';
 
-// Ruta donde se guarda el banner (dentro del proyecto)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
+const IMGBB_KEY = 'cc54a2ff43201cff8ecca0f3336e850d';
 
-// Asegura que la carpeta src/ exista
 if (!existsSync(join(__dirname, '../src'))) {
   mkdirSync(join(__dirname, '../src'), { recursive: true });
+}
+
+async function uploadToImgBB(buffer) {
+  const form = new FormData();
+  form.append('image', buffer.toString('base64'));
+  const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, {
+    method: 'POST',
+    body: form,
+    headers: form.getHeaders()
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(JSON.stringify(json));
+  return json.data.url; // URL permanente
 }
 
 const handler = async (m, { conn, isOwner }) => {
   if (!isOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.');
 
-  // Verificar que haya una imagen
   const q = m.quoted ? m.quoted : m;
   const mime = (q.msg || q).mimetype || q.mediaType || '';
   if (!q || !/image\/(png|jpe?g|gif)/.test(mime)) {
     return m.reply('꒰ ✗ ꒱ Responde a una *imagen* (jpg/png/gif) para cambiar el banner.');
   }
 
-  await m.reply(global.wait || '_[ ⏳ ] Guardando banner..._');
+  await m.reply(global.wait || '_[ ⏳ ] Subiendo banner..._');
 
   let buffer;
   try {
@@ -32,21 +45,26 @@ const handler = async (m, { conn, isOwner }) => {
   if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
 
   try {
-    // Guardar imagen en disco
+    // Subir a ImgBB (URL permanente)
+    const url = await uploadToImgBB(buffer);
+
+    // Guardar también localmente como respaldo
     writeFileSync(BANNER_PATH, buffer);
-
-    // Guardar en la base de datos como flag para que el menú sepa que existe
-    const settings = global.db.data.settings[conn.user.jid] || {};
-    settings.banner = 'local'; // el menú leerá el archivo del disco
-    global.db.data.settings[conn.user.jid] = settings;
-
-    // Actualizar global.imagen1 en caliente (sin reiniciar el bot)
     global.bannerBuffer = buffer;
 
-    await m.reply('╰─► ✰ *Banner actualizado permanentemente* ♡ ༉‧₊˚✧\n\n_La imagen está guardada en el servidor y no expirará._');
+    // Guardar URL en la base de datos
+    const settings = global.db.data.settings[conn.user.jid] || {};
+    settings.banner = url;
+    global.db.data.settings[conn.user.jid] = settings;
+
+    await m.reply(
+      `╰─► ✰ *Banner actualizado permanentemente* ♡ ༉‧₊˚✧\n\n` +
+      `🔗 URL:\n${url}\n\n` +
+      `_El menú ya usará esta imagen automáticamente._`
+    );
   } catch (e) {
     console.error('[setbanner]', e);
-    return m.reply(`꒰ ✗ ꒱ Error al guardar el banner:\n\`${e.message}\``);
+    return m.reply(`꒰ ✗ ꒱ Error al subir a ImgBB:\n\`${e.message}\``);
   }
 };
 
