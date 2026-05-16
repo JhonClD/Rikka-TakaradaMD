@@ -7,7 +7,7 @@ const CONFIG = {
   lineSeparator: '❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼',
   footerText: '𝘙𝘪𝘬𝘬𝘢',
   catBox: {
-    top: '┌─────── “ *{title}* {icon} „ ━━━━━━━┓',
+    top: '┌─────── " *{title}* {icon} „ ━━━━━━━┓',
     mid: '└➤ ✎~',
     bottom: '┗━━━━━━━━━━━━━━━━━━━━━━━┛',
     cmdPrefix: '── ⟡ ˙ '
@@ -15,7 +15,7 @@ const CONFIG = {
 };
 
 const CAT_ICONS = {
-  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', ai: '🤖', 
+  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', ai: '🤖',
   sticker: '🎭', game: '🎮', group: '🏯', owner: '💎', info: '💫', otros: '📌'
 };
 
@@ -32,12 +32,11 @@ function clockString(ms) {
 
 const handler = async (m, { conn, usedPrefix }) => {
   const settings = global.db.data.settings[conn.user.jid] || {};
-  
-  // Datos dinámicos de tus archivos
-  const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ'; 
+
+  const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
   const botNameShort = settings.namebot || '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
   const botLink = settings.link || 'https://github.com/JhonCID';
-  const bannerUrl = settings.banner || 'https://uguu.se/default.jpg'; 
+  const bannerUrl = settings.banner || null;
 
   const pushname = m.pushName || 'Usuario';
   const date = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
@@ -55,7 +54,7 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const totalCmds = Object.values(categories).flat().length;
 
-  // Construcción del menú (Tu estilo anterior)
+  // Construcción del menú de texto
   let menuTexto = `━━━━━❒「 \`${botNameLong}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
   menuTexto += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
   menuTexto += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
@@ -76,20 +75,22 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  // SOLUCIÓN: Enviar como texto con contextInfo para evitar la doble imagen
-  await conn.sendMessage(m.chat, {
-    text: menuTexto,
-    contextInfo: {
-      externalAdReply: {
-        title: `${botNameLong}`,
-        body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
-        thumbnailUrl: bannerUrl,
-        sourceUrl: botLink,
-        mediaType: 1,
-        renderLargerThumbnail: true, // Esto muestra la imagen grande una sola vez
-        showAdAttribution: false
-      }
+  // PASO 1: Si hay banner guardado, enviarlo como imagen primero
+  if (bannerUrl) {
+    try {
+      await conn.sendMessage(m.chat, {
+        image: { url: bannerUrl },
+        caption: `✨ *${botNameLong}*\n🔗 ${botLink}`
+      }, { quoted: m });
+    } catch (e) {
+      // Si la imagen falla, continúa sin ella
+      console.log('⚠️ [menu] No se pudo enviar el banner:', e.message);
     }
+  }
+
+  // PASO 2: Enviar el texto del menú (funciona en TODOS los WhatsApp)
+  await conn.sendMessage(m.chat, {
+    text: menuTexto
   }, { quoted: m });
 };
 
