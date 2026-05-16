@@ -1,10 +1,21 @@
 import { uploadWithFallback } from '../src/libraries/uploadImage.js'
 
-const handler = async (m, { conn, text }) => {
+const handler = async (m, { conn, text, command }) => {
   const q = m.quoted ? m.quoted : m
   let buffer
   let mime = (q.msg || q).mimetype || ''
   let originalName = (q.msg || q).fileName || ''
+
+  let preferredService = null
+  const cmd = command.toLowerCase()
+  
+  if (cmd.endsWith('2')) {
+    preferredService = 'catbox'
+  } else if (cmd.endsWith('3')) {
+    preferredService = 'quax'
+  } else if (cmd.endsWith('4')) {
+    preferredService = 'tmpfiles'
+  }
 
   if (text) {
     buffer = Buffer.from(text, 'utf-8')
@@ -26,7 +37,7 @@ const handler = async (m, { conn, text }) => {
   const { key: statusKey } = await m.reply('✧˚ ༘ ⋆｡˚ Subiendo...')
 
   try {
-    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime)
+    const { url: link, service, finalMime, finalExt } = await uploadWithFallback(buffer, 'txt', mime, preferredService)
 
     const urlObj = (() => { try { return new URL(link) } catch { return null } })()
     const displayFileName = originalName || urlObj?.pathname?.split('/').pop() || `file_${Date.now()}.${finalExt}`
@@ -51,8 +62,9 @@ const handler = async (m, { conn, text }) => {
   }
 }
 
-handler.help = ['tourl']
+handler.help = ['tourl', 'tourl2', 'tourl3', 'tourl4']
 handler.tags = ['converter']
-handler.command = /^(upload|uploader|tourl)$/i
+handler.command = /^(upload|uploader|tourl)[2-4]?$/i
 
 export default handler
+      
