@@ -1,8 +1,8 @@
-import os from 'os';
 import moment from 'moment-timezone';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import Jimp from 'jimp';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
@@ -35,11 +35,25 @@ function clockString(ms) {
   return `${d}d ${h}h ${mm}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
 }
 
-/** Devuelve el banner como Buffer (local > global.bannerBuffer > menu.png) */
+/** Devuelve el banner como Buffer crudo */
 function getBannerBuffer() {
   if (existsSync(BANNER_PATH)) return readFileSync(BANNER_PATH);
   if (global.bannerBuffer)     return global.bannerBuffer;
   return global.imagen1 || null;
+}
+
+/**
+ * Comprime el buffer a JPEG 300x300 máx, calidad 60
+ * WhatsApp necesita thumbnail pequeño o lo ignora/muestra negro
+ */
+async function makeThumbnail(buffer) {
+  try {
+    const img = await Jimp.read(buffer);
+    img.cover(300, 300);
+    return await img.getBufferAsync(Jimp.MIME_JPEG);
+  } catch {
+    return buffer; // si falla, devuelve original
+  }
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
@@ -85,11 +99,13 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  // Banner como base64 para el thumbnail (todo en UN solo mensaje)
-  const bannerBuffer = getBannerBuffer();
-  const jpegThumbnail = bannerBuffer
-    ? bannerBuffer.toString('base64')
-    : undefined;
+  // Preparar thumbnail comprimido
+  const rawBanner = getBannerBuffer();
+  let jpegThumbnail;
+  if (rawBanner) {
+    const thumb = await makeThumbnail(rawBanner);
+    jpegThumbnail = thumb.toString('base64');
+  }
 
   await conn.sendMessage(m.chat, {
     text: menuTexto,
@@ -112,4 +128,3 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
-
