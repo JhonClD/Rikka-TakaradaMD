@@ -32,8 +32,16 @@ const handler = async (m, { conn, client, args, text, command }) => {
         const ext      = isAudio ? 'mp3' : 'mp4';
         const fileName = `${title.replace(/[\\/:*?"<>|]/g, '')}.${ext}`;
 
-        await socket.sendMessage(m.chat,
-            { text: buildInfoCard(meta, type), linkPreview: null }, { quoted: m });
+        // Tarjeta con miniatura (igual que Play.js)
+        if (meta?.thumbnail) {
+            await socket.sendMessage(m.chat, {
+                image:   { url: meta.thumbnail },
+                caption: buildInfoCard(meta, type),
+            }, { quoted: m });
+        } else {
+            await socket.sendMessage(m.chat,
+                { text: buildInfoCard(meta, type), linkPreview: null }, { quoted: m });
+        }
 
         if (isAudio) {
             await socket.sendMessage(m.chat, {
