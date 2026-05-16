@@ -11,7 +11,8 @@ const EXT_MAP = {
   mp4: 'video', webm: 'video', avi: 'video', mkv: 'video', mov: 'video', wmv: 'video', '3gp': 'video',
   jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', bmp: 'image', svg: 'image', ico: 'image', avif: 'image',
   mp3: 'audio', ogg: 'audio', wav: 'audio', aac: 'audio', flac: 'audio', amr: 'audio', m4a: 'audio',
-  pdf: 'document', zip: 'document', rar: 'document', '7z': 'document', doc: 'document', docx: 'document', xls: 'document', xlsx: 'document', txt: 'document', json: 'document', exe: 'document', apk: 'document'
+  pdf: 'document', zip: 'document', rar: 'document', '7z': 'document', doc: 'document', docx: 'document',
+  xls: 'document', xlsx: 'document', txt: 'document', json: 'document', exe: 'document', apk: 'document'
 };
 
 const HEADERS = [
@@ -30,33 +31,45 @@ const HEADERS = [
   }
 ];
 
-const PROXIES = [
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url) => `https://proxy.cors.sh/${url}`
-];
+const MAX_VIDEO_SIZE = 60 * 1024 * 1024;
 
-const MAX_VIDEO_SIZE = 60 * 1024 * 1024; // 60 MB
+const react = (conn, m, emoji) =>
+  conn.sendMessage(m.chat, { react: { text: emoji, key: m.key } });
 
 async function fetchWithBypass(url) {
-  for (const headers of HEADERS) {
+  const TIMEOUT = 15000;
+
+  const makeFetch = (target, headers = {}) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), TIMEOUT);
+    return fetch(target, { headers, redirect: 'follow', signal: ctrl.signal })
+      .finally(() => clearTimeout(t));
+  };
+
+  const attempts = [
+    () => makeFetch(url, HEADERS[0]),
+    () => makeFetch(url, HEADERS[1]),
+    () => makeFetch(`https://corsproxy.io/?${encodeURIComponent(url)}`),
+    () => makeFetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`),
+  ];
+
+  for (const attempt of attempts) {
     try {
-      const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(15000) });
-      if (res.ok && ![403, 503, 429].includes(res.status)) return res;
-    } catch {}
-  }
-  for (const proxyFn of PROXIES) {
-    try {
-      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(20000) });
+      const res = await attempt();
       if (res.ok) return res;
-    } catch {}
+    } catch (e) {
+      if (e.name === 'AbortError') continue;
+    }
   }
-  throw new Error('No se pudo acceder al recurso');
+
+  throw new Error('No se pudo acceder al recurso tras múltiples intentos');
 }
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) throw `❌ Uso: ${usedPrefix + command} <url>`;
   if (!/^https?:\/\//.test(text)) throw '❌ URL inválida';
+
+  await react(conn, m, '⏳');
 
   try {
     const res = await fetchWithBypass(text);
@@ -65,6 +78,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     let ext = urlObj.pathname.split('.').pop()?.toLowerCase();
     let fileName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext || 'bin'}`;
 
+    await react(conn, m, '📥');
+
     const buf = Buffer.from(await res.arrayBuffer());
     const mediaType = Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) || EXT_MAP[ext] || null;
 
@@ -72,28 +87,28 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       const isMp4 = ext === 'mp4' || contentType.includes('video/mp4');
       if (isMp4 && buf.length > MAX_VIDEO_SIZE) {
         const mkvName = fileName.replace(/\.mp4$/i, '.mkv');
-        return conn.sendMessage(m.chat, { document: buf, mimetype: 'application/x-matroska', fileName: mkvName.endsWith('.mkv') ? mkvName : mkvName + '.mkv' }, { quoted: m });
+        await conn.sendMessage(m.chat, { document: buf, mimetype: 'application/x-matroska', fileName: mkvName.endsWith('.mkv') ? mkvName : mkvName + '.mkv' }, { quoted: m });
+      } else {
+        await conn.sendMessage(m.chat, { video: buf, mimetype: contentType, fileName }, { quoted: m });
       }
-      return conn.sendMessage(m.chat, { video: buf, mimetype: contentType, fileName }, { quoted: m });
-    }
-
-    if (mediaType === 'image') {
-      return conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
-    }
-    if (mediaType === 'audio') {
-      return conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
-    }
-
-    if (/text|json/.test(contentType) && buf.length < 100000) {
+    } else if (mediaType === 'image') {
+      await conn.sendMessage(m.chat, { image: buf, mimetype: contentType || 'image/jpeg' }, { quoted: m });
+    } else if (mediaType === 'audio') {
+      await conn.sendMessage(m.chat, { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false }, { quoted: m });
+    } else if (/text|json/.test(contentType) && buf.length < 100000) {
       let txt = buf.toString();
       if (contentType.includes('json')) {
         try { txt = format(JSON.parse(txt)); } catch {}
       }
-      return m.reply(txt.slice(0, 50000));
+      await m.reply(txt.slice(0, 50000));
+    } else {
+      await conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
     }
 
-    return conn.sendMessage(m.chat, { document: buf, mimetype: contentType || 'application/octet-stream', fileName }, { quoted: m });
+    await react(conn, m, '✅');
+
   } catch (e) {
+    await react(conn, m, '❌');
     throw `❌ Error: ${e.message}`;
   }
 };
