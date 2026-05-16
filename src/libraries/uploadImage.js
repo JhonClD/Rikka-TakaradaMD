@@ -162,30 +162,30 @@ async function uploadToPostimages(buffer, ext, mime) {
   throw new Error('Postimages falló');
 }
 
+export const SERVICES = [
+  { name: 'Graph.org',  fn: (b, e, m) => uploadToGraph(b, e, m)     },
+  { name: 'Catbox',     fn: (b, e, m) => uploadToCatbox(b, e, m)     },
+  { name: 'Dix.lat',    fn: (b, e, m) => uploadToDixLat(b, e, m)     },
+  { name: '0x0.st',     fn: (b, e, m) => uploadTo0x0(b, e, m)        },
+  { name: 'Uguu.se',    fn: (b, e, m) => uploadToUguu(b, e, m)       },
+  { name: 'Litterbox',  fn: (b, e, m) => uploadToLitterbox(b, e, m)  },
+  { name: 'FileDitch',  fn: (b, e, m) => uploadToFileDitch(b, e, m)  },
+  { name: 'Imgbox',     fn: (b, e, m) => uploadToImgbox(b, e, m)     },
+  { name: 'EvoGB',      fn: (b, e, m) => uploadToEvoGB(b, e, m)      },
+  { name: 'ImgBB',      fn: (b, e, m) => uploadToImgBB(b, e, m)      },
+  { name: 'Picsur',     fn: (b, e, m) => uploadToPicsur(b, e, m)     },
+  { name: 'Postimages', fn: (b, e, m) => uploadToPostimages(b, e, m) },
+  { name: 'Qu.ax',      fn: (b, e, m) => uploadToQuax(b, e, m)       },
+];
+
 export async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   const ft = await fileTypeFromBuffer(buffer);
   const ext = ft?.ext || forcedExt || 'txt';
   const mime = ft?.mime || forcedMime || 'text/plain';
 
-  const services = [
-    { name: 'Graph.org',  fn: () => uploadToGraph(buffer, ext, mime)     },
-    { name: 'Catbox',     fn: () => uploadToCatbox(buffer, ext, mime)     },
-    { name: 'Dix.lat',    fn: () => uploadToDixLat(buffer, ext, mime)     },
-    { name: '0x0.st',     fn: () => uploadTo0x0(buffer, ext, mime)        },
-    { name: 'Uguu.se',    fn: () => uploadToUguu(buffer, ext, mime)       },
-    { name: 'Litterbox',  fn: () => uploadToLitterbox(buffer, ext, mime)  },
-    { name: 'FileDitch',  fn: () => uploadToFileDitch(buffer, ext, mime)  },
-    { name: 'Imgbox',     fn: () => uploadToImgbox(buffer, ext, mime)     },
-    { name: 'EvoGB',      fn: () => uploadToEvoGB(buffer, ext, mime)      },
-    { name: 'ImgBB',      fn: () => uploadToImgBB(buffer, ext, mime)      },
-    { name: 'Picsur',     fn: () => uploadToPicsur(buffer, ext, mime)     },
-    { name: 'Postimages', fn: () => uploadToPostimages(buffer, ext, mime) },
-    { name: 'Qu.ax',      fn: () => uploadToQuax(buffer, ext, mime)       },
-  ];
-
-  for (const { name, fn } of services) {
+  for (const { name, fn } of SERVICES) {
     try {
-      const url = await fn();
+      const url = await fn(buffer, ext, mime);
       if (url) {
         console.log(`✅ [uploadImage] Subido en ${name}`);
         return { url, service: name, finalMime: mime, finalExt: ext };
@@ -196,6 +196,16 @@ export async function uploadWithFallback(buffer, forcedExt, forcedMime) {
   }
 
   throw new Error('Todos los servidores fallaron');
+}
+
+export async function uploadToServiceByIndex(buffer, index, forcedExt, forcedMime) {
+  const ft = await fileTypeFromBuffer(buffer);
+  const ext = ft?.ext || forcedExt || 'txt';
+  const mime = ft?.mime || forcedMime || 'text/plain';
+  const service = SERVICES[index];
+  if (!service) throw new Error(`Servidor #${index + 1} no existe`);
+  const url = await service.fn(buffer, ext, mime);
+  return { url, service: service.name, finalMime: mime, finalExt: ext };
 }
 
 export default async (buffer) => {
@@ -212,4 +222,3 @@ export default async (buffer) => {
     }
   }
 };
-    
