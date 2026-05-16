@@ -19,7 +19,7 @@ const EXT_MAP = {
   xls: 'document', xlsx: 'document', txt: 'document', json: 'document', exe: 'document', apk: 'document'
 };
 
-const MAX_VIDEO_SIZE = 60 * 1024 * 1024; // 60 MB
+const MAX_VIDEO_SIZE = 60 * 1024 * 1024;
 
 const react = (conn, m, emoji) =>
   conn.sendMessage(m.chat, { react: { text: emoji, key: m.key } });
@@ -52,8 +52,8 @@ async function fetchBuffer(url) {
         const res = await axios.get(proxy(url), {
           headers,
           responseType: 'arraybuffer',
-          timeout: 30000, // 30 segundos (más margen para archivos grandes)
-          maxContentLength: 200 * 1024 * 1024, // 200 MB máximo
+          timeout: 30000,
+          maxContentLength: 200 * 1024 * 1024,
           validateStatus: (s) => s >= 200 && s < 300,
         });
 
@@ -63,7 +63,6 @@ async function fetchBuffer(url) {
         };
       } catch (e) {
         lastError = e;
-        // continua al siguiente intento
       }
     }
   }
@@ -86,11 +85,14 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     const rawName = urlObj.pathname.split('/').pop() || `file_${Date.now()}.${ext}`;
     const fileName = decodeURIComponent(rawName);
 
-    // Determinar tipo: primero por MIME, luego por extensión
-    const mediaType =
+    let mediaType =
       Object.keys(MIME_MAP).find(k => MIME_MAP[k].some(t => contentType.includes(t))) ||
       EXT_MAP[ext] ||
       null;
+
+    if (!mediaType || contentType.includes('octet-stream') || contentType.includes('binary')) {
+      mediaType = EXT_MAP[ext] || null;
+    }
 
     await react(conn, m, '📥');
 
@@ -104,29 +106,34 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         );
       } else {
         await conn.sendMessage(m.chat,
-          { video: buf, mimetype: contentType || 'video/mp4', fileName },
+          { video: buf, mimetype: contentType.includes('video/') ? contentType : 'video/mp4', fileName },
           { quoted: m }
         );
       }
     } else if (mediaType === 'image') {
-      // .webp puede ser un sticker animado; se envía como imagen normal
-      await conn.sendMessage(m.chat,
-        { image: buf, mimetype: contentType.includes('image/') ? contentType : 'image/jpeg' },
-        { quoted: m }
-      );
+      if (ext === 'webp' || contentType.includes('image/webp')) {
+        await conn.sendMessage(m.chat,
+          { sticker: buf },
+          { quoted: m }
+        );
+      } else {
+        await conn.sendMessage(m.chat,
+          { image: buf, mimetype: contentType.includes('image/') ? contentType : 'image/jpeg' },
+          { quoted: m }
+        );
+      }
     } else if (mediaType === 'audio') {
       await conn.sendMessage(m.chat,
-        { audio: buf, mimetype: contentType || 'audio/mpeg', ptt: false },
+        { audio: buf, mimetype: contentType.includes('audio/') ? contentType : 'audio/mpeg', ptt: false },
         { quoted: m }
       );
     } else if (/text|json/.test(contentType) && buf.length < 100000) {
       let txt = buf.toString();
       if (contentType.includes('json')) {
-        try { txt = format(JSON.parse(txt)); } catch { /* déjalo como texto */ }
+        try { txt = format(JSON.parse(txt)); } catch { }
       }
       await m.reply(txt.slice(0, 50000));
     } else {
-      // Tipo desconocido → documento genérico
       await conn.sendMessage(m.chat,
         { document: buf, mimetype: contentType || 'application/octet-stream', fileName },
         { quoted: m }
@@ -146,4 +153,4 @@ handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
 
 export default handler;
-          
+      
