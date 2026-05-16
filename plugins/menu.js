@@ -85,36 +85,27 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const bannerBuffer = getBannerBuffer();
 
+  // Mensaje 1: imagen del banner
   if (bannerBuffer) {
     await conn.sendMessage(m.chat, {
       image: bannerBuffer,
-      caption: menuTexto,
-      contextInfo: {
-        externalAdReply: {
-          title: botNameLong,
-          body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
-          sourceUrl: botLink,
-          mediaType: 1,
-          renderLargerThumbnail: false,
-          showAdAttribution: false
-        }
-      }
-    }, { quoted: m });
-  } else {
-    await conn.sendMessage(m.chat, {
-      text: menuTexto,
-      contextInfo: {
-        externalAdReply: {
-          title: botNameLong,
-          body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
-          sourceUrl: botLink,
-          mediaType: 1,
-          renderLargerThumbnail: true,
-          showAdAttribution: false
-        }
-      }
     }, { quoted: m });
   }
+
+  // Mensaje 2: texto del menú con el link del creador
+  await conn.sendMessage(m.chat, {
+    text: menuTexto,
+    contextInfo: {
+      externalAdReply: {
+        title: botNameLong,
+        body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
+        sourceUrl: botLink,
+        mediaType: 1,
+        renderLargerThumbnail: true,
+        showAdAttribution: false
+      }
+    }
+  }, { quoted: m });
 };
 
 handler.help    = ['menu'];
@@ -122,4 +113,3 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
-
