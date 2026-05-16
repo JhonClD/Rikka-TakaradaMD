@@ -85,15 +85,35 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const bannerBuffer = getBannerBuffer();
 
-  // Enviar banner como imagen aparte (mensaje 1)
   if (bannerBuffer) {
     await conn.sendMessage(m.chat, {
       image: bannerBuffer,
       caption: menuTexto,
+      contextInfo: {
+        externalAdReply: {
+          title: botNameLong,
+          body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
+          sourceUrl: botLink,
+          mediaType: 1,
+          renderLargerThumbnail: false,
+          showAdAttribution: false
+        }
+      }
     }, { quoted: m });
   } else {
-    // Sin banner: enviar solo texto
-    await conn.sendMessage(m.chat, { text: menuTexto }, { quoted: m });
+    await conn.sendMessage(m.chat, {
+      text: menuTexto,
+      contextInfo: {
+        externalAdReply: {
+          title: botNameLong,
+          body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
+          sourceUrl: botLink,
+          mediaType: 1,
+          renderLargerThumbnail: true,
+          showAdAttribution: false
+        }
+      }
+    }, { quoted: m });
   }
 };
 
