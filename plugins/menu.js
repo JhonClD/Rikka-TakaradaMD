@@ -1,5 +1,11 @@
 import os from 'os';
 import moment from 'moment-timezone';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const BANNER_PATH = join(__dirname, '../src/banner.jpg');
 
 const CONFIG = {
   timezone: 'America/Lima',
@@ -25,28 +31,39 @@ const readMore = more.repeat(4001);
 function clockString(ms) {
   const d = Math.floor(ms / 86400000);
   const h = Math.floor(ms / 3600000) % 24;
-  const m = Math.floor(ms / 60000) % 60;
+  const mm = Math.floor(ms / 60000) % 60;
   const s = Math.floor(ms / 1000) % 60;
-  return `${d}d ${h}h ${m}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
+  return `${d}d ${h}h ${mm}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
+}
+
+/**
+ * Obtiene el banner como Buffer.
+ * Prioridad: 1) global.bannerBuffer (actualizado en caliente por setbanner)
+ *            2) src/banner.jpg en disco
+ *            3) global.imagen1 (menu.png por defecto)
+ */
+function getBannerBuffer() {
+  if (global.bannerBuffer) return global.bannerBuffer;
+  if (existsSync(BANNER_PATH)) return readFileSync(BANNER_PATH);
+  return global.imagen1 || null;
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
   const settings = global.db.data.settings[conn.user.jid] || {};
 
-  const botNameLong = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
+  const botNameLong  = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
   const botNameShort = settings.namebot || '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
-  const botLink = settings.link || 'https://github.com/JhonCID';
-  const bannerUrl = settings.banner || null;
+  const botLink      = settings.link    || 'https://github.com/JhonCID';
 
-  const pushname = m.pushName || 'Usuario';
-  const date = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
-  const uptime = clockString(process.uptime() * 1000);
+  const pushname  = m.pushName || 'Usuario';
+  const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
+  const uptime    = clockString(process.uptime() * 1000);
   const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
 
   const categories = {};
   Object.values(global.plugins || {}).forEach(plugin => {
     if (!plugin?.command) return;
-    const tag = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
+    const tag  = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
     const help = Array.isArray(plugin.help) ? plugin.help : [plugin.help];
     if (!categories[tag]) categories[tag] = [];
     categories[tag].push(...help.filter(Boolean));
@@ -54,7 +71,6 @@ const handler = async (m, { conn, usedPrefix }) => {
 
   const totalCmds = Object.values(categories).flat().length;
 
-  // Construcción del menú de texto
   let menuTexto = `━━━━━❒「 \`${botNameLong}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
   menuTexto += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
   menuTexto += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
@@ -75,27 +91,31 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  // PASO 1: Si hay banner guardado, enviarlo como imagen primero
-  if (bannerUrl) {
-    try {
-      await conn.sendMessage(m.chat, {
-        image: { url: bannerUrl },
-        caption: `✨ *${botNameLong}*\n🔗 ${botLink}`
-      }, { quoted: m });
-    } catch (e) {
-      // Si la imagen falla, continúa sin ella
-      console.log('⚠️ [menu] No se pudo enviar el banner:', e.message);
-    }
+  const bannerBuffer = getBannerBuffer();
+
+  if (bannerBuffer) {
+    // Enviar imagen del banner primero
+    await conn.sendMessage(m.chat, { image: bannerBuffer }, { quoted: m });
   }
 
-  // PASO 2: Enviar el texto del menú (funciona en TODOS los WhatsApp)
+  // Enviar el texto del menú
   await conn.sendMessage(m.chat, {
-    text: menuTexto
+    text: menuTexto,
+    contextInfo: {
+      externalAdReply: {
+        title: botNameLong,
+        body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
+        sourceUrl: botLink,
+        mediaType: 1,
+        renderLargerThumbnail: false,
+        showAdAttribution: false
+      }
+    }
   }, { quoted: m });
 };
 
-handler.help = ['menu'];
-handler.tags = ['info'];
+handler.help    = ['menu'];
+handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
