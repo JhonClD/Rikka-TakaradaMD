@@ -1,4 +1,4 @@
-import { uploadWithFallback, uploadToServiceByIndex, SERVICES } from '../src/libraries/uploadImage.js'
+import { uploadWithFallback, uploadToServiceByIndex, SERVICES } from '../src/libraries/uploadFile.js'
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const q = m.quoted ? m.quoted : m
@@ -83,4 +83,3 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl\d*|tourllist|urllist)$/i
 
 export default handler
-    
