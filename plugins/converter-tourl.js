@@ -46,7 +46,20 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     ? `al servidor *${SERVICES[serviceIndex].name}*`
     : `(auto fallback)`
 
-  const { key: statusKey } = await m.reply(`✧˚ ༘ ⋆｡˚ Subiendo ${serverLabel}...`)
+  let statusKey = null
+  try { ({ key: statusKey } = await m.reply(`✧˚ ༘ ⋆｡˚ Subiendo ${serverLabel}...`)) } catch { }
+
+  const safeSend = async (payload) => {
+    try {
+      if (statusKey) {
+        await conn.sendMessage(m.chat, { ...payload, edit: statusKey }, { quoted: m })
+      } else {
+        await conn.sendMessage(m.chat, payload, { quoted: m })
+      }
+    } catch (sendErr) {
+      console.log(`⚠️ [tourl] No se pudo enviar resultado: ${sendErr?.message}`)
+    }
+  }
 
   try {
     const result = serviceIndex !== null
@@ -62,7 +75,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       ? `${(buffer.length / 1024 / 1024).toFixed(2)} MB`
       : `${(buffer.length / 1024).toFixed(1)} KB`
 
-    await conn.sendMessage(m.chat, {
+    await safeSend({
       text: `ִֶָ𓂃 ࣪˖ ִֶָ *FILE UPLOADED* ִֶָ𓂃 ࣪˖ ִֶָ\n\n` +
             `⭑ ₊ ⭒ *NAME* ꩜ \`${displayFileName}\`\n` +
             `⭑ ₊ ⭒ *SIZE* ꩜ \`${pesoTxt}\`\n` +
@@ -70,11 +83,10 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
             `⭑ ₊ ⭒ *SERVER* ꩜ \`${service}\`\n\n` +
             `˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗ *URL*\n` +
             `${link}\n\n` +
-            `✧˚ ༘ ⋆｡˚ 𖥔 ࣪˖`,
-      edit: statusKey
-    }, { quoted: m })
+            `✧˚ ༘ ⋆｡˚ 𖥔 ࣪˖`
+    })
   } catch (e) {
-    await conn.sendMessage(m.chat, { text: `❌ Error: ${e?.message || e}`, edit: statusKey }, { quoted: m })
+    await safeSend({ text: `❌ Error: ${e?.message || e}` })
   }
 }
 
@@ -83,3 +95,4 @@ handler.tags = ['converter']
 handler.command = /^(upload|uploader|tourl\d*|tourllist|urllist)$/i
 
 export default handler
+      
