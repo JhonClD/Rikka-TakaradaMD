@@ -1,5 +1,19 @@
 const { getDevice } = await import('@whiskeysockets/baileys')
 
+
+const IMG_URL = 'https://files.evogb.win/j3nZpp.jpg'
+
+async function fetchImageBuffer (url) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+    },
+  })
+  if (!res.ok) throw new Error('fetch image failed: ' + res.status)
+  return Buffer.from(await res.arrayBuffer())
+}
+
 const handler = async (m, { conn, args }) => {
   const device = getDevice(m.key.id)
   const isMobile = device !== 'desktop' && device !== 'web'
@@ -24,7 +38,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        image: { url: 'https://i.imgur.com/placeholder.jpg' },
+        image: await fetchImageBuffer(IMG_URL),
         caption:
           '╔══ *quick_reply Test* ══╗\n' +
           '║ Botones de respuesta rápida.\n' +
@@ -45,7 +59,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *cta_copy Test* ══╗\n' +
           '║ Botón para copiar texto\n' +
           '║ al portapapeles del usuario.\n' +
@@ -63,7 +77,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *cta_url Test* ══╗\n' +
           '║ Botón que abre una URL.\n' +
           '║ useWebview = abre dentro de WA.\n' +
@@ -81,7 +95,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *cta_call Test* ══╗\n' +
           '║ Botón que inicia una llamada\n' +
           '║ telefónica al número indicado.\n' +
@@ -98,7 +112,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *single_select Test* ══╗\n' +
           '║ Lista desplegable con secciones.\n' +
           '║ Elige una opción del menú.\n' +
@@ -136,7 +150,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *limited_time_offer Test* ══╗\n' +
           '║ 🎁 ¡Oferta especial por tiempo limitado!\n' +
           '║ Esta oferta expira en *24 horas*.\n' +
@@ -157,7 +171,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        caption:
+        text:
           '╔══ *bottom_sheet Test* ══╗\n' +
           '║ Este botón abre una hoja inferior.\n' +
           '║ Similar a single_select pero modal.\n' +
@@ -200,7 +214,7 @@ const handler = async (m, { conn, args }) => {
         footer,
         cards: [
           {
-            image:   { url: 'https://i.imgur.com/placeholder.jpg' },
+            image: await fetchImageBuffer(IMG_URL),
             caption: '🃏 *Tarjeta 1* — Acción',
             footer:  'card footer 1',
             nativeFlow: [
@@ -209,7 +223,7 @@ const handler = async (m, { conn, args }) => {
             ],
           },
           {
-            image:   { url: 'https://i.imgur.com/placeholder.jpg' },
+            image: await fetchImageBuffer(IMG_URL),
             caption: '🃏 *Tarjeta 2* — Oferta',
             footer:  'card footer 2',
             offerText:       '🏷️ Solo hoy',
@@ -219,7 +233,7 @@ const handler = async (m, { conn, args }) => {
             ],
           },
           {
-            image:   { url: 'https://i.imgur.com/placeholder.jpg' },
+            image: await fetchImageBuffer(IMG_URL),
             caption: '🃏 *Tarjeta 3* — Lista',
             footer:  'card footer 3',
             optionText:  '📋 Opciones',
@@ -250,13 +264,13 @@ const handler = async (m, { conn, args }) => {
       m.chat,
       {
         title:   '📄 Hydrated Template',
+        image: await fetchImageBuffer(IMG_URL),
         caption:
           '╔══ *templateButtons Test* ══╗\n' +
           '║ Botones de plantilla hidratada.\n' +
           '║ Funcionan en Web y Móvil.\n' +
           '╚═══════════════════════╝',
         footer,
-        image: { url: 'https://i.imgur.com/placeholder.jpg' },
         templateButtons: [
           { text: '⚡ Acción rápida',  id:   '.testbtn resultado template-btn'      },
           { text: '🌐 GitHub',          url:  'https://github.com'                   },
@@ -300,7 +314,7 @@ const handler = async (m, { conn, args }) => {
     await conn.sendMessage(
       m.chat,
       {
-        image: { url: 'https://i.imgur.com/placeholder.jpg' },
+        image: await fetchImageBuffer(IMG_URL),
         caption:
           '╔══ *NativeFlow — Test completo* ══╗\n' +
           '║ 1️⃣  quick_reply    → botón con id\n' +
@@ -431,4 +445,4 @@ handler.before = async function (m, { conn }) {
 }
 
 export default handler
-                   
+  
