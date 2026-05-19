@@ -57,7 +57,15 @@ export function extractMessageText(m) {
     msg.buttonsResponseMessage?.selectedButtonId ||
     msg.templateButtonReplyMessage?.selectedId ||
     msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
-    msg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
+    (() => {
+      // Extraer el rowId del paramsJson en lugar del JSON crudo
+      const _pj = msg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
+      if (_pj) {
+        try { const _p = JSON.parse(_pj); if (typeof _p?.id === 'string') return _p.id } catch (_) {}
+        return _pj // fallback: devolver el raw si no es JSON parseable
+      }
+      return ''
+    })() ||
     ''
   );
 }
@@ -115,4 +123,5 @@ export function isEphemeralMessage(m) {
 
 export function isEditedMessage(m) {
   return getMessageType(m) === 'editedMessage' || getMessageType(m) === 'protocolMessage';
-}
+      }
+                                               
