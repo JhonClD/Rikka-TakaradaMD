@@ -1,19 +1,6 @@
-/*
- ╔══════════════════════════════════════════════════════════════╗
- ║  Plugin: test-nativeflow.js                                  ║
- ║  Prueba de todos los tipos de botones NativeFlow             ║
- ║  Comandos:                                                   ║
- ║    .testbtn single     → single_select (lista desplegable)   ║
- ║    .testbtn offer      → limited_time_offer (oferta/cuenta)  ║
- ║    .testbtn sheet      → bottom_sheet (hoja inferior)        ║
- ║    .testbtn all        → los 3 botones en un solo mensaje    ║
- ╚══════════════════════════════════════════════════════════════╝
-*/
-
 const { proto, generateWAMessageFromContent, getDevice } =
   await import('@whiskeysockets/baileys')
 
-// ─── Helper: enviar interactiveMessage envuelto en viewOnce ───────────────────
 async function sendInteractive(conn, chat, interactiveMessage, quotedMsg) {
   const msg = generateWAMessageFromContent(
     chat,
@@ -31,8 +18,6 @@ async function sendInteractive(conn, chat, interactiveMessage, quotedMsg) {
   return msg
 }
 
-// ─── 1. SINGLE_SELECT ─────────────────────────────────────────────────────────
-// Lista desplegable clásica. El usuario elige una opción de una sección.
 async function sendSingleSelect(conn, m) {
   const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
     header: proto.Message.InteractiveMessage.Header.fromObject({
@@ -104,11 +89,8 @@ async function sendSingleSelect(conn, m) {
   return sendInteractive(conn, m.chat, interactiveMessage, m)
 }
 
-// ─── 2. LIMITED_TIME_OFFER ────────────────────────────────────────────────────
-// Botón de oferta con cuenta regresiva (timestamp Unix en segundos).
-// WhatsApp muestra un contador visible si la fecha aún no expiró.
 async function sendLimitedTimeOffer(conn, m) {
-  // Oferta válida por 24 horas desde ahora
+
   const expirationMs = Date.now() + 24 * 60 * 60 * 1000
   const expirationSec = Math.floor(expirationMs / 1000)
 
@@ -128,11 +110,11 @@ async function sendLimitedTimeOffer(conn, m) {
         {
           name: 'limited_time_offer',
           buttonParamsJson: JSON.stringify({
-            // title: texto visible en el botón
+
             title:              '🛒 Reclamar oferta ahora',
-            // expiration_time_ms: timestamp en MILISEGUNDOS
+
             expiration_time_ms:  expirationMs,
-            // has_expiration:     activa la cuenta regresiva visual
+
             has_expiration:      true,
           }),
         },
@@ -144,9 +126,6 @@ async function sendLimitedTimeOffer(conn, m) {
   return sendInteractive(conn, m.chat, interactiveMessage, m)
 }
 
-// ─── 3. BOTTOM_SHEET ──────────────────────────────────────────────────────────
-// Abre una hoja emergente desde abajo con una lista de opciones.
-// Diferencia vs single_select: el diseño visual es tipo "modal sheet".
 async function sendBottomSheet(conn, m) {
   const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
     header: proto.Message.InteractiveMessage.Header.fromObject({
@@ -164,7 +143,7 @@ async function sendBottomSheet(conn, m) {
         {
           name: 'bottom_sheet',
           buttonParamsJson: JSON.stringify({
-            // title: texto del botón que abre la hoja
+
             title: '📂 Abrir opciones',
             sections: [
               {
@@ -213,9 +192,8 @@ async function sendBottomSheet(conn, m) {
   return sendInteractive(conn, m.chat, interactiveMessage, m)
 }
 
-// ─── 4. ALL: los 3 botones en un solo mensaje ──────────────────────────────────
 async function sendAllButtons(conn, m) {
-  const expirationMs = Date.now() + 6 * 60 * 60 * 1000 // 6 horas
+  const expirationMs = Date.now() + 6 * 60 * 60 * 1000
 
   const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
     header: proto.Message.InteractiveMessage.Header.fromObject({
@@ -236,7 +214,7 @@ async function sendAllButtons(conn, m) {
     }),
     nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
       buttons: [
-        // Botón 1: single_select
+
         {
           name: 'single_select',
           buttonParamsJson: JSON.stringify({
@@ -253,7 +231,7 @@ async function sendAllButtons(conn, m) {
             ],
           }),
         },
-        // Botón 2: limited_time_offer
+
         {
           name: 'limited_time_offer',
           buttonParamsJson: JSON.stringify({
@@ -262,7 +240,7 @@ async function sendAllButtons(conn, m) {
             has_expiration:      true,
           }),
         },
-        // Botón 3: bottom_sheet
+
         {
           name: 'bottom_sheet',
           buttonParamsJson: JSON.stringify({
@@ -286,48 +264,12 @@ async function sendAllButtons(conn, m) {
   return sendInteractive(conn, m.chat, interactiveMessage, m)
 }
 
-// ─── HANDLER.BEFORE — captura respuestas de single_select y bottom_sheet ──────
-handler.before = async function (m, { conn }) {
-  const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
-  if (!nativeFlow) return false
-
-  try {
-    const params    = JSON.parse(nativeFlow.paramsJson || '{}')
-    const selectedId = params?.id || null
-    if (!selectedId) return false
-
-    // Solo procesar IDs que pertenecen a este plugin
-    if (!selectedId.startsWith('.testbtn resultado')) return false
-
-    const eleccion = selectedId.replace('.testbtn resultado ', '')
-    await conn.sendMessage(
-      m.chat,
-      {
-        text:
-          `✅ *NativeFlow — respuesta recibida*\n\n` +
-          `👤 *Usuario:* @${m.sender.split('@')[0]}\n` +
-          `🆔 *Row ID:* \`${selectedId}\`\n` +
-          `🎯 *Selección:* *${eleccion}*\n\n` +
-          `_El handler.before interceptó correctamente el interactiveResponseMessage._`,
-        mentions: [m.sender],
-      },
-      { quoted: m }
-    )
-    return true // consumir el evento
-  } catch (e) {
-    console.error('[testbtn before]', e.message)
-    return false
-  }
-}
-
-// ─── COMANDO PRINCIPAL ─────────────────────────────────────────────────────────
 const handler = async (m, { conn, args }) => {
   const device = getDevice(m.key.id)
   const isMobile = device !== 'desktop' && device !== 'web'
 
   const sub = (args[0] || '').toLowerCase()
 
-  // Aviso si el usuario está en desktop/web (los botones no se renderizan)
   if (!isMobile) {
     await conn.sendMessage(
       m.chat,
@@ -351,7 +293,7 @@ const handler = async (m, { conn, args }) => {
   } else if (sub === 'all' || sub === 'a') {
     await sendAllButtons(conn, m)
   } else if (sub === 'resultado') {
-    // Respuesta de fallback texto plano (desktop)
+
     const eleccion = args.slice(1).join(' ')
     await conn.sendMessage(
       m.chat,
@@ -382,5 +324,37 @@ handler.tags    = ['owner', 'test']
 handler.help    = ['testbtn <single|offer|sheet|all>']
 handler.description = 'Prueba de botones NativeFlow: single_select, limited_time_offer, bottom_sheet'
 
+handler.before = async function (m, { conn }) {
+  const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
+  if (!nativeFlow) return false
+
+  try {
+    const params     = JSON.parse(nativeFlow.paramsJson || '{}')
+    const selectedId = params?.id || null
+    if (!selectedId) return false
+
+    if (!selectedId.startsWith('.testbtn resultado')) return false
+
+    const eleccion = selectedId.replace('.testbtn resultado ', '')
+    await conn.sendMessage(
+      m.chat,
+      {
+        text:
+          `✅ *NativeFlow — respuesta recibida*\n\n` +
+          `👤 *Usuario:* @${m.sender.split('@')[0]}\n` +
+          `🆔 *Row ID:* \`${selectedId}\`\n` +
+          `🎯 *Selección:* *${eleccion}*\n\n` +
+          `_handler.before interceptó correctamente el interactiveResponseMessage._`,
+        mentions: [m.sender],
+      },
+      { quoted: m }
+    )
+    return true
+  } catch (e) {
+    console.error('[testbtn before]', e.message)
+    return false
+  }
+}
+
 export default handler
-     
+                   
