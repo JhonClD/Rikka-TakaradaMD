@@ -710,6 +710,40 @@ export async function handler(chatUpdate) {
       m.text = '';
     }
 
+    // ── NativeFlow normalization ──────────────────────────────────────────────
+    // interactiveResponseMessage llega con mtype='interactiveResponseMessage'.
+    // Baileys NO expone su contenido en m.text automáticamente, así que lo
+    // normalizamos aquí para que plugin.before (y el loop de plugins) lo reciba
+    // con el texto correcto.
+    //
+    // Tipos soportados:
+    //   • nativeFlowResponseMessage  → single_select / bottom_sheet / limited_time_offer
+    //     el id seleccionado está en paramsJson como { "id": "<rowId>" }
+    //   • listResponseMessage        → lista clásica (fallback desktop)
+    //     el id está en singleSelectReply.selectedRowId
+    //   • buttonsResponseMessage     → botones de texto (legacy)
+    {
+      const _iResp = m.message?.interactiveResponseMessage
+      if (_iResp) {
+        const _nfResp = _iResp.nativeFlowResponseMessage
+        if (_nfResp?.paramsJson) {
+          try {
+            const _nfParams = JSON.parse(_nfResp.paramsJson)
+            // single_select y bottom_sheet envían { id: '<rowId>' }
+            if (typeof _nfParams?.id === 'string' && _nfParams.id) {
+              m.text = _nfParams.id
+            }
+            // limited_time_offer no genera respuesta de selección; ignorar
+          } catch (_) {}
+        }
+      }
+      // listResponseMessage (fallback para WhatsApp Desktop/Web)
+      if (!m.text) {
+        const _listId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId
+        if (_listId) m.text = _listId
+      }
+    }
+
     const _resolveLidJid = (jid) => {
       if (!jid?.endsWith('@lid')) return jid;
       const lidKey = jid.split('@')[0];
