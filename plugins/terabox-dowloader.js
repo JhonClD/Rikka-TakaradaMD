@@ -6,6 +6,7 @@ const CONFIG = {
 };
 
 const MAX_SIZE = 100 * 1024 * 1024;
+
 const sessionCache = { token: null, cookie: null, ts: 0 };
 const TTL = 5 * 60 * 1000;
 
@@ -89,6 +90,19 @@ async function fetchTeraBox(videoUrl, retry = true) {
   throw new Error("No se encontraron datos para esa URL");
 }
 
+const MIME_MAP = {
+  mp4: "video/mp4", mkv: "video/x-matroska", mov: "video/quicktime",
+  avi: "video/x-msvideo", webm: "video/webm",
+  mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4",
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+  pdf: "application/pdf",
+};
+
+function getMime(filename) {
+  const ext = filename?.split(".").pop().toLowerCase();
+  return MIME_MAP[ext] || "application/octet-stream";
+}
+
 function getType(ext) {
   ext = ext?.toLowerCase();
   if (["mp4", "mkv", "mov", "avi", "webm"].includes(ext)) return "video";
@@ -99,8 +113,11 @@ function getType(ext) {
 
 async function sendItem(conn, chat, m, item, statusKey, index, total) {
   const fileName  = item.file_name || "archivo";
+  const ext       = item.extension;
   const sizeBytes = item.file_size_bytes;
   const sizeLabel = item.file_size || "N/A";
+  const mime      = getMime(fileName);
+  const type      = getType(ext);
 
   log.step(`[${index}/${total}] Iniciando | ${fileName} (${sizeLabel})`);
 
@@ -114,19 +131,18 @@ async function sendItem(conn, chat, m, item, statusKey, index, total) {
     );
   }
 
-  const downloadUrl = item.stream_final_url || item.stream_url || item.download_url;
+  const downloadUrl =
+    type === "video"
+      ? (item.stream_final_url || item.stream_url || item.download_url)
+      : item.download_url;
 
   log.info(`[${index}/${total}] Descargando desde: ${downloadUrl}`);
   await edit(`⏳ Descargando ${index}/${total}: *${fileName}*...`);
 
-  let buffer, realMime;
+  let buffer;
   try {
     const res = await fetch(downloadUrl, { headers: { "User-Agent": CONFIG.ua } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    realMime = res.headers.get("content-type")?.split(";")[0].trim() || "application/octet-stream";
-    log.info(`[${index}/${total}] Content-Type real: ${realMime}`);
-
     buffer = Buffer.from(await res.arrayBuffer());
     log.done(`[${index}/${total}] Descargado | ${buffer.length} bytes`);
   } catch (e) {
@@ -136,35 +152,22 @@ async function sendItem(conn, chat, m, item, statusKey, index, total) {
     );
   }
 
-  let type;
-  if (realMime.startsWith("video/"))      type = "video";
-  else if (realMime.startsWith("audio/")) type = "audio";
-  else if (realMime.startsWith("image/")) type = "image";
-  else {
-    const ext = fileName.split(".").pop().toLowerCase();
-    type = getType(ext);
-    if (type === "document") {
-      const apiExt = item.extension?.toLowerCase();
-      if (apiExt) type = getType(apiExt);
-    }
-  }
-
-  log.info(`[${index}/${total}] Tipo detectado: ${type} (mime: ${realMime})`);
   await edit(`📤 Enviando ${index}/${total}: *${fileName}*...`);
+  log.info(`[${index}/${total}] Enviando como tipo: ${type}`);
 
   const caption = `📦 *${fileName}*\n💾 ${sizeLabel}`;
 
   try {
     if (type === "video") {
-      await conn.sendMessage(chat, { video: buffer, caption, mimetype: realMime }, { quoted: m });
+      await conn.sendMessage(chat, { video: buffer, caption, mimetype: mime }, { quoted: m });
     } else if (type === "audio") {
-      await conn.sendMessage(chat, { audio: buffer, mimetype: realMime, fileName }, { quoted: m });
+      await conn.sendMessage(chat, { audio: buffer, mimetype: mime, fileName }, { quoted: m });
     } else if (type === "image") {
       await conn.sendMessage(chat, { image: buffer, caption }, { quoted: m });
     } else {
-      await conn.sendMessage(chat, { document: buffer, mimetype: realMime, fileName, caption }, { quoted: m });
+      await conn.sendMessage(chat, { document: buffer, mimetype: mime, fileName, caption }, { quoted: m });
     }
-    log.done(`[${index}/${total}] Enviado correctamente como ${type}`);
+    log.done(`[${index}/${total}] Enviado correctamente`);
   } catch (e) {
     log.error(`[${index}/${total}] Error al enviar: ${e.message}`);
     await edit(`❌ Error al enviar *${fileName}*: ${e.message}`);
