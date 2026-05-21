@@ -293,8 +293,9 @@ let handler = async (m, { conn, text, command, args }) => {
                 // ✅ pix_fmt yuv420p + pad (compressO)
                 ffmpegArgs.push(
                     '-vf', withWM(scaleFast('360')),
-                    '-c:v', 'libx264', '-b:v', '200k', '-maxrate', '250k', '-bufsize', '500k',
-                    '-pix_fmt', 'yuv420p',          // ✅
+                    '-c:v', 'libx264', '-crf', '26',
+                    // Sin -maxrate/-bufsize: CRF puro → el bitrate varía con la complejidad visual
+                    '-pix_fmt', 'yuv420p',
                     '-preset', 'faster', '-tune', 'fastdecode',
                     '-profile:v', 'baseline', '-level', '3.0',
                     '-c:a', 'aac', '-b:a', '64k', '-ac', '2', '-movflags', '+faststart'
@@ -352,17 +353,33 @@ let handler = async (m, { conn, text, command, args }) => {
                                     );
                                 });
                                 const finalFile    = fs.existsSync(optOut) ? optOut : output;
+                                const finalSizeMB2 = fs.statSync(finalFile).size / 1024 / 1024;
+                                let bitrateKbps2   = 0;
+                                try {
+                                    const br = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${finalFile}"`, { encoding: 'utf8' }).trim();
+                                    bitrateKbps2 = Math.round(parseInt(br) / 1000);
+                                } catch (_) {}
+                                const caption2 = `✅ *360p* | ${finalSizeMB2.toFixed(1)} MB${bitrateKbps2 ? ` | ~${bitrateKbps2}k` : ''}\n⚡ _El bitrate real puede variar dependiendo de la complejidad visual del video_`;
                                 const mediaOptions = asDocument
                                     ? { document: { url: finalFile }, fileName: 'Video_360p_HD.mp4', mimetype: 'video/mp4' }
-                                    : { video: { url: finalFile }, mimetype: 'video/mp4' };
+                                    : { video: { url: finalFile }, caption: caption2, mimetype: 'video/mp4' };
                                 await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
                                 if (fs.existsSync(optOut)) fs.unlinkSync(optOut);
                                 return resolve();
                             }
                         }
+                        const finalSizeMB = fs.statSync(output).size / 1024 / 1024;
+                        let bitrateKbps   = 0;
+                        try {
+                            const br = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${output}"`, { encoding: 'utf8' }).trim();
+                            bitrateKbps = Math.round(parseInt(br) / 1000);
+                        } catch (_) {}
+                        const captionFinal = isDw4
+                            ? `✅ *360p* | ${finalSizeMB.toFixed(1)} MB${bitrateKbps ? ` | ~${bitrateKbps}k` : ''}\n⚡ _El bitrate real puede variar dependiendo de la complejidad visual del video_`
+                            : undefined;
                         const mediaOptions = asDocument
                             ? { document: { url: output }, fileName: `Video_${res}p.mp4`, mimetype: 'video/mp4' }
-                            : { video: { url: output }, mimetype: 'video/mp4' };
+                            : { video: { url: output }, ...(captionFinal ? { caption: captionFinal } : {}), mimetype: 'video/mp4' };
                         await conn.sendMessage(m.chat, mediaOptions, { quoted: m });
                         resolve();
                     } catch (e) {
