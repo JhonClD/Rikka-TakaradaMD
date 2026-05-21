@@ -1172,13 +1172,6 @@ ${tradutor.texto1[1]} ${messageNumber}/3
           console.error(e);
           if (e) {
             let text = format(e);
-            for (const key of Object.values(global.APIKeys)) {
-              text = text.replace(new RegExp(key, 'g'), '#HIDDEN#');
-            }
-            if (e.name) {
-              
-
-            }
             await m.reply(text);
           }
         } finally {
