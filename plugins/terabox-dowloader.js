@@ -1,136 +1,227 @@
 // © Ado | 2026
 // plugins/downloader-terabox.js
 
+import fs from "fs";
+import path from "path";
+import os from "os";
+
 const CONFIG = {
   base: "https://flowvideoplayer.com",
   ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 };
 
-async function descargarTeraBox(videoUrl) {
-  if (!videoUrl) throw new Error("Debes proporcionar una URL");
+const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
 
-  const sessionRes = await fetch(CONFIG.base, {
+// ─── Caché de sesión (TTL 5 min) ────────────────────────────────────────────
+const sessionCache = { token: null, cookie: null, ts: 0 };
+const TTL = 5 * 60 * 1000;
+
+async function getSession(forceRefresh = false) {
+  if (!forceRefresh && sessionCache.token && Date.now() - sessionCache.ts < TTL)
+    return sessionCache;
+
+  const res = await fetch(CONFIG.base, {
     method: "GET",
     headers: { "User-Agent": CONFIG.ua },
   });
 
-  if (!sessionRes.ok)
-    throw new Error(`Error obteniendo sesión: ${sessionRes.status}`);
+  if (!res.ok) throw new Error(`Error obteniendo sesión: ${res.status}`);
 
   let cookieStr = "";
-  if (typeof sessionRes.headers.getSetCookie === "function") {
-    cookieStr = sessionRes.headers
-      .getSetCookie()
-      .map((c) => c.split(";")[0])
-      .join("; ");
+  if (typeof res.headers.getSetCookie === "function") {
+    cookieStr = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   } else {
-    const setCookie = sessionRes.headers.get("set-cookie");
-    if (setCookie)
-      cookieStr = setCookie
-        .split(",")
-        .map((c) => c.split(";")[0])
-        .join("; ");
+    const raw = res.headers.get("set-cookie");
+    if (raw) cookieStr = raw.split(",").map((c) => c.split(";")[0]).join("; ");
   }
 
-  const html = await sessionRes.text();
-  const tokenMatch = html.match(
-    /name=["']csrf-token["']\s+content=["']([^"']+)["']/i
-  );
-  const token = tokenMatch?.[1];
-  if (!token) throw new Error("CSRF Token no encontrado");
+  const html = await res.text();
+  const match = html.match(/name=["']csrf-token["']\s+content=["']([^"']+)["']/i);
+  if (!match) throw new Error("CSRF Token no encontrado");
 
-  const response = await fetch(`${CONFIG.base}/telegram/bot/search/video`, {
+  sessionCache.token  = match[1];
+  sessionCache.cookie = cookieStr;
+  sessionCache.ts     = Date.now();
+
+  return sessionCache;
+}
+
+// ─── Llamada a la API con reintento ─────────────────────────────────────────
+async function fetchTeraBox(videoUrl, retry = true) {
+  const { token, cookie } = await getSession();
+
+  const res = await fetch(`${CONFIG.base}/telegram/bot/search/video`, {
     method: "POST",
     headers: {
       "User-Agent": CONFIG.ua,
       "Content-Type": "application/json",
       "X-CSRF-TOKEN": token,
       "X-Requested-With": "XMLHttpRequest",
-      Cookie: cookieStr,
+      Cookie: cookie,
       Origin: CONFIG.base,
       Referer: `${CONFIG.base}/`,
     },
     body: JSON.stringify({ url: videoUrl }),
   });
 
-  if (!response.ok)
-    throw new Error(`Error en la API: ${response.status}`);
-
-  const result = await response.json();
-
-  if (result.error === false && result.data?.length > 0) {
-    const item = result.data[0];
-    return {
-      file_name: item.file_name,
-      thumbnail: item.thumbnail,
-      download_url: item.download_url,
-      stream_url: item.stream_final_url || item.stream_url,
-      file_size: item.file_size,
-      file_size_bytes: item.file_size_bytes,
-      duration: item.duration,
-      extension: item.extension,
-    };
+  // Si falla por sesión expirada, refrescar y reintentar una vez
+  if (!res.ok) {
+    if (retry) {
+      await getSession(true);
+      return fetchTeraBox(videoUrl, false);
+    }
+    throw new Error(`Error en la API: ${res.status}`);
   }
+
+  const result = await res.json();
+
+  if (result.error === false && result.data?.length > 0)
+    return result.data; // devuelve el array completo
 
   throw new Error("No se encontraron datos para esa URL");
 }
 
-// ─── Handler ────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
+function formatSize(bytes) {
+  if (!bytes) return "N/A";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
+}
 
+const MIME_MAP = {
+  mp4: "video/mp4", mkv: "video/x-matroska", mov: "video/quicktime",
+  avi: "video/x-msvideo", webm: "video/webm",
+  mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4",
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+  pdf: "application/pdf",
+};
+
+function getMime(filename) {
+  const ext = filename?.split(".").pop().toLowerCase();
+  return MIME_MAP[ext] || "application/octet-stream";
+}
+
+function getType(ext) {
+  ext = ext?.toLowerCase();
+  if (["mp4", "mkv", "mov", "avi", "webm"].includes(ext)) return "video";
+  if (["mp3", "ogg", "wav", "m4a"].includes(ext))          return "audio";
+  if (["jpg", "jpeg", "png", "webp"].includes(ext))         return "image";
+  return "document";
+}
+
+// Edita el mensaje de progreso simulado
+async function editProgress(conn, chat, key, steps, current) {
+  const bar = steps.map((s, i) => (i <= current ? "▰" : "▱")).join("");
+  await conn.sendMessage(chat, { text: `📥 Descargando... ${bar}` }, { edit: key });
+}
+
+// ─── Enviar un item ──────────────────────────────────────────────────────────
+async function sendItem(conn, chat, m, item, progressKey) {
+  const fileName  = item.file_name || "archivo";
+  const ext       = item.extension;
+  const sizeBytes = item.file_size_bytes;
+  const mime      = getMime(fileName);
+  const type      = getType(ext);
+
+  // Advertencia si supera el límite
+  if (sizeBytes && sizeBytes > MAX_SIZE) {
+    return conn.sendMessage(
+      chat,
+      {
+        text:
+          `⚠️ *${fileName}* pesa *${formatSize(sizeBytes)}* y supera el límite de envío (100 MB).\n` +
+          `🔗 Descárgalo manualmente:\n${item.download_url}`,
+      },
+      { quoted: m }
+    );
+  }
+
+  const downloadUrl = item.stream_url || item.stream_final_url || item.download_url;
+
+  // Barra de progreso simulada (3 pasos)
+  const steps = ["Inicio", "Descarga", "Envío"];
+  if (progressKey) await editProgress(conn, chat, progressKey, steps, 0);
+
+  let buffer;
+  try {
+    const res = await fetch(downloadUrl, { headers: { "User-Agent": CONFIG.ua } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+    buffer = Buffer.from(arrayBuffer);
+  } catch (e) {
+    return conn.sendMessage(
+      chat,
+      { text: `❌ No se pudo descargar *${fileName}*: ${e.message}\n🔗 ${item.download_url}` },
+      { quoted: m }
+    );
+  }
+
+  if (progressKey) await editProgress(conn, chat, progressKey, steps, 1);
+
+  const caption = `📦 *${fileName}* (${formatSize(sizeBytes)})`;
+
+  if (type === "video") {
+    await conn.sendMessage(chat, { video: buffer, caption, mimetype: mime }, { quoted: m });
+  } else if (type === "audio") {
+    await conn.sendMessage(chat, { audio: buffer, mimetype: mime, fileName }, { quoted: m });
+  } else if (type === "image") {
+    await conn.sendMessage(chat, { image: buffer, caption }, { quoted: m });
+  } else {
+    await conn.sendMessage(chat, { document: buffer, mimetype: mime, fileName, caption }, { quoted: m });
+  }
+
+  if (progressKey) await editProgress(conn, chat, progressKey, steps, 2);
+}
+
+// ─── Handler ────────────────────────────────────────────────────────────────
 let handler = async (m, { conn, args, usedPrefix, command }) => {
   const url = args[0];
   if (!url)
-    return m.reply(
-      `❌ Proporciona una URL de TeraBox.\n\n*Uso:* ${usedPrefix}${command} <url>`
-    );
+    return m.reply(`❌ Proporciona una URL de TeraBox.\n\n*Uso:* ${usedPrefix}${command} <url>`);
 
-  await m.reply("⏳ Obteniendo información...");
+  const progressMsg = await conn.sendMessage(m.chat, { text: "⏳ Obteniendo información..." }, { quoted: m });
+  const progressKey = progressMsg?.key;
 
-  let data;
+  let items;
   try {
-    data = await descargarTeraBox(url);
+    items = await fetchTeraBox(url);
   } catch (e) {
-    return m.reply(`❌ Error: ${e.message}`);
+    return conn.sendMessage(m.chat, { text: `❌ Error: ${e.message}` }, { edit: progressKey });
   }
 
-  const caption =
+  // Resumen general
+  const totalSize = items.reduce((acc, i) => acc + (i.file_size_bytes || 0), 0);
+  const lista = items
+    .map((i, n) => `  ${n + 1}. *${i.file_name}* — ${formatSize(i.file_size_bytes)}`)
+    .join("\n");
+
+  const resumen =
     `╭━━━━━━━━━━━━━━━╮\n` +
     `┃  📦 *TeraBox Downloader*\n` +
     `╰━━━━━━━━━━━━━━━╯\n\n` +
-    `📄 *Archivo:* ${data.file_name}\n` +
-    `📦 *Tamaño:* ${data.file_size}\n` +
-    `⏱️ *Duración:* ${data.duration || "N/A"}\n` +
-    `🎞️ *Extensión:* .${data.extension}\n\n` +
-    `🔗 *Enlace directo:*\n${data.download_url}`;
+    `🗂️ *Archivos encontrados:* ${items.length}\n` +
+    `💾 *Tamaño total:* ${formatSize(totalSize)}\n\n` +
+    `*Contenido:*\n${lista}`;
 
-  // Enviar thumbnail + caption si existe
-  if (data.thumbnail) {
-    await conn.sendMessage(
-      m.chat,
-      {
-        image: { url: data.thumbnail },
-        caption,
-      },
-      { quoted: m }
-    );
-  } else {
-    await m.reply(caption);
+  await conn.sendMessage(m.chat, { text: resumen }, { edit: progressKey });
+
+  // Enviar thumbnail del primer item si existe
+  if (items[0]?.thumbnail) {
+    await conn.sendMessage(m.chat, { image: { url: items[0].thumbnail }, caption: "🖼️ _Preview_" }, { quoted: m });
   }
 
-  // Intentar enviar el video directamente si es un archivo de video
-  const videoExts = ["mp4", "mkv", "mov", "avi", "webm"];
-  if (data.stream_url && videoExts.includes(data.extension?.toLowerCase())) {
-    await m.reply("📥 Enviando video...");
-    await conn.sendMessage(
+  // Enviar cada archivo
+  for (let i = 0; i < items.length; i++) {
+    const statusMsg = await conn.sendMessage(
       m.chat,
-      {
-        video: { url: data.stream_url },
-        caption: `📦 ${data.file_name}`,
-        mimetype: "video/mp4",
-      },
+      { text: `📥 Enviando archivo ${i + 1}/${items.length}...` },
       { quoted: m }
     );
+    await sendItem(conn, m.chat, m, items[i], statusMsg?.key);
   }
+
+  await m.reply(`✅ *Listo!* Se procesaron *${items.length}* archivo(s).`);
 };
 
 handler.help = ["terabox <url>"];
