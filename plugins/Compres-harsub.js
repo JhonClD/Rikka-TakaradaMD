@@ -293,7 +293,7 @@ let handler = async (m, { conn, text, command, args }) => {
                 // ✅ pix_fmt yuv420p + pad (compressO)
                 ffmpegArgs.push(
                     '-vf', withWM(scaleFast('360')),
-                    '-c:v', 'libx264', '-crf', '26', '-maxrate', '800k', '-bufsize', '1600k',
+                    '-c:v', 'libx264', '-b:v', '200k', '-maxrate', '250k', '-bufsize', '500k',
                     '-pix_fmt', 'yuv420p',          // ✅
                     '-preset', 'faster', '-tune', 'fastdecode',
                     '-profile:v', 'baseline', '-level', '3.0',
