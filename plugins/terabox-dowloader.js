@@ -1,76 +1,248 @@
-// plugins/terabox.js
-// Descarga videos de Terabox — Rikka-TakaradaMD
-// Usa APIs públicas gratuitas (sin necesidad de cuenta Terabox)
+// plugins/terabox-dowloader.js
+// Descarga videos/archivos de Terabox — Rikka-TakaradaMD
+// Estrategia: scraper nativo (extrae jsToken del HTML) + APIs externas de fallback
 
 import fetch from 'node-fetch'
 
-// ── APIs con fallback ─────────────────────────────────────
-const APIS = [
-  // API 1: terabox-downloader worker
+// ── Config ────────────────────────────────────────────────
+// Opcional: si tienes cookie de sesión propia de Terabox, pégala aquí
+// para aumentar la tasa de éxito del scraper nativo.
+// Déjala vacía para modo anónimo (funciona con links públicos).
+const TERABOX_COOKIE = process.env.TERABOX_COOKIE || ''
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+// ── Scraper nativo (no depende de APIs externas) ─────────
+/**
+ * Extrae jsToken y logid del HTML de la página de Terabox
+ * luego llama a la API interna /share/list para obtener el dlink directo.
+ * Funciona igual que los bots Python más conocidos.
+ */
+async function scrapTeraboxDirect(url) {
+  // 1) Fetch de la página compartida
+  const headers = {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+  }
+  if (TERABOX_COOKIE) headers['Cookie'] = TERABOX_COOKIE
+
+  const pageRes = await fetch(url, { headers, signal: AbortSignal.timeout(25_000), redirect: 'follow' })
+  if (!pageRes.ok) throw new Error(`Página devolvió HTTP ${pageRes.status}`)
+  const html = await pageRes.text()
+
+  // 2) Extraer jsToken
+  let jsToken = ''
+  const jsTokenMatch = html.match(/window\.jsToken\s*=\s*["']([^"']+)["']/)
+    || html.match(/"jsToken"\s*:\s*"([^"]+)"/)
+    || html.match(/jsToken['"]\s*[:=]\s*['"]([^'"]+)['"]/)
+    || html.match(/fn%28%22([^%]+)/)
+  if (jsTokenMatch) {
+    jsToken = jsTokenMatch[1]
+  } else {
+    // Último recurso: buscarlo en cookies de respuesta
+    const setCookie = pageRes.headers.get('set-cookie') || ''
+    const ck = setCookie.match(/(?:^|;\s*)ELIST=([^;]+)/i)
+    if (!ck) throw new Error('No se pudo extraer jsToken del HTML')
+  }
+
+  // 3) Extraer logid (dp-logid)
+  let logid = ''
+  const logidMatch = html.match(/dp-logid['"]\s*:\s*['"]([^'"]+)['"]/)
+    || html.match(/logid['"]\s*:\s*['"]([^'"]+)['"]/)
+  if (logidMatch) logid = logidMatch[1]
+
+  // 4) Extraer shorturl del path
+  const shorturlMatch = url.match(/\/s\/([a-zA-Z0-9_-]+)/)
+  if (!shorturlMatch) throw new Error('No se pudo extraer shorturl del link')
+  const shorturl = shorturlMatch[1]
+
+  // 5) Extraer thumbnail por si acaso
+  const thumbMatch = html.match(/"thumbnail"\s*:\s*"([^"]+)"/)
+    || html.match(/og:image[^>]+content="([^"]+)"/)
+    || html.match(/<meta[^>]+content="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/)
+  const thumb = thumbMatch ? thumbMatch[1].replace(/\\u002F/g, '/') : null
+
+  // 6) Llamar a la API interna de Terabox: /api/shorturlinfo
+  const infoUrl = `https://www.1024terabox.com/api/shorturlinfo?app_id=250528&shorturl=${shorturl}&root=1`
+  const infoHeaders = { ...headers, 'Referer': url }
+  const infoRes = await fetch(infoUrl, { headers: infoHeaders, signal: AbortSignal.timeout(15_000) })
+  
+  let fileList = []
+  if (infoRes.ok) {
+    const infoData = await infoRes.json()
+    if (infoData?.list?.length) fileList = infoData.list
+  }
+
+  // 7) Si no hay info todavía, usar /share/list con jsToken
+  if (!fileList.length && jsToken) {
+    const logidParam = logid ? `&dp-logid=${logid}` : ''
+    const shareUrl = `https://www.1024terabox.com/share/list?app_id=250528&web=1&channel=0&jsToken=${jsToken}${logidParam}&page=1&num=20&by=name&order=asc&shorturl=${shorturl}&root=1`
+    const shareRes = await fetch(shareUrl, { headers: infoHeaders, signal: AbortSignal.timeout(15_000) })
+    if (!shareRes.ok) throw new Error(`/share/list devolvió HTTP ${shareRes.status}`)
+    const shareData = await shareRes.json()
+    if (shareData?.errno) throw new Error(`Error Terabox errno=${shareData.errno}`)
+    fileList = shareData?.list || []
+  }
+
+  if (!fileList.length) throw new Error('No se encontraron archivos en el link')
+
+  const file = fileList[0]
+  let dlink = file.dlink || file.download_link || ''
+
+  // 8) Si hay dlink, intentar resolver la redirección para obtener la URL final
+  if (dlink) {
+    try {
+      const dlRes = await fetch(dlink, {
+        method: 'HEAD',
+        headers: { ...headers, 'Referer': 'https://www.terabox.com/' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10_000)
+      })
+      if (dlRes.ok || dlRes.status === 206) dlink = dlRes.url || dlink
+    } catch (_) { /* usar dlink original */ }
+  }
+
+  if (!dlink) throw new Error('El archivo no tiene dlink disponible')
+
+  return {
+    link: dlink,
+    name: file.server_filename || file.filename || 'archivo',
+    size: parseInt(file.size) || 0,
+    thumb: file.thumbs?.url3 || file.thumbs?.url1 || thumb
+  }
+}
+
+// ── APIs externas de fallback ─────────────────────────────
+const FALLBACK_APIS = [
+
+  // API A: teraboxapp.xyz/api (mirror público activo)
   async (url) => {
-    const res = await fetch('https://terabox.hnn.workers.dev/api', {
+    const res = await fetch('https://teraboxapp.xyz/api', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': UA,
+        'Referer': 'https://teraboxapp.xyz/'
+      },
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(20_000)
+      signal: AbortSignal.timeout(25_000)
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const d = await res.json()
-    if (!d?.downloadLink && !d?.url && !d?.link) throw new Error('Sin link')
-    const link = d.downloadLink || d.url || d.link
-    const name = d.name || d.filename || d.title || 'video.mp4'
-    const size = d.size || d.fileSize || 0
-    return { link, name, size, thumb: d.thumbnail || d.thumb || null }
+    const link = d?.downloadLink || d?.download_link || d?.url || d?.link
+    if (!link) throw new Error('Sin link en respuesta')
+    return {
+      link,
+      name: d.name || d.filename || d.title || 'video.mp4',
+      size: parseInt(d.size || d.fileSize || 0) || 0,
+      thumb: d.thumbnail || d.thumb || null
+    }
   },
 
-  // API 2: ytshorts.savetube.me
+  // API B: terabox.fun/api (endpoint alternativo conocido)
   async (url) => {
-    const res = await fetch('https://ytshorts.savetube.me/api/v1/terabox-downloader', {
+    const res = await fetch('https://terabox.fun/api', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Referer': 'https://ytshorts.savetube.me/' },
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': UA,
+        'Origin': 'https://terabox.fun',
+        'Referer': 'https://terabox.fun/'
+      },
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(20_000)
+      signal: AbortSignal.timeout(25_000)
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const d = await res.json()
-    if (!d?.response?.[0]?.resolutions) throw new Error('Sin resoluciones')
-    const resolutions = d.response[0].resolutions
-    const link = resolutions['Fast Download'] || resolutions['HD Video'] || Object.values(resolutions)[0]
+    const link = d?.downloadLink || d?.download_link || d?.dlink || d?.url
+    if (!link) throw new Error('Sin link en respuesta')
+    return {
+      link,
+      name: d.name || d.filename || 'video.mp4',
+      size: parseInt(d.size || 0) || 0,
+      thumb: d.thumbnail || null
+    }
+  },
+
+  // API C: terabox-dl.replit.app (worker de comunidad)
+  async (url) => {
+    const enc = encodeURIComponent(url)
+    const res = await fetch(`https://terabox-dl.replit.app/api/download?url=${enc}`, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(25_000)
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const d = await res.json()
+    const link = d?.downloadUrl || d?.download_url || d?.url || d?.link
     if (!link) throw new Error('Sin link')
-    const name = d.response[0].name || 'video.mp4'
-    const size = d.response[0].size || 0
-    const thumb = d.response[0].thumbnail || null
-    return { link, name, size, thumb }
+    return {
+      link,
+      name: d.filename || d.name || 'video.mp4',
+      size: parseInt(d.size || d.fileSize || 0) || 0,
+      thumb: d.thumbnail || null
+    }
   },
 
-  // API 3: teraboxlink.nexus
+  // API D: mirrorbox.cc/api (espejo alternativo)
   async (url) => {
-    const res = await fetch(`https://teraboxlink.nexus/api/get?url=${encodeURIComponent(url)}`, {
-      signal: AbortSignal.timeout(20_000)
+    const res = await fetch('https://mirrorbox.cc/api/getlink', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': UA,
+        'Origin': 'https://mirrorbox.cc',
+        'Referer': 'https://mirrorbox.cc/'
+      },
+      body: `url=${encodeURIComponent(url)}`,
+      signal: AbortSignal.timeout(25_000)
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const d = await res.json()
-    if (!d?.dlink && !d?.download_link) throw new Error('Sin link')
-    const link = d.dlink || d.download_link
-    const name = d.name || d.filename || 'video.mp4'
-    const size = d.size || 0
-    return { link, name, size, thumb: d.thumb || null }
-  },
-
-  // API 4: terabox-app worker
-  async (url) => {
-    const res = await fetch(`https://terabox-app.hnn.workers.dev/?url=${encodeURIComponent(url)}`, {
-      signal: AbortSignal.timeout(20_000)
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const d = await res.json()
-    if (!d?.direct_link && !d?.url) throw new Error('Sin link')
-    const link = d.direct_link || d.url
-    const name = d.name || d.filename || 'video.mp4'
-    const size = d.size || 0
-    return { link, name, size, thumb: d.thumbnail || null }
+    const link = d?.url || d?.download || d?.link || d?.dlink
+    if (!link) throw new Error('Sin link')
+    return {
+      link,
+      name: d.name || d.filename || 'video.mp4',
+      size: parseInt(d.size || 0) || 0,
+      thumb: d.thumb || d.thumbnail || null
+    }
   }
 ]
+
+// ── Helper: obtener info con scraper nativo + fallbacks ───
+async function getTeraboxInfo(url) {
+  const errors = []
+
+  // Intento 1: scraper nativo (el más confiable a largo plazo)
+  try {
+    console.log('[terabox] Intentando scraper nativo...')
+    const info = await scrapTeraboxDirect(url)
+    console.log(`[terabox] ✅ Scraper nativo OK → ${info.name}`)
+    return info
+  } catch (e) {
+    console.warn(`[terabox] ⚠️ Scraper nativo falló: ${e.message}`)
+    errors.push(`Scraper nativo: ${e.message}`)
+  }
+
+  // Intentos 2-5: APIs externas de fallback
+  for (let i = 0; i < FALLBACK_APIS.length; i++) {
+    try {
+      console.log(`[terabox] Intentando API externa ${i + 1}...`)
+      const info = await FALLBACK_APIS[i](url)
+      console.log(`[terabox] ✅ API ${i + 1} OK → ${info.name}`)
+      return info
+    } catch (e) {
+      console.warn(`[terabox] ⚠️ API ${i + 1} falló: ${e.message}`)
+      errors.push(`API ${i + 1}: ${e.message}`)
+    }
+  }
+
+  throw new Error(`Todas las fuentes fallaron:\n${errors.join('\n')}`)
+}
 
 // ── Helper: formatear bytes ───────────────────────────────
 function formatBytes(bytes) {
@@ -80,45 +252,26 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
-// ── Helper: obtener info de descarga con fallback ─────────
-async function getTeraboxInfo(url) {
-  const errors = []
-  for (let i = 0; i < APIS.length; i++) {
-    try {
-      console.log(`[terabox] Intentando API ${i + 1}...`)
-      const info = await APIS[i](url)
-      console.log(`[terabox] ✅ API ${i + 1} OK → ${info.name}`)
-      return info
-    } catch (e) {
-      console.warn(`[terabox] ⚠️ API ${i + 1} falló: ${e.message}`)
-      errors.push(`API ${i + 1}: ${e.message}`)
-    }
-  }
-  throw new Error(`Todas las APIs fallaron:\n${errors.join('\n')}`)
-}
-
-// ── Helper: descargar buffer desde URL ───────────────────
-async function downloadBuffer(url, name) {
+// ── Helper: descargar buffer ──────────────────────────────
+async function downloadBuffer(url) {
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'User-Agent': UA,
       'Referer': 'https://www.terabox.com/'
     },
-    signal: AbortSignal.timeout(120_000) // 2 minutos para archivos grandes
+    signal: AbortSignal.timeout(120_000)
   })
   if (!res.ok) throw new Error(`Error descargando: HTTP ${res.status}`)
-  const buffer = await res.buffer()
-  return buffer
+  return res.buffer()
 }
 
-// ── Detectar si es URL de Terabox ────────────────────────
+// ── Detectar dominio Terabox ──────────────────────────────
 function isTeraboxUrl(url) {
-  return /terabox\.com|1024terabox\.com|terafileshare\.com|4funbox\.com|teraboxapp\.com|mirrobox\.com|nephobox\.com|freeterabox\.com/i.test(url)
+  return /terabox\.com|1024terabox\.com|terafileshare\.com|4funbox\.co[m]?|teraboxapp\.com|mirrorbox\.com|nephobox\.com|freeterabox\.com|terabox\.fun|terabox\.app/i.test(url)
 }
 
-// ── Extraer URL del texto ─────────────────────────────────
 function extractUrl(text) {
-  const match = text.match(/https?:\/\/[^\s]+/)
+  const match = text?.match(/https?:\/\/[^\s]+/)
   return match ? match[0] : null
 }
 
@@ -126,12 +279,8 @@ function extractUrl(text) {
 const handler = async (m, { conn, text, args }) => {
   const input = text?.trim() || args?.[0] || ''
 
-  // Intentar extraer URL del texto o del mensaje citado
   let url = extractUrl(input)
-
-  if (!url && m.quoted?.text) {
-    url = extractUrl(m.quoted.text)
-  }
+  if (!url && m.quoted?.text) url = extractUrl(m.quoted.text)
 
   if (!url) {
     return m.reply(`❌ *¡Ne ne! Necesito un link de Terabox.*
@@ -141,7 +290,7 @@ const handler = async (m, { conn, text, args }) => {
 • Responde a un mensaje con el link y escribe .terabox
 
 *Dominios soportados:*
-terabox.com, 1024terabox.com, teraboxapp.com, y más.`)
+terabox.com, 1024terabox.com, teraboxapp.com, mirrorbox.com y más.`)
   }
 
   if (!isTeraboxUrl(url)) {
@@ -149,7 +298,7 @@ terabox.com, 1024terabox.com, teraboxapp.com, y más.`)
   }
 
   await m.conn.sendMessage(m.chat, { react: { text: '⏳', key: m.key } })
-  const waitMsg = await m.reply('⏳ Obteniendo info del archivo...')
+  await m.reply('⏳ Obteniendo info del archivo...')
 
   let info
   try {
@@ -163,23 +312,22 @@ terabox.com, 1024terabox.com, teraboxapp.com, y más.`)
   const isVideo = /\.(mp4|mkv|webm|mov|avi|flv|m4v|ts)$/i.test(info.name)
   const isAudio = /\.(mp3|m4a|flac|wav|ogg|opus|aac)$/i.test(info.name)
 
-  // Límite de WhatsApp: ~200MB aprox
   const MAX_SIZE = 200 * 1024 * 1024
   if (info.size && info.size > MAX_SIZE) {
     await m.conn.sendMessage(m.chat, { react: { text: '⚠️', key: m.key } })
-    return m.reply(`⚠️ *Archivo demasiado grande para enviar por WhatsApp*
+    return m.reply(`⚠️ *Archivo demasiado grande para WhatsApp*
 
 📁 *Nombre:* ${info.name}
 📦 *Tamaño:* ${sizeText}
 
-Usa este link para descargarlo directamente:
+🔗 Link directo:
 ${info.link}`)
   }
 
   try {
     await m.reply(`📥 Descargando *${info.name}*${sizeText ? ` (${sizeText})` : ''}...`)
 
-    const buffer = await downloadBuffer(info.link, info.name)
+    const buffer = await downloadBuffer(info.link)
 
     await m.conn.sendMessage(m.chat, { react: { text: '✅', key: m.key } })
 
@@ -209,9 +357,8 @@ ${info.link}`)
     }
 
   } catch (e) {
-    console.error('[terabox] Error descargando:', e.message)
+    console.error('[terabox] Error descargando buffer:', e.message)
     await m.conn.sendMessage(m.chat, { react: { text: '⚠️', key: m.key } })
-    // Si falla la descarga directa → enviar el link
     await m.reply(`⚠️ No pude descargar el archivo directamente. Aquí tienes el link:
 
 📁 *${info.name}*${sizeText ? `\n📦 ${sizeText}` : ''}
