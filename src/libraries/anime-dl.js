@@ -1079,125 +1079,55 @@ export async function scrapeAnimeFLV(url) {
 }
 
 export async function scrapeLatAnime(url) {
-  const html = await fetchHtml(url)
-  const $    = cheerio.load(html)
-  const servidores = []
+  const { default: axios } = await import('axios')
+  const DOMINIOS = [
+    'mega.nz','mega.co.nz','mediafire.com','voe.sx','streamtape','filemoon',
+    'mp4upload','streamwish','dood','upstream','ok.ru','vidhide','mixdrop',
+    'savefiles','gofile.io','byse','dsvplay','lulu','pixeldrain','pdrain',
+  ]
 
-  const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
-  if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
+  const esConocido = (href) => DOMINIOS.some(d => href.includes(d))
 
-  async function resolverRedirector(href) {
-    const dominiosDirectos = ['mega.nz','mediafire.com','voe.sx','streamtape','filemoon',
-      'mp4upload','streamwish','dood','upstream','ok.ru','vidhide','mixdrop','gofile.io',
-      'pixeldrain','pdrain','byse','dsvplay','lulu']
-    if (dominiosDirectos.some(d => href.includes(d))) return href
+  const resolverRedirector = async (href) => {
+    if (esConocido(href)) return href
     try {
-      const { default: axios } = await import('axios')
       const res = await axios.get(href, {
         headers: { 'User-Agent': randomUA(), 'Referer': 'https://latanime.org/' },
-        httpsAgent, maxRedirects: 5, timeout: 10000, validateStatus: () => true,
+        maxRedirects: 5, timeout: 10000, validateStatus: () => true,
       })
-      const body = typeof res.data === 'string' ? res.data : ''
+      const body     = typeof res.data === 'string' ? res.data : ''
       const finalUrl = res.request?.res?.responseUrl || ''
-      for (const d of dominiosDirectos) {
+      for (const d of DOMINIOS) {
         const m = body.match(new RegExp(`https?://[^"'\\s]*${d.replace('.', '\\.')}[^"'\\s]*`))
         if (m) return m[0]
       }
-      if (finalUrl && dominiosDirectos.some(d => finalUrl.includes(d))) return finalUrl
+      if (finalUrl && esConocido(finalUrl)) return finalUrl
     } catch (_) {}
-    return href
+    return null
   }
 
-  const dataPlayerEls = $('[data-player], .play-video[data-player], .servers a[data-player], a[data-player]')
-  if (dataPlayerEls.length > 0) {
-    dataPlayerEls.each((_, el) => {
-      const dataPlayer = $(el).attr('data-player') || ''
-      const label = ($(el).text() || $(el).attr('title') || '').trim().toLowerCase()
-      if (!dataPlayer) return
-      try {
-        let embedUrl = dataPlayer
-        
-        try {
-          const decoded = Buffer.from(dataPlayer, 'base64').toString('utf-8')
-          if (decoded.startsWith('http')) embedUrl = decoded
-        } catch (_) {}
-        if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
-          const nombre = label || detectarServidor(embedUrl)
-          servidores.push({ nombre, url: embedUrl })
-        }
-      } catch (_) {}
+  let html
+  try {
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent'     : randomUA(),
+        'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-419,es;q=0.9',
+        'Referer'        : 'https://latanime.org/',
+      },
+      timeout: 15000,
     })
-    console.log(`[latanime] data-player: ${servidores.length} servidores`)
+    html = res.data
+  } catch (_) {
+    html = await fetchHtml(url)
   }
 
-  if (servidores.length === 0) {
-    const linksDescarga = []
-    $('a[href]').each((_, el) => {
-      const href  = $(el).attr('href') || ''
-      const label = $(el).text().trim().toLowerCase()
-      if (!href.startsWith('http')) return
-      const esServidor =
-        href.includes('mega.nz')    || href.includes('mediafire.com') ||
-        href.includes('voe.sx')     || href.includes('streamtape')    ||
-        href.includes('filemoon')   || href.includes('mp4upload')     ||
-        href.includes('streamwish') || href.includes('dood')          ||
-        href.includes('upstream')   || href.includes('ok.ru')         ||
-        href.includes('vidhide')    || href.includes('mixdrop')       ||
-        href.includes('savefiles')  || href.includes('gofile.io')     ||
-        href.includes('byse')       || href.includes('dsvplay')       ||
-        href.includes('lulu')       || href.includes('pixeldrain')
-      if (esServidor && !linksDescarga.find(l => l.href === href))
-        linksDescarga.push({ href, label })
-    })
-
-    for (const { href, label } of linksDescarga) {
-      const urlReal = await resolverRedirector(href)
-      const urlNorm = normalizarMegaUrl(urlReal)
-      if (!servidores.find(s => s.url === urlNorm)) {
-        const nombre = label || detectarServidor(urlNorm)
-        servidores.push({ nombre, url: urlNorm })
-      }
-    }
-  }
-
-  $('[data-src], [data-url]').each((_, el) => {
-    const raw   = $(el).attr('data-src') || $(el).attr('data-url') || ''
-    const label = $(el).text().trim().toLowerCase()
-    let embedUrl = raw
-    try {
-      const decoded = Buffer.from(raw, 'base64').toString('utf-8')
-      if (decoded.startsWith('http')) embedUrl = decoded
-    } catch (_) {}
-    if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl))
-      servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
-  })
-
-  $('iframe[src]').each((_, el) => {
-    const src = $(el).attr('src') || ''
-    if (src.startsWith('http') && !servidores.find(s => s.url === src))
-      servidores.push({ nombre: detectarServidor(src), url: src })
-  })
-
-  if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
-
-  const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
-  const resultado = filtrados.length > 0 ? filtrados : servidores
-
-  console.log(`[latanime] ${resultado.length} servidor(es):`, resultado.map(s => s.nombre).join(', '))
-  return resultado
-}
-
-export async function scrapeMonosChinos(url) {
-  const html = await fetchHtml(url)
-  const $    = cheerio.load(html)
+  const $        = cheerio.load(html)
   const servidores = []
 
-  const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
-  if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
-
-  $('[data-player], [data-url], [data-src]').each((_, el) => {
-    const raw   = $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('data-src') || ''
-    const label = ($(el).text() || $(el).find('span, strong').text() || '').trim().toLowerCase()
+  $('button.play-video[data-player], a[data-player], [data-player]').each((_, el) => {
+    const raw   = $(el).attr('data-player') || ''
+    const label = $(el).text().trim().toLowerCase()
     if (!raw) return
     let embedUrl = raw
     try {
@@ -1205,8 +1135,27 @@ export async function scrapeMonosChinos(url) {
       if (decoded.startsWith('http')) embedUrl = decoded
     } catch (_) {}
     if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl))
-      servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
+      servidores.push({ nombre: label || detectarServidor(embedUrl), url: normalizarMegaUrl(embedUrl), directo: /mega\.nz|mediafire\.com/.test(embedUrl) })
   })
+
+  const redirLinks = []
+  $('a[href]').each((_, el) => {
+    const href  = $(el).attr('href') || ''
+    const label = $(el).text().trim().toLowerCase()
+    if (!href.startsWith('http') || servidores.find(s => s.url === href)) return
+    if (href.includes('latanime.org') || href.match(/\.(jpg|png|gif|css|js)$/)) return
+    if (esConocido(href)) {
+      servidores.push({ nombre: label || detectarServidor(href), url: normalizarMegaUrl(href), directo: /mega\.nz|mediafire\.com/.test(href) })
+    } else if (href.length > 20 && !href.includes('javascript') && !href.includes('#')) {
+      redirLinks.push({ href, label })
+    }
+  })
+
+  for (const { href, label } of redirLinks) {
+    const urlReal = await resolverRedirector(href)
+    if (urlReal && !servidores.find(s => s.url === urlReal))
+      servidores.push({ nombre: label || detectarServidor(urlReal), url: normalizarMegaUrl(urlReal), directo: /mega\.nz|mediafire\.com/.test(urlReal) })
+  }
 
   $('iframe[src]').each((_, el) => {
     const src = $(el).attr('src') || ''
@@ -1214,42 +1163,62 @@ export async function scrapeMonosChinos(url) {
       servidores.push({ nombre: detectarServidor(src), url: src })
   })
 
-  $('script').each((_, el) => {
-    const code = $(el).html() || ''
-    const m1 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\[[\s\S]*?\]\])/s)
-    if (m1) {
-      try {
-        const lista = JSON.parse(m1[1])
-        for (const item of lista) {
-          if (Array.isArray(item) && typeof item[1] === 'string' && item[1].startsWith('http')) {
-            const nombre = String(item[0]).toLowerCase() || detectarServidor(item[1])
-            const u = normalizarMegaUrl(item[1])
-            if (!servidores.find(s => s.url === u)) servidores.push({ nombre, url: u })
-          }
-        }
-      } catch (_) {}
-    }
-    const m2 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\s*\{[\s\S]*?\}\s*\])/s)
-    if (m2) {
-      try {
-        const lista = JSON.parse(m2[1])
-        for (const item of lista) {
-          const u = item.url || item.src || item.file || item.source || ''
-          const n = (item.server || item.name || item.label || '').toLowerCase()
-          if (u.startsWith('http') && !servidores.find(s => s.url === u))
-            servidores.push({ nombre: n || detectarServidor(u), url: normalizarMegaUrl(u) })
-        }
-      } catch (_) {}
-    }
-  })
-
   if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
 
   const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
   const resultado = filtrados.length > 0 ? filtrados : servidores
-
-  console.log(`[monoschinos] ${resultado.length} servidor(es):`, resultado.map(s => s.nombre).join(', '))
+  console.log(`[latanime] ${resultado.length} servidor(es):`, resultado.map(s => s.nombre).join(', '))
   return resultado
+}
+
+export async function scrapeMonosChinos(url) {
+  const { default: axios } = await import('axios')
+  let html
+  try {
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent'     : randomUA(),
+        'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-419,es;q=0.9',
+        'Referer'        : 'https://monoschinos2.com/',
+      },
+      timeout: 15000,
+    })
+    html = res.data
+  } catch (_) {
+    html = await fetchHtmlDirecto(url, 'https://monoschinos2.com/')
+  }
+
+  const $        = cheerio.load(html)
+  const servidores = []
+
+  $('button.play-video[data-player], a.play-video[data-player], [data-player]').each((_, el) => {
+    const raw   = $(el).attr('data-player') || ''
+    const label = $(el).text().trim().toLowerCase()
+    if (!raw) return
+    let embedUrl = raw
+    try {
+      const decoded = Buffer.from(raw, 'base64').toString('utf-8').trim()
+      if (decoded.startsWith('http')) embedUrl = decoded
+    } catch (_) {}
+    if (!embedUrl.startsWith('http') || servidores.find(s => s.url === embedUrl)) return
+    servidores.push({
+      nombre : label || detectarServidor(embedUrl),
+      url    : normalizarMegaUrl(embedUrl),
+      directo: /mega\.nz|mediafire\.com/.test(embedUrl),
+    })
+  })
+
+  if (servidores.length === 0) {
+    $('iframe[src]').each((_, el) => {
+      const src = $(el).attr('src') || ''
+      if (src.startsWith('http') && !servidores.find(s => s.url === src))
+        servidores.push({ nombre: detectarServidor(src), url: src })
+    })
+  }
+
+  console.log(`[monoschinos] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
+  return servidores
 }
 
 export async function scrapeJKanime(url) {
