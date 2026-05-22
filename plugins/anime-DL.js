@@ -265,14 +265,24 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     episodeUrl   = argsParaAnime[0]
     sitioElegido = getSitioPorDominio(episodeUrl)
     try {
-      const parts = new URL(episodeUrl).pathname.replace(/\/+$/, '').split('/').filter(Boolean)
-      const epPart = parts[parts.length - 1]
-      const slugPart = parts[parts.length - 2] || parts[0]
-      if (/^\d+$/.test(epPart)) {
-        episodio  = parseInt(epPart)
-        nombre    = slugPart.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      const pathname = new URL(episodeUrl).pathname.replace(/\/+$/, '')
+      const parts    = pathname.split('/').filter(Boolean)
+      const lastSeg  = parts[parts.length - 1]
+
+      if (/^\d+$/.test(lastSeg)) {
+        // Formato: /slug/8/ (JKanime)
+        episodio = parseInt(lastSeg)
+        const slugSeg = parts[parts.length - 2] || parts[0]
+        nombre = slugSeg.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
       } else {
-        nombre    = epPart.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        // Formato: /ver/slug-episodio-8 (AnimeFLV, LatAnime, MonosChinos)
+        const m = lastSeg.match(/^(.*?)(?:-episodio)?-(\d+)$/)
+        if (m) {
+          episodio = parseInt(m[2])
+          nombre   = m[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        } else {
+          nombre = lastSeg.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        }
       }
     } catch (_) {}
   } else {
