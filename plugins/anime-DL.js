@@ -259,16 +259,29 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
   let episodeUrl = null
 
+  let nombre = null, episodio = null, temporada = 1
+
   if (argsParaAnime[0]?.startsWith('http')) {
     episodeUrl   = argsParaAnime[0]
     sitioElegido = getSitioPorDominio(episodeUrl)
+    try {
+      const parts = new URL(episodeUrl).pathname.replace(/\/+$/, '').split('/').filter(Boolean)
+      const epPart = parts[parts.length - 1]
+      const slugPart = parts[parts.length - 2] || parts[0]
+      if (/^\d+$/.test(epPart)) {
+        episodio  = parseInt(epPart)
+        nombre    = slugPart.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      } else {
+        nombre    = epPart.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      }
+    } catch (_) {}
   } else {
     const lastToken = argsParaAnime[argsParaAnime.length - 1]
-    const episodio  = isNaN(lastToken) ? null : parseInt(lastToken)
+    episodio  = isNaN(lastToken) ? null : parseInt(lastToken)
 
     if (episodio === null) {
       let tokensSinEp = [...argsParaAnime]
-      let temporada   = 1
+      temporada   = 1
       const tempIdx2  = tokensSinEp.findIndex(t => /^t(?:emperada|emp)?(\d+)$/i.test(t))
       if (tempIdx2 !== -1) {
         temporada    = parseInt(tokensSinEp[tempIdx2].match(/(\d+)/)[1])
@@ -322,7 +335,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       })
     }
 
-    let temporada  = 1
     let tokensSinEp = argsParaAnime.slice(0, -1)
 
     const tempIdx = tokensSinEp.findIndex(t => /^t(?:emperada|emp)?(\d+)$/i.test(t))
@@ -332,7 +344,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       tokensSinEp = tokensSinEp.filter((_, i) => i !== tempIdx)
     }
 
-    const nombre = tokensSinEp.join(' ')
+    nombre = tokensSinEp.join(' ')
     if (!nombre) return m.reply(`❌ Falta el nombre del anime.\nEjemplo: *.animedl one piece t1 1*`)
 
     const labelTemp  = temporada > 1 ? ` temporada *${temporada}*` : ''
@@ -423,9 +435,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     tmpDir,
     sitioElegido,
     argsParaAnime,
-    nombre      : typeof nombre !== 'undefined' ? nombre : null,
-    episodio    : typeof episodio !== 'undefined' ? episodio : null,
-    temporada   : typeof temporada !== 'undefined' ? temporada : 1,
+    nombre      : nombre ?? null,
+    episodio    : episodio ?? null,
+    temporada   : temporada ?? 1,
     timestamp   : Date.now(),
     owner       : m.sender,
   })
