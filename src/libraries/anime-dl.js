@@ -564,6 +564,52 @@ export function elegirPorTemporada(links, temporada) {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  fetchHtmlMonos — fetch dedicado para MonosChinos sin Puppeteer
+//  MonosChinos2 tiene Cloudflare pero responde bien a axios con
+//  cookies/headers adecuados; no necesita Chromium.
+// ─────────────────────────────────────────────────────────────
+
+export async function fetchHtmlMonos(url) {
+  const { default: axios } = await import('axios')
+  const monosHeaders = {
+    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT'            : '1',
+    'Connection'     : 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest' : 'document',
+    'Sec-Fetch-Mode' : 'navigate',
+    'Sec-Fetch-Site' : 'none',
+    'Sec-CH-UA'      : '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'Sec-CH-UA-Mobile'  : '?0',
+    'Sec-CH-UA-Platform': '"Windows"',
+    'Cache-Control'  : 'max-age=0',
+    'Referer'        : 'https://monoschinos2.com/',
+  }
+  try {
+    const res = await axios.get(url, {
+      headers     : monosHeaders,
+      httpsAgent,
+      timeout     : 20000,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    })
+    const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
+    // Si sigue siendo Cloudflare challenge, lanzar error claro (sin Puppeteer)
+    if (html.includes('Just a moment') || html.includes('cf-browser-verification') || html.includes('challenge-platform')) {
+      throw new Error('MonosChinos: Cloudflare activo, intenta de nuevo en unos segundos')
+    }
+    return html
+  } catch (err) {
+    // Re-throw con mensaje claro, sin intentar Puppeteer
+    const msg = err.response ? `HTTP ${err.response.status}` : err.message
+    throw new Error(`[monoschinos] fetch falló: ${msg}`)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  fetchHtml / Puppeteer
 // ─────────────────────────────────────────────────────────────
 
@@ -1164,7 +1210,7 @@ export async function scrapeLatAnime(url) {
 // ─────────────────────────────────────────────────────────────
 
 export async function scrapeMonosChinos(url) {
-  const html = await fetchHtml(url)
+  const html = await fetchHtmlMonos(url)
   const $    = cheerio.load(html)
   const servidores = []
 
@@ -1624,7 +1670,7 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
 export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
   const searchUrl = `https://monoschinos2.com/buscar?q=${encodeURIComponent(query)}`
-  const html = await fetchHtml(searchUrl)
+  const html = await fetchHtmlMonos(searchUrl)
   const $    = cheerio.load(html)
 
   const links = []
