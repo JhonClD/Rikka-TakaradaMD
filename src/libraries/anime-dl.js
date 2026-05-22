@@ -575,11 +575,13 @@ export async function fetchHtml(url) {
 export async function fetchHtmlConPuppeteer(url) {
   const chromiumPaths = [
     process.env.PUPPETEER_EXECUTABLE_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/local/bin/chromium',
     '/data/data/com.termux/files/usr/bin/chromium-browser',
     '/data/data/com.termux/files/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/usr/bin/google-chrome',
   ].filter(Boolean)
 
   let execPath = null
@@ -588,8 +590,8 @@ export async function fetchHtmlConPuppeteer(url) {
   }
 
   if (!execPath) {
-    console.error('[puppeteer] Chromium no encontrado. Instala con: pkg install chromium')
-    throw new Error('Chromium no disponible (instala con: pkg install chromium)')
+    console.error('[puppeteer] Chromium no encontrado en paths conocidos')
+    throw new Error('Chromium no disponible')
   }
 
   let capturedVideoUrl = null
@@ -618,6 +620,9 @@ export async function fetchHtmlConPuppeteer(url) {
       tries++
     }
     await new Promise(r => setTimeout(r, 3000))
+    if (url.includes('latanime.org') || url.includes('monoschinos')) {
+      try { await page.waitForSelector('[data-player], [data-url], iframe[src]', { timeout: 8000 }) } catch (_) {}
+    }
     const html = await page.content()
     await browser.close()
     if (capturedVideoUrl) return html + `\n<!-- INTERCEPTED_VIDEO:${capturedVideoUrl} -->`
@@ -792,9 +797,10 @@ export async function extractStreamWish(embedUrl) {
   try {
     const chromiumPaths = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable', '/usr/local/bin/chromium',
       '/data/data/com.termux/files/usr/bin/chromium-browser',
       '/data/data/com.termux/files/usr/bin/chromium',
-      '/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome',
     ].filter(Boolean)
     let execPath = null
     for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
@@ -1014,23 +1020,53 @@ export async function scrapeAnimeFLV(url) {
 
   $('script').each((_, el) => {
     const code = $(el).html() || ''
-    const matchVar = code.match(/var videos\s*=\s*(\{[\s\S]*?\});/)
-    if (matchVar) {
+
+    const m1 = code.match(/var\s+videos\s*=\s*(\{[\s\S]*?\})\s*;/)
+    if (m1) {
       try {
-        const data  = JSON.parse(matchVar[1])
+        const data  = JSON.parse(m1[1])
         const listas = [
           ...(data.SUB || []).map(s => ({ ...s, dub: false })),
           ...(data.LAT || []).map(s => ({ ...s, dub: false })),
           ...(data.DUB || []).map(s => ({ ...s, dub: true  })),
         ]
         for (const s of listas) {
-          let videoUrl = normalizarMegaUrl(s.url || '')
-          let embedUrl = normalizarMegaUrl(s.code || '')
+          const videoUrl = normalizarMegaUrl(s.url || '')
+          const embedUrl = normalizarMegaUrl(s.code || '')
           const u = embedUrl || videoUrl
           if (u && !servidores.find(sv => sv.url === u)) {
             const nombre = (s.title || detectarServidor(u)).toLowerCase()
             servidores.push({ nombre: nombre + (s.dub ? '-dub' : ''), url: u, download: videoUrl || null })
           }
+        }
+      } catch (_) {}
+    }
+
+    const m2 = code.match(/var\s+videos\s*=\s*(\[[\s\S]*?\])\s*;/)
+    if (m2 && !m1) {
+      try {
+        const lista = JSON.parse(m2[1])
+        for (const s of lista) {
+          const videoUrl = normalizarMegaUrl(s.url || '')
+          const embedUrl = normalizarMegaUrl(s.code || s.embed || '')
+          const u = embedUrl || videoUrl
+          if (u && !servidores.find(sv => sv.url === u)) {
+            const nombre = (s.title || s.server || s.name || detectarServidor(u)).toLowerCase()
+            servidores.push({ nombre, url: u, download: videoUrl || null })
+          }
+        }
+      } catch (_) {}
+    }
+
+    const m3 = code.match(/anime_info\s*=\s*\[[^\]]*,\s*(\[[^\]]+\])/)
+    if (m3) {
+      try {
+        const lista = JSON.parse(m3[1])
+        for (const s of lista) {
+          if (!Array.isArray(s) || s.length < 2) continue
+          const u = normalizarMegaUrl(String(s[1]))
+          if (u.startsWith('http') && !servidores.find(sv => sv.url === u))
+            servidores.push({ nombre: String(s[0]).toLowerCase() || detectarServidor(u), url: u })
         }
       } catch (_) {}
     }
@@ -1262,14 +1298,6 @@ export async function scrapeJKanime(url) {
               })
           }
 
-          if (remoteBase && entry.slug) {
-            const dlUrl = `${remoteBase.replace(/\/$/, '')}/d/${entry.slug}/`
-            if (!servidores.find(s => s.url === dlUrl))
-              servidores.push({
-                nombre: `${(entry.server || '').toLowerCase()}-dl`,
-                url: dlUrl,
-              })
-          }
         }
 
         if (servidores.length > 0) {
@@ -1297,9 +1325,10 @@ export async function scrapeJKanime(url) {
   try {
     const chromiumPaths = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable', '/usr/local/bin/chromium',
       '/data/data/com.termux/files/usr/bin/chromium-browser',
       '/data/data/com.termux/files/usr/bin/chromium',
-      '/usr/bin/chromium-browser', '/usr/bin/chromium',
     ].filter(Boolean)
     let execPath = null
     for (const p of chromiumPaths) { if (fs.existsSync(p)) { execPath = p; break } }
@@ -1391,7 +1420,7 @@ export async function scrapeJKanime(url) {
     }
   } catch (e) { console.error('[jkanime] Puppeteer:', e.message) }
 
-  if (slug && cap) {
+  if (slug && cap && servidores.length === 0) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
     const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
 
