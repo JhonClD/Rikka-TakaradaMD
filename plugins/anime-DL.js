@@ -25,6 +25,7 @@ import {
   descargarConYtDlp,
   ejecutarDescargaServidor,
   MegaQuotaError,
+  esServidorConocido,
 } from '../src/libraries/anime-dl.js'
 
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
@@ -392,12 +393,16 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const esMegaMf  = s => /mega\.nz|mega\.co\.nz|mediafire\.com/.test(s.url)
   const megaYMf   = servidores.filter(s =>  esMegaMf(s))
   const sinMegaMf = servidores.filter(s => !esMegaMf(s))
-  const directas  = sinMegaMf.filter(s => s.directo && CONFIG.videoExtensions.test(s.url))
+
+  const conocidosSinMegaMf = sinMegaMf.filter(s => esServidorConocido(s.nombre, s.url))
+  const baseParaIntentos   = conocidosSinMegaMf.length > 0 ? conocidosSinMegaMf : sinMegaMf
+
+  const directas  = baseParaIntentos.filter(s => s.directo && CONFIG.videoExtensions.test(s.url))
   const listaIntentos = [
     ...megaYMf,
     ...(directas.length > 0
-      ? [...directas, ...sinMegaMf.filter(s => !s.directo)]
-      : sinMegaMf),
+      ? [...directas, ...baseParaIntentos.filter(s => !s.directo)]
+      : baseParaIntentos),
   ]
 
   const tmpDir = path.join(process.env.TMPDIR || '/tmp', `anime_${Date.now()}`)
@@ -506,25 +511,6 @@ handler.before = async function (m, { conn }) {
             { quoted: m, mentions: [m.sender] }
           )
           return true
-        }
-
-        global.pendingAnimeSearch.delete(m.chat)
-        const elegido = animeSearch.resultados.find(r => r.slug === slug)
-        if (!elegido) return false
-
-        await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
-        return true
-      }
-
-      const pick = global.pendingServerPicks.get(m.chat)
-      if (!pick) return false
-
-      if (pick.owner && pick.owner !== m.sender) {
-        await conn.sendMessage(m.chat,
-          { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
-          { quoted: m, mentions: [m.sender] }
-        )
-        return true
       }
 
       const sk = `${m.chat}|${m.sender}`
