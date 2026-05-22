@@ -167,6 +167,11 @@ export const CONFIG = {
 export const randomUA     = () => CONFIG.userAgents[Math.floor(Math.random() * CONFIG.userAgents.length)]
 export const buildHeaders = (extra = {}) => ({ ...CONFIG.baseHeaders, 'User-Agent': randomUA(), ...extra })
 
+export function esServidorConocido(nombre, url) {
+  const src = `${nombre || ''} ${url || ''}`.toLowerCase()
+  return CONFIG.servidoresConocidos.some(sv => src.includes(sv))
+}
+
 export function normalizarMegaUrl(u) {
   if (!u || !u.includes('mega.nz')) return u
   let m = u.match(/mega\.nz\/(?:embed\/)?[#!]*([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{40,})/)
@@ -564,52 +569,6 @@ export function elegirPorTemporada(links, temporada) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  fetchHtmlMonos — fetch dedicado para MonosChinos sin Puppeteer
-//  MonosChinos2 tiene Cloudflare pero responde bien a axios con
-//  cookies/headers adecuados; no necesita Chromium.
-// ─────────────────────────────────────────────────────────────
-
-export async function fetchHtmlMonos(url) {
-  const { default: axios } = await import('axios')
-  const monosHeaders = {
-    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'DNT'            : '1',
-    'Connection'     : 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest' : 'document',
-    'Sec-Fetch-Mode' : 'navigate',
-    'Sec-Fetch-Site' : 'none',
-    'Sec-CH-UA'      : '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    'Sec-CH-UA-Mobile'  : '?0',
-    'Sec-CH-UA-Platform': '"Windows"',
-    'Cache-Control'  : 'max-age=0',
-    'Referer'        : 'https://monoschinos2.com/',
-  }
-  try {
-    const res = await axios.get(url, {
-      headers     : monosHeaders,
-      httpsAgent,
-      timeout     : 20000,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    })
-    const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
-    // Si sigue siendo Cloudflare challenge, lanzar error claro (sin Puppeteer)
-    if (html.includes('Just a moment') || html.includes('cf-browser-verification') || html.includes('challenge-platform')) {
-      throw new Error('MonosChinos: Cloudflare activo, intenta de nuevo en unos segundos')
-    }
-    return html
-  } catch (err) {
-    // Re-throw con mensaje claro, sin intentar Puppeteer
-    const msg = err.response ? `HTTP ${err.response.status}` : err.message
-    throw new Error(`[monoschinos] fetch falló: ${msg}`)
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
 //  fetchHtml / Puppeteer
 // ─────────────────────────────────────────────────────────────
 
@@ -686,6 +645,24 @@ export async function fetchHtmlConPuppeteer(url) {
   } catch (err) {
     await browser.close()
     throw err
+  }
+}
+
+export async function fetchHtmlDirecto(url, referer) {
+  try {
+    const res = await fetch(url, {
+      headers: buildHeaders({
+        Referer: referer || (url ? (() => { try { return new URL(url).origin } catch (_) { return '' } })() : ''),
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      }),
+      timeout: 20000,
+    })
+    if (!res.ok) return ''
+    return await res.text()
+  } catch (e) {
+    console.error('[fetchHtmlDirecto]', e.message)
+    return ''
   }
 }
 
@@ -1089,7 +1066,9 @@ export async function scrapeAnimeFLV(url) {
   })
 
   extraerUrlsDeScripts($, html, servidores)
-  return servidores
+
+  const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
+  return filtrados.length > 0 ? filtrados : servidores
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1201,8 +1180,11 @@ export async function scrapeLatAnime(url) {
 
   if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
 
-  console.log(`[latanime] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
-  return servidores
+  const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
+  const resultado = filtrados.length > 0 ? filtrados : servidores
+
+  console.log(`[latanime] ${resultado.length} servidor(es):`, resultado.map(s => s.nombre).join(', '))
+  return resultado
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1210,7 +1192,7 @@ export async function scrapeLatAnime(url) {
 // ─────────────────────────────────────────────────────────────
 
 export async function scrapeMonosChinos(url) {
-  const html = await fetchHtmlMonos(url)
+  const html = await fetchHtmlDirecto(url, 'https://monoschinos2.com/')
   const $    = cheerio.load(html)
   const servidores = []
 
@@ -1260,8 +1242,11 @@ export async function scrapeMonosChinos(url) {
 
   if (servidores.length === 0) extraerUrlsDeScripts($, html, servidores)
 
-  console.log(`[monoschinos] ${servidores.length} servidor(es):`, servidores.map(s => s.nombre).join(', '))
-  return servidores
+  const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
+  const resultado = filtrados.length > 0 ? filtrados : servidores
+
+  console.log(`[monoschinos] ${resultado.length} servidor(es):`, resultado.map(s => s.nombre).join(', '))
+  return resultado
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1524,36 +1509,37 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
 
   const links = []
 
-  // Selector principal: tarjetas de anime con link a la serie
-  $('article, .col, .card, .anime-card, .result-item').each((_, el) => {
-    const aTag  = $(el).find('a').first()
+  const addLink = (href, title) => {
+    if (!href || !title || title.length < 2) return
+    if (!links.find(l => l.href === href)) links.push({ href, title })
+  }
+
+  $('article').each((_, el) => {
+    const aTag  = $(el).find('a[href*="/anime/"], a[href*="latanime.org"]').first()
     const href  = aTag.attr('href') || ''
     const title = (
-      aTag.attr('title') ||
-      $(el).find('h3, h2, .title, .name').first().text() ||
-      aTag.text()
+      $(el).find('h2, h3, h4, .Title, .title, .entry-title, .name').first().text() ||
+      aTag.attr('title') || aTag.text()
     ).trim().toLowerCase()
-    if (!href || !title) return
-    if (!links.find(l => l.href === href)) links.push({ href, title })
+    addLink(href, title)
   })
 
-  // Fallback: buscar links /anime/ o /ver/ directos
   if (links.length === 0) {
-    $('a[href*="/anime/"], a[href*="latanime.org/anime/"]').each((_, el) => {
+    $('a[href*="/anime/"]').each((_, el) => {
       const href  = $(el).attr('href') || ''
-      const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-      if (href && !links.find(l => l.href === href)) links.push({ href, title })
+      const title = ($(el).attr('title') || $(el).find('h2,h3').text() || $(el).text()).trim().toLowerCase()
+      if ((href.includes('latanime.org') || href.startsWith('/anime/')) && title.length > 2)
+        addLink(href, title)
     })
   }
 
-  // Fallback 2: cualquier link con título que coincida
   if (links.length === 0) {
     $('a[href]').each((_, el) => {
       const href  = $(el).attr('href') || ''
       const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-      const esLatAnime = href.includes('latanime.org') || href.startsWith('/')
-      if (!esLatAnime || !title || title.length < 3) return
-      if (!links.find(l => l.href === href)) links.push({ href, title })
+      if (!/latanime\.org|^\/anime\//.test(href)) return
+      if (title.length < 3 || /menu|nav|footer|header|logo/i.test($(el).closest('nav,header,footer').attr('class') || '')) return
+      addLink(href, title)
     })
   }
 
@@ -1561,21 +1547,17 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
 
   const elegido = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
 
-  // Construir URL del episodio a partir del slug de la serie
-  // LatAnime formato: /ver/nombre-del-anime-episodio-N
   let baseHref = elegido.href
-  // Si el href ya incluye episodio, extraer solo el slug base
   const slugMatch =
-    baseHref.match(/\/ver\/([^/]+?)(?:-episodio-\d+)?(?:\/|$)/) ||
-    baseHref.match(/\/anime\/([^/]+?)(?:\/|$)/)
+    baseHref.match(/\/ver\/([^/?#]+?)(?:-episodio-\d+)?(?:\/|$)/) ||
+    baseHref.match(/\/anime\/([^/?#]+?)(?:\/|$)/)
 
   if (!slugMatch) {
-    // Intentar construir la URL directa con el nombre normalizado
     const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
     return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
   }
 
-  const slugBase = slugMatch[1].replace(/-episodio-\d+$/, '')
+  const slugBase = slugMatch[1].replace(/-episodio-\d+$/, '').replace(/\/$/, '')
   return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
 }
 
@@ -1669,13 +1651,36 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
 
 export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
+
+  const tryBuscarAPI = async () => {
+    try {
+      const apiUrl = `https://monoschinos2.com/api/search?q=${encodeURIComponent(nombre)}&_=${Date.now()}`
+      const res = await fetch(apiUrl, {
+        headers: buildHeaders({ Referer: 'https://monoschinos2.com/', Accept: 'application/json' }),
+        timeout: 10000,
+      })
+      if (!res.ok) return null
+      const json   = await res.json()
+      const animes = json?.data || json?.results || json?.animes || []
+      if (!Array.isArray(animes) || animes.length === 0) return null
+      const mejor = animes
+        .map(a => ({ ...a, score: puntuarMatch(a.titulo || a.title || a.name || '', nombre) }))
+        .sort((a, b) => b.score - a.score)[0]
+      const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
+      if (slug) return `https://monoschinos2.com/ver/${slug}-episodio-${episodio}`
+    } catch (_) {}
+    return null
+  }
+
+  const fromApi = await tryBuscarAPI()
+  if (fromApi) return fromApi
+
   const searchUrl = `https://monoschinos2.com/buscar?q=${encodeURIComponent(query)}`
-  const html = await fetchHtmlMonos(searchUrl)
+  const html = await fetchHtmlDirecto(searchUrl, 'https://monoschinos2.com/')
   const $    = cheerio.load(html)
 
   const links = []
 
-  // MonosChinos: cards de anime con link /anime/
   $('a[href*="/anime/"]').each((_, el) => {
     const href  = $(el).attr('href') || ''
     const title = (
@@ -1683,22 +1688,26 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
       $(el).attr('title') ||
       $(el).text()
     ).trim().toLowerCase()
-    const img   = $(el).find('img')
-    // Solo resultados con imagen (cards reales, no links de menú)
+    const img = $(el).find('img')
     if (!href || !title || img.length === 0) return
     if (!links.find(l => l.href === href)) links.push({ href, title })
   })
 
+  if (links.length === 0) {
+    $('a[href*="/anime/"]').each((_, el) => {
+      const href  = $(el).attr('href') || ''
+      const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
+      if (href && title.length > 2 && !links.find(l => l.href === href)) links.push({ href, title })
+    })
+  }
+
   if (links.length === 0) return null
 
-  const elegido   = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
-
-  // Extraer slug del anime
-  let slugMatch = elegido.href.match(/\/anime\/([^/?#]+)/)
+  const elegido  = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
+  const slugMatch = elegido.href.match(/\/anime\/([^/?#]+)/)
   if (!slugMatch) return null
   const slug = slugMatch[1]
 
-  // MonosChinos: URL episodio = /ver/slug-episodio-N
   return `https://monoschinos2.com/ver/${slug}-episodio-${episodio}`
 }
 
