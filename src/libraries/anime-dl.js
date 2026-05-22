@@ -1209,6 +1209,19 @@ export async function scrapeMonosChinos(url) {
     })
   })
 
+  $('a[href]').each((_, el) => {
+    const href  = $(el).attr('href') || ''
+    const label = $(el).text().trim().toLowerCase()
+    if (!href.startsWith('http') || servidores.find(s => s.url === href)) return
+    const esDescarga = /mega\.nz|mediafire\.com|1fichier\.com|filemoon|voe\.sx|mp4upload|streamwish|gofile\.io|pixeldrain/.test(href)
+    if (!esDescarga) return
+    servidores.push({
+      nombre : label || detectarServidor(href),
+      url    : normalizarMegaUrl(href),
+      directo: /mega\.nz|mediafire\.com|1fichier\.com/.test(href),
+    })
+  })
+
   if (servidores.length === 0) {
     $('iframe[src]').each((_, el) => {
       const src = $(el).attr('src') || ''
