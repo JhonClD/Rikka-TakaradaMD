@@ -511,6 +511,25 @@ handler.before = async function (m, { conn }) {
             { quoted: m, mentions: [m.sender] }
           )
           return true
+        }
+
+        global.pendingAnimeSearch.delete(m.chat)
+        const elegido = animeSearch.resultados.find(r => r.slug === slug)
+        if (!elegido) return false
+
+        await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
+        return true
+      }
+
+      const pick = global.pendingServerPicks.get(m.chat)
+      if (!pick) return false
+
+      if (pick.owner && pick.owner !== m.sender) {
+        await conn.sendMessage(m.chat,
+          { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
+          { quoted: m, mentions: [m.sender] }
+        )
+        return true
       }
 
       const sk = `${m.chat}|${m.sender}`
