@@ -39,6 +39,9 @@ export function guardarPicks() {
         tmpDir       : pick.tmpDir,
         sitioId      : pick.sitioElegido?.id ?? null,
         argsParaAnime: pick.argsParaAnime,
+        nombre       : pick.nombre ?? null,
+        episodio     : pick.episodio ?? null,
+        temporada    : pick.temporada ?? 1,
         timestamp    : pick.timestamp,
       }
     }
@@ -61,6 +64,9 @@ export function cargarPicks() {
         tmpDir       : p.tmpDir,
         sitioElegido : getSitioPorId(p.sitioId),
         argsParaAnime: p.argsParaAnime,
+        nombre       : p.nombre ?? null,
+        episodio     : p.episodio ?? null,
+        temporada    : p.temporada ?? 1,
         timestamp    : p.timestamp,
       })
     }
@@ -184,26 +190,25 @@ export function normalizarMegaUrl(u) {
 
 export const numToLetter = (i) => String.fromCharCode(97 + (i % 26))
 
-// ─────────────────────────────────────────────────────────────
-//  Helpers para detectar y normalizar servidores
-// ─────────────────────────────────────────────────────────────
+export const zeroPad     = (n) => String(n).padStart(2, '0')
+export const safeFile    = (s) => s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+export const buildFileName = (titulo, epNum, temporada = 1) => {
+  const season = temporada > 1 ? ` T${temporada}` : ''
+  return `${zeroPad(epNum)} ${safeFile(titulo)}${season}.mp4`
+}
 
-/**
- * Dado un nombre o URL, devuelve el nombre "limpio" del servidor conocido
- * o null si no se reconoce (para filtrarlo).
- */
 export function detectarServidorConocido(nombre, url = '') {
   const src = `${nombre || ''} ${url || ''}`.toLowerCase()
   for (const sv of CONFIG.servidoresConocidos) {
     if (src.includes(sv)) return sv
   }
-  // Detectar por dominio de la URL
+  
   try {
     const host = new URL(url).hostname.replace(/^www\./, '')
     for (const sv of CONFIG.servidoresConocidos) {
       if (host.includes(sv)) return sv
     }
-    // Retornar el host corto si parece un embed conocido
+    
     const hostBase = host.split('.')[0]
     if (hostBase.length > 2) return hostBase
   } catch (_) {}
@@ -214,7 +219,7 @@ export function detectarServidor(url) {
   for (const s of CONFIG.servidoresPreferidos) {
     if (url.includes(s)) return s
   }
-  // Intentar extraer dominio legible
+  
   try {
     const host = new URL(url).hostname.replace(/^www\./, '')
     return host.split('.')[0] || 'generico'
@@ -231,10 +236,6 @@ export function elegirMejorServidor(servidores) {
   }
   return servidores[0] || null
 }
-
-// ─────────────────────────────────────────────────────────────
-//  Helpers JKAnime: extracción robusta de var servers
-// ─────────────────────────────────────────────────────────────
 
 function extractBalancedSection(text, startIndex, openChar, closeChar) {
   let depth = 0
@@ -740,7 +741,7 @@ export async function extractMp4Upload(embedUrl) {
     const url = idMatch
       ? `https://www.mp4upload.com/embed-${idMatch[1]}.html`
       : embedUrl
-    const res  = await fetch(url, { headers: embedHeaders('https://www.mp4upload.com/'), timeout: 15000 })
+    const res  = await fetch(url, { headers: embedHeaders('https:
     const text = await res.text()
     const packed = text.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
     const code   = packed ? jsUnpack(packed[0]) : text
@@ -755,7 +756,7 @@ export async function extractMp4Upload(embedUrl) {
 
 export async function extractDoodStream(embedUrl) {
   try {
-    const url   = embedUrl.replace(/\/(d|watch)\//, '/e/')
+    const url   = embedUrl.replace(/\/(d|watch)\
     const res   = await fetch(url, { headers: embedHeaders('https://dood.wf/'), timeout: 15000 })
     const text  = await res.text()
     const host  = new URL(res.url).origin
@@ -848,7 +849,7 @@ export async function extractStreamWish(embedUrl) {
 export async function extractStreamtape(embedUrl) {
   try {
     const pageUrl = embedUrl.replace('/e/', '/v/')
-    const res  = await fetch(pageUrl, { headers: embedHeaders('https://streamtape.com/'), timeout: 15000 })
+    const res  = await fetch(pageUrl, { headers: embedHeaders('https:
     const text = await res.text()
     const m1 = text.match(/robotlink['"]\)\.innerHTML\s*=\s*["']([^"']+)["']\s*\+\s*["']([^"']+)["']/)
     if (m1) return 'https:' + m1[1] + m1[2]
@@ -1070,10 +1071,6 @@ export async function scrapeAnimeFLV(url) {
   const filtrados = servidores.filter(s => esServidorConocido(s.nombre, s.url))
   return filtrados.length > 0 ? filtrados : servidores
 }
-
-// ─────────────────────────────────────────────────────────────
-//  scrapeLatAnime — mejorado con selectores correctos
-// ─────────────────────────────────────────────────────────────
 
 export async function scrapeLatAnime(url) {
   const html = await fetchHtml(url)
@@ -1458,7 +1455,7 @@ export async function scrapeJKanime(url) {
 
     for (const srv of SERVIDORES_JK) {
       try {
-        const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
+        const apiUrl = `https:
         const res    = await fetch(apiUrl, { headers, timeout: 12000 })
         if (!res.ok) continue
         const json   = await res.json()
@@ -1492,10 +1489,6 @@ export async function scrapeJKanime(url) {
   return servidores
 }
 
-// ─────────────────────────────────────────────────────────────
-//  buscarEnAnimeFLV
-// ─────────────────────────────────────────────────────────────
-
 export async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
   const html = await fetchHtml(`https://www3.animeflv.net/browse?q=${encodeURIComponent(query)}`)
@@ -1515,10 +1508,6 @@ export async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
   const slug    = elegido.href.replace('/anime/', '').replace(/\/$/, '')
   return `https://www3.animeflv.net/ver/${slug}-${episodio}`
 }
-
-// ─────────────────────────────────────────────────────────────
-//  buscarEnLatAnime — mejorado con selectores correctos
-// ─────────────────────────────────────────────────────────────
 
 export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
@@ -1555,7 +1544,7 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
     $('a[href]').each((_, el) => {
       const href  = $(el).attr('href') || ''
       const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-      if (!/latanime\.org|^\/anime\//.test(href)) return
+      if (!/latanime\.org|^\/anime\
       if (title.length < 3 || /menu|nav|footer|header|logo/i.test($(el).closest('nav,header,footer').attr('class') || '')) return
       addLink(href, title)
     })
@@ -1579,14 +1568,9 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
   return `https://latanime.org/ver/${slugBase}-episodio-${episodio}`
 }
 
-// ─────────────────────────────────────────────────────────────
-//  buscarEnJKanime
-// ─────────────────────────────────────────────────────────────
-
 export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
 
-  // Método 1: API search
   try {
     const apiSearch = `https://jkanime.net/api/search/?q=${encodeURIComponent(nombre)}`
     const res = await fetch(apiSearch, {
@@ -1607,13 +1591,11 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     }
   } catch (e) { console.error('[jkanime] API search:', e.message) }
 
-  // Método 2: scrape buscar/
   try {
     const html  = await fetchHtml(`https://jkanime.net/buscar/?q=${encodeURIComponent(query)}`)
     const $     = cheerio.load(html)
     const links = []
 
-    // Selector principal de JKAnime (.anime__item = tarjeta de anime)
     $('.anime__item, .card, .col-lg-2').each((_, el) => {
       const aTag  = $(el).find('a').first()
       const href  = aTag.attr('href') || ''
@@ -1642,7 +1624,6 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     }
   } catch (e) { console.error('[jkanime] HTML search:', e.message) }
 
-  // Método 3: slug directo
   try {
     const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
     const candidatos = [slugBase]
@@ -1662,10 +1643,6 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
 
   return null
 }
-
-// ─────────────────────────────────────────────────────────────
-//  buscarEnMonosChinos (reemplaza TioAnime)
-// ─────────────────────────────────────────────────────────────
 
 export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
@@ -1728,10 +1705,6 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
 
   return `https://monoschinos2.com/ver/${slug}-episodio-${episodio}`
 }
-
-// ─────────────────────────────────────────────────────────────
-//  Mega / MegaQuotaError / yt-dlp
-// ─────────────────────────────────────────────────────────────
 
 export class MegaQuotaError extends Error {
   constructor() { super('EOVERQUOTA'); this.name = 'MegaQuotaError' }
@@ -1848,7 +1821,7 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
 // ─────────────────────────────────────────────────────────────
 
 export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m, conn) {
-  const { tmpDir, sitioElegido, argsParaAnime } = pick
+  const { tmpDir, sitioElegido, argsParaAnime, nombre, episodio, temporada = 1 } = pick
   let archivoPath = null
 
   let statusKey = null
@@ -1984,6 +1957,12 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   }
 
   try {
+    if (nombre && episodio != null) {
+      const newName = buildFileName(nombre, episodio, temporada)
+      const newPath = path.join(tmpDir, newName)
+      try { fs.renameSync(archivoPath, newPath); archivoPath = newPath } catch (_) {}
+    }
+
     const sizeMB  = fs.statSync(archivoPath).size / 1024 / 1024
     const fileName = path.basename(archivoPath).replace(/_c\.mp4$/, '.mp4')
     const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · KanaArima-MD`
