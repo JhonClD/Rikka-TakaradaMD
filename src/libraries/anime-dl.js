@@ -153,7 +153,7 @@ export const CONFIG = {
     'Sec-Fetch-Site': 'none',
     'Connection': 'keep-alive',
   },
-  // Servidores conocidos que tienen soporte real de descarga
+  
   servidoresConocidos: [
     'mega', 'mediafire', 'mp4upload', 'filemoon', 'streamwish', 'wishembed',
     'doodstream', 'dood', 'streamtape', 'okru', 'voe', 'upstream',
@@ -188,10 +188,9 @@ export function normalizarMegaUrl(u) {
   return u
 }
 
-export const numToLetter = (i) => String.fromCharCode(97 + (i % 26))
-
-export const zeroPad     = (n) => String(n).padStart(2, '0')
-export const safeFile    = (s) => s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+export const numToLetter  = (i) => String.fromCharCode(97 + (i % 26))
+export const zeroPad      = (n) => String(n).padStart(2, '0')
+export const safeFile     = (s) => s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
 export const buildFileName = (titulo, epNum, temporada = 1) => {
   const season = temporada > 1 ? ` T${temporada}` : ''
   return `${zeroPad(epNum)} ${safeFile(titulo)}${season}.mp4`
@@ -301,10 +300,6 @@ function extractVideoIframeUrls(html) {
   return urls
 }
 
-// ─────────────────────────────────────────────────────────────
-//  enviarListaWA
-// ─────────────────────────────────────────────────────────────
-
 export async function enviarListaWA(conn, m, { title, body = '', footer, buttonText = 'SELECCIONAR', sections }) {
   const device   = getDevice(m.key.id)
   const isMobile = device !== 'desktop' && device !== 'web'
@@ -352,10 +347,6 @@ export async function enviarListaWA(conn, m, { title, body = '', footer, buttonT
   return false
 }
 
-// ─────────────────────────────────────────────────────────────
-//  buscarResultadosAnimeFLV
-// ─────────────────────────────────────────────────────────────
-
 export async function buscarResultadosAnimeFLV(nombre, temporada = 1) {
   const query = temporada > 1 ? `${nombre} ${temporada}` : nombre
   try {
@@ -383,10 +374,6 @@ export async function buscarResultadosAnimeFLV(nombre, temporada = 1) {
     return []
   }
 }
-
-// ─────────────────────────────────────────────────────────────
-//  scrapeInfoAnimeFLV / mostrarInfoYEpisodios
-// ─────────────────────────────────────────────────────────────
 
 export async function scrapeInfoAnimeFLV(animeUrl) {
   try {
@@ -522,10 +509,6 @@ export async function mostrarInfoYEpisodios({ url, slug: inputSlug, title: input
   })
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Helpers texto / normalización
-// ─────────────────────────────────────────────────────────────
-
 export function normalizarTitulo(t = '') {
   return t.toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -568,10 +551,6 @@ export function elegirPorTemporada(links, temporada) {
     )) || links[0]
   )
 }
-
-// ─────────────────────────────────────────────────────────────
-//  fetchHtml / Puppeteer
-// ─────────────────────────────────────────────────────────────
 
 export async function fetchHtml(url) {
   try {
@@ -667,10 +646,6 @@ export async function fetchHtmlDirecto(url, referer) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Extractores de embeds (filemoon, mp4upload, dood, etc.)
-// ─────────────────────────────────────────────────────────────
-
 export function jsUnpack(packed) {
   try {
     const m = packed.match(/}\s*\('(.*)',\s*(.*?),\s*(\d+),\s*'(.*?)'\.split\('\|'\)/)
@@ -741,7 +716,7 @@ export async function extractMp4Upload(embedUrl) {
     const url = idMatch
       ? `https://www.mp4upload.com/embed-${idMatch[1]}.html`
       : embedUrl
-    const res  = await fetch(url, { headers: embedHeaders('https:
+    const res  = await fetch(url, { headers: embedHeaders('https://www.mp4upload.com/'), timeout: 15000 })
     const text = await res.text()
     const packed = text.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
     const code   = packed ? jsUnpack(packed[0]) : text
@@ -756,7 +731,7 @@ export async function extractMp4Upload(embedUrl) {
 
 export async function extractDoodStream(embedUrl) {
   try {
-    const url   = embedUrl.replace(/\/(d|watch)\
+    const url   = embedUrl.replace(/\/(d|watch)\//, '/e/')
     const res   = await fetch(url, { headers: embedHeaders('https://dood.wf/'), timeout: 15000 })
     const text  = await res.text()
     const host  = new URL(res.url).origin
@@ -814,7 +789,6 @@ export async function extractStreamWish(embedUrl) {
     if (src) return src
   } catch (e) { console.error('[streamwish] fetch error:', e.message) }
 
-  // Puppeteer fallback
   try {
     const chromiumPaths = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -849,7 +823,7 @@ export async function extractStreamWish(embedUrl) {
 export async function extractStreamtape(embedUrl) {
   try {
     const pageUrl = embedUrl.replace('/e/', '/v/')
-    const res  = await fetch(pageUrl, { headers: embedHeaders('https:
+    const res  = await fetch(pageUrl, { headers: embedHeaders('https://streamtape.com/'), timeout: 15000 })
     const text = await res.text()
     const m1 = text.match(/robotlink['"]\)\.innerHTML\s*=\s*["']([^"']+)["']\s*\+\s*["']([^"']+)["']/)
     if (m1) return 'https:' + m1[1] + m1[2]
@@ -1030,10 +1004,6 @@ export function extraerUrlsDeScripts($, html, servidores) {
   })
 }
 
-// ─────────────────────────────────────────────────────────────
-//  scrapeAnimeFLV
-// ─────────────────────────────────────────────────────────────
-
 export async function scrapeAnimeFLV(url) {
   const html = await fetchHtml(url)
   const $ = cheerio.load(html)
@@ -1102,7 +1072,6 @@ export async function scrapeLatAnime(url) {
     return href
   }
 
-  // LatAnime usa data-player con base64 para los servidores (botones .play-video o similares)
   const dataPlayerEls = $('[data-player], .play-video[data-player], .servers a[data-player], a[data-player]')
   if (dataPlayerEls.length > 0) {
     dataPlayerEls.each((_, el) => {
@@ -1111,7 +1080,7 @@ export async function scrapeLatAnime(url) {
       if (!dataPlayer) return
       try {
         let embedUrl = dataPlayer
-        // Intentar decodificar base64
+        
         try {
           const decoded = Buffer.from(dataPlayer, 'base64').toString('utf-8')
           if (decoded.startsWith('http')) embedUrl = decoded
@@ -1125,7 +1094,6 @@ export async function scrapeLatAnime(url) {
     console.log(`[latanime] data-player: ${servidores.length} servidores`)
   }
 
-  // Fallback: links directos a servidores conocidos
   if (servidores.length === 0) {
     const linksDescarga = []
     $('a[href]').each((_, el) => {
@@ -1156,7 +1124,6 @@ export async function scrapeLatAnime(url) {
     }
   }
 
-  // data-src / iframe fallback
   $('[data-src], [data-url]').each((_, el) => {
     const raw   = $(el).attr('data-src') || $(el).attr('data-url') || ''
     const label = $(el).text().trim().toLowerCase()
@@ -1184,48 +1151,35 @@ export async function scrapeLatAnime(url) {
   return resultado
 }
 
-// ─────────────────────────────────────────────────────────────
-//  scrapeMonosChinos (reemplaza TioAnime)
-// ─────────────────────────────────────────────────────────────
-
 export async function scrapeMonosChinos(url) {
-  // fetchHtml tiene fallback automático a Puppeteer si el sitio usa JS/Cloudflare
   const html = await fetchHtml(url)
   const $    = cheerio.load(html)
   const servidores = []
 
-  // URL capturada por Puppeteer (video directo interceptado)
   const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
   if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
 
-  // Método 1: data-player / data-url / data-src (estructura MonosChinos, posiblemente base64)
   $('[data-player], [data-url], [data-src]').each((_, el) => {
     const raw   = $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('data-src') || ''
     const label = ($(el).text() || $(el).find('span, strong').text() || '').trim().toLowerCase()
     if (!raw) return
-
     let embedUrl = raw
     try {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8').trim()
       if (decoded.startsWith('http')) embedUrl = decoded
     } catch (_) {}
-
     if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl))
       servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
   })
 
-  // Método 2: iframes directos en el DOM
   $('iframe[src]').each((_, el) => {
     const src = $(el).attr('src') || ''
     if (src.startsWith('http') && !servidores.find(s => s.url === src))
       servidores.push({ nombre: detectarServidor(src), url: src })
   })
 
-  // Método 3: variables JS inline (var videos / var hls / var servers)
   $('script').each((_, el) => {
     const code = $(el).html() || ''
-
-    // Patrón array-de-arrays: var videos = [["Server","url"], ...]
     const m1 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\[[\s\S]*?\]\])/s)
     if (m1) {
       try {
@@ -1239,8 +1193,6 @@ export async function scrapeMonosChinos(url) {
         }
       } catch (_) {}
     }
-
-    // Patrón array-de-objetos: var videos = [{server:"...", url:"..."}, ...]
     const m2 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\s*\{[\s\S]*?\}\s*\])/s)
     if (m2) {
       try {
@@ -1264,10 +1216,6 @@ export async function scrapeMonosChinos(url) {
   return resultado
 }
 
-// ─────────────────────────────────────────────────────────────
-//  scrapeJKanime — mejorado con var servers + base64 decoding
-// ─────────────────────────────────────────────────────────────
-
 export async function scrapeJKanime(url) {
   const servidores = []
 
@@ -1289,7 +1237,6 @@ export async function scrapeJKanime(url) {
     return current
   }
 
-  // ── Método 1: var servers con base64 (el más robusto) ──
   try {
     const html = await fetchHtml(url)
     const serversLiteral = extractVarLiteral(html, 'servers')
@@ -1315,7 +1262,6 @@ export async function scrapeJKanime(url) {
               })
           }
 
-          // Links de descarga si hay remote base + slug
           if (remoteBase && entry.slug) {
             const dlUrl = `${remoteBase.replace(/\/$/, '')}/d/${entry.slug}/`
             if (!servidores.find(s => s.url === dlUrl))
@@ -1333,7 +1279,6 @@ export async function scrapeJKanime(url) {
       }
     }
 
-    // video[N] = '<iframe src="...">' pattern
     const iframeUrls = extractVideoIframeUrls(html)
     for (const iUrl of iframeUrls) {
       if (!servidores.find(s => s.url === iUrl))
@@ -1345,7 +1290,6 @@ export async function scrapeJKanime(url) {
     }
   } catch (e) { console.error('[jkanime] var servers parse:', e.message) }
 
-  // ── Método 2: Puppeteer (tabla de servidores) ──
   const jkMatch = url.match(/jkanime\.net\/([^/]+)\/(\d+)/)
   const slug    = jkMatch?.[1]
   const cap     = jkMatch?.[2]
@@ -1379,7 +1323,6 @@ export async function scrapeJKanime(url) {
       try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }) } catch (_) {}
     }
 
-    // Intentar también extraer var servers desde Puppeteer
     const serversFromPage = await page.evaluate(() => {
       try {
         const scripts = Array.from(document.querySelectorAll('script'))
@@ -1448,14 +1391,13 @@ export async function scrapeJKanime(url) {
     }
   } catch (e) { console.error('[jkanime] Puppeteer:', e.message) }
 
-  // ── Método 3: API AJAX fallback ──
   if (slug && cap) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
     const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
 
     for (const srv of SERVIDORES_JK) {
       try {
-        const apiUrl = `https:
+        const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
         const res    = await fetch(apiUrl, { headers, timeout: 12000 })
         if (!res.ok) continue
         const json   = await res.json()
@@ -1544,7 +1486,7 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
     $('a[href]').each((_, el) => {
       const href  = $(el).attr('href') || ''
       const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-      if (!/latanime\.org|^\/anime\
+      if (!/latanime\.org|^\/anime\//.test(href)) return
       if (title.length < 3 || /menu|nav|footer|header|logo/i.test($(el).closest('nav,header,footer').attr('class') || '')) return
       addLink(href, title)
     })
@@ -1816,10 +1758,6 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────
-//  ejecutarDescargaServidor
-// ─────────────────────────────────────────────────────────────
-
 export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m, conn) {
   const { tmpDir, sitioElegido, argsParaAnime, nombre, episodio, temporada = 1 } = pick
   let archivoPath = null
@@ -1962,7 +1900,6 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       const newPath = path.join(tmpDir, newName)
       try { fs.renameSync(archivoPath, newPath); archivoPath = newPath } catch (_) {}
     }
-
     const sizeMB  = fs.statSync(archivoPath).size / 1024 / 1024
     const fileName = path.basename(archivoPath).replace(/_c\.mp4$/, '.mp4')
     const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · KanaArima-MD`
