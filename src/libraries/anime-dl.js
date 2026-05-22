@@ -1192,49 +1192,67 @@ export async function scrapeLatAnime(url) {
 // ─────────────────────────────────────────────────────────────
 
 export async function scrapeMonosChinos(url) {
-  const html = await fetchHtmlDirecto(url, 'https://monoschinos2.com/')
+  // fetchHtml tiene fallback automático a Puppeteer si el sitio usa JS/Cloudflare
+  const html = await fetchHtml(url)
   const $    = cheerio.load(html)
   const servidores = []
 
+  // URL capturada por Puppeteer (video directo interceptado)
   const intercepted = html.match(/INTERCEPTED_VIDEO:(https?:\/\/[^\s"<>\n]+)/)
   if (intercepted) servidores.push({ nombre: detectarServidor(intercepted[1]), url: intercepted[1], directo: true })
 
-  // MonosChinos usa .play-video con data-player en base64
-  $('.play-video[data-player], [class*="server"][data-player], button[data-player], a[data-player]').each((_, el) => {
-    const dataPlayer = $(el).attr('data-player') || ''
-    const label = ($(el).text() || $(el).find('span').text() || '').trim().toLowerCase()
-    if (!dataPlayer) return
+  // Método 1: data-player / data-url / data-src (estructura MonosChinos, posiblemente base64)
+  $('[data-player], [data-url], [data-src]').each((_, el) => {
+    const raw   = $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('data-src') || ''
+    const label = ($(el).text() || $(el).find('span, strong').text() || '').trim().toLowerCase()
+    if (!raw) return
+
+    let embedUrl = raw
     try {
-      const decoded = Buffer.from(dataPlayer, 'base64').toString('utf-8').trim()
-      const embedUrl = decoded.startsWith('http') ? decoded : dataPlayer
-      if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl)) {
-        servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
-      }
-    } catch (_) {
-      if (dataPlayer.startsWith('http') && !servidores.find(s => s.url === dataPlayer))
-        servidores.push({ nombre: label || detectarServidor(dataPlayer), url: dataPlayer })
-    }
+      const decoded = Buffer.from(raw, 'base64').toString('utf-8').trim()
+      if (decoded.startsWith('http')) embedUrl = decoded
+    } catch (_) {}
+
+    if (embedUrl.startsWith('http') && !servidores.find(s => s.url === embedUrl))
+      servidores.push({ nombre: label || detectarServidor(embedUrl), url: embedUrl })
   })
 
-  // Fallback: iframes y scripts
+  // Método 2: iframes directos en el DOM
   $('iframe[src]').each((_, el) => {
     const src = $(el).attr('src') || ''
     if (src.startsWith('http') && !servidores.find(s => s.url === src))
       servidores.push({ nombre: detectarServidor(src), url: src })
   })
 
+  // Método 3: variables JS inline (var videos / var hls / var servers)
   $('script').each((_, el) => {
     const code = $(el).html() || ''
-    const m = code.match(/var videos\s*=\s*(\[\[[\s\S]*?\]\])/s)
-    if (m) {
+
+    // Patrón array-de-arrays: var videos = [["Server","url"], ...]
+    const m1 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\[[\s\S]*?\]\])/s)
+    if (m1) {
       try {
-        const lista = JSON.parse(m[1])
+        const lista = JSON.parse(m1[1])
         for (const item of lista) {
           if (Array.isArray(item) && typeof item[1] === 'string' && item[1].startsWith('http')) {
             const nombre = String(item[0]).toLowerCase() || detectarServidor(item[1])
             const u = normalizarMegaUrl(item[1])
             if (!servidores.find(s => s.url === u)) servidores.push({ nombre, url: u })
           }
+        }
+      } catch (_) {}
+    }
+
+    // Patrón array-de-objetos: var videos = [{server:"...", url:"..."}, ...]
+    const m2 = code.match(/var\s+(?:videos|hls|servers?)\s*=\s*(\[\s*\{[\s\S]*?\}\s*\])/s)
+    if (m2) {
+      try {
+        const lista = JSON.parse(m2[1])
+        for (const item of lista) {
+          const u = item.url || item.src || item.file || item.source || ''
+          const n = (item.server || item.name || item.label || '').toLowerCase()
+          if (u.startsWith('http') && !servidores.find(s => s.url === u))
+            servidores.push({ nombre: n || detectarServidor(u), url: normalizarMegaUrl(u) })
         }
       } catch (_) {}
     }
