@@ -423,6 +423,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     tmpDir,
     sitioElegido,
     argsParaAnime,
+    nombre      : typeof nombre !== 'undefined' ? nombre : null,
+    episodio    : typeof episodio !== 'undefined' ? episodio : null,
+    temporada   : typeof temporada !== 'undefined' ? temporada : 1,
     timestamp   : Date.now(),
     owner       : m.sender,
   })
