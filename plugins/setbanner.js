@@ -25,22 +25,31 @@ async function uploadToImgBB(buffer) {
   return json.data.url;
 }
 
-const handler = async (m, { conn, isOwner }) => {
+const handler = async (m, { conn, isOwner, args }) => {
   if (!isOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.');
 
-  const q = m.quoted ? m.quoted : m;
-  const mime = (q.msg || q).mimetype || q.mediaType || '';
-  if (!q || !/image\/(png|jpe?g|gif)/.test(mime)) {
-    return m.reply('꒰ ✗ ꒱ Responde a una *imagen* (jpg/png/gif) para cambiar el banner.');
+  let buffer;
+  if (args[0] && /^https?:\/\/.+\.(jpe?g|png|gif)$/i.test(args[0])) {
+    try {
+      const res = await fetch(args[0]);
+      buffer = Buffer.from(await res.arrayBuffer());
+    } catch {
+      return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen desde la URL.');
+    }
+  } else {
+    const q = m.quoted ? m.quoted : m;
+    const mime = (q.msg || q).mimetype || q.mediaType || '';
+    if (!q || !/image\/(png|jpe?g|gif)/.test(mime)) {
+      return m.reply('꒰ ✗ ꒱ Responde a una *imagen* (jpg/png/gif) o pasa una URL válida.');
+    }
+    try {
+      buffer = await q.download();
+    } catch {
+      return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
+    }
   }
 
-  let buffer;
-  try {
-    buffer = await q.download();
-  } catch {
-    return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
-  }
-  if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
+  if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo obtener la imagen.');
 
   try {
     const url = await uploadToImgBB(buffer);
