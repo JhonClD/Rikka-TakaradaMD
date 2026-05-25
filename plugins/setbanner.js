@@ -33,7 +33,7 @@ const handler = async (m, { conn, isOwner, args }) => {
     } catch {
       return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
     }
-    url = 'local'; // marcador para indicar que se usa copia local
+    url = 'local';
   }
 
   if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo obtener la imagen.');
@@ -41,6 +41,7 @@ const handler = async (m, { conn, isOwner, args }) => {
   try {
     writeFileSync(BANNER_PATH, buffer);
     global.bannerBuffer = buffer;
+    global.banner = url; // 🔥 esta línea actualiza el banner activo
     const settings = global.db.data.settings[conn.user.jid] || {};
     settings.banner = url;
     global.db.data.settings[conn.user.jid] = settings;
