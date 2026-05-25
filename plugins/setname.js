@@ -4,9 +4,24 @@ const handler = async (m, { conn, args, isOwner, usedPrefix, command }) => {
   const settings = global.db.data.settings[conn.user.jid] || {};
   const value = args.join(' ').trim();
 
+  if (command === 'resetname' || value.toLowerCase() === 'reset') {
+    const defaultShort = '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
+    const defaultLong  = 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
+    delete settings.namebot;
+    delete settings.botname;
+    global.db.data.settings[conn.user.jid] = settings;
+    return m.reply(
+      `꒰ ✰ ꒱ *Nombre restaurado* ♡\n` +
+      `┊ೃ ⇢ Corto › *${defaultShort}*\n` +
+      `┊ೃ ⇢ Largo › *${defaultLong}*\n` +
+      `╰─► ༉‧₊˚✧`
+    );
+  }
+
   if (!value) return m.reply(
     `꒰ ✰ ꒱ *Set Name* ⸙͎\n` +
     `┊ ↳ Uso: *${usedPrefix + command} Corto / Nombre Largo*\n` +
+    `┊ ↳ Reset: *${usedPrefix}resetname*\n` +
     `╰─► Ejemplo: *${usedPrefix + command} Rikka / Rikka Takarada*`
   );
 
@@ -28,9 +43,9 @@ const handler = async (m, { conn, args, isOwner, usedPrefix, command }) => {
   );
 };
 
-handler.help = ['setname <corto / largo>'];
+handler.help = ['setname <corto / largo>', 'resetname'];
 handler.tags = ['owner'];
-handler.command = ['setbotname', 'setname'];
+handler.command = ['setbotname', 'setname', 'resetname'];
 handler.owner = true;
 
 export default handler;
