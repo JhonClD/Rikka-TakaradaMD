@@ -1727,7 +1727,10 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
   console.log(`\n[yt-dlp] Descargando: ${videoUrl.slice(0, 120)}`)
 
   await new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const ytDlpBin = fs.existsSync('/home/container/.local/bin/yt-dlp')
+      ? '/home/container/.local/bin/yt-dlp'
+      : 'yt-dlp'
+    const proc = spawn(ytDlpBin, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stderrBuf = ''
     let stdoutBuf = ''
 
