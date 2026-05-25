@@ -47,7 +47,27 @@ const handler = async (m, { conn, usedPrefix }) => {
   const pushname  = m.pushName || 'Usuario';
   const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
   const uptime    = clockString(process.uptime() * 1000);
-  const isPremium = global.db?.data?.users[m.sender]?.premium ? '✅' : '❌';
+  // Detectar nivel del usuario
+  const _ownerNums = (global.owner || []).map(([n]) => n.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+  const _senderJid = m.sender;
+  const _isROwner  = _ownerNums.includes(_senderJid) || m.fromMe;
+  const _isMod     = !_isROwner && (global.mods || []).map(v => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(_senderJid);
+  const _userData  = global.db?.data?.users[m.sender] || {};
+  const _premActive = typeof _userData.premiumTime === 'number' && _userData.premiumTime > Date.now();
+
+  let isPremium;
+  if (_isROwner) {
+    isPremium = '👑 Owner';
+  } else if (_isMod) {
+    isPremium = '🛡️ Mod';
+  } else if (_premActive) {
+    const _msLeft = _userData.premiumTime - Date.now();
+    const _dLeft  = Math.floor(_msLeft / 86400000);
+    const _hLeft  = Math.floor((_msLeft % 86400000) / 3600000);
+    isPremium = _dLeft > 0 ? `✅ (${_dLeft}d ${_hLeft}h)` : `✅ (<1d)`;
+  } else {
+    isPremium = '❌';
+  }
 
   const categories = {};
   Object.values(global.plugins || {}).forEach(plugin => {
