@@ -1,5 +1,3 @@
-import GraphemeSplitter from 'grapheme-splitter';
-
 const handler = async (m, { conn, args, isOwner, usedPrefix, command }) => {
   if (!isOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.');
 
@@ -35,8 +33,9 @@ const handler = async (m, { conn, args, isOwner, usedPrefix, command }) => {
     return m.reply('╰─► ✰ Modo *sin prefijos* activado ♡\n┊ ↳ El bot responderá a comandos sin prefijos.');
   }
 
-  const splitter = new GraphemeSplitter();
-  const graphemes = splitter.splitGraphemes(value);
+  // Usa Intl.Segmenter nativo (Node 16+) — sin dependencias externas
+  const segmenter = new Intl.Segmenter();
+  const graphemes = [...segmenter.segment(value)].map(s => s.segment);
   const lista = [];
   for (const g of graphemes) {
     if (/^[a-zA-Z]+$/.test(g)) continue;
