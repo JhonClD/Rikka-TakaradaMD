@@ -1772,6 +1772,94 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
   )
 }
 
+export async function descargarDirecto(embedUrl, outputDir) {
+  const { default: axios } = await import('axios')
+  const referer = (() => { try { return new URL(embedUrl).origin + '/' } catch (_) { return 'https://animeflv.net/' } })()
+
+  // 1. Intentar extractor propio
+  let videoUrl = await resolverEmbedAVideoDirecto(embedUrl)
+
+  // 2. Si falla, hacer scrape de la página buscando mp4/m3u8
+  if (!videoUrl) {
+    try {
+      const res = await axios.get(embedUrl, {
+        headers: { 'User-Agent': randomUA(), 'Referer': referer, 'Accept': 'text/html,*/*' },
+        httpsAgent, timeout: 15000,
+      })
+      const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
+      const patterns = [
+        /['"]?(https?:\/\/[^'">\s]+\.m3u8[^'">\s]*)/gi,
+        /['"]?(https?:\/\/[^'">\s]+\.mp4[^'">\s]*)/gi,
+        /file\s*:\s*['"]?(https?:\/\/[^'">\s,]+)/gi,
+        /src\s*:\s*['"]?(https?:\/\/[^'">\s]+\.(?:mp4|m3u8)[^'">\s]*)/gi,
+        /source\s+src=['"]?(https?:\/\/[^'">\s]+)/gi,
+        /hlsUrl\s*[=:]\s*['"]?(https?:\/\/[^'">\s]+)/gi,
+      ]
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0
+        const match = pattern.exec(html)
+        if (match?.[1] && !/ads?|banner|track|subtitle|font/i.test(match[1])) {
+          videoUrl = match[1].replace(/['">\s].*$/, '')
+          break
+        }
+      }
+    } catch (err) {
+      console.log(`[directoDL] scrape falló: ${err.message?.slice(0, 80)}`)
+    }
+  }
+
+  if (!videoUrl) throw new Error(`Sin extractor disponible para: ${embedUrl}`)
+  console.log(`[directoDL] URL extraída: ${videoUrl.slice(0, 100)}`)
+
+  const isHLS = videoUrl.includes('.m3u8')
+  const outFile = path.join(outputDir, `video_${Date.now()}.mp4`)
+
+  if (isHLS) {
+    // HLS → re-invocar yt-dlp con la URL directa del m3u8
+    const ytDlpBin = fs.existsSync('/home/container/.local/bin/yt-dlp')
+      ? '/home/container/.local/bin/yt-dlp'
+      : 'yt-dlp'
+    await new Promise((resolve, reject) => {
+      const args = [
+        '--no-check-certificate', '--no-warnings',
+        '--downloader', 'ffmpeg',
+        '-f', 'best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        '--add-header', `Referer: ${referer}`,
+        '--add-header', `User-Agent: ${randomUA()}`,
+        '-o', outFile, videoUrl,
+      ]
+      const proc = spawn(ytDlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const timer = setTimeout(() => { proc.kill(); reject(new Error('HLS timeout')) }, CONFIG.downloadTimeout)
+      proc.on('close', code => {
+        clearTimeout(timer)
+        code === 0 ? resolve() : reject(new Error(`HLS: yt-dlp salió con código ${code}`))
+      })
+      proc.on('error', err => { clearTimeout(timer); reject(err) })
+    })
+  } else {
+    // MP4 directo → axios stream
+    const ext = videoUrl.match(/\.(mp4|mkv|webm)/i)?.[1] || 'mp4'
+    const directFile = path.join(outputDir, `video_${Date.now()}.${ext}`)
+    const response = await axios({
+      method: 'get', url: videoUrl, responseType: 'stream',
+      headers: { 'User-Agent': randomUA(), 'Referer': referer, 'Accept': '*/*' },
+      httpsAgent, timeout: CONFIG.downloadTimeout,
+    })
+    const total = parseInt(response.headers['content-length'] || '0')
+    let downloaded = 0
+    response.data.on('data', chunk => {
+      downloaded += chunk.length
+      if (total) process.stdout.write(`\r[directoDL] ${((downloaded / total) * 100).toFixed(1)}% | ${(downloaded / 1024 / 1024).toFixed(1)} MB`)
+    })
+    await pipeline(response.data, fs.createWriteStream(directFile))
+    console.log(`\n[directoDL] ✅ ${path.basename(directFile)}`)
+    return directFile
+  }
+
+  return outFile
+}
+
 export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m, conn) {
   const { tmpDir, sitioElegido, argsParaAnime, nombre, episodio, temporada = 1 } = pick
   let archivoPath = null
@@ -1880,7 +1968,15 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       }
 
       await updateStatus(`⬇️ Descargando desde *${srv.nombre.toUpperCase()}*...`)
-      archivoPath = await descargarConYtDlp(srv.url, tmpDir)
+      try {
+        archivoPath = await descargarConYtDlp(srv.url, tmpDir)
+      } catch (ytErr) {
+        const isUnsupported = /(unsupported url|no suitable extractor)/i.test(ytErr.message)
+        if (!isUnsupported) throw ytErr
+        console.log(`[descarga] yt-dlp no soporta ${srv.nombre}, usando extractor propio...`)
+        await updateStatus(`🔍 *${srv.nombre.toUpperCase()}*: usando extractor propio...`)
+        archivoPath = await descargarDirecto(srv.url, tmpDir)
+      }
       break
 
     } catch (err) {
