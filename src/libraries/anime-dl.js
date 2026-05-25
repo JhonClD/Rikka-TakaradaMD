@@ -82,8 +82,8 @@ export const SITIOS = [
     buscar: buscarEnAnimeFLV,    scrape: scrapeAnimeFLV,
   },
   {
-    id: 2, nombre: 'MonosChinos', dominio: 'monoschinos2',
-    url: 'https://monoschinos2.com',
+    id: 2, nombre: 'MonosChinos', dominio: 'monoschinos',
+    url: 'https://monoschinos.st',
     buscar: buscarEnMonosChinos, scrape: scrapeMonosChinos,
   },
   {
@@ -1180,13 +1180,13 @@ export async function scrapeMonosChinos(url) {
         'User-Agent'     : randomUA(),
         'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'es-419,es;q=0.9',
-        'Referer'        : 'https://monoschinos2.com/',
+        'Referer'        : 'https://monoschinos.st/',
       },
       timeout: 15000,
     })
     html = res.data
   } catch (_) {
-    html = await fetchHtmlDirecto(url, 'https://monoschinos2.com/')
+    html = await fetchHtmlDirecto(url, 'https://monoschinos.st/')
   }
 
   const $        = cheerio.load(html)
@@ -1602,9 +1602,9 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
 
   const tryBuscarAPI = async () => {
     try {
-      const apiUrl = `https://monoschinos2.com/api/search?q=${encodeURIComponent(nombre)}&_=${Date.now()}`
+      const apiUrl = `https://monoschinos.st/api/search?q=${encodeURIComponent(nombre)}&_=${Date.now()}`
       const res = await fetch(apiUrl, {
-        headers: buildHeaders({ Referer: 'https://monoschinos2.com/', Accept: 'application/json' }),
+        headers: buildHeaders({ Referer: 'https://monoschinos.st/', Accept: 'application/json' }),
         timeout: 10000,
       })
       if (!res.ok) return null
@@ -1615,7 +1615,7 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
         .map(a => ({ ...a, score: puntuarMatch(a.titulo || a.title || a.name || '', nombre) }))
         .sort((a, b) => b.score - a.score)[0]
       const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
-      if (slug) return `https://monoschinos2.com/ver/${slug}-episodio-${episodio}`
+      if (slug) return `https://monoschinos.st/ver/${slug}-episodio-${episodio}`
     } catch (_) {}
     return null
   }
@@ -1623,8 +1623,8 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
   const fromApi = await tryBuscarAPI()
   if (fromApi) return fromApi
 
-  const searchUrl = `https://monoschinos2.com/buscar?q=${encodeURIComponent(query)}`
-  const html = await fetchHtmlDirecto(searchUrl, 'https://monoschinos2.com/')
+  const searchUrl = `https://monoschinos.st/buscar?q=${encodeURIComponent(query)}`
+  const html = await fetchHtmlDirecto(searchUrl, 'https://monoschinos.st/')
   const $    = cheerio.load(html)
 
   const links = []
@@ -1656,7 +1656,7 @@ export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
   if (!slugMatch) return null
   const slug = slugMatch[1]
 
-  return `https://monoschinos2.com/ver/${slug}-episodio-${episodio}`
+  return `https://monoschinos.st/ver/${slug}-episodio-${episodio}`
 }
 
 export class MegaQuotaError extends Error {
