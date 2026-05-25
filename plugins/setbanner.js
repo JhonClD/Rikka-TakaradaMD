@@ -2,22 +2,36 @@ import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
+import FormData from 'form-data';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
+const IMGBB_KEY = 'cc54a2ff43201cff8ecca0f3336e850d';
 
 if (!existsSync(join(__dirname, '../src'))) {
   mkdirSync(join(__dirname, '../src'), { recursive: true });
 }
 
+async function uploadToImgBB(buffer) {
+  const form = new FormData();
+  form.append('image', buffer.toString('base64'));
+  const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, {
+    method: 'POST',
+    body: form,
+    headers: form.getHeaders()
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(JSON.stringify(json));
+  return json.data.url;
+}
+
 const handler = async (m, { conn, isOwner, args }) => {
   if (!isOwner) return m.reply('꒰ ✗ ꒱ Solo el *owner* puede usar este comando.');
 
-  let buffer, url;
+  let buffer;
   if (args[0] && /^https?:\/\/.+\.(jpe?g|png|gif)$/i.test(args[0])) {
-    url = args[0];
     try {
-      const res = await fetch(url);
+      const res = await fetch(args[0]);
       buffer = Buffer.from(await res.arrayBuffer());
     } catch {
       return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen desde la URL.');
@@ -33,15 +47,14 @@ const handler = async (m, { conn, isOwner, args }) => {
     } catch {
       return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
     }
-    url = 'local';
   }
 
   if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo obtener la imagen.');
 
   try {
+    const url = await uploadToImgBB(buffer);
     writeFileSync(BANNER_PATH, buffer);
     global.bannerBuffer = buffer;
-    global.banner = url; // 🔥 esta línea actualiza el banner activo
     const settings = global.db.data.settings[conn.user.jid] || {};
     settings.banner = url;
     global.db.data.settings[conn.user.jid] = settings;
@@ -52,7 +65,7 @@ const handler = async (m, { conn, isOwner, args }) => {
     );
   } catch (e) {
     console.error('[setbanner]', e);
-    return m.reply(`꒰ ✗ ꒱ Error al guardar el banner:\n\`${e.message}\``);
+    return m.reply(`꒰ ✗ ꒱ Error al subir a ImgBB:\n\`${e.message}\``);
   }
 };
 
