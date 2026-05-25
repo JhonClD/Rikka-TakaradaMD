@@ -1,21 +1,3 @@
-/**
- * owner-addprem.js — Gestión de premium para Rikka-TakaradaMD
- *
- * Comandos (solo rowner):
- *   .addprem @user <N> <h|d|w|m>  → Dar/sumar premium
- *   .delprem @user                 → Quitar premium
- *   .checkprem @user               → Ver tiempo restante
- *
- * Ejemplos:
- *   .addprem @user 1h   → 1 hora
- *   .addprem @user 7d   → 7 días
- *   .addprem @user 2w   → 2 semanas
- *   .addprem @user 1m   → 1 mes (30 días)
- */
-
-// ─── Utilidades ───────────────────────────────────────────────────────────────
-
-/** Convierte ms a string legible: "3 días 2 horas 15 minutos" */
 function formatTime(ms) {
   if (ms <= 0) return '0 segundos';
   const days    = Math.floor(ms / 86400000);
@@ -30,18 +12,16 @@ function formatTime(ms) {
   return parts.join(', ');
 }
 
-/** Convierte "<N><unidad>" a milisegundos. Ej: "7d" → 604800000 */
 function parseTime(str) {
   if (!str) return null;
-  const match = str.trim().match(/^(\d+)(h|d|w|m)$/i);
+  const match = str.trim().match(/^(\d+)(s|min|h|d|w|m)$/i);
   if (!match) return null;
   const n    = parseInt(match[1]);
   const unit = match[2].toLowerCase();
-  const table = { h: 3600000, d: 86400000, w: 604800000, m: 2592000000 };
+  const table = { s: 1000, min: 60000, h: 3600000, d: 86400000, w: 604800000, m: 2592000000 };
   return n * table[unit];
 }
 
-/** Obtiene el JID objetivo desde mención, cita o chat privado */
 function getTarget(m) {
   if (m.isGroup) {
     return m.mentionedJid?.[0] || m.quoted?.sender || null;
@@ -49,13 +29,10 @@ function getTarget(m) {
   return m.chat;
 }
 
-// ─── Handler principal ────────────────────────────────────────────────────────
-
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const target = getTarget(m);
   const tag    = (jid) => '@' + jid.split('@')[0];
 
-  // ── checkprem ──────────────────────────────────────────────────────────────
   if (command === 'checkprem') {
     if (!target) {
       return m.reply(
@@ -91,7 +68,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply(msg, null, { mentions: [target] });
   }
 
-  // ── delprem ────────────────────────────────────────────────────────────────
   if (command === 'delprem' || command === 'removeprem') {
     if (!target) {
       return m.reply(
@@ -118,20 +94,20 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply(msg, null, { mentions: [target] });
   }
 
-  // ── addprem ────────────────────────────────────────────────────────────────
   if (!target) {
     return m.reply(
       `꒰ ✗ ꒱ Menciona o cita a un usuario.\n\n` +
       `┊ ↳ *Uso:*\n` +
-      `┊ ➛ ${usedPrefix}addprem @user *1h*  (horas)\n` +
-      `┊ ➛ ${usedPrefix}addprem @user *7d*  (días)\n` +
-      `┊ ➛ ${usedPrefix}addprem @user *2w*  (semanas)\n` +
-      `┊ ➛ ${usedPrefix}addprem @user *1m*  (mes)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *30s*   (segundos)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *30min* (minutos)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *1h*    (horas)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *7d*    (días)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *2w*    (semanas)\n` +
+      `┊ ➛ ${usedPrefix}addprem @user *1m*    (mes)\n` +
       `╰─► ༉‧₊˚✧`
     );
   }
 
-  // Extraer la duración del texto (ignorar la mención)
   const cleanText = text.replace(/@\d+/g, '').trim();
   const duration  = parseTime(cleanText);
 
@@ -139,9 +115,10 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply(
       `꒰ ✗ ꒱ Duración inválida.\n\n` +
       `┊ ↳ Formato: *<número><unidad>*\n` +
+      `┊ ➛ *s* = segundos  │  *min* = minutos\n` +
       `┊ ➛ *h* = horas  │  *d* = días\n` +
       `┊ ➛ *w* = semanas  │  *m* = mes\n` +
-      `┊ ↳ Ejemplo: *${usedPrefix}addprem @user 30d*\n` +
+      `┊ ↳ Ejemplo: *${usedPrefix}addprem @user 30m*\n` +
       `╰─► ༉‧₊˚✧`
     );
   }
@@ -174,12 +151,10 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   return m.reply(msg, null, { mentions: [target] });
 };
 
-// ─── Metadata ─────────────────────────────────────────────────────────────────
-
-handler.help    = ['addprem @user <1h|7d|2w|1m>', 'delprem @user', 'checkprem @user'];
+handler.help    = ['addprem @user <30s|30min|1h|7d|2w|1m>', 'delprem @user', 'checkprem @user'];
 handler.tags    = ['owner'];
 handler.command = ['addprem', 'delprem', 'removeprem', 'checkprem'];
 handler.rowner  = true;
 
 export default handler;
-      
+  
