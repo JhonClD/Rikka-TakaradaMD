@@ -47,12 +47,24 @@ const handler = async (m, { conn, usedPrefix }) => {
   const pushname  = m.pushName || 'Usuario';
   const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
   const uptime    = clockString(process.uptime() * 1000);
-  // Detectar nivel del usuario
-  const _ownerNums = (global.owner || []).map(([n]) => n.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-  const _senderJid = m.sender;
-  const _isROwner  = _ownerNums.includes(_senderJid) || m.fromMe;
-  const _isMod     = !_isROwner && (global.mods || []).map(v => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(_senderJid);
-  const _userData  = global.db?.data?.users[m.sender] || {};
+  // Detectar nivel del usuario — con resolución de LID igual que handler.js
+  const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
+  const _resolveLid = (jid) => {
+    if (!jid?.endsWith('@lid')) return jid;
+    const lidKey = jid.split('@')[0];
+    const pnUser = conn?.signalRepository?.lidMapping?.mappingCache?.get(`lid:${lidKey}`);
+    if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+    return jid;
+  };
+  const _senderJid   = _resolveLid(m.sender);
+  const _senderPhone = _phoneOnly(_senderJid);
+  const _ownerList   = (global.owner || []).map(([n]) => n.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+  const _modsList    = (global.mods  || []).map(v  => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+
+  const _isROwner = m.fromMe || _ownerList.some(o => o === _senderJid || _phoneOnly(o) === _senderPhone);
+  const _isMod    = !_isROwner && _modsList.some(o => o === _senderJid || _phoneOnly(o) === _senderPhone);
+
+  const _userData   = global.db?.data?.users?.[m.sender] || global.db?.data?.users?.[_senderJid] || {};
   const _premActive = typeof _userData.premiumTime === 'number' && _userData.premiumTime > Date.now();
 
   let isPremium;
@@ -121,3 +133,4 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
+      
