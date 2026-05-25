@@ -22,7 +22,7 @@ async function uploadToImgBB(buffer) {
   });
   const json = await res.json();
   if (!json.success) throw new Error(JSON.stringify(json));
-  return json.data.url; // URL permanente
+  return json.data.url;
 }
 
 const handler = async (m, { conn, isOwner }) => {
@@ -34,8 +34,6 @@ const handler = async (m, { conn, isOwner }) => {
     return m.reply('꒰ ✗ ꒱ Responde a una *imagen* (jpg/png/gif) para cambiar el banner.');
   }
 
-  await m.reply(global.wait || '_[ ⏳ ] Subiendo banner..._');
-
   let buffer;
   try {
     buffer = await q.download();
@@ -45,22 +43,16 @@ const handler = async (m, { conn, isOwner }) => {
   if (!buffer) return m.reply('꒰ ✗ ꒱ No se pudo descargar la imagen.');
 
   try {
-    // Subir a ImgBB (URL permanente)
     const url = await uploadToImgBB(buffer);
-
-    // Guardar también localmente como respaldo
     writeFileSync(BANNER_PATH, buffer);
     global.bannerBuffer = buffer;
-
-    // Guardar URL en la base de datos
     const settings = global.db.data.settings[conn.user.jid] || {};
     settings.banner = url;
     global.db.data.settings[conn.user.jid] = settings;
 
     await m.reply(
-      `╰─► ✰ *Banner actualizado permanentemente* ♡ ༉‧₊˚✧\n\n` +
-      `🔗 URL:\n${url}\n\n` +
-      `_El menú ya usará esta imagen automáticamente._`
+      `⭑ ₊ ⭒ \`BANNER ACTUALIZADO\` ꩜\n\n` +
+      `🔗 URL:\n${url}`
     );
   } catch (e) {
     console.error('[setbanner]', e);
