@@ -239,6 +239,19 @@ export async function handler(chatUpdate) {
           modoia: false,
         };
         Object.assign(settings, { ...setttings, ...settings });
+        // Aplicar prefijo guardado al conn
+        if (settings.prefix !== undefined) {
+          if (settings.prefix === true) {
+            // noprefix mode: acepta cualquier texto como comando
+            this.prefix = new RegExp('^[\s\S]?', '');
+          } else if (Array.isArray(settings.prefix)) {
+            this.prefix = settings.prefix;
+          } else {
+            this.prefix = global.prefix;
+          }
+        } else {
+          this.prefix = global.prefix;
+        }
       }
     } catch (e) {
       console.error(e);
