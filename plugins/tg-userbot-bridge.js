@@ -20,7 +20,7 @@
  * Primera ejecución: el bot te pedirá el código de verificación
  * de Telegram en la terminal. Solo ocurre una vez.
  */
-
+import 'dotenv/config'
 import { TelegramClient } from 'telegram'
 import { StringSession }  from 'telegram/sessions/index.js'
 import { NewMessage }     from 'telegram/events/index.js'
