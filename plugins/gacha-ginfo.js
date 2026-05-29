@@ -20,41 +20,40 @@ function formatTime(ms) {
   const s = Math.ceil(ms / 1000);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   const p = [];
-  if (h)   p.push(`${h}h`);
+  if (h)      p.push(`${h}h`);
   if (m || h) p.push(`${m}m`);
   p.push(`${sec}s`);
   return p.join(' ');
 }
 
 const handler = async (m, { conn, usedPrefix }) => {
-  if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
+  if (!global.db.data.chats[m.chat])              global.db.data.chats[m.chat]              = {};
   const chat = global.db.data.chats[m.chat];
-
-
-  if (!chat.users[m.sender]) chat.users[m.sender] = {};
+  if (!chat.users)                                 chat.users                                = {};
+  if (!chat.users[m.sender])                       chat.users[m.sender]                      = {};
+  if (!chat.gacha_characters)                      chat.gacha_characters                     = {};
 
   if (chat.gacha === false) {
     return m.reply(`╰─► El *Gacha* está desactivado en este grupo.\n⇢ Un *admin* puede activarlo con *${usedPrefix}gacha on*`);
   }
 
-  const me = global.db.data.users[m.sender] || {};
-  const globalUser = global.db.data.users[m.sender] || {};
-  const now        = Date.now();
+  const me  = global.db.data.users[m.sender] || {};
+  const now = Date.now();
 
-  const rollLeft  = me.lastrw  && now < me.lastrw  ? me.lastrw  - now : 0;
+  const rollLeft  = me.lastrw    && now < me.lastrw    ? me.lastrw    - now : 0;
   const claimLeft = me.lastclaim && now < me.lastclaim ? me.lastclaim - now : 0;
 
   let structure;
   try { structure = await loadCharacters(); } catch { return m.reply('❲ ✗ ❳ No se pudo leer characters.json'); }
-  const allCharacters  = flattenCharacters(structure);
+  const allCharacters   = flattenCharacters(structure);
   const totalCharacters = allCharacters.length;
-  const totalSeries    = Object.keys(structure).length;
+  const totalSeries     = Object.keys(structure).length;
 
   const claimedIDs = Object.entries(chat.gacha_characters)
     .filter(([, c]) => c.user === m.sender).map(([id]) => id);
   const totalValue = claimedIDs.reduce((sum, id) => {
-    const gv  = global.db.data.characters?.[id]?.value;
-    const jv  = allCharacters.find(c => c.id == id)?.value || 0;
+    const gv = global.db.data.characters?.[id]?.value;
+    const jv = allCharacters.find(c => c.id == id)?.value || 0;
     return sum + (typeof gv === 'number' ? gv : jv);
   }, 0);
 
