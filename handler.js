@@ -426,15 +426,24 @@ export async function handler(chatUpdate) {
     ) : {}) || {};
     const isRAdmin = user?.admin === 'superadmin' || false;
     const isAdmin = isRAdmin || user?.admin === 'admin' || isROwner || false;
-    const isBotAdmin = bot?.admin === 'admin' || bot?.admin === 'superadmin' || false;
-if (m.isGroup) {
-  console.log('[DEBUG isBotAdmin]', {
-    botUserJid: this.user?.jid,
-    botUserId: this.user?.id,
-    botFound: bot,
-    participants: participants.map(p => ({ id: p.id, admin: p.admin }))
-  });
-}
+    const bot = (m.isGroup ? (
+  participants.find((u) => {
+    const uId = conn.decodeJid(u.id || u.jid || '');
+    if (uId && uId === this.user?.jid) return true;
+    if (uId && _phoneOnly(uId) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+    if (uId?.endsWith('@lid')) {
+      const resolvedUId = _resolveLidJid(uId);
+      if (resolvedUId && resolvedUId !== uId && _phoneOnly(resolvedUId) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+      const contactJid = conn.contacts?.[uId]?.id || conn.contacts?.[uId]?.jid || '';
+      if (contactJid && _phoneOnly(contactJid) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+    }
+    if (u.lid) {
+      const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
+      if (resolvedLid && _phoneOnly(resolvedLid) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+    }
+    return false;
+  })
+) : {}) || {};
     const ___dirname = handler._pluginsDir ??= path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
     for (const name in global.plugins) {
       const plugin = global.plugins[name];
