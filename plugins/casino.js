@@ -23,13 +23,13 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     if (user.lastApuesta && ahora - user.lastApuesta < tiempoEspera) {
       const restante = user.lastApuesta + tiempoEspera - ahora
       const tiempoRestante = formatTime(restante)
-      return conn.sendMessage(m.chat, { text: m.chat, `ꕥ Debes esperar *${tiempoRestante}* para usar *${usedPrefix + command}* nuevamente.` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `ꕥ Debes esperar *${tiempoRestante}* para usar *${usedPrefix + command}* nuevamente.` }, { quoted: m })
     }
     user.lastApuesta = ahora
     count = count ? /all/i.test(count) ? Math.floor(db.users[m.sender].limit / buatall) : parseInt(count) : args[0] ? parseInt(args[0]) : 1
     count = Math.max(1, count)
     if (args.length < 1) {
-      return conn.sendMessage(m.chat, { text: m.chat, `❀ Ingresa la cantidad de *${currency}* que deseas aportar contra *${botname}*\n> Ejemplo: *${usedPrefix + command} 100*` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `❀ Ingresa la cantidad de *${currency}* que deseas aportar contra *${botname}*\n> Ejemplo: *${usedPrefix + command} 100*` }, { quoted: m })
     }
     if (user.coins >= count) {
       user.coins -= count
@@ -53,7 +53,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
       const replyMsg = `❀ \`Veamos qué números tienen!\`\n\n➠ *${botname}* : ${Aku}\n➠ *${userName}* : ${Kamu}\n\n${resultado}`
       await conn.sendMessage(m.chat, { text: replyMsg.trim(), edit: key }, { quoted: m })
     } else {
-      conn.sendMessage(m.chat, { text: m.chat, `ꕥ No tienes *¥${formatNumber(count)} ${currency}* para apostar!` }, { quoted: m })
+      conn.sendMessage(m.chat, { text: `ꕥ No tienes *¥${formatNumber(count)} ${currency}* para apostar!` }, { quoted: m })
     }
 };
 

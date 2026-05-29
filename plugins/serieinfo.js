@@ -50,7 +50,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
         msg += `» *${c.name}* (${record.value.toLocaleString()}) • ${status}.\n`
       }
       msg += `\n> ⌦ _Página *1* de *1*_`
-      await conn.sendMessage(m.chat, { text: m.chat, msg.trim() }, { quoted: m })
+      await conn.sendMessage(m.chat, { text: msg.trim() }, { quoted: m })
     } catch (e) {
       await m.reply(`> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e.message}*]`)
     }

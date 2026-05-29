@@ -34,7 +34,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
         msg += `   ♡ ${char.favorites} favorito${char.favorites !== 1 ? 's' : ''}.\n`
       })
       msg += `\n> Página ${page} de ${totalPages}`
-      await conn.sendMessage(m.chat, { text: m.chat, msg.trim() }, { quoted: m })
+      await conn.sendMessage(m.chat, { text: msg.trim() }, { quoted: m })
     } catch (e) {
       await m.reply(`> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e.message}*]`)
     }

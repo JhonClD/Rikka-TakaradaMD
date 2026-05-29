@@ -70,7 +70,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
       record.dailyIncrement[today] = currentValue + increment
       globalUser.lastVote = now + cooldown
       const source = getSeriesNameByCharacter(structure, character.id)
-      await conn.sendMessage(m.chat, { text: m.chat, `❀ Votaste por *${record.name}* (*${source}*)\n> Su nuevo valor es *${record.value.toLocaleString()}*` }, { quoted: m })
+      await conn.sendMessage(m.chat, { text: `❀ Votaste por *${record.name}* (*${source}*)\n> Su nuevo valor es *${record.value.toLocaleString()}*` }, { quoted: m })
     } catch (e) {
       await m.reply(`> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e.message}*]`)
     }

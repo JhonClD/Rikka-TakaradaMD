@@ -10,14 +10,14 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     const user = chat.users[m.sender]
     const botId = conn.user?.id.split(':')[0] + '@s.whatsapp.net'
     const currency = global.db?.data?.settings?.[botId]?.currency || 'Yenes'
-    if (chat.adminonly || !chat.economy) return conn.sendMessage(m.chat, { text: m.chat, `ꕥ Los comandos de *Economía* están desactivados en este grupo.\n\nUn *administrador* puede activarlos con el comando:\n» *${usedPrefix}economy on*` }, { quoted: m })    
+    if (chat.adminonly || !chat.economy) return conn.sendMessage(m.chat, { text: `ꕥ Los comandos de *Economía* están desactivados en este grupo.\n\nUn *administrador* puede activarlos con el comando:\n» *${usedPrefix}economy on*` }, { quoted: m })    
     user.lastadventure ||= 0
     if (user.coins == null) user.coins = 0
     if (user.health == null) user.health = 100
     if (user.health < 5) return m.reply(`ꕥ No tienes suficiente salud para volver a *aventurarte*.\n> Usa *"${usedPrefix}heal"* para curarte.`)
     const remainingTime = user.lastadventure - Date.now()
     if (remainingTime > 0) {
-      return conn.sendMessage(m.chat, { text: m.chat, `ꕥ Debes esperar *${msToTime(remainingTime)}* antes de volver a aventurarte.` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `ꕥ Debes esperar *${msToTime(remainingTime)}* antes de volver a aventurarte.` }, { quoted: m })
     }
     const rand = Math.random()
     let cantidad = 0

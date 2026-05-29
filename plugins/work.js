@@ -103,7 +103,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     user.lastwork = user.lastwork || 0
     if (Date.now() < user.lastwork) {
       const tiempoRestante = formatTime(user.lastwork - Date.now())
-      return conn.sendMessage(m.chat, { text: m.chat, `ꕥ Debes esperar *${tiempoRestante}* para usar *${usedPrefix + command}* de nuevo.` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `ꕥ Debes esperar *${tiempoRestante}* para usar *${usedPrefix + command}* de nuevo.` }, { quoted: m })
     }
     user.lastwork = Date.now() + cooldown
     const rsl = Math.floor(Math.random() * (4000 - 2000 + 1)) + 2000

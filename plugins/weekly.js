@@ -21,7 +21,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     user.lastweekly = user.lastweekly || 0
     if (now < user.lastweekly) {
       const wait = formatTime(Math.floor((user.lastweekly - now) / 1000))
-      return conn.sendMessage(m.chat, { text: m.chat, `ꕥ Ya has reclamado tu recompensa semanal.\n> Puedes reclamarlo de nuevo en *${wait}*` }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: `ꕥ Ya has reclamado tu recompensa semanal.\n> Puedes reclamarlo de nuevo en *${wait}*` }, { quoted: m })
     }
     const lost = users.weeklyStreak >= 1 && now - users.lastWeeklyGlobal > gap * 1.5
     if (lost) users.weeklyStreak = 0
@@ -36,7 +36,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     let nextReward = Math.min(40000 + users.weeklyStreak * 5000, 185000).toLocaleString()
     let msg = `> Semana *${users.weeklyStreak + 1}* » *+¥${nextReward}*`
     if (lost) msg += `\n> ☆ ¡Has perdido tu racha de semanas!`
-    conn.sendMessage(m.chat, { text: m.chat, `「❁」 Has reclamado tu recompensa semanal de *¥${coins.toLocaleString()} ${currency}* (Semana *${users.weeklyStreak}*)\n${msg}` }, { quoted: m })
+    conn.sendMessage(m.chat, { text: `「❁」 Has reclamado tu recompensa semanal de *¥${coins.toLocaleString()} ${currency}* (Semana *${users.weeklyStreak}*)\n${msg}` }, { quoted: m })
 };
 
 handler.command = ['weekly', 'semanal'];
