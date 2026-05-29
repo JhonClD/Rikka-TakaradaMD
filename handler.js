@@ -416,7 +416,7 @@ export async function handler(chatUpdate) {
       participants.find((u) => {
         const uId = conn.decodeJid(u.id || u.jid || '');
         if (uId && uId === this.user?.jid) return true;
-        if (uId && _phoneOnly(uId) === _phoneOnly(this.user?.id || '')) return true;
+        if (uId && _phoneOnly(uId) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
         if (u.lid) {
           const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
           if (resolvedLid && _phoneOnly(resolvedLid) === _phoneOnly(this.user?.id || '')) return true;
