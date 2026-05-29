@@ -1,9 +1,12 @@
 // anime-waifu.js — Imagen de waifu/neko (SFW)
 // Portado de YukiBot-MD → Rikka-TakaradaMD
 
+const react = (conn, m, emoji) =>
+  conn.sendMessage(m.chat, { react: { text: emoji, key: m.key } });
+
 const handler = async (m, { conn, command, usedPrefix }) => {
   try {
-    await m.react('🕒');
+    await react(conn, m, '🕒');
     const chat = global.db.data.chats[m.chat] || {};
     const mode = chat.nsfw ? 'nsfw' : 'sfw';
     const type = ['neko', 'waifu'].includes(command) ? command : 'waifu';
@@ -16,9 +19,9 @@ const handler = async (m, { conn, command, usedPrefix }) => {
       image: buf,
       caption: `✩ *${type.toUpperCase()}* para ti ˑ ❁ཻུ۪۪`,
     }, { quoted: m });
-    await m.react('✔️');
+    await react(conn, m, '✔️');
   } catch (e) {
-    await m.react('✖️');
+    await react(conn, m, '✖️');
     await m.reply(`↳ ✗ Error en *${usedPrefix + command}*: ${e.message}`);
   }
 };
