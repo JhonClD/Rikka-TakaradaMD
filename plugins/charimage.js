@@ -1,9 +1,53 @@
-// charimage.js — Portado de YukiBot-MD → Rikka-TakaradaMD
-import axios from 'axios';
 import { promises as fs } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __FILE__ = fileURLToPath(import.meta.url);
+const __DIR__ = path.dirname(__FILE__);
+const CHARS_PATH = path.join(__DIR__, '../core/characters.json');
+
+async function loadCharacters() {
+  try { await fs.access(CHARS_PATH); } catch { await fs.writeFile(CHARS_PATH, '{}'); }
+  return JSON.parse(await fs.readFile(CHARS_PATH, 'utf-8'));
+}
+function flattenCharacters(db) {
+  return Object.values(db).flatMap(s => Array.isArray(s.characters) ? s.characters : []);
+}
+function getCharacterById(id, structure) {
+  return flattenCharacters(structure).find(c => String(c.id) === String(id));
+}
+function getSeriesNameByCharacter(db, id) {
+  return Object.entries(db).find(([, s]) => Array.isArray(s.characters) && s.characters.some(c => String(c.id) === String(id)))?.[1]?.name || 'Desconocido';
+}
+
+import axios from 'axios';
+
+function formatTag(tag) { return String(tag).trim().toLowerCase().replace(/\s+/g, '_'); }
+function getReferer(url) {
+  if (url.includes('safebooru.org')) return 'https://safebooru.org/';
+  if (url.includes('danbooru.donmai.us')) return 'https://danbooru.donmai.us/';
+  if (url.includes('gelbooru.com')) return 'https://gelbooru.com/';
+  return '';
+}
+async function buscarImagenDelirius(tag) {
+  const q = formatTag(tag);
+  const sources = [
+    { url: `https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1&tags=${q}&limit=100`,
+      extract: d => { const p = Array.isArray(d) ? d : d?.post || []; return p.map(i => i?.file_url || (i?.directory && i?.image ? `https://safebooru.org/images/${i.directory}/${i.image}` : null)).filter(u => u && /\.(jpe?g|png)(\?.*)?$/i.test(u)); }},
+    { url: `https://danbooru.donmai.us/posts.json?tags=${q}&limit=100`,
+      extract: d => (Array.isArray(d) ? d : []).map(i => i?.file_url || i?.large_file_url).filter(u => u && /\.(jpe?g|png)(\?.*)?$/i.test(u)) },
+    { url: `https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&tags=${q}&limit=100&api_key=98f554258c88c44f4dd28ccde0c28f36682b2a992490ab35ebcc7baf7e196a86d7550b174bce577b8cc3f544e9b3ad0f6aeb09ad63bf89a9141cc3eddb6fbfd2&user_id=1917269`,
+      extract: d => { const p = Array.isArray(d) ? d : d?.post || d?.data || []; return p.map(i => i?.file_url).filter(u => u && /\.(jpe?g|png)(\?.*)?$/i.test(u)); }},
+  ];
+  const results = await Promise.allSettled(sources.map(async s => {
+    const r = await axios.get(s.url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }, timeout: 8000 });
+    return s.extract(r.data);
+  }));
+  return [...new Set(results.filter(r => r.status === 'fulfilled' && r.value.length).flatMap(r => r.value))];
+}
+// charimage.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
-const FILE_PATH = './core/characters.json';
 ;
 const handler = async (m, { conn, command, usedPrefix, args }) => {
     try {

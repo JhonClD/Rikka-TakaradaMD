@@ -1,5 +1,38 @@
-// ginfo.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 import { promises as fs } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __FILE__ = fileURLToPath(import.meta.url);
+const __DIR__ = path.dirname(__FILE__);
+const CHARS_PATH = path.join(__DIR__, '../core/characters.json');
+
+async function loadCharacters() {
+  try { await fs.access(CHARS_PATH); } catch { await fs.writeFile(CHARS_PATH, '{}'); }
+  return JSON.parse(await fs.readFile(CHARS_PATH, 'utf-8'));
+}
+function flattenCharacters(db) {
+  return Object.values(db).flatMap(s => Array.isArray(s.characters) ? s.characters : []);
+}
+function getCharacterById(id, structure) {
+  return flattenCharacters(structure).find(c => String(c.id) === String(id));
+}
+function getSeriesNameByCharacter(db, id) {
+  return Object.entries(db).find(([, s]) => Array.isArray(s.characters) && s.characters.some(c => String(c.id) === String(id)))?.[1]?.name || 'Desconocido';
+}
+
+function formatTime(ms) {
+  if (ms <= 0) return 'Ahora';
+  const totalSec = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours} hora${hours !== 1 ? 's' : ''}`);
+  if (minutes > 0) parts.push(`${minutes} minuto${minutes !== 1 ? 's' : ''}`);
+  parts.push(`${seconds} segundo${seconds !== 1 ? 's' : ''}`);
+  return parts.join(' ');
+}
+// ginfo.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
 const charactersFilePath = './core/characters.json'

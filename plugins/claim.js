@@ -1,5 +1,19 @@
-// claim.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 import { promises as fs } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FILE_PATH = path.join(__dirname, '../core/characters.json');
+
+async function loadCharacters() {
+  try { await fs.access(FILE_PATH); } catch { await fs.writeFile(FILE_PATH, '{}'); }
+  return JSON.parse(await fs.readFile(FILE_PATH, 'utf-8'));
+}
+function getCharacterById(id, structure) {
+  return Object.values(structure).flatMap(s => s.characters || []).find(c => String(c.id) === String(id));
+}
+
+// claim.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
 const charactersFilePath = './core/characters.json'

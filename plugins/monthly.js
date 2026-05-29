@@ -1,3 +1,16 @@
+
+function formatTime(ms) {
+  if (ms <= 0) return 'Ahora';
+  const totalSec = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours} hora${hours !== 1 ? 's' : ''}`);
+  if (minutes > 0) parts.push(`${minutes} minuto${minutes !== 1 ? 's' : ''}`);
+  parts.push(`${seconds} segundo${seconds !== 1 ? 's' : ''}`);
+  return parts.join(' ');
+}
 // monthly.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 

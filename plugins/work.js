@@ -1,3 +1,8 @@
+
+function pickRandom(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
+
 function formatTime(ms) {
   const totalSec = Math.ceil(ms / 1000)
   const minutes = Math.floor((totalSec % 3600) / 60)

@@ -1,5 +1,25 @@
-// waifusboard.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 import { promises as fs } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __FILE__ = fileURLToPath(import.meta.url);
+const __DIR__ = path.dirname(__FILE__);
+const CHARS_PATH = path.join(__DIR__, '../core/characters.json');
+
+async function loadCharacters() {
+  try { await fs.access(CHARS_PATH); } catch { await fs.writeFile(CHARS_PATH, '{}'); }
+  return JSON.parse(await fs.readFile(CHARS_PATH, 'utf-8'));
+}
+function flattenCharacters(db) {
+  return Object.values(db).flatMap(s => Array.isArray(s.characters) ? s.characters : []);
+}
+function getCharacterById(id, structure) {
+  return flattenCharacters(structure).find(c => String(c.id) === String(id));
+}
+function getSeriesNameByCharacter(db, id) {
+  return Object.entries(db).find(([, s]) => Array.isArray(s.characters) && s.characters.some(c => String(c.id) === String(id)))?.[1]?.name || 'Desconocido';
+}
+// waifusboard.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
 const charactersFilePath = './core/characters.json'

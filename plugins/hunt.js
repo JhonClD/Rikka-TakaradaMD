@@ -1,3 +1,15 @@
+
+function msToTime(duration) {
+  const seconds = Math.floor((duration / 1000) % 60);
+  const minutes = Math.floor((duration / (1000 * 60)) % 60);
+  const min = minutes < 10 ? '0' + minutes : minutes;
+  const sec = seconds < 10 ? '0' + seconds : seconds;
+  return min === '00' ? `${sec} segundo${seconds > 1 ? 's' : ''}` : `${min} minuto${minutes > 1 ? 's' : ''}, ${sec} segundo${seconds > 1 ? 's' : ''}`;
+}
+
+function pickRandom(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
 // hunt.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
