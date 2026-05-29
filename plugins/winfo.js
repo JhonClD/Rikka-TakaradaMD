@@ -31,7 +31,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
         return m.reply(`ꕥ Los comandos de *Gacha* están desactivados en este grupo.\n\nUn *administrador* puede activarlos con el comando:\n» *${usedPrefix}gacha on*`)
       }
       if (!args.length) {
-        return m.reply(`❀ Por favor, proporciona el nombre de un personaje.\n> Ejemplo » *${usedPrefix + command} Yuki Suou*`)
+        return m.reply(`❀ Por favor, proporciona el nombre de un personaje.\n> Ejemplo » *${usedPrefix + command} Rikka Takarada*`)
       }
       const structure = await loadCharacters()
       const allCharacters = flattenCharacters(structure)
