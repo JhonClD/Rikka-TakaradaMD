@@ -1,10 +1,4 @@
-// group-toggles.js — Activar/desactivar Gacha, Economía y NSFW
-// Portado de YukiBot-MD → Rikka-TakaradaMD
-
 const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin }) => {
-  if (!m.isGroup) return m.reply('ꕥ Este comando solo funciona en grupos.');
-  if (!isAdmin && !m.fromMe) return m.reply('ꕥ Solo los *administradores* pueden usar este comando.');
-
   const chat = global.db.data.chats[m.chat] ||= {};
   const sub = (args[0] || '').toLowerCase();
 
@@ -33,7 +27,7 @@ const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin
       'Los comandos de economía están bloqueados hasta nuevo aviso.');
   }
 
-  if (['nsfw'].includes(command)) {
+  if (command === 'nsfw') {
     if (!isBotAdmin) return m.reply('ꕥ El bot debe ser *administrador* para activar el NSFW.');
     return toggle('nsfw', 'NSFW',
       '⚠️ Contenido adulto habilitado. Úsalo con responsabilidad.',
@@ -44,5 +38,6 @@ const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin
 handler.command = ['gacha', 'gacharoll', 'economy', 'economia', 'eco', 'nsfw'];
 handler.tags = ['group'];
 handler.group = true;
+handler.admin = true;
 
 export default handler;
