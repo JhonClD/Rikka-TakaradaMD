@@ -1,3 +1,13 @@
+function formatTime(ms) {
+  const totalSec = Math.ceil(ms / 1000)
+  const minutes = Math.floor((totalSec % 3600) / 60)
+  const seconds = totalSec % 60
+  const parts = []
+  if (minutes > 0) parts.push(`${minutes} minuto${minutes !== 1 ? 's' : ''}`)
+  parts.push(`${seconds} segundo${seconds !== 1 ? 's' : ''}`)
+  return parts.join(' ')
+}
+
 // work.js — Portado de YukiBot-MD → Rikka-TakaradaMD
 
 
