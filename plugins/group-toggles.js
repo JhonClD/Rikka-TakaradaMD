@@ -1,5 +1,6 @@
 const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin }) => {
-  const chat = global.db.data.chats[m.chat] ||= {};
+  if (!global.db.data.chats[m.chat]) global.db.data.chats[m.chat] = {};
+  const chat = global.db.data.chats[m.chat];
   const sub = (args[0] || '').toLowerCase();
 
   const toggle = (field, label, onMsg, offMsg) => {
