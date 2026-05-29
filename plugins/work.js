@@ -95,6 +95,8 @@ const trabajo = [
 const handler = async (m, { conn, command, usedPrefix, args }) => {
     const db = global.db.data
     const chat = db.chats[m.chat]
+    if (!chat.users) chat.users = {}
+    if (!chat.users[m.sender]) chat.users[m.sender] = { coins: 0, bank: 0 }
     const user = chat.users[m.sender]
     const botId = conn.user?.id.split(':')[0] + '@s.whatsapp.net'
     const monedas = global.db?.data?.settings?.[botId]?.currency || 'Yenes'
