@@ -42,6 +42,15 @@ const handler = async (m, { conn, args }) => {
     realJid = realJid || rawSender;
   } else {
     try {
+      const fromMeta = await resolveFromParticipants(rawSender, conn, m.chat);
+      if (fromMeta) {
+        realJid = fromMeta;
+        console.log('[INFO-LID] resolveFromParticipants (phone):', realJid);
+      }
+    } catch (e) {
+      console.log('[INFO-LID] resolveFromParticipants error:', e?.message);
+    }
+    try {
       lid = await getLidForJidAsync(rawSender, conn);
       console.log('[INFO-LID] getLidForJidAsync:', lid);
     } catch (e) {
