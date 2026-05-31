@@ -5,9 +5,19 @@ import {
   isPhoneJid,
 } from '../src/funcion/lid-resolver.js';
 
-const handler = async (m, { conn }) => {
-  const rawSender = m.sender;
-  const isLid     = isLidJid(rawSender);
+const handler = async (m, { conn, args }) => {
+  let rawSender;
+
+  if (args[0]) {
+    const num = args[0].replace(/[^0-9]/g, '');
+    rawSender = num + '@s.whatsapp.net';
+  } else if (m.quoted) {
+    rawSender = m.quoted.sender;
+  } else {
+    rawSender = m.sender;
+  }
+
+  const isLid = isLidJid(rawSender);
 
   let realJid = rawSender;
   let lid     = null;
