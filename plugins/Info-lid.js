@@ -1,3 +1,9 @@
+import {
+  resolveToPhoneJidAsync,
+  getLidForJidAsync,
+  isLidJid,
+  isPhoneJid,
+} from '../src/funcion/lid-resolver.js';
 const handler = async (m, { conn }) => {
   const rawSender = m.sender;
   const isLid     = isLidJid(rawSender);
