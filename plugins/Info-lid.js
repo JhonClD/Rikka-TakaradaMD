@@ -4,7 +4,6 @@ import {
   isLidJid,
   resolveFromParticipants,
 } from '../src/funcion/lid-resolver.js';
-import { uploadWithFallback } from '../src/libraries/uploadFile.js';
 
 const handler = async (m, { conn, args }) => {
   let rawSender;
@@ -35,15 +34,19 @@ const handler = async (m, { conn, args }) => {
   const jid = rawNumber + '@s.whatsapp.net';
 
   let pp = null;
-  try {
-    const ppUrl = await conn.profilePictureUrl(jid, 'image');
-    if (ppUrl) {
-      const res = await fetch(ppUrl);
-      const buf = Buffer.from(await res.arrayBuffer());
-      const { url } = await uploadWithFallback(buf, 'jpg', 'image/jpeg');
-      pp = url;
-    }
-  } catch {}
+  const targets = [jid];
+  if (lid) targets.unshift(lid);
+
+  for (const t of targets) {
+    try {
+      const url = await conn.profilePictureUrl(t, 'image');
+      if (url) { pp = url; break; }
+    } catch {}
+    try {
+      const url = await conn.profilePictureUrl(t, 'preview');
+      if (url) { pp = url; break; }
+    } catch {}
+  }
 
   const notResolved = isLid && isLidJid(realJid);
   const warnLine    = notResolved
