@@ -44,6 +44,8 @@ const handler = async (m, { conn, args }) => {
     }
   }
 
+  console.log('[PP result]', pp);
+
   const notResolved = isLid && isLidJid(realJid);
   const warnLine    = notResolved
     ? `\n\n⚠️ _LID sin resolver: aún no hay mapping guardado para este usuario._`
