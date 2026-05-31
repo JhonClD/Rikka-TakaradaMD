@@ -3,6 +3,7 @@ import {
   getLidForJidAsync,
   isLidJid,
   isPhoneJid,
+  resolveFromParticipants,
 } from '../src/funcion/lid-resolver.js';
 
 const handler = async (m, { conn, args }) => {
@@ -24,7 +25,9 @@ const handler = async (m, { conn, args }) => {
 
   if (isLid) {
     lid     = rawSender;
-    realJid = await resolveToPhoneJidAsync(rawSender, conn);
+    realJid = await resolveToPhoneJidAsync(rawSender, conn)
+      || await resolveFromParticipants(rawSender, conn, m.chat)
+      || rawSender;
   } else {
     lid = await getLidForJidAsync(rawSender, conn);
   }
@@ -35,16 +38,10 @@ const handler = async (m, { conn, args }) => {
   let pp = null;
   try {
     pp = await conn.profilePictureUrl(jid, 'image');
-  } catch (e1) {
-    console.log('[PP error image]', e1?.message);
-    try {
-      pp = await conn.profilePictureUrl(jid, 'preview');
-    } catch (e2) {
-      console.log('[PP error preview]', e2?.message);
-    }
+  } catch {}
+  if (!pp) {
+    try { pp = await conn.profilePictureUrl(jid, 'preview'); } catch {}
   }
-
-  console.log('[PP result]', pp);
 
   const notResolved = isLid && isLidJid(realJid);
   const warnLine    = notResolved
