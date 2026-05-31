@@ -1,10 +1,3 @@
-import {
-  resolveToPhoneJidAsync,
-  getLidForJidAsync,
-  isLidJid,
-  isPhoneJid,
-} from '../src/funcion/lid-resolver.js';
-
 const handler = async (m, { conn }) => {
   const rawSender = m.sender;
   const isLid     = isLidJid(rawSender);
@@ -13,19 +6,16 @@ const handler = async (m, { conn }) => {
   let lid     = null;
 
   if (isLid) {
-    lid    = rawSender;
+    lid     = rawSender;
     realJid = await resolveToPhoneJidAsync(rawSender, conn);
   } else {
     lid = await getLidForJidAsync(rawSender, conn);
   }
 
   const rawNumber = realJid.split('@')[0].replace(/[^0-9]/g, '');
-  const formatted = rawNumber.length <= 11
-    ? '+' + rawNumber.replace(/(\d{2})(\d{3})(\d{3})(\d{3})/, '$1 $2 $3 $4')
-    : '+' + rawNumber;
   const jid = rawNumber + '@s.whatsapp.net';
 
-  let pp = 'https://files.catbox.moe/leegee.jpg';
+  let pp = null;
   try { pp = await conn.profilePictureUrl(jid, 'image'); } catch {
     try { pp = await conn.profilePictureUrl(jid, 'preview'); } catch {}
   }
@@ -41,7 +31,7 @@ const handler = async (m, { conn }) => {
 ╚═════✰⋆⋅☆⋅⋆✰═════╝
 
 ✧ *Número de WhatsApp:*
-\`${formatted}\`
+\`+${rawNumber}\`
 
 ✧ *JID (ID de WhatsApp):*
 \`${jid}\`
@@ -51,11 +41,11 @@ const handler = async (m, { conn }) => {
 
 ☆✦・*・✦・*・✦・*・✦・*・✦☆`;
 
-  await conn.sendMessage(
-    m.chat,
-    { image: { url: pp }, caption, mentions: [jid] },
-    { quoted: m },
-  );
+  if (pp) {
+    await conn.sendMessage(m.chat, { image: { url: pp }, caption, mentions: [jid] }, { quoted: m });
+  } else {
+    await conn.sendMessage(m.chat, { text: caption, mentions: [jid] }, { quoted: m });
+  }
 };
 
 handler.help    = ['jid', 'lid', 'myjid'];
