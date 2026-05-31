@@ -4,6 +4,7 @@ import {
   isLidJid,
   isPhoneJid,
 } from '../src/funcion/lid-resolver.js';
+
 const handler = async (m, { conn }) => {
   const rawSender = m.sender;
   const isLid     = isLidJid(rawSender);
@@ -22,8 +23,15 @@ const handler = async (m, { conn }) => {
   const jid = rawNumber + '@s.whatsapp.net';
 
   let pp = null;
-  try { pp = await conn.profilePictureUrl(jid, 'image'); } catch {
-    try { pp = await conn.profilePictureUrl(jid, 'preview'); } catch {}
+  try {
+    pp = await conn.profilePictureUrl(jid, 'image');
+  } catch (e1) {
+    console.log('[PP error image]', e1?.message);
+    try {
+      pp = await conn.profilePictureUrl(jid, 'preview');
+    } catch (e2) {
+      console.log('[PP error preview]', e2?.message);
+    }
   }
 
   const notResolved = isLid && isLidJid(realJid);
