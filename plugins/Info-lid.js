@@ -38,9 +38,15 @@ const handler = async (m, { conn, args }) => {
   let pp = null;
   try {
     pp = await conn.profilePictureUrl(jid, 'image');
-  } catch {}
+  } catch (e) {
+    console.error('Error al obtener la foto de perfil (image):', e);
+  }
   if (!pp) {
-    try { pp = await conn.profilePictureUrl(jid, 'preview'); } catch {}
+    try { 
+      pp = await conn.profilePictureUrl(jid, 'preview'); 
+    } catch (e) {
+      console.error('Error al obtener la foto de perfil (preview):', e);
+    }
   }
 
   const notResolved = isLid && isLidJid(realJid);
@@ -76,3 +82,4 @@ handler.tags    = ['info'];
 handler.command = /^(jid|lid|myjid|miid|infojid)$/i;
 
 export default handler;
+  
