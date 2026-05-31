@@ -17,36 +17,65 @@ const handler = async (m, { conn, args }) => {
     rawSender = m.sender;
   }
 
+  console.log('[INFO-LID] rawSender:', rawSender);
+
   const isLid = isLidJid(rawSender);
   let realJid = rawSender;
   let lid     = null;
 
   if (isLid) {
-    lid     = rawSender;
-    realJid = await resolveToPhoneJidAsync(rawSender, conn)
-      || await resolveFromParticipants(rawSender, conn, m.chat)
-      || rawSender;
+    lid = rawSender;
+    try {
+      realJid = await resolveToPhoneJidAsync(rawSender, conn);
+      console.log('[INFO-LID] resolveToPhoneJidAsync:', realJid);
+    } catch (e) {
+      console.log('[INFO-LID] resolveToPhoneJidAsync error:', e?.message);
+    }
+    if (!realJid || isLidJid(realJid)) {
+      try {
+        realJid = await resolveFromParticipants(rawSender, conn, m.chat);
+        console.log('[INFO-LID] resolveFromParticipants:', realJid);
+      } catch (e) {
+        console.log('[INFO-LID] resolveFromParticipants error:', e?.message);
+      }
+    }
+    realJid = realJid || rawSender;
   } else {
-    lid = await getLidForJidAsync(rawSender, conn);
+    try {
+      lid = await getLidForJidAsync(rawSender, conn);
+      console.log('[INFO-LID] getLidForJidAsync:', lid);
+    } catch (e) {
+      console.log('[INFO-LID] getLidForJidAsync error:', e?.message);
+    }
   }
 
   const rawNumber = realJid.split('@')[0].replace(/[^0-9]/g, '');
   const jid = rawNumber + '@s.whatsapp.net';
+  console.log('[INFO-LID] jid final:', jid, '| lid:', lid);
 
   let pp = null;
   const targets = [jid];
   if (lid) targets.unshift(lid);
+  console.log('[INFO-LID] targets pp:', targets);
 
   for (const t of targets) {
     try {
       const url = await conn.profilePictureUrl(t, 'image');
+      console.log(`[INFO-LID] profilePictureUrl image (${t}):`, url);
       if (url) { pp = url; break; }
-    } catch {}
+    } catch (e) {
+      console.log(`[INFO-LID] profilePictureUrl image error (${t}):`, e?.message);
+    }
     try {
       const url = await conn.profilePictureUrl(t, 'preview');
+      console.log(`[INFO-LID] profilePictureUrl preview (${t}):`, url);
       if (url) { pp = url; break; }
-    } catch {}
+    } catch (e) {
+      console.log(`[INFO-LID] profilePictureUrl preview error (${t}):`, e?.message);
+    }
   }
+
+  console.log('[INFO-LID] pp final:', pp);
 
   const notResolved = isLid && isLidJid(realJid);
   const warnLine    = notResolved
