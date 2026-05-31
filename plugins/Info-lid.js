@@ -53,6 +53,14 @@ const handler = async (m, { conn, args }) => {
   const jid = rawNumber + '@s.whatsapp.net';
   console.log('[INFO-LID] jid final:', jid, '| lid:', lid);
 
+  const storageJid = lid || jid;
+  try {
+    const tcData = await conn.authState?.keys?.get?.('tctoken', [storageJid]);
+    console.log('[TCTOKEN] storageJid:', storageJid, '| data:', JSON.stringify(tcData));
+  } catch (e) {
+    console.log('[TCTOKEN] error:', e?.message);
+  }
+
   let pp = null;
   const targets = [jid];
   if (lid) targets.unshift(lid);
