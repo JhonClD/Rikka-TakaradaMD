@@ -2,9 +2,9 @@ import {
   resolveToPhoneJidAsync,
   getLidForJidAsync,
   isLidJid,
-  isPhoneJid,
   resolveFromParticipants,
 } from '../src/funcion/lid-resolver.js';
+import { uploadWithFallback } from '../src/libraries/uploadFile.js';
 
 const handler = async (m, { conn, args }) => {
   let rawSender;
@@ -19,7 +19,6 @@ const handler = async (m, { conn, args }) => {
   }
 
   const isLid = isLidJid(rawSender);
-
   let realJid = rawSender;
   let lid     = null;
 
@@ -37,17 +36,14 @@ const handler = async (m, { conn, args }) => {
 
   let pp = null;
   try {
-    pp = await conn.profilePictureUrl(jid, 'image');
-  } catch (e) {
-    console.error('Error al obtener la foto de perfil (image):', e);
-  }
-  if (!pp) {
-    try { 
-      pp = await conn.profilePictureUrl(jid, 'preview'); 
-    } catch (e) {
-      console.error('Error al obtener la foto de perfil (preview):', e);
+    const ppUrl = await conn.profilePictureUrl(jid, 'image');
+    if (ppUrl) {
+      const res = await fetch(ppUrl);
+      const buf = Buffer.from(await res.arrayBuffer());
+      const { url } = await uploadWithFallback(buf, 'jpg', 'image/jpeg');
+      pp = url;
     }
-  }
+  } catch {}
 
   const notResolved = isLid && isLidJid(realJid);
   const warnLine    = notResolved
@@ -82,4 +78,3 @@ handler.tags    = ['info'];
 handler.command = /^(jid|lid|myjid|miid|infojid)$/i;
 
 export default handler;
-  
