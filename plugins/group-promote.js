@@ -1,11 +1,19 @@
-// plugins/group-promote.js
-import { getLidForJidAsync } from '../src/funcion/lid-resolver.js'
-
 const handler = async (m, { conn, command, usedPrefix, groupMetadata, participants }) => {
   const who = m.mentionedJid?.[0] || m.quoted?.sender
   const isProm = ['promote', 'promover'].includes(command)
   const action  = isProm ? 'promote' : 'demote'
   const whoBase = who?.split('@')[0]
+
+  // Verificar que el bot sea admin (detección robusta por número)
+  const botNum = (conn.user?.jid || conn.user?.id || '').replace(/\D/g, '')
+  const botPart = participants.find(p => {
+    const idNum = (p.id || p.jid || '').replace(/\D/g, '')
+    const lidNum = (p.lid || '').replace(/\D/g, '')
+    return botNum && (idNum === botNum || lidNum === botNum)
+  })
+  if (!botPart?.admin) {
+    return m.reply('《✧》 El bot no es *administrador* del grupo.')
+  }
 
   if (!who) {
     return m.reply(
@@ -15,27 +23,11 @@ const handler = async (m, { conn, command, usedPrefix, groupMetadata, participan
     )
   }
 
-  // Fallback si participants no llega del handler
-  const parts = participants || groupMetadata?.participants || []
-
-  const participant = parts.find(
+  const participant = participants.find(
     p => p.id?.split('@')[0] === whoBase || p.lid?.split('@')[0] === whoBase
+      || (p.id || '').replace(/\D/g, '') === whoBase?.replace(/\D/g, '')
   )
-
-  // Usar el JID real del participante; si no se encontró, intentar resolver LID
-  let targetJid = participant?.id || who
-
-  // Si el JID mencionado es formato phone pero WA necesita LID (o viceversa), resolverlo
-  if (!participant) {
-    // intenta encontrar por número sin importar formato
-    const byNumber = parts.find(p => {
-      const idNum = p.id?.replace(/\D/g, '')
-      const lidNum = p.lid?.replace(/\D/g, '')
-      const whoNum = whoBase?.replace(/\D/g, '')
-      return whoNum && (idNum === whoNum || lidNum === whoNum)
-    })
-    if (byNumber) targetJid = byNumber.id || byNumber.lid || who
-  }
+  const targetJid = participant?.id || who
 
   if (!isProm) {
     const ownerGroup  = groupMetadata?.owner || m.chat.split('-')[0] + '@s.whatsapp.net'
@@ -79,6 +71,6 @@ handler.command  = ['promote', 'promover', 'demote', 'degradar']
 handler.tags     = ['group']
 handler.group    = true
 handler.admin    = true
-handler.botAdmin = true
+// handler.botAdmin removido — la verificación se hace adentro con detección por número
 
 export default handler
