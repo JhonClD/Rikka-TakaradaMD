@@ -1,19 +1,33 @@
 const handler = async (m, { conn, command, usedPrefix, groupMetadata, participants }) => {
-  const who = m.mentionedJid?.[0] || m.quoted?.sender
+  const who    = m.mentionedJid?.[0] || m.quoted?.sender
   const isProm = ['promote', 'promover'].includes(command)
-  const action  = isProm ? 'promote' : 'demote'
+  const action = isProm ? 'promote' : 'demote'
   const whoBase = who?.split('@')[0]
 
-  // Verificar que el bot sea admin (detección robusta por número)
-  const botNum = (conn.user?.jid || conn.user?.id || '').replace(/\D/g, '')
+  // ── Detectar si el bot es admin resolviendo LID ──────────────────────────
+  const _cache  = conn?.signalRepository?.lidMapping?.mappingCache
+  const botNum  = (conn.user?.jid || conn.user?.id || '').replace(/\D/g, '')
+
+  const _resolveNum = (jid) => {
+    if (!jid) return ''
+    if (!jid.endsWith('@lid')) return jid.replace(/\D/g, '')
+    if (!_cache) return ''
+    const pn = _cache.get(`lid:${jid.split('@')[0]}`)
+    return pn ? pn.replace(/\D/g, '') : ''
+  }
+
   const botPart = participants.find(p => {
-    const idNum = (p.id || p.jid || '').replace(/\D/g, '')
-    const lidNum = (p.lid || '').replace(/\D/g, '')
-    return botNum && (idNum === botNum || lidNum === botNum)
+    if (!botNum) return false
+    if (_resolveNum(p.id)  === botNum) return true
+    if (_resolveNum(p.lid) === botNum) return true
+    const phoneNum = (p.phoneNumber || '').replace(/\D/g, '')
+    return phoneNum && phoneNum === botNum
   })
+
   if (!botPart?.admin) {
     return m.reply('《✧》 El bot no es *administrador* del grupo.')
   }
+  // ─────────────────────────────────────────────────────────────────────────
 
   if (!who) {
     return m.reply(
@@ -23,9 +37,11 @@ const handler = async (m, { conn, command, usedPrefix, groupMetadata, participan
     )
   }
 
-  const participant = participants.find(
-    p => p.id?.split('@')[0] === whoBase || p.lid?.split('@')[0] === whoBase
-      || (p.id || '').replace(/\D/g, '') === whoBase?.replace(/\D/g, '')
+  const participant = participants.find(p =>
+    p.id?.split('@')[0]  === whoBase ||
+    p.lid?.split('@')[0] === whoBase ||
+    _resolveNum(p.id)    === whoBase?.replace(/\D/g, '') ||
+    _resolveNum(p.lid)   === whoBase?.replace(/\D/g, '')
   )
   const targetJid = participant?.id || who
 
@@ -71,6 +87,5 @@ handler.command  = ['promote', 'promover', 'demote', 'degradar']
 handler.tags     = ['group']
 handler.group    = true
 handler.admin    = true
-// handler.botAdmin removido — la verificación se hace adentro con detección por número
 
 export default handler
