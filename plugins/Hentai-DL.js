@@ -18,23 +18,63 @@ import path from 'path'
 import { tmpdir } from 'os'
 import https from 'https'
 
-// ─── Configuración ────────────────────────────────────────────────────────
+// ─── Configuración ─────────────────────────────────────────────────────────
 const BASE = 'https://hentaila.com'
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
+
+// ╔═══════════════════════════════════════════════════════════════════╗
+// ║  CONFIGURACIÓN DEL PROXY — LEE ESTO                             ║
+// ║                                                                   ║
+// ║  Opción 1 (RECOMENDADA): Cloudflare Worker (gratis, 100k/día)   ║
+// ║  1. Ve a https://workers.cloudflare.com y crea cuenta gratis     ║
+// ║  2. Dashboard → Workers & Pages → Create Worker                  ║
+// ║  3. Pega el código del worker (ver comentario más abajo)         ║
+// ║  4. Deploy → copia la URL y pégala en CF_WORKER_URL              ║
+// ║                                                                   ║
+// ║  Opción 2: Sin proxy (puede ser bloqueado por Cloudflare)        ║
+// ║  Deja CF_WORKER_URL = '' y el bot intentará conexión directa     ║
+// ╚═══════════════════════════════════════════════════════════════════╝
+//
+// CÓDIGO DEL WORKER (pégalo en el editor de Cloudflare Workers):
+// ─────────────────────────────────────────────────────────────────
+// export default {
+//   async fetch(request) {
+//     const url = new URL(request.url)
+//     const target = url.searchParams.get('url')
+//     if (!target) return new Response('Falta ?url=', { status: 400 })
+//     try {
+//       const res = await fetch(target, {
+//         headers: {
+//           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+//           'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+//           'Accept-Language': 'es-419,es;q=0.9',
+//         },
+//         redirect: 'follow',
+//       })
+//       const body = await res.text()
+//       return new Response(body, {
+//         status: res.status,
+//         headers: { 'Content-Type': res.headers.get('Content-Type') || 'text/html', 'Access-Control-Allow-Origin': '*' }
+//       })
+//     } catch(e) { return new Response('Error: ' + e.message, { status: 500 }) }
+//   }
+// }
+// ─────────────────────────────────────────────────────────────────
+
+const CF_WORKER_URL = 'https://purple-cloud-3351.luisluissandovaltarazona.workers.dev'
 
 global.activeDownloads = global.activeDownloads || new Map()
 global.hentaiSelection = global.hentaiSelection || {}
 global.hdlSessions = global.hdlSessions || {}
 
-// ─── FIX 1: fetch wrapper robusto — AbortSignal.timeout es nativo en Node 18+ ──
-// El fetch local NO usa 'timeout' como opción (no estándar), usa AbortSignal
+// ─── fetch wrapper robusto ─────────────────────────────────────────────────
 async function fetchGet(url, opts = {}) {
     const timeoutMs = opts.timeout || 25000
     delete opts.timeout
     return nodeFetch(url, {
         ...opts,
-        agent: opts.agent || httpsAgent,
+        agent: opts.agent !== null ? (opts.agent || httpsAgent) : undefined,
         signal: AbortSignal.timeout(timeoutMs),
     })
 }
@@ -55,7 +95,7 @@ const CF_HEADERS = {
 }
 
 // ─── Cola de peticiones (máx 1 a la vez, delay entre c/u) ─────────────────
-const REQUEST_DELAY = 2500
+const REQUEST_DELAY = 2000
 let _lastRequestTime = 0
 let _queueRunning = false
 const _requestQueue = []
@@ -79,32 +119,123 @@ async function _processQueue() {
     _processQueue()
 }
 
-// ─── FIX 2: fetchText/fetchBuffer sin Zyte (usa cabeceras CF) ─────────────
-// Zyte daba créditos gratuitos que ya expiraron. Ahora usamos fetch directo
-// con headers que imitan un navegador real (más efectivo para hentaila.com).
+// ─── Helper: verificar si respuesta es HTML válido (no página CF bloqueada) ─
+function esCFBloqueado(html) {
+    if (!html || html.length < 200) return true
+    // Cloudflare challenge/block pages tienen estas firmas características
+    if (html.includes('cf-browser-verification') ||
+        html.includes('Just a moment') ||
+        html.includes('challenge-platform') ||
+        html.includes('Enable JavaScript and cookies') ||
+        html.includes('cf_clearance')) return true
+    return false
+}
+
+// ─── Capa 1: Via Cloudflare Worker (si está configurado) ──────────────────
+async function fetchViaWorker(url) {
+    if (!CF_WORKER_URL) throw new Error('CF_WORKER_URL no configurado')
+    const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
+    const res = await fetchGet(proxyUrl, { timeout: 30000, agent: null })
+    if (!res.ok) throw new Error(`Worker HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 2: Fetch directo con headers de Chrome completos ────────────────
+async function fetchDirecto(url) {
+    const res = await fetchGet(url, { headers: CF_HEADERS, timeout: 25000, compress: true })
+    if (!res.ok) throw new Error(`Directo HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 3: Via proxies públicos gratuitos (lista rotativa) ──────────────
+// Estos proxies HTTPS son gratuitos y rotan automáticamente
+const PUBLIC_CORS_PROXIES = [
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`,
+]
+let _proxyIndex = 0
+
+async function fetchViaProxy(url) {
+    // Intentar cada proxy en rotación hasta que uno funcione
+    for (let i = 0; i < PUBLIC_CORS_PROXIES.length; i++) {
+        const proxyFn = PUBLIC_CORS_PROXIES[_proxyIndex % PUBLIC_CORS_PROXIES.length]
+        _proxyIndex++
+        const proxyUrl = proxyFn(url)
+        try {
+            const res = await fetchGet(proxyUrl, { timeout: 20000, agent: null })
+            if (!res.ok) continue
+            const text = await res.text()
+            if (!esCFBloqueado(text)) return text
+        } catch (_) { continue }
+    }
+    throw new Error('Todos los proxies públicos fallaron')
+}
+
+// ─── fetchText: cadena de fallback con 3 capas ────────────────────────────
+// Capa 1: CF Worker (más confiable) → Capa 2: Directo → Capa 3: Proxy público
 async function fetchText(url) {
     return queuedFetch(async () => {
-        const res = await fetchGet(url, {
-            headers: CF_HEADERS,
-            timeout: 25000,
-            compress: true,
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status} para ${url}`)
-        return res.text()
+        // Capa 1: Cloudflare Worker
+        if (CF_WORKER_URL) {
+            try {
+                const html = await fetchViaWorker(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ CF Worker OK: ${url.replace(BASE, '')}`)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] CF Worker falló: ${e.message}`)
+            }
+        }
+
+        // Capa 2: Directo con headers de Chrome
+        try {
+            const html = await fetchDirecto(url)
+            if (!esCFBloqueado(html)) {
+                console.log(`[HDL] ✅ Directo OK: ${url.replace(BASE, '')}`)
+                return html
+            }
+        } catch (e) {
+            console.warn(`[HDL] Directo falló: ${e.message}`)
+        }
+
+        // Capa 3: Proxies públicos rotativos
+        console.log(`[HDL] Intentando proxies públicos...`)
+        const html = await fetchViaProxy(url)
+        console.log(`[HDL] ✅ Proxy público OK: ${url.replace(BASE, '')}`)
+        return html
     })
 }
 
+// ─── fetchBuffer: para imágenes (portadas) ────────────────────────────────
 async function fetchBuffer(url) {
     return queuedFetch(async () => {
-        const res = await fetchGet(url, {
-            headers: { 'User-Agent': UA, 'Referer': BASE + '/' },
-            timeout: 20000,
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status} para ${url}`)
-        // FIX 3: res.buffer() es de node-fetch, pero en versiones más nuevas
-        // puede no existir. Usar arrayBuffer() como fallback universal.
-        if (typeof res.buffer === 'function') return res.buffer()
-        return Buffer.from(await res.arrayBuffer())
+        // Para imágenes de CDN (no son hentaila.com directamente) funciona sin proxy
+        try {
+            const res = await fetchGet(url, {
+                headers: { 'User-Agent': UA, 'Referer': BASE + '/' },
+                timeout: 20000,
+            })
+            if (res.ok) {
+                if (typeof res.buffer === 'function') return res.buffer()
+                return Buffer.from(await res.arrayBuffer())
+            }
+        } catch (_) { }
+
+        // Fallback: via proxy
+        if (CF_WORKER_URL) {
+            try {
+                const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
+                const res = await fetchGet(proxyUrl, { timeout: 20000, agent: null })
+                if (res.ok) {
+                    if (typeof res.buffer === 'function') return res.buffer()
+                    return Buffer.from(await res.arrayBuffer())
+                }
+            } catch (_) { }
+        }
+        throw new Error(`No se pudo obtener imagen: ${url}`)
     })
 }
 
