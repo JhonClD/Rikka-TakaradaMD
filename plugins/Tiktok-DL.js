@@ -16,7 +16,7 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
             if (json.code === 0 && json.data && json.data.play) {
                 const videoUrl = json.data.play || json.data.wmplay;
 
-                // Descargar el buffer con cabecera User-Agent
+                // 1. Descargamos el buffer con cabecera User-Agent para saltar el bloqueo CDN
                 const resVideo = await fetch(videoUrl, {
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -24,7 +24,7 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
                 });
                 const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
 
-                // Formato de caption
+                // 2. Extraemos los campos para el formato de caption
                 const title = json.data.title || "Video de TikTok";
                 const nickname = json.data.author?.nickname || "Desconocido";
                 const uniqueId = json.data.author?.unique_id || "";
@@ -38,26 +38,11 @@ ${uniqueId ? `@${uniqueId}` : ''}
 ✨ *Duración ›* ${duration}
 🎵 *Música ›* ${music}`;
 
-                const limit = 16 * 1024 * 1024; // Límite de 16 MB de WhatsApp
-                const isLarge = buffer.length > limit;
-
-                if (isLarge) {
-                    await m.reply(`⚠️ El video pesa *${(buffer.length / (1024 * 1024)).toFixed(1)} MB* (excede el límite de 16 MB de WhatsApp).\nEnviando como documento para evitar errores de reproducción...`);
-                }
-
+                // 3. Enviar el video de forma robusta
                 if (typeof conn.sendFile === 'function') {
-                    await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m, false, { asDocument: isLarge });
+                    await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
                 } else {
-                    if (isLarge) {
-                        await conn.sendMessage(m.chat, { 
-                            document: buffer, 
-                            mimetype: 'video/mp4', 
-                            fileName: `${title.slice(0, 20)}.mp4`,
-                            caption: caption
-                        }, { quoted: m });
-                    } else {
-                        await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
-                    }
+                    await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
                 }
             } else {
                 await m.reply('❌ No se pudo descargar el video. Intenta con otro enlace o comprueba que no sea privado.');
@@ -77,6 +62,7 @@ ${uniqueId ? `@${uniqueId}` : ''}
             const json = await response.json();
 
             if (json.code === 0 && json.data && json.data.videos && json.data.videos.length > 0) {
+                // Obtenemos los primeros 10 videos con enlaces de descarga
                 const videos = json.data.videos.filter(v => v.play || v.wmplay).slice(0, 10);
                 if (videos.length === 0) {
                     return m.reply('❌ No se encontraron videos con enlace de descarga para tu búsqueda.');
@@ -101,6 +87,7 @@ ${uniqueId ? `@${uniqueId}` : ''}
 🎵 *Música ›* ${music}`;
 
                     try {
+                        // Descargar el buffer del video con la cabecera correspondiente
                         const resVideo = await fetch(videoUrl, {
                             headers: {
                                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -108,25 +95,13 @@ ${uniqueId ? `@${uniqueId}` : ''}
                         });
                         const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
 
-                        const limit = 16 * 1024 * 1024; // Límite de 16 MB
-                        const isLarge = buffer.length > limit;
-
                         if (typeof conn.sendFile === 'function') {
-                            await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m, false, { asDocument: isLarge });
+                            await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
                         } else {
-                            if (isLarge) {
-                                await conn.sendMessage(m.chat, { 
-                                    document: buffer, 
-                                    mimetype: 'video/mp4', 
-                                    fileName: `${title.slice(0, 20)}.mp4`,
-                                    caption: caption
-                                }, { quoted: m });
-                            } else {
-                                await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
-                            }
+                            await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
                         }
                         
-                        // Esperar 2 segundos entre envíos
+                        // Retardo de 2 segundos para que se suban consecutivamente sin saturar
                         await new Promise(resolve => setTimeout(resolve, 2000));
                     } catch (e) {
                         console.error(`Error al enviar el video ${i + 1}:`, e);
