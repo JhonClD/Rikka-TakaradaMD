@@ -24,45 +24,25 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 
 // ╔═══════════════════════════════════════════════════════════════════╗
-// ║  CONFIGURACIÓN DEL PROXY — LEE ESTO                             ║
+// ║  CONFIGURACIÓN DE TOKENS — TODOS GRATUITOS                        ║
 // ║                                                                   ║
-// ║  Opción 1 (RECOMENDADA): Cloudflare Worker (gratis, 100k/día)   ║
-// ║  1. Ve a https://workers.cloudflare.com y crea cuenta gratis     ║
-// ║  2. Dashboard → Workers & Pages → Create Worker                  ║
-// ║  3. Pega el código del worker (ver comentario más abajo)         ║
-// ║  4. Deploy → copia la URL y pégala en CF_WORKER_URL              ║
+// ║  Crea cuenta gratis en cada uno y pega el token:                 ║
+// ║  1. https://scrape.do          → 1,000/mes  → SCRAPE_DO_TOKEN    ║
+// ║  2. https://scraperapi.com      → 1,000/mes  → SCRAPERAPI_KEY     ║
+// ║  3. https://webscrapingapi.com  → 5,000/mes  → WEBSCRAPINGAPI_KEY ║
+// ║  4. https://www.scrapingdog.com → 1,000/mes  → SCRAPINGDOG_KEY    ║
+// ║  5. https://www.scrapingbee.com → 1,000/mes  → SCRAPINGBEE_KEY    ║
 // ║                                                                   ║
-// ║  Opción 2: Sin proxy (puede ser bloqueado por Cloudflare)        ║
-// ║  Deja CF_WORKER_URL = '' y el bot intentará conexión directa     ║
+// ║  Con estos + caché de 6h: ~300+ descargas/día gratis              ║
+// ║  Tokens que no ponés quedan como ''  — el bot los salta          ║
 // ╚═══════════════════════════════════════════════════════════════════╝
-//
-// CÓDIGO DEL WORKER (pégalo en el editor de Cloudflare Workers):
-// ─────────────────────────────────────────────────────────────────
-// export default {
-//   async fetch(request) {
-//     const url = new URL(request.url)
-//     const target = url.searchParams.get('url')
-//     if (!target) return new Response('Falta ?url=', { status: 400 })
-//     try {
-//       const res = await fetch(target, {
-//         headers: {
-//           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-//           'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-//           'Accept-Language': 'es-419,es;q=0.9',
-//         },
-//         redirect: 'follow',
-//       })
-//       const body = await res.text()
-//       return new Response(body, {
-//         status: res.status,
-//         headers: { 'Content-Type': res.headers.get('Content-Type') || 'text/html', 'Access-Control-Allow-Origin': '*' }
-//       })
-//     } catch(e) { return new Response('Error: ' + e.message, { status: 500 }) }
-//   }
-// }
-// ─────────────────────────────────────────────────────────────────
 
-const CF_WORKER_URL = 'https://purple-cloud-3351.luisluissandovaltarazona.workers.dev'
+const SCRAPE_DO_TOKEN    = '6868b58ba96148b4b282f0075795119e67a595611e7'  // scrape.do → 1,000/mes
+const SCRAPERAPI_KEY     = '56971a05b709caed0f17204ccc1f4532'             // scraperapi.com → 1,000/mes
+const WEBSCRAPINGAPI_KEY = ''  // webscrapingapi.com → 5,000/mes
+const SCRAPINGDOG_KEY    = ''  // scrapingdog.com → 1,000/mes
+const SCRAPINGBEE_KEY    = ''  // scrapingbee.com → 1,000/mes
+const CF_WORKER_URL      = 'https://purple-cloud-3351.luisluissandovaltarazona.workers.dev'
 
 global.activeDownloads = global.activeDownloads || new Map()
 global.hentaiSelection = global.hentaiSelection || {}
@@ -119,10 +99,9 @@ async function _processQueue() {
     _processQueue()
 }
 
-// ─── Helper: verificar si respuesta es HTML válido (no página CF bloqueada) ─
+// ─── Helper: verificar si respuesta es HTML válido ─────────────────────────
 function esCFBloqueado(html) {
     if (!html || html.length < 200) return true
-    // Cloudflare challenge/block pages tienen estas firmas características
     if (html.includes('cf-browser-verification') ||
         html.includes('Just a moment') ||
         html.includes('challenge-platform') ||
@@ -131,24 +110,99 @@ function esCFBloqueado(html) {
     return false
 }
 
-// ─── Capa 1: Via Cloudflare Worker (si está configurado) ──────────────────
+// ─── CACHÉ inteligente de páginas (6 horas) ────────────────────────────────
+// Si el mismo anime/episodio se pide varias veces, NO consume tokens adicionales
+const _htmlCache = new Map()
+const CACHE_TTL  = 6 * 60 * 60 * 1000   // 6 horas
+const CACHE_MAX  = 150                    // máximo de entradas en memoria
+
+function cacheGet(url) {
+    const entry = _htmlCache.get(url)
+    if (!entry) return null
+    if (Date.now() - entry.t > CACHE_TTL) { _htmlCache.delete(url); return null }
+    return entry.html
+}
+function cacheSet(url, html) {
+    if (_htmlCache.size >= CACHE_MAX) {
+        // Eliminar la entrada más antigua
+        const oldest = [..._htmlCache.entries()].sort((a, b) => a[1].t - b[1].t)[0]
+        _htmlCache.delete(oldest[0])
+    }
+    _htmlCache.set(url, { html, t: Date.now() })
+}
+
+// ─── Capa 1a: scrape.do ──────────────────────────────────────────────────
+async function fetchViaScrapeDo(url) {
+    if (!SCRAPE_DO_TOKEN) throw new Error('sin token')
+    const apiUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(url)}&render=false`
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    if (res.status === 401) throw new Error('Token inválido')
+    if (res.status === 429) throw new Error('Límite mensual alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 1b: ScraperAPI ─────────────────────────────────────────────────
+async function fetchViaScraperAPI(url) {
+    if (!SCRAPERAPI_KEY) throw new Error('sin token')
+    const apiUrl = `http://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=false`
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
+    if (res.status === 429) throw new Error('Límite mensual alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 1c: WebScrapingAPI (5,000/mes gratis) ───────────────────────
+async function fetchViaWebScrapingAPI(url) {
+    if (!WEBSCRAPINGAPI_KEY) throw new Error('sin token')
+    const apiUrl = `https://api.webscrapingapi.com/v2?api_key=${WEBSCRAPINGAPI_KEY}&url=${encodeURIComponent(url)}&render_js=0`
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
+    if (res.status === 429) throw new Error('Límite mensual alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 1d: Scrapingdog (1,000/mes gratis) ─────────────────────────
+async function fetchViaScrapingdog(url) {
+    if (!SCRAPINGDOG_KEY) throw new Error('sin token')
+    const apiUrl = `https://api.scrapingdog.com/scrape?api_key=${SCRAPINGDOG_KEY}&url=${encodeURIComponent(url)}`
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
+    if (res.status === 429) throw new Error('Límite mensual alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 1e: ScrapingBee (1,000/mes gratis) ─────────────────────────
+async function fetchViaScrapingBee(url) {
+    if (!SCRAPINGBEE_KEY) throw new Error('sin token')
+    const apiUrl = `https://app.scrapingbee.com/api/v1/?api_key=${SCRAPINGBEE_KEY}&url=${encodeURIComponent(url)}`
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
+    if (res.status === 429) throw new Error('Límite mensual alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 2: Via Cloudflare Worker ──────────────────────────────────────
 async function fetchViaWorker(url) {
-    if (!CF_WORKER_URL) throw new Error('CF_WORKER_URL no configurado')
+    if (!CF_WORKER_URL) throw new Error('sin URL')
     const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
     const res = await fetchGet(proxyUrl, { timeout: 30000, agent: null })
-    if (!res.ok) throw new Error(`Worker HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
 
-// ─── Capa 2: Fetch directo con headers de Chrome completos ────────────────
+// ─── Capa 3: Fetch directo ──────────────────────────────────────────────
 async function fetchDirecto(url) {
     const res = await fetchGet(url, { headers: CF_HEADERS, timeout: 25000, compress: true })
-    if (!res.ok) throw new Error(`Directo HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
 
-// ─── Capa 3: Via proxies públicos gratuitos (lista rotativa) ──────────────
-// Estos proxies HTTPS son gratuitos y rotan automáticamente
+// ─── Capa 4: Proxies públicos rotativos ──────────────────────────────────
 const PUBLIC_CORS_PROXIES = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
@@ -158,31 +212,107 @@ const PUBLIC_CORS_PROXIES = [
 let _proxyIndex = 0
 
 async function fetchViaProxy(url) {
-    // Intentar cada proxy en rotación hasta que uno funcione
     for (let i = 0; i < PUBLIC_CORS_PROXIES.length; i++) {
         const proxyFn = PUBLIC_CORS_PROXIES[_proxyIndex % PUBLIC_CORS_PROXIES.length]
         _proxyIndex++
-        const proxyUrl = proxyFn(url)
         try {
-            const res = await fetchGet(proxyUrl, { timeout: 20000, agent: null })
+            const res = await fetchGet(proxyFn(url), { timeout: 20000, agent: null })
             if (!res.ok) continue
             const text = await res.text()
             if (!esCFBloqueado(text)) return text
         } catch (_) { continue }
     }
-    throw new Error('Todos los proxies públicos fallaron')
+    throw new Error('Todos los proxies fallaron')
 }
 
-// ─── fetchText: cadena de fallback con 3 capas ────────────────────────────
-// Capa 1: CF Worker (más confiable) → Capa 2: Directo → Capa 3: Proxy público
+// ─── fetchText: CACHÉ + 7 capas de fallback ────────────────────────────
+// Cache → scrape.do → ScraperAPI → WebScrapingAPI → Scrapingdog → ScrapingBee → CF Worker → Directo → Proxies
 async function fetchText(url) {
+    // 1. Ver cache
+    const cached = cacheGet(url)
+    if (cached) {
+        console.log(`[HDL] ✅ Caché hit: ${url.replace(BASE, '')}`)
+        return cached
+    }
+
     return queuedFetch(async () => {
-        // Capa 1: Cloudflare Worker
+        // Capa 1a: scrape.do
+        if (SCRAPE_DO_TOKEN) {
+            try {
+                const html = await fetchViaScrapeDo(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ scrape.do OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] scrape.do falló: ${e.message}`)
+            }
+        }
+
+        // Capa 1b: ScraperAPI
+        if (SCRAPERAPI_KEY) {
+            try {
+                const html = await fetchViaScraperAPI(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ ScraperAPI OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] ScraperAPI falló: ${e.message}`)
+            }
+        }
+
+        // Capa 1c: WebScrapingAPI
+        if (WEBSCRAPINGAPI_KEY) {
+            try {
+                const html = await fetchViaWebScrapingAPI(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ WebScrapingAPI OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] WebScrapingAPI falló: ${e.message}`)
+            }
+        }
+
+        // Capa 1d: Scrapingdog
+        if (SCRAPINGDOG_KEY) {
+            try {
+                const html = await fetchViaScrapingdog(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ Scrapingdog OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] Scrapingdog falló: ${e.message}`)
+            }
+        }
+
+        // Capa 1e: ScrapingBee
+        if (SCRAPINGBEE_KEY) {
+            try {
+                const html = await fetchViaScrapingBee(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ ScrapingBee OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] ScrapingBee falló: ${e.message}`)
+            }
+        }
+
+        // Capa 2: CF Worker
         if (CF_WORKER_URL) {
             try {
                 const html = await fetchViaWorker(url)
                 if (!esCFBloqueado(html)) {
                     console.log(`[HDL] ✅ CF Worker OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
                     return html
                 }
             } catch (e) {
@@ -190,21 +320,23 @@ async function fetchText(url) {
             }
         }
 
-        // Capa 2: Directo con headers de Chrome
+        // Capa 3: Directo
         try {
             const html = await fetchDirecto(url)
             if (!esCFBloqueado(html)) {
                 console.log(`[HDL] ✅ Directo OK: ${url.replace(BASE, '')}`)
+                cacheSet(url, html)
                 return html
             }
         } catch (e) {
             console.warn(`[HDL] Directo falló: ${e.message}`)
         }
 
-        // Capa 3: Proxies públicos rotativos
+        // Capa 4: Proxies públicos
         console.log(`[HDL] Intentando proxies públicos...`)
         const html = await fetchViaProxy(url)
         console.log(`[HDL] ✅ Proxy público OK: ${url.replace(BASE, '')}`)
+        cacheSet(url, html)
         return html
     })
 }
@@ -374,15 +506,11 @@ function generarSlugVariaciones(query) {
     return [...variaciones].filter(v => v && v.length > 1)
 }
 
-// ─── Búsqueda por fetch (extrae slugs del HTML de SvelteKit) ──────────────
+// ─── Búsqueda por fetch (usa fetchText con todas las capas) ───────────────
 async function buscarPorFetch(query) {
     try {
-        const res = await fetchGet(`${BASE}/busqueda?q=${encodeURIComponent(query)}`, {
-            headers: CF_HEADERS,
-            timeout: 20000,
-        })
-        if (!res.ok) return []
-        const html = await res.text()
+        // Usar fetchText para que pase por scrape.do / CF Worker / proxies
+        const html = await fetchText(`${BASE}/busqueda?q=${encodeURIComponent(query)}`)
         const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
 
         const results = []
