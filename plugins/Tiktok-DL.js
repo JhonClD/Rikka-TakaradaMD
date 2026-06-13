@@ -14,11 +14,36 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
             const json = await response.json();
 
             if (json.code === 0 && json.data && json.data.play) {
+                const videoUrl = json.data.play || json.data.wmplay;
+
+                // 1. Descargamos el buffer con cabecera User-Agent para saltar el bloqueo CDN
+                const resVideo = await fetch(videoUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                });
+                const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
+
+                // 2. Extraemos los campos para el formato de caption
                 const title = json.data.title || "Video de TikTok";
-                await conn.sendMessage(m.chat, { 
-                    video: { url: json.data.play }, 
-                    caption: `🌸 *TikTok Descargado* 🌸\n\n📌 *Título:* ${title}` 
-                }, { quoted: m });
+                const nickname = json.data.author?.nickname || "Desconocido";
+                const uniqueId = json.data.author?.unique_id || "";
+                const duration = json.data.duration || "0";
+                const music = json.data.music_info?.title || "Sonido original";
+
+                const caption = `❀ *Título ›* ${title}
+
+☕ *Autor ›* ${nickname}
+${uniqueId ? `@${uniqueId}` : ''}
+✨ *Duración ›* ${duration}
+🎵 *Música ›* ${music}`;
+
+                // 3. Enviar el video de forma robusta
+                if (typeof conn.sendFile === 'function') {
+                    await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
+                } else {
+                    await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
+                }
             } else {
                 await m.reply('❌ No se pudo descargar el video. Intenta con otro enlace o comprueba que no sea privado.');
             }
@@ -29,7 +54,7 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
     } else {
         try {
             await m.reply(`🔍 Buscando "${text}" en TikTok...`);
-            const response = await fetch(`https://tikwm.com/api/feed/search?keywords=${encodeURIComponent(text)}&count=12&cursor=0`, {
+            const response = await fetch(`https://tikwm.com/api/feed/search?keywords=${encodeURIComponent(text)}&count=15&cursor=0`, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
@@ -37,7 +62,8 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
             const json = await response.json();
 
             if (json.code === 0 && json.data && json.data.videos && json.data.videos.length > 0) {
-                const videos = json.data.videos.filter(v => v.play || v.wmplay).slice(0, 6);
+                // Obtenemos los primeros 10 videos con enlaces de descarga
+                const videos = json.data.videos.filter(v => v.play || v.wmplay).slice(0, 10);
                 if (videos.length === 0) {
                     return m.reply('❌ No se encontraron videos con enlace de descarga para tu búsqueda.');
                 }
@@ -48,14 +74,34 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
                     const video = videos[i];
                     const videoUrl = video.play || video.wmplay;
                     const title = video.title || `Video ${i + 1}`;
-                    const author = video.author?.nickname || "Desconocido";
+                    const nickname = video.author?.nickname || "Desconocido";
+                    const uniqueId = video.author?.unique_id || "";
+                    const duration = video.duration || "0";
+                    const music = video.music_info?.title || "Sonido original";
+
+                    const caption = `❀ *Título ›* ${title}
+
+☕ *Autor ›* ${nickname}
+${uniqueId ? `@${uniqueId}` : ''}
+✨ *Duración ›* ${duration}
+🎵 *Música ›* ${music}`;
 
                     try {
-                        await conn.sendMessage(m.chat, {
-                            video: { url: videoUrl },
-                            caption: `🎥 *Video ${i + 1}/${videos.length}*\n\n📌 *Título:* ${title}\n👤 *Autor:* ${author}`
-                        }, { quoted: m });
-                        // Pequeño retardo de 2 segundos para no saturar la conexión de red
+                        // Descargar el buffer del video con la cabecera correspondiente
+                        const resVideo = await fetch(videoUrl, {
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                            }
+                        });
+                        const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
+
+                        if (typeof conn.sendFile === 'function') {
+                            await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
+                        } else {
+                            await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
+                        }
+                        
+                        // Retardo de 2 segundos para que se suban consecutivamente sin saturar
                         await new Promise(resolve => setTimeout(resolve, 2000));
                     } catch (e) {
                         console.error(`Error al enviar el video ${i + 1}:`, e);
