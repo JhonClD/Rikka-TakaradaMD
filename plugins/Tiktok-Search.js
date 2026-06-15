@@ -36,6 +36,38 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   return readFileSync(outputPath);
 }
 
+async function downloadVideo(videoUrl, index, ts) {
+  const tmpInput = join(tmpdir(), `tts_in_${ts}_${index}.mp4`);
+  const tmpComp  = join(tmpdir(), `tts_comp_${ts}_${index}.mp4`);
+  try {
+    const res = await axios.get(videoUrl, {
+      responseType     : 'arraybuffer',
+      timeout          : 120000,
+      maxContentLength : Infinity,
+      maxBodyLength    : Infinity,
+    });
+
+    let buffer = Buffer.from(res.data);
+    const rawMB = buffer.length / 1024 / 1024;
+
+    if (rawMB > MAX_RAW_MB) {
+      const dynamicTarget = rawMB <= WA_LIMIT_MB ? Math.floor(rawMB * 0.90) : 60;
+      writeFileSync(tmpInput, buffer);
+      try {
+        buffer = await compressForWhatsApp(tmpInput, tmpComp, dynamicTarget);
+      } catch (e) {
+        console.error(`[TikTok-TTS] Compresión falló video ${index + 1}:`, e.message);
+      }
+    }
+
+    return buffer;
+  } finally {
+    for (const f of [tmpInput, tmpComp]) {
+      if (existsSync(f)) unlinkSync(f);
+    }
+  }
+}
+
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!text) throw `📎 Uso: _${usedPrefix + command} [cantidad] búsqueda_\nEjemplo: _${usedPrefix + command} 3 gatos graciosos_`;
 
@@ -75,59 +107,55 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   await conn.sendMessage(m.chat, { react: { text: '⬇️', key: m.key } });
 
   const ts = Date.now();
-  let sent = 0;
 
-  for (let i = 0; i < videoUrls.length; i++) {
-    const tmpInput = join(tmpdir(), `tts_in_${ts}_${i}.mp4`);
-    const tmpComp  = join(tmpdir(), `tts_comp_${ts}_${i}.mp4`);
-    try {
-      const res = await axios.get(videoUrls[i], {
-        responseType     : 'arraybuffer',
-        timeout          : 120000,
-        maxContentLength : Infinity,
-        maxBodyLength    : Infinity,
-      });
+  if (cantidad === 1) {
+    const buffer = await downloadVideo(videoUrls[0], 0, ts);
+    const finalMB = buffer.length / 1024 / 1024;
 
-      let buffer = Buffer.from(res.data);
-      const rawMB = buffer.length / 1024 / 1024;
-
-      if (rawMB > MAX_RAW_MB) {
-        const dynamicTarget = rawMB <= WA_LIMIT_MB ? Math.floor(rawMB * 0.90) : 60;
-        writeFileSync(tmpInput, buffer);
-        try {
-          buffer = await compressForWhatsApp(tmpInput, tmpComp, dynamicTarget);
-        } catch (e) {
-          console.error(`[TikTok-TTS] Compresión falló video ${i + 1}:`, e.message);
-        }
-      }
-
-      const finalMB = buffer.length / 1024 / 1024;
-
-      if (finalMB <= WA_LIMIT_MB) {
-        await conn.sendMessage(m.chat, {
-          video   : buffer,
-          mimetype: 'video/mp4',
-          caption : `🎵 *${i + 1}/${videoUrls.length}* — ${query}`,
-        }, { quoted: i === 0 ? m : undefined });
-      } else {
-        await conn.sendMessage(m.chat, {
-          document : buffer,
-          mimetype : 'video/mp4',
-          fileName : `tiktok_${ts}_${i + 1}.mp4`,
-          caption  : `🎵 *${i + 1}/${videoUrls.length}* — ${query}`,
-        }, { quoted: i === 0 ? m : undefined });
-      }
-      sent++;
-    } catch (err) {
-      console.error(`[TikTok-TTS] Video ${i + 1} falló:`, err.message);
-    } finally {
-      for (const f of [tmpInput, tmpComp]) {
-        if (existsSync(f)) unlinkSync(f);
-      }
+    if (finalMB <= WA_LIMIT_MB) {
+      await conn.sendMessage(m.chat, {
+        video   : buffer,
+        mimetype: 'video/mp4',
+        caption : `🎵 ${query}`,
+      }, { quoted: m });
+    } else {
+      await conn.sendMessage(m.chat, {
+        document : buffer,
+        mimetype : 'video/mp4',
+        fileName : `tiktok_${ts}.mp4`,
+        caption  : `🎵 ${query}`,
+      }, { quoted: m });
     }
+    await conn.sendMessage(m.chat, { react: { text: '✅', key: m.key } });
+    return;
   }
 
-  if (sent === 0) throw '❌ No se pudo descargar ningún video del resultado.';
+  const buffers = await Promise.allSettled(
+    videoUrls.map((url, i) => downloadVideo(url, i, ts))
+  );
+
+  const validBuffers = buffers
+    .filter(r => r.status === 'fulfilled' && r.value)
+    .map(r => r.value)
+    .filter(buf => buf.length / 1024 / 1024 <= WA_LIMIT_MB);
+
+  if (!validBuffers.length) throw '❌ No se pudo descargar ningún video del resultado.';
+
+  if (validBuffers.length === 1) {
+    await conn.sendMessage(m.chat, {
+      video   : validBuffers[0],
+      mimetype: 'video/mp4',
+      caption : `🎵 ${query}`,
+    }, { quoted: m });
+  } else {
+    await conn.sendMessage(m.chat, {
+      album: validBuffers.map(buf => ({
+        video   : buf,
+        mimetype: 'video/mp4',
+      })),
+    }, { quoted: m });
+  }
+
   await conn.sendMessage(m.chat, { react: { text: '✅', key: m.key } });
 };
 
