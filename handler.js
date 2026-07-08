@@ -459,7 +459,7 @@ export async function handler(chatUpdate) {
 
       const _str2Regex = (str) => {
         if (_prefixRegexCache.has(str)) return _prefixRegexCache.get(str);
-        const re = new RegExp('^' + str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'), 'u');
+        const re = new RegExp(str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'));
         _prefixRegexCache.set(str, re);
         return re;
       };
@@ -474,7 +474,7 @@ export async function handler(chatUpdate) {
           typeof _prefix === 'string' ?
             [[_str2Regex(_prefix).exec(m.text), _str2Regex(_prefix)]] :
             [[[], new RegExp]]
-      ).find((p) => p[0]);
+      ).find((p) => p[1]);
 
       if (typeof plugin.before === 'function') {
         if (await plugin.before.call(this, m, {
@@ -498,7 +498,7 @@ export async function handler(chatUpdate) {
 
       if (typeof plugin !== 'function') continue;
 
-      if (match && (usedPrefix = (match[0] || '')[0])) {
+      if ((usedPrefix = (match[0] || '')[0])) {
         const noPrefix = m.text.replace(usedPrefix, '');
         let [command, ...args] = noPrefix.trim().split` `.filter((v) => v);
         args = args || [];
