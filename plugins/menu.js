@@ -1,5 +1,5 @@
 import moment from 'moment-timezone';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -43,6 +43,20 @@ const handler = async (m, { conn, usedPrefix }) => {
   // URL de ImgBB guardada por .setbanner (o vacío si no hay)
   const bannerUrl    = (settings.banner && settings.banner.startsWith('http'))
     ? settings.banner : null;
+
+  // WhatsApp normal necesita el buffer del thumbnail, no solo la URL.
+  // Si hay banner personalizado (URL) lo descargamos; si no, usamos el banner local.
+  let thumbBuffer;
+  try {
+    if (bannerUrl) {
+      const res = await fetch(bannerUrl);
+      thumbBuffer = Buffer.from(await res.arrayBuffer());
+    } else if (existsSync(BANNER_PATH)) {
+      thumbBuffer = readFileSync(BANNER_PATH);
+    }
+  } catch {
+    if (existsSync(BANNER_PATH)) thumbBuffer = readFileSync(BANNER_PATH);
+  }
 
   const pushname  = m.pushName || 'Usuario';
   const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
@@ -122,7 +136,8 @@ const handler = async (m, { conn, usedPrefix }) => {
         mediaType: 1,
         renderLargerThumbnail: true,
         showAdAttribution: false,
-        ...(bannerUrl ? { thumbnailUrl: bannerUrl } : {})
+        ...(bannerUrl ? { thumbnailUrl: bannerUrl } : {}),
+        ...(thumbBuffer ? { thumbnail: thumbBuffer } : {})
       }
     }
   }, { quoted: m });
@@ -133,4 +148,3 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
-      
