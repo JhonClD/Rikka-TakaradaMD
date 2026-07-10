@@ -58,10 +58,11 @@ export async function handler(chatUpdate) {
   let m = chatUpdate.messages[chatUpdate.messages.length - 1];
   if (!m) return;
 
-  if (!isValidMessage(m)) return;
+  if (!isValidMessage(m)) { console.log('[DEBUG] Mensaje descartado por isValidMessage'); return; }
   const _msgText = extractMessageText(m);
+  console.log('[DEBUG] Mensaje recibido, texto:', JSON.stringify(_msgText));
   const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participant || m.key?.remoteJid || '');
-  if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) return;
+  if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) { console.log('[DEBUG] Mensaje descartado por isDuplicate'); return; }
 
   if (global.db.data == null) await global.loadDatabase();
 
@@ -477,7 +478,7 @@ export async function handler(chatUpdate) {
       ).find((p) => p[1]);
 
       if (typeof plugin.before === 'function') {
-        if (await plugin.before.call(this, m, {
+        const _beforeResult = await plugin.before.call(this, m, {
           match,
           conn: this,
           participants,
@@ -493,7 +494,8 @@ export async function handler(chatUpdate) {
           chatUpdate,
           __dirname: ___dirname,
           __filename,
-        })) continue;
+        });
+        if (_beforeResult) { console.log('[DEBUG] plugin.before cortó el flujo en:', name); continue; }
       }
 
       if (typeof plugin !== 'function') continue;
@@ -514,6 +516,7 @@ export async function handler(chatUpdate) {
               plugin.command === command :
               false;
 
+        if (isAccept) console.log('[DEBUG] Comando aceptado:', command, 'plugin:', name);
         if (!isAccept) continue;
 
         if (_isSubBot && !_subBotAllowed.has(command)) continue;
