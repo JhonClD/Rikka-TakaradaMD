@@ -74,6 +74,19 @@ global.loadDatabase = async function loadDatabase() {
 };
 loadDatabase();
 
+// FIX: fuerza el prefijo por defecto en cada arranque (alguien lo cambió a un emoji y rompió el bot).
+// Cuando ya no necesites este parche, puedes borrar este bloque completo.
+(async () => {
+  await global.loadDatabase();
+  const forcedPrefix = ['#', '/', '!', '.'];
+  const settings = global.db.data.settings || {};
+  for (const jid of Object.keys(settings)) {
+    settings[jid].prefix = forcedPrefix;
+  }
+  global.db.data.settings = settings;
+  console.log('[ ✔️ ] Prefijo forzado a valores por defecto:', forcedPrefix.join(' '));
+})();
+
 const { state, saveCreds } = await useMultiFileAuthState(global.authFile);
 const version22 = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1033893291] }));
 console.log(version22)
