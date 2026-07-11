@@ -126,20 +126,20 @@ const handler = async (m, { conn, usedPrefix }) => {
     menuTexto += `${CONFIG.catBox.bottom}\n\n`;
   });
 
-  await conn.sendMessage(m.chat, {
-    text: menuTexto,
-    contextInfo: {
-      externalAdReply: {
-        title: botNameLong,
-        body: `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}`,
-        sourceUrl: botLink,
-        mediaType: 1,
-        renderLargerThumbnail: true,
-        showAdAttribution: false,
-        ...(thumbBuffer ? { thumbnail: thumbBuffer } : bannerUrl ? { thumbnailUrl: bannerUrl } : {})
-      }
+  menuTexto += `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}\n${botLink}`;
+
+  if (thumbBuffer) {
+    try {
+      return await conn.sendMessage(m.chat, {
+        image: thumbBuffer,
+        caption: menuTexto
+      }, { quoted: m });
+    } catch (e) {
+      console.error('menu.js image send error:', e?.message || e);
     }
-  }, { quoted: m });
+  }
+
+  await conn.sendMessage(m.chat, { text: menuTexto }, { quoted: m });
 };
 
 handler.help    = ['menu'];
@@ -147,3 +147,4 @@ handler.tags    = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
+  
