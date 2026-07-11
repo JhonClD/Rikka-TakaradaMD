@@ -188,7 +188,7 @@ export async function handler(chatUpdate) {
       if (chat) {
         const chats = {
           isBanned: false,
-          welcome: true,
+          welcome: false,
           detect: true,
           detect2: false,
           sWelcome: '',
