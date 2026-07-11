@@ -136,8 +136,7 @@ const handler = async (m, { conn, usedPrefix }) => {
         mediaType: 1,
         renderLargerThumbnail: true,
         showAdAttribution: false,
-        ...(bannerUrl ? { thumbnailUrl: bannerUrl } : {}),
-        ...(thumbBuffer ? { thumbnail: thumbBuffer } : {})
+        ...(thumbBuffer ? { thumbnail: thumbBuffer } : bannerUrl ? { thumbnailUrl: bannerUrl } : {})
       }
     }
   }, { quoted: m });
