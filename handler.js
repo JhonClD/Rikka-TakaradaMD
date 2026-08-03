@@ -58,11 +58,10 @@ export async function handler(chatUpdate) {
   let m = chatUpdate.messages[chatUpdate.messages.length - 1];
   if (!m) return;
 
-  if (!isValidMessage(m)) { console.log('[DEBUG] Mensaje descartado por isValidMessage'); return; }
+  if (!isValidMessage(m)) return;
   const _msgText = extractMessageText(m);
-  console.log('[DEBUG] Mensaje recibido, texto:', JSON.stringify(_msgText));
   const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participant || m.key?.remoteJid || '');
-  if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) { console.log('[DEBUG] Mensaje descartado por isDuplicate'); return; }
+  if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) return;
 
   if (global.db.data == null) await global.loadDatabase();
 
