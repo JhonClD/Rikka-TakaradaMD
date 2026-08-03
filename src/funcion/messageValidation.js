@@ -1,6 +1,7 @@
 export function isValidMessage(m) {
   if (!m || typeof m !== 'object') return false;
   if (!m.message) return false;
+  if (m.message?.protocolMessage) return false;
 
   const remoteJid = m.key?.remoteJid || '';
 
@@ -124,4 +125,4 @@ export function isEphemeralMessage(m) {
 export function isEditedMessage(m) {
   return getMessageType(m) === 'editedMessage' || getMessageType(m) === 'protocolMessage';
       }
-                                               
+
