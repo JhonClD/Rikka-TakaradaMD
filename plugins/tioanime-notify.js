@@ -394,7 +394,9 @@ async function enviarEpisodio(chatId, ep, conn) {
       try {
         if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
         else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
-        break // Embeds ignorados temporalmente por falta de yt-dlp nativo
+        else continue // "otros" directos y embeds: sin soporte de descarga por ahora, seguir probando
+
+        if (videoPath) break // solo cortar tras una descarga exitosa
       } catch (err) {
         fs.readdirSync(tmpDir).forEach(f => {
           try { if (f !== 'cover.jpg') fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {}
@@ -540,9 +542,14 @@ if (!global.tioWatchdog) {
   }, 2 * 60 * 1000)
 }
 
-let handler = async (m, { conn, text, usedPrefix, command }) => {
+let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.tioConn = conn
   restaurarNotificadores(conn)
+
+  const COMANDOS_OWNER = ['tiostart', 'tiostop', 'tiointerval', 'tioflush', 'tiounblock', 'tioexample', 'latexample']
+  if (COMANDOS_OWNER.includes(command) && !isOwner) {
+    return conn.sendMessage(m.chat, { text: '⛔ Solo el *owner* puede usar este comando.' }, { quoted: m })
+  }
 
   if (command === 'tiostart') {
     const min = parseInt(text?.trim())
