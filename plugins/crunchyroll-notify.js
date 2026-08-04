@@ -272,15 +272,19 @@ function startCron(conn) {
       if (!items.length) return
 
       for (const ep of items) {
+        let algunExito = false
         for (const jid of jids) {
           try {
             await sendItem(activeConn, jid, ep)
+            algunExito = true
             await delay(1500)
           } catch (err) {
             console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
           }
         }
-        markSeen(ep.id)  // Marcar después de enviarlo a todos los grupos
+        // [FIX] Solo marcar como visto si se envió con éxito a AL MENOS un grupo.
+        // Si falló en todos (ej. conexión caída), se reintentará en el próximo tick.
+        if (algunExito) markSeen(ep.id)
         await delay(3000)
       }
       console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
@@ -378,6 +382,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
 
   // ── .crlist ───────────────────────────────────────────────────────────────
   if (command === 'crlist') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     await conn.sendMessage(m.chat, { text: '🔍 Obteniendo los 10 lanzamientos más recientes...' }, { quoted: m })
     try {
       const episodes = await getLatestEpisodes(10)
@@ -389,6 +394,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
 
   // ── .crnotify ─────────────────────────────────────────────────────────────
   if (command === 'crnotify') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     await conn.sendMessage(m.chat, { text: '🔍 Buscando episodios recientes...' }, { quoted: m })
     try {
       const episodes = await getLatestEpisodes(10)
