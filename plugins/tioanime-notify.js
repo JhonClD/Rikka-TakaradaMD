@@ -9,6 +9,7 @@ import path         from 'path'
 import { spawn }    from 'child_process'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
+import https        from 'https'
 import { File as MegaFile } from 'megajs'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
@@ -26,6 +27,14 @@ const STATE_FILE             = path.join(DB_DIR, 'tioanime_state.json')
 const CHECK_INTERVAL_DEFAULT = 10        // minutos
 const QUEUE_DELAY            = 90_000    // ms entre ítems de cola (90 seg)
 const DL_TIMEOUT             = 3 * 60 * 60 * 1000
+
+// [MEJORA VELOCIDAD] Conexiones paralelas para acelerar descargas
+// Ajustado para conexión ~90 Mbps de bajada (11+ MB/s teóricos)
+const MEGA_MAX_CONNECTIONS   = 10  // default de megajs es 4
+const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
+const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
+
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const HEADERS = {
@@ -330,7 +339,8 @@ async function descargarMega(megaUrl, outputDir, fileName) {
   await file.loadAttributes()
   const total      = file.size || 0
   const destPath   = path.join(outputDir, fileName)
-  const fileStream = file.download()
+  // [MEJORA VELOCIDAD] megajs usa 4 conexiones por defecto; subimos a MEGA_MAX_CONNECTIONS
+  const fileStream = file.download({ maxConnections: MEGA_MAX_CONNECTIONS })
 
   let done = 0
   const start = Date.now()
@@ -363,38 +373,102 @@ async function descargarMega(megaUrl, outputDir, fileName) {
 async function descargarMediaFire(mfUrl, outputDir, fileName) {
   let mfPage
   try {
-    const res = await axios.get(mfUrl, { headers: HEADERS, timeout: 12000 })
+    const res = await axios.get(mfUrl, { headers: HEADERS, httpsAgent, timeout: 12000 })
     mfPage = res.data
   } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
 
   const mfLink = mfPage.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/)?.[1] ||
                  mfPage.match(/id="downloadButton"[^>]+href=["']([^"']+)["']/)?.[1] ||
                  mfPage.match(/"(https?:\/\/download\d*\.mediafire\.com\/[^"]+)"/)?.[1]
-                 
+
   if (!mfLink) throw new Error('MediaFire: sin link directo')
 
-  let mfRes
-  try {
-    mfRes = await axios.get(mfLink, { responseType: 'stream', headers: { ...HEADERS, Referer: 'https://www.mediafire.com/' }, timeout: DL_TIMEOUT })
-  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
-
-  const total = parseInt(mfRes.headers['content-length'] || '0')
   const destPath = path.join(outputDir, fileName)
+
+  // [MEJORA VELOCIDAD] Averiguar tamaño y soporte de rangos con un HEAD
+  let total = 0
+  let soportaRangos = false
+  try {
+    const head = await axios.head(mfLink, { headers: HEADERS, httpsAgent, timeout: 10000 })
+    total = parseInt(head.headers['content-length'] || '0')
+    soportaRangos = /bytes/i.test(head.headers['accept-ranges'] || '')
+  } catch (_) {}
 
   let done = 0
   const start = Date.now()
   let lastLog = 0
+  const reportar = (bytes) => {
+    done += bytes
+    const now = Date.now()
+    if (now - lastLog > 1000) {
+      lastLog = now
+      const secs  = (now - start) / 1000 || 0.001
+      const speed = done / secs
+      const pct   = total > 0 ? (done / total) * 100 : 0
+      process.stdout.write(`\r[MEDIAFIRE] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
+    }
+  }
+
+  // ── Descarga paralela por rangos (si el servidor lo permite) ────────────────
+  if (soportaRangos && total >= MF_MIN_SIZE_PARALELO) {
+    const hilos     = MF_HILOS
+    const chunkSize = Math.ceil(total / hilos)
+    const partes    = []
+    for (let i = 0; i < hilos; i++) {
+      const bStart = i * chunkSize
+      const bEnd   = Math.min(bStart + chunkSize - 1, total - 1)
+      if (bStart > bEnd) break
+      partes.push({ start: bStart, end: bEnd, path: `${destPath}.part${i}` })
+    }
+
+    try {
+      await Promise.all(partes.map(async p => {
+        const res = await axios.get(mfLink, {
+          responseType: 'stream',
+          headers : { ...HEADERS, Referer: 'https://www.mediafire.com/', Range: `bytes=${p.start}-${p.end}` },
+          httpsAgent,
+          timeout : DL_TIMEOUT,
+        })
+        res.data.on('data', chunk => reportar(chunk.length))
+        await pipeline(res.data, fs.createWriteStream(p.path))
+      }))
+
+      // Unir las partes en orden
+      const out = fs.createWriteStream(destPath)
+      for (const p of partes) {
+        await new Promise((resolve, reject) => {
+          const rs = fs.createReadStream(p.path)
+          rs.pipe(out, { end: false })
+          rs.on('end', resolve)
+          rs.on('error', reject)
+        })
+      }
+      await new Promise(resolve => out.end(resolve))
+      for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
+
+      process.stdout.write('\n')
+      console.log(`[tioanime-notify] ⚡ MediaFire descargado en ${partes.length} hilos paralelos`)
+      return destPath
+    } catch (err) {
+      process.stdout.write('\n')
+      for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
+      console.log(`[tioanime-notify] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
+      done = 0 // reiniciar contador para el fallback
+      // sigue abajo al modo de un solo stream
+    }
+  }
+
+  // ── Descarga simple (fallback o cuando no hay soporte de rangos) ────────────
+  let mfRes
+  try {
+    mfRes = await axios.get(mfLink, { responseType: 'stream', headers: { ...HEADERS, Referer: 'https://www.mediafire.com/' }, httpsAgent, timeout: DL_TIMEOUT })
+  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+
+  if (!total) total = parseInt(mfRes.headers['content-length'] || '0')
+
   const tracker = new Transform({
     transform(chunk, _enc, cb) {
-      done += chunk.length
-      const secs  = (Date.now() - start) / 1000 || 0.001
-      const speed = done / secs
-      const now   = Date.now()
-      if (now - lastLog > 1000) {
-        lastLog = now
-        const pct = total > 0 ? (done / total) * 100 : 0
-        process.stdout.write(`\r[MEDIAFIRE] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
-      }
+      reportar(chunk.length)
       cb(null, chunk)
     },
   })
