@@ -61,22 +61,7 @@ function fmtBytes(b) {
   return (b / 1024).toFixed(2) + ' KB'
 }
 
-function progressBar(pct, width = 16) {
-  const clamped = Math.max(0, Math.min(100, pct))
-  const filled  = Math.round(width * clamped / 100)
-  return '█'.repeat(filled) + '░'.repeat(width - filled)
-}
 
-function buildProgressStatus(servidor, pct, done, total, speed) {
-  const clamped = Math.max(0, Math.min(100, pct))
-  return (
-    `📥 *Descargando episodio*\n` +
-    `[ ${servidor.toUpperCase()} ]\n` +
-    `\`[${progressBar(clamped)}]\` *${clamped.toFixed(1)}%*\n` +
-    `⚡ ${fmtBytes(speed)}/s` +
-    (total > 0 ? ` · 📦 ${fmtBytes(done)} / ${fmtBytes(total)}` : ` · 📦 ${fmtBytes(done)}`)
-  )
-}
 
 // ─── Scraping ─────────────────────────────────────────────────────────────────
 
@@ -334,7 +319,7 @@ function ordenarServidores(srvs, fuente = 'tioanime') {
   return [...mega, ...mediafire, ...otros, ...embeds]
 }
 
-async function descargarMega(megaUrl, outputDir, fileName, onProgress) {
+async function descargarMega(megaUrl, outputDir, fileName) {
   let url = megaUrl
   const m1 = megaUrl.match(/mega\.nz\/(?:embed\/)?[#!]*([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{40,})/)
   if (m1) url = `https://mega.nz/file/${m1[1]}#${m1[2]}`
@@ -349,17 +334,17 @@ async function descargarMega(megaUrl, outputDir, fileName, onProgress) {
 
   let done = 0
   const start = Date.now()
-  let lastUpdate = 0
+  let lastLog = 0
   const tracker = new Transform({
     transform(chunk, _enc, cb) {
       done += chunk.length
       const secs  = (Date.now() - start) / 1000 || 0.001
       const speed = done / secs
       const now   = Date.now()
-      if (onProgress && now - lastUpdate > 3000) {
-        lastUpdate = now
+      if (now - lastLog > 1000) {
+        lastLog = now
         const pct = total > 0 ? (done / total) * 100 : 0
-        onProgress({ pct, done, total, speed })
+        process.stdout.write(`\r[MEGA] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
       }
       cb(null, chunk)
     },
@@ -367,13 +352,15 @@ async function descargarMega(megaUrl, outputDir, fileName, onProgress) {
 
   try {
     await pipeline(fileStream, tracker, fs.createWriteStream(destPath))
+    process.stdout.write('\n')
   } catch (err) {
+    process.stdout.write('\n')
     throw new Error(`Mega error: ${err.message}`)
   }
   return destPath
 }
 
-async function descargarMediaFire(mfUrl, outputDir, fileName, onProgress) {
+async function descargarMediaFire(mfUrl, outputDir, fileName) {
   let mfPage
   try {
     const res = await axios.get(mfUrl, { headers: HEADERS, timeout: 12000 })
@@ -396,17 +383,17 @@ async function descargarMediaFire(mfUrl, outputDir, fileName, onProgress) {
 
   let done = 0
   const start = Date.now()
-  let lastUpdate = 0
+  let lastLog = 0
   const tracker = new Transform({
     transform(chunk, _enc, cb) {
       done += chunk.length
       const secs  = (Date.now() - start) / 1000 || 0.001
       const speed = done / secs
       const now   = Date.now()
-      if (onProgress && now - lastUpdate > 3000) {
-        lastUpdate = now
+      if (now - lastLog > 1000) {
+        lastLog = now
         const pct = total > 0 ? (done / total) * 100 : 0
-        onProgress({ pct, done, total, speed })
+        process.stdout.write(`\r[MEDIAFIRE] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
       }
       cb(null, chunk)
     },
@@ -414,7 +401,11 @@ async function descargarMediaFire(mfUrl, outputDir, fileName, onProgress) {
 
   try {
     await pipeline(mfRes.data, tracker, fs.createWriteStream(destPath))
-  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+    process.stdout.write('\n')
+  } catch (err) {
+    process.stdout.write('\n')
+    throw new Error(`MediaFire: ${err.message}`)
+  }
   return destPath
 }
 
@@ -447,48 +438,39 @@ async function enviarEpisodio(chatId, ep, conn) {
       await conn.sendMessage(chatId, { text: caption })
     }
 
-    // ── Mensaje de estado editable (progreso de descarga) ──────────────────
-    const statusMsg  = await conn.sendMessage(chatId, { text: '🔎 _Buscando servidores de descarga..._' })
-    const statusKey  = statusMsg?.key
-    const editStatus = txt => statusKey
-      ? conn.sendMessage(chatId, { text: txt, edit: statusKey }).catch(() => {})
-      : Promise.resolve()
-
+    console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
     const srvs = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
-    if (!srvs.length) { await editStatus('❌ No se encontraron servidores de descarga.'); throw new Error('No se encontraron servidores') }
+    if (!srvs.length) throw new Error('No se encontraron servidores')
 
     await new Promise(r => setTimeout(r, 15_000))
     const orden = ordenarServidores(srvs, fuente).slice(0, 5)
     let videoPath = null
 
     for (const srv of orden) {
-      const nombreServidor = srv.nombre || 'servidor'
+      const nombreServidor = (srv.nombre || 'servidor').toUpperCase()
       try {
         if (srv.nombre === 'mega' || srv.nombre === 'mediafire') {
-          await editStatus(`🔄 Conectando con [ ${nombreServidor.toUpperCase()} ]...`)
+          console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
         } else {
           continue // "otros" directos y embeds: sin soporte de descarga por ahora, seguir probando
         }
 
-        const onProgress = ({ pct, done, total, speed }) =>
-          editStatus(buildProgressStatus(nombreServidor, pct, done, total, speed))
-
-        if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName, onProgress)
-        else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName, onProgress)
+        if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
+        else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
 
         if (videoPath) break // solo cortar tras una descarga exitosa
       } catch (err) {
-        await editStatus(`⚠️ [ ${nombreServidor.toUpperCase()} ] falló, probando otro servidor...`)
+        console.log(`[tioanime-notify] ⚠️ [ ${nombreServidor} ] falló: ${err.message}`)
         fs.readdirSync(tmpDir).forEach(f => {
           try { if (f !== 'cover.jpg') fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {}
         })
       }
     }
 
-    if (!videoPath) { await editStatus('❌ Todos los servidores fallaron.'); throw new Error('Todos los servidores fallaron') }
+    if (!videoPath) throw new Error('Todos los servidores fallaron')
 
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
-    await editStatus(`✅ *Descarga completa*\n📦 ${sizeMB} MB\n📤 _Subiendo a WhatsApp..._`)
+    console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — subiendo a WhatsApp...`)
 
     // [CORRECCIÓN 3] Usar { url: videoPath } para usar streaming real y no congelar el bot ni la memoria RAM
     await conn.sendMessage(chatId, {
@@ -498,7 +480,7 @@ async function enviarEpisodio(chatId, ep, conn) {
       caption  : `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}`,
     })
 
-    await editStatus(`✅ *¡Listo!* Episodio ${zeroPad(epNum)} enviado correctamente.`)
+    console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
 
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {}
