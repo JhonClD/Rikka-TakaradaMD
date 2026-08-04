@@ -23,6 +23,11 @@ const BASE = 'https://hentaila.com'
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 
+// [MEJORA VELOCIDAD] Conexiones paralelas para acelerar descargas
+const HDL_MEGA_MAX_CONNECTIONS = 10  // default de megajs es 4
+const HDL_HILOS_PARALELOS      = 8   // hilos para descarga por rangos HTTP
+const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
+
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║  CONFIGURACIÓN DE TOKENS — TODOS GRATUITOS                        ║
 // ║                                                                   ║
@@ -657,17 +662,75 @@ async function descargarDirecto(directUrl, fileName, tempPath, updateStatus, lab
     const headRes = await fetchGet(directUrl, { method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 10000 })
     const sizeBytes = parseInt(headRes.headers.get('content-length') || '0')
     const sizeH = sizeBytes ? (sizeBytes / 1048576).toFixed(2) + ' MB' : '?'
+    const soportaRangos = /bytes/i.test(headRes.headers.get('accept-ranges') || '')
 
     await updateStatus(`📥 *${label}:* ${fileName}\n⚖️ *Peso:* ${sizeH}\n⏬ _Descargando..._`)
 
+    let dld = 0
+    const tStart = Date.now()
+    let lastLog = 0
+    const reportar = bytes => {
+        dld += bytes
+        const now = Date.now()
+        if (now - lastLog > 1000) {
+            lastLog = now
+            const secs  = (now - tStart) / 1000 || 0.001
+            const speed = dld / secs
+            const pct   = sizeBytes > 0 ? (dld / sizeBytes) * 100 : 0
+            process.stdout.write(`\r[${label}] ${pct.toFixed(1)}% (${(dld / 1048576).toFixed(1)} MB) | ${(speed / 1048576).toFixed(2)} MB/s   `)
+        }
+    }
+
+    // ── Descarga paralela por rangos (si el servidor lo soporta) ─────────────
+    if (soportaRangos && sizeBytes >= HDL_MIN_SIZE_PARALELO) {
+        const hilos     = HDL_HILOS_PARALELOS
+        const chunkSize = Math.ceil(sizeBytes / hilos)
+        const partes    = []
+        for (let i = 0; i < hilos; i++) {
+            const start = i * chunkSize
+            const end   = Math.min(start + chunkSize - 1, sizeBytes - 1)
+            if (start > end) break
+            partes.push({ start, end, path: `${tempPath}.part${i}` })
+        }
+
+        try {
+            await Promise.all(partes.map(async p => {
+                const res = await fetchGet(directUrl, {
+                    headers: { 'User-Agent': UA, Range: `bytes=${p.start}-${p.end}` },
+                    timeout: 180000,
+                })
+                if (!res.ok && res.status !== 206) throw new Error(`HTTP ${res.status}`)
+                res.body.on('data', chunk => reportar(chunk.length))
+                await pipeline(res.body, fs.createWriteStream(p.path))
+            }))
+
+            // Unir las partes en orden
+            const out = fs.createWriteStream(tempPath)
+            for (const p of partes) {
+                await new Promise((resolve, reject) => {
+                    const rs = fs.createReadStream(p.path)
+                    rs.pipe(out, { end: false })
+                    rs.on('end', resolve)
+                    rs.on('error', reject)
+                })
+            }
+            await new Promise(resolve => out.end(resolve))
+            for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) { } }
+
+            console.log(`\n[${label}] ✅ Completo (${partes.length} hilos paralelos)`)
+            return sizeH
+        } catch (err) {
+            for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) { } }
+            console.log(`\n[${label}] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
+            dld = 0 // reiniciar contador para el fallback
+            // sigue abajo al modo de un solo stream
+        }
+    }
+
+    // ── Descarga simple (fallback o cuando no hay soporte de rangos) ─────────
     const response = await fetchGet(directUrl, { headers: { 'User-Agent': UA }, timeout: 180000 })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-
-    let dld = 0
-    response.body.on('data', chunk => {
-        dld += chunk.length
-        if (sizeBytes > 0) process.stdout.write(`\r[${label}] ${((dld / sizeBytes) * 100).toFixed(1)}% (${(dld / 1048576).toFixed(1)} MB)`)
-    })
+    response.body.on('data', chunk => reportar(chunk.length))
     await pipeline(response.body, fs.createWriteStream(tempPath))
     console.log(`\n[${label}] ✅ Completo`)
     return sizeH
@@ -743,7 +806,8 @@ async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus
                 sizeH = (sizeBytes / 1048576).toFixed(2) + ' MB'
                 tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
                 await updateStatus(`📥 *MEGA:* ${fileName}\n⚖️ *Peso:* ${sizeH}\n⏬ _Descargando..._`)
-                const fileStream = file.download()
+                // [MEJORA VELOCIDAD] megajs usa 4 conexiones por defecto; subimos a HDL_MEGA_MAX_CONNECTIONS
+                const fileStream = file.download({ maxConnections: HDL_MEGA_MAX_CONNECTIONS })
                 let dld = 0
                 fileStream.on('data', chunk => {
                     dld += chunk.length
