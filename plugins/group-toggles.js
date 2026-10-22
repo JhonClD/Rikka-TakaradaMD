@@ -22,15 +22,9 @@ const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin
       'Los comandos de economía están bloqueados hasta nuevo aviso.');
   }
 
-  if (command === 'nsfw') {
-    if (!isBotAdmin) return m.reply('ꕥ El bot debe ser *administrador* para activar el NSFW.');
-    return toggle('nsfw', 'NSFW',
-      '⚠️ Contenido adulto habilitado. Úsalo con responsabilidad.',
-      'El contenido NSFW ha sido bloqueado.');
-  }
 };
 
-handler.command = ['economy', 'economia', 'eco', 'nsfw'];
+handler.command = ['economy', 'economia', 'eco'];
 handler.tags = ['group'];
 handler.group = true;
 handler.admin = true;
