@@ -1,124 +1,160 @@
-import fetch from 'node-fetch';
+import axios from 'axios';
+import cheerio from 'cheerio';
+import { exec } from 'child_process';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { promisify } from 'util';
 
-let handler = async (m, { conn, text, usedPrefix, command }) => {
-    if (!text) throw `❌ Por favor, ingresa un enlace de TikTok o un término de búsqueda.\n\nEjemplos:\n📌 *Con enlace:* ${usedPrefix + command} https://vm.tiktok.com/...\n📌 *Con búsqueda:* ${usedPrefix + command} videos de minecraft`;
+const execAsync = promisify(exec);
 
-    const isLink = text.match(/(https?:\/\/)?(www\.)?(vt|vm|v)\.tiktok\.com\/[a-zA-Z0-9]+/gi) || 
-                   text.match(/(https?:\/\/)?(www\.)?tiktok\.com\/@[a-zA-Z0-9._]+\/video\/[0-9]+/gi) || 
-                   text.includes('tiktok.com');
+const handler = async (m, { conn, text, args, usedPrefix, command }) => {
+  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
+  if (!/(?:https?:\/\/)?(?:www\.|vm\.|vt\.|m\.)?tiktok\.com\/[^\s&]+/gi.test(text))
+    throw '❌ El enlace no parece ser de TikTok.';
 
-    if (isLink) {
-        try {
-            await m.reply('⏳ Descargando video de TikTok, por favor espera...');
-            const response = await fetch(`https://tikwm.com/api/?url=${encodeURIComponent(text)}`);
-            const json = await response.json();
+  const url     = args[0];
+  const encoded = encodeURIComponent(url);
 
-            if (json.code === 0 && json.data && json.data.play) {
-                const videoUrl = json.data.play || json.data.wmplay;
+  const APIs = [
+    async () => {
+      const links = await fetchInstatiktok(url);
+      if (!links?.length) return null;
+      return links.find(l => /hdplay/i.test(l)) || links.find(l => /download/i.test(l)) || links[0];
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://www.tikwm.com/api/?url=${encoded}&hd=1`, { timeout: 10000 });
+      return j?.data?.hdplay || j?.data?.play || null;
+    },
+    async () => {
+      const res  = await axios.post('https://snaptik.app/abc2.php',
+        new URLSearchParams({ url, token: '' }).toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 });
+      const $    = cheerio.load(res.data?.html || res.data || '');
+      const link = $('a[href*="tikcdn"]').attr('href') || $('a[href*="download"]').first().attr('href');
+      return link || null;
+    },
+    async () => {
+      const res  = await axios.post('https://sssstik.io/app/upload',
+        new URLSearchParams({ id: url }).toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' }, timeout: 10000 });
+      const $    = cheerio.load(res.data || '');
+      const link = $('a[href^="http"]').attr('href');
+      return link || null;
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://tiksave.net/api/?url=${encoded}`, { timeout: 10000 });
+      return j?.data?.play || j?.url || null;
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://api.vreden.my.id/api/tiktok?url=${encoded}`, { timeout: 10000 });
+      return j?.result?.url || null;
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://api.alyacid.my.id/api/tiktok?url=${encoded}`, { timeout: 10000 });
+      return j?.data?.video?.noWatermark || j?.data?.play || null;
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://api.naxdr.com/tiktok/dl?url=${encoded}`, { timeout: 10000 });
+      return j?.data?.play || j?.url || null;
+    },
+    async () => {
+      const { data: j } = await axios.get(`https://luminai.my.id/api/download/tiktok?url=${encoded}`, { timeout: 10000 });
+      return j?.data?.url || null;
+    },
+    async () => {
+      const { data: j } = await axios.post('https://tikmate.online/api/lookup',
+        new URLSearchParams({ url }).toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 });
+      return j?.token ? `https://tikmate.online/download/${j.token}/${j.id}.mp4` : null;
+    },
+  ];
 
-                // 1. Descargamos el buffer con cabecera User-Agent para saltar el bloqueo CDN
-                const resVideo = await fetch(videoUrl, {
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
-                });
-                const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
+  const tmpInput  = join(tmpdir(), `tiktok_in_${Date.now()}.mp4`);
+  const tmpOutput = join(tmpdir(), `tiktok_out_${Date.now()}.mp4`);
 
-                // 2. Extraemos los campos para el formato de caption
-                const title = json.data.title || "Video de TikTok";
-                const nickname = json.data.author?.nickname || "Desconocido";
-                const uniqueId = json.data.author?.unique_id || "";
-                const duration = json.data.duration || "0";
-                const music = json.data.music_info?.title || "Sonido original";
+  try {
+    let videoUrl = null;
 
-                const caption = `❀ *Título ›* ${title}
-
-☕ *Autor ›* ${nickname}
-${uniqueId ? `@${uniqueId}` : ''}
-✨ *Duración ›* ${duration}
-🎵 *Música ›* ${music}`;
-
-                // 3. Enviar el video de forma robusta
-                if (typeof conn.sendFile === 'function') {
-                    await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
-                } else {
-                    await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
-                }
-            } else {
-                await m.reply('❌ No se pudo descargar el video. Intenta con otro enlace o comprueba que no sea privado.');
-            }
-        } catch (err) {
-            console.error(err);
-            await m.reply('❌ Ocurrió un error al intentar procesar el enlace de TikTok.');
-        }
-    } else {
-        try {
-            await m.reply(`🔍 Buscando "${text}" en TikTok...`);
-            const response = await fetch(`https://tikwm.com/api/feed/search?keywords=${encodeURIComponent(text)}&count=15&cursor=0`, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            });
-            const json = await response.json();
-
-            if (json.code === 0 && json.data && json.data.videos && json.data.videos.length > 0) {
-                // Obtenemos los primeros 10 videos con enlaces de descarga
-                const videos = json.data.videos.filter(v => v.play || v.wmplay).slice(0, 10);
-                if (videos.length === 0) {
-                    return m.reply('❌ No se encontraron videos con enlace de descarga para tu búsqueda.');
-                }
-
-                await m.reply(`✨ Se encontraron resultados. Enviando ${videos.length} videos...`);
-
-                for (let i = 0; i < videos.length; i++) {
-                    const video = videos[i];
-                    const videoUrl = video.play || video.wmplay;
-                    const title = video.title || `Video ${i + 1}`;
-                    const nickname = video.author?.nickname || "Desconocido";
-                    const uniqueId = video.author?.unique_id || "";
-                    const duration = video.duration || "0";
-                    const music = video.music_info?.title || "Sonido original";
-
-                    const caption = `❀ *Título ›* ${title}
-
-☕ *Autor ›* ${nickname}
-${uniqueId ? `@${uniqueId}` : ''}
-✨ *Duración ›* ${duration}
-🎵 *Música ›* ${music}`;
-
-                    try {
-                        // Descargar el buffer del video con la cabecera correspondiente
-                        const resVideo = await fetch(videoUrl, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                            }
-                        });
-                        const buffer = resVideo.buffer ? await resVideo.buffer() : Buffer.from(await resVideo.arrayBuffer());
-
-                        if (typeof conn.sendFile === 'function') {
-                            await conn.sendFile(m.chat, buffer, 'tiktok.mp4', caption, m);
-                        } else {
-                            await conn.sendMessage(m.chat, { video: buffer, caption: caption }, { quoted: m });
-                        }
-                        
-                        // Retardo de 2 segundos para que se suban consecutivamente sin saturar
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    } catch (e) {
-                        console.error(`Error al enviar el video ${i + 1}:`, e);
-                    }
-                }
-            } else {
-                await m.reply('❌ No se encontraron resultados para tu búsqueda.');
-            }
-        } catch (err) {
-            console.error(err);
-            await m.reply('❌ Ocurrió un error al realizar la búsqueda en TikTok.');
-        }
+    for (let i = 0; i < APIs.length; i++) {
+      try {
+        const result = await APIs[i]();
+        if (result) { videoUrl = result; break; }
+      } catch (err) {
+        console.log(`[TikTok API #${i + 1} Error]`, err.message);
+      }
     }
+
+    if (!videoUrl) throw '❌ No se pudo descargar el video con ninguna fuente.';
+
+    // Descargar video a archivo temporal
+    const res = await axios.get(videoUrl, {
+      responseType     : 'arraybuffer',
+      timeout          : 120000,
+      maxContentLength : Infinity,
+      maxBodyLength    : Infinity,
+    });
+    writeFileSync(tmpInput, Buffer.from(res.data));
+
+    // Remuxear con ffmpeg sin perder calidad (solo reempaqueta el contenedor)
+    await execAsync(
+      `ffmpeg -y -i "${tmpInput}" -c:v copy -c:a copy -movflags faststart "${tmpOutput}"`,
+      { timeout: 120000 }
+    );
+
+    const buffer = readFileSync(tmpOutput);
+
+    await conn.sendMessage(m.chat, {
+      video  : buffer,
+      caption: `✅ *TikTok descargado*`,
+    }, { quoted: m });
+
+  } catch (e) {
+    console.error('[TikTok-DL]', e);
+    throw typeof e === 'string' ? e : '❌ No se pudo descargar el video. Inténtalo de nuevo.';
+  } finally {
+    // Limpiar archivos temporales
+    if (existsSync(tmpInput))  unlinkSync(tmpInput);
+    if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
+  }
 };
 
-handler.help = ['tiktok', 'tt'].map(v => v + ' <enlace o búsqueda>');
-handler.tags = ['downloader'];
-handler.command = /^(tiktok|tt|tk)$/i;
+handler.help    = ['tiktok'];
+handler.tags    = ['downloader'];
+handler.command = /^(tiktok|ttdl|tiktokdl|tiktoknowm|tt|ttnowm|tiktokaudio)$/i;
 
 export default handler;
+
+// ─── Scraper instatiktok ──────────────────────────────────────────────────────
+async function fetchInstatiktok(url) {
+  try {
+    const SITE_URL = 'https://instatiktok.com/';
+    const form     = new URLSearchParams();
+    form.append('url', url);
+    form.append('platform', 'tiktok');
+
+    const res = await axios.post(`${SITE_URL}api`, form.toString(), {
+      headers: {
+        'Content-Type'    : 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Origin'          : SITE_URL,
+        'Referer'         : SITE_URL,
+        'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      timeout: 10000,
+    });
+
+    const html = res?.data?.html;
+    if (!html || res?.data?.status !== 'success') return null;
+
+    const $     = cheerio.load(html);
+    const links = [];
+    $('a.btn[href^="http"]').each((_, el) => {
+      const link = $(el).attr('href');
+      if (link && !links.includes(link)) links.push(link);
+    });
+    return links;
+  } catch {
+    return null;
+  }
+}
