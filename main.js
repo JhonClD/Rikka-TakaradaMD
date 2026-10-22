@@ -205,6 +205,24 @@ if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
   }
 }
 
+// Solicitar el código una sola vez, después de crear el socket. Hacerlo desde
+// connection.update puede repetir la solicitud durante el handshake y provocar
+// que WhatsApp reemplace la conexión anterior.
+if (pairingPhoneNumber && !state.creds.registered) {
+  setTimeout(async () => {
+    try {
+      if (state.creds.registered || !global.conn?.requestPairingCode) return;
+      let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
+      codigo = String(codigo || '').replace(/[^A-Za-z0-9]/g, '');
+      if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
+      console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
+      console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
+    } catch (err) {
+      console.log(chalk.red(`[ ⚠️ ] Error al obtener código: ${err.message}`));
+    }
+  }, 3000);
+}
+
 conn.isInit = false;
 conn.well = false;
 conn.logger.info(`[　ℹ️　] Cargando...\n`);
@@ -263,36 +281,6 @@ async function connectionUpdate(update) {
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
 
-  // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
-  if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
-    if (!global.conn.authState.creds.registered) {
-      if (!pairingRequestTimer) pairingRequestTimer = setTimeout(async () => {
-        pairingRequestTimer = null;
-        if (pairingCodeDone) return;
-        pairingAttemptCount++;
-        try {
-          const socket = global.conn;
-          if (!socket?.requestPairingCode) throw new Error('La conexión no tiene habilitado el código de vinculación');
-          let codigo = await socket.requestPairingCode(pairingPhoneNumber);
-          if (!codigo) throw new Error('Código vacío recibido');
-          codigo = String(codigo).replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
-          if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
-          pairingCodeDone = true;
-          codigo = codigo.match(/.{1,4}/g).join('-');
-          console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
-          console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(chalk.black(` ${codigo} `))));
-        } catch (err) {
-          console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/5): ${err.message}`));
-          if (pairingAttemptCount >= 5) {
-            console.log(chalk.red('[ ❌ ] No se pudo obtener el código. Reinicia y usa QR.'));
-            pairingPhoneNumber = null; // detener reintentos
-          }
-          // El siguiente 'connecting' reintentará automáticamente
-        }
-      }, 3000);
-    }
-  }
-  // ──────────────────────────────────────────────────────────
   const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
   const isConnectionReplaced = code === 405 || code === 440 || code === DisconnectReason.connectionReplaced;
   if (code && !isConnectionReplaced && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
