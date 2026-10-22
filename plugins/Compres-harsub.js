@@ -9,6 +9,30 @@ const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000; // ✅ mata procesos colgados a los 20
 const RES_MIN           = 144;
 const RES_MAX           = 2160;
 const activeChats       = new Set(); // ✅ evita que un mismo chat sature con varios jobs a la vez
+const MESSAGE_WRAPPERS = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage']);
+const unwrapMessage = (message) => {
+    let current = message;
+    for (let i = 0; i < 8 && current && typeof current === 'object'; i++) {
+        const wrapper = Object.keys(current).find(key => MESSAGE_WRAPPERS.has(key) && current[key]?.message);
+        if (!wrapper) break;
+        current = current[wrapper].message;
+    }
+    return current;
+};
+const getQuotedMessage = (m) => {
+    if (m.quoted) return m.quoted;
+    let content = unwrapMessage(m.message);
+    for (let i = 0; i < 8 && content && typeof content === 'object'; i++) {
+        for (const value of Object.values(content)) {
+            const quotedMessage = value?.contextInfo?.quotedMessage;
+            if (quotedMessage) return { fakeObj: { message: unwrapMessage(quotedMessage) } };
+        }
+        const next = unwrapMessage(content);
+        if (next === content) break;
+        content = next;
+    }
+    return null;
+};
 
 // ✅ Parámetros de codificación centralizados (antes: números mágicos sueltos)
 const PRESET = {
@@ -23,6 +47,7 @@ const PRESET = {
 
 let handler = async (m, { conn, text, command, args }) => {
     const reply = (texto) => conn.sendMessage(m.chat, { text: texto }, { quoted: m });
+    const quoted = getQuotedMessage(m);
 
     if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -58,6 +83,7 @@ let handler = async (m, { conn, text, command, args }) => {
     // así que este fallback SIGUE cargando el buffer completo en RAM. Solo se usa
     // cuando downloadMediaStream (100% streaming) falla.
     const downloadFallback = async (quoted, outputPath) => {
+        if (typeof quoted?.download !== 'function') throw new Error('No fue posible descargar el medio citado por streaming.');
         const buf = await quoted.download();
         await fs.promises.writeFile(outputPath, buf);
     };
@@ -227,10 +253,9 @@ let handler = async (m, { conn, text, command, args }) => {
         //  DW — Analizar info del vídeo
         // ─────────────────────────────────────────────
         if (command === 'dw') {
-            if (!m.quoted) return reply('Responde a un video o documento.');
+            if (!quoted) return reply('No detecté la cita. Responde directamente al archivo de video o documento.');
             try {
                 const { downloadContentFromMessage } = await import('@this-xys/baileys');
-                const quoted  = m.quoted;
                 const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
                 const type    = Object.keys(message)[0];
                 const media   = message[type];
@@ -311,7 +336,7 @@ let handler = async (m, { conn, text, command, args }) => {
         //  MI — Comprimir a tamaño objetivo (2-pass)
         // ─────────────────────────────────────────────
         if (command === 'mi') {
-            if (!m.quoted) return reply('Responde a un video.\nUso: *.mi [resolución] [pesoMB]*\nEjemplo: `.mi 720 200mb`');
+            if (!quoted) return reply('No detecté la cita. Responde directamente al video.\nUso: *.mi [resolución] [pesoMB]*\nEjemplo: `.mi 720 200mb`');
             const asDocument = args[args.length - 1]?.toLowerCase() === 'doc';
             const res        = validRes(args[0]);
             const targetMB   = args[1] ? parseFloat(args[1].replace(/mb/i, '')) : NaN;
@@ -325,8 +350,8 @@ let handler = async (m, { conn, text, command, args }) => {
 
             try {
                 reply(`⚙️ *Comprimiendo video*\n> Resolución: \`${res}p\`\n> Peso objetivo: \`${targetMB} MB\`\n> Modo: \`${asDocument ? 'Documento' : 'Video'}\`\n\nProcesando...`);
-                let success = await downloadMediaStream(m.quoted, input);
-                if (!success) await downloadFallback(m.quoted, input);
+                let success = await downloadMediaStream(quoted, input);
+                if (!success) await downloadFallback(quoted, input);
 
                 // Duración real desde ffprobe (no asumir 30fps)
                 const { totalFrames, durationSec } = getVideoMeta(input);
@@ -367,7 +392,7 @@ let handler = async (m, { conn, text, command, args }) => {
         //  DW2 / DW3 / DW4 — Reescalar / hardsub / 360p
         // ─────────────────────────────────────────────
         if (/^(dw2|dw3|dw4)$/i.test(command)) {
-            if (!m.quoted) return reply('Responde a un video.');
+            if (!quoted) return reply('No detecté la cita. Responde directamente al video.');
             const isDw4      = command === 'dw4';
             const isDw3      = command === 'dw3';
             const asDocument = args[args.length - 1]?.toLowerCase() === 'doc';
@@ -380,8 +405,8 @@ let handler = async (m, { conn, text, command, args }) => {
 
             try {
                 reply(`⚙️ Procesando \`${command}\` a \`${res}p\`...\nModo: \`${asDocument ? 'Documento' : 'Video'}\``);
-                let success = await downloadMediaStream(m.quoted, input);
-                if (!success) await downloadFallback(m.quoted, input);
+                let success = await downloadMediaStream(quoted, input);
+                if (!success) await downloadFallback(quoted, input);
 
                 const { totalFrames, durationSec } = getVideoMeta(input);
                 let ffmpegArgs = ['-i', input];
