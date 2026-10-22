@@ -35,6 +35,7 @@ const msgRetryCounterMap = new Map();
 const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 let socketReloadInProgress = false;
+let lastDisplayedQr = null;
 
 global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
   return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
@@ -144,7 +145,8 @@ process.on('uncaughtException', (err) => {
 
 const connectionOptions = {
   logger: pino({ level: 'silent' }),
-  printQRInTerminal: opcion == '1' ? true : methodCodeQR ? true : false,
+  // El QR se imprime manualmente en connectionUpdate para evitar duplicados.
+  printQRInTerminal: false,
   mobile: MethodMobile,
   browser: opcion === '1' ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
   auth: {
@@ -275,8 +277,6 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
 
 async function connectionUpdate(update) {
   let isFirstConnection = '';
-  let qrAlreadyShown = false;
-  let qrTimeout = null;
   const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
@@ -288,14 +288,12 @@ async function connectionUpdate(update) {
     global.timestamp.connect = new Date;
   }
   if (global.db.data == null) loadDatabase();
-  if (update.qr && (opcion == '1' || methodCodeQR)) {
+  if (update.qr && (opcion == '1' || methodCodeQR) && update.qr !== lastDisplayedQr) {
+    lastDisplayedQr = update.qr;
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       console.log(qr);
       console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));
     });
-    qrAlreadyShown = true;
-    if (qrTimeout) clearTimeout(qrTimeout);
-    qrTimeout = setTimeout(() => qrAlreadyShown = false, 60000);
   }
   if (connection == 'open') {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
