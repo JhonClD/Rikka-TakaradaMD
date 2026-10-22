@@ -34,6 +34,7 @@ serialize();
 const msgRetryCounterMap = new Map();
 const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+let socketReloadInProgress = false;
 
 global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
   return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
@@ -293,7 +294,8 @@ async function connectionUpdate(update) {
   }
   // ──────────────────────────────────────────────────────────
   const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
-  if (code && code !== DisconnectReason.loggedOut && code !== 405 && conn?.ws.socket == null) {
+  const isConnectionReplaced = code === 405 || code === 440 || code === DisconnectReason.connectionReplaced;
+  if (code && !isConnectionReplaced && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
     await global.reloadHandler(true).catch(console.error);
     global.timestamp.connect = new Date;
   }
@@ -335,7 +337,7 @@ async function connectionUpdate(update) {
     errorData.lastShown = now;
     return true;
   }
-  if (reason == 405) {
+  if (reason == 405 || reason == 440 || reason === DisconnectReason.connectionReplaced) {
     // WhatsApp puede cerrar el socket temporal usado para vincular el número.
     // El código anterior ya no sirve después de crear el nuevo socket, por lo
     // que hay que permitir que connection.update solicite uno nuevo.
@@ -414,14 +416,21 @@ global.reloadHandler = async function (restatConn) {
     console.error(e);
   }
   if (restatConn) {
+    if (socketReloadInProgress) return false;
+    socketReloadInProgress = true;
     const oldChats = global.conn.chats;
+    const oldConn = global.conn;
     try {
-      global.conn.ws.close();
+      oldConn.ev.removeAllListeners();
+      await oldConn.ws?.close?.();
     } catch { }
-    conn.ev.removeAllListeners();
-    global.conn = makeWASocket(connectionOptions, { chats: oldChats });
-    store?.bind(conn);
-    isInit = true;
+    try {
+      global.conn = makeWASocket(connectionOptions, { chats: oldChats });
+      store?.bind(global.conn);
+      isInit = true;
+    } finally {
+      socketReloadInProgress = false;
+    }
   }
   if (!isInit) {
     conn.ev.off('messages.upsert', conn.handler);
