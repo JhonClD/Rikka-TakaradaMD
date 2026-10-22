@@ -336,8 +336,19 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405) {
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión replazada, reconectando en 10 segundos...`));
-    await new Promise(r => setTimeout(r, 10000));
+    // WhatsApp puede cerrar el socket temporal usado para vincular el número.
+    // El código anterior ya no sirve después de crear el nuevo socket, por lo
+    // que hay que permitir que connection.update solicite uno nuevo.
+    if (pairingPhoneNumber && !conn.authState.creds.registered) {
+      pairingCodeDone = false;
+      pairingAttemptCount = 0;
+      if (pairingRequestTimer) {
+        clearTimeout(pairingRequestTimer);
+        pairingRequestTimer = null;
+      }
+    }
+    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión reemplazada; generando un nuevo código en 5 segundos...`));
+    await new Promise(r => setTimeout(r, 5000));
     await global.reloadHandler(true).catch(console.error);
     return;
   }
