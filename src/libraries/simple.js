@@ -2125,9 +2125,7 @@ export function serialize() {
                     const senderKeyDistributionMessage =
                         this.message?.senderKeyDistributionMessage?.groupId;
                     const rawJid =
-                        (this.key?.remoteJid?.endsWith('@lid')
-                            ? (this.key?.remoteJidAlt || this.key?.remoteJidPN || this.key?.remoteJid)
-                            : this.key?.remoteJid) ||
+                        this.key?.remoteJid ||
                         (senderKeyDistributionMessage &&
                             senderKeyDistributionMessage !== "status@broadcast") ||
                         "";
@@ -2184,7 +2182,7 @@ export function serialize() {
                 try {
                     const rawJid = this.key?.fromMe
                         ? (this.conn?.user?.id || '')
-                        : (this.key?.participantAlt || this.key?.participantPN || this.participantAlt || this.participant || this.key?.participant || this.key?.remoteJidAlt || this.key?.remoteJidPN || this.chat || '');
+                        : (this.participant || this.key?.participant || this.chat || '');
                     const decoded = rawJid ? (this.conn?.decodeJid?.(rawJid) || rawJid) : '';
                     if (!decoded) return '';
                     if (!decoded.endsWith('@lid')) return decoded;

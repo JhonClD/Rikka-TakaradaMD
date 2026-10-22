@@ -60,7 +60,7 @@ export async function handler(chatUpdate) {
 
   if (!isValidMessage(m)) return;
   const _msgText = extractMessageText(m);
-  const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participantAlt || m.key?.participantPN || m.key?.participant || m.key?.remoteJidAlt || m.key?.remoteJidPN || m.key?.remoteJid || '');
+  const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participant || m.key?.remoteJid || '');
   if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) return;
 
   if (global.db.data == null) await global.loadDatabase();
