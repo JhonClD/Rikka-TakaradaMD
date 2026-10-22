@@ -5,99 +5,58 @@ import {
   resolveFromParticipants,
 } from '../src/funcion/lid-resolver.js';
 
+const isPhoneJid = jid => typeof jid === 'string' && (
+  jid.endsWith('@s.whatsapp.net') || jid.endsWith('@c.us') || jid.endsWith('@hosted')
+);
+const normalizeLid = jid => typeof jid === 'string' && jid.endsWith('@lid')
+  ? jid.replace(/:\d+@lid$/, '@lid')
+  : jid;
+
 const handler = async (m, { conn, args }) => {
-  let rawSender;
+  const key = m.quoted?.key || m.key || {};
+  const quotedSender = m.quoted?.sender;
+  let rawSender = args[0]
+    ? `${args[0].replace(/[^0-9]/g, '')}@s.whatsapp.net`
+    : (quotedSender || m.sender || '');
+  const rawLid = [key.participant, key.remoteJid, rawSender]
+    .find(jid => typeof jid === 'string' && isLidJid(jid)) || null;
+  const alternateJid = key.participantAlt || key.remoteJidAlt || key.senderPn || key.participantPn || null;
+  const configuredOwner = (global.owner || []).find(([, , , ownerLid]) => ownerLid && (normalizeLid(ownerLid) === normalizeLid(rawLid) || normalizeLid(ownerLid) === normalizeLid(rawSender)));
+  let lid = rawLid;
+  let realJid = isPhoneJid(alternateJid)
+    ? alternateJid
+    : configuredOwner
+      ? `${configuredOwner[0]}@s.whatsapp.net`
+      : rawSender;
 
-  if (args[0]) {
-    const num = args[0].replace(/[^0-9]/g, '');
-    rawSender = num + '@s.whatsapp.net';
-  } else if (m.quoted) {
-    rawSender = m.quoted.sender;
-  } else {
-    rawSender = m.sender;
+  if (rawLid && !isPhoneJid(alternateJid) && !configuredOwner) {
+    try { realJid = await resolveToPhoneJidAsync(rawLid, conn) || rawLid; } catch {}
+    if (isLidJid(realJid)) {
+      try { realJid = await resolveFromParticipants(rawLid, conn, m.chat) || rawLid; } catch {}
+    }
+  } else if (!rawLid && isPhoneJid(rawSender)) {
+    try { lid = await getLidForJidAsync(rawSender, conn); } catch {}
+    try { realJid = await resolveFromParticipants(rawSender, conn, m.chat) || rawSender; } catch {}
   }
 
-  console.log('[INFO-LID] rawSender:', rawSender);
-
-  const isLid = isLidJid(rawSender);
-  let realJid = rawSender;
-  let lid     = null;
-
-  if (isLid) {
-    lid = rawSender;
-    try {
-      realJid = await resolveToPhoneJidAsync(rawSender, conn);
-      console.log('[INFO-LID] resolveToPhoneJidAsync:', realJid);
-    } catch (e) {
-      console.log('[INFO-LID] resolveToPhoneJidAsync error:', e?.message);
-    }
-    if (!realJid || isLidJid(realJid)) {
-      try {
-        realJid = await resolveFromParticipants(rawSender, conn, m.chat);
-        console.log('[INFO-LID] resolveFromParticipants:', realJid);
-      } catch (e) {
-        console.log('[INFO-LID] resolveFromParticipants error:', e?.message);
-      }
-    }
-    realJid = realJid || rawSender;
-  } else {
-    try {
-      const fromMeta = await resolveFromParticipants(rawSender, conn, m.chat);
-      if (fromMeta) {
-        realJid = fromMeta;
-        console.log('[INFO-LID] resolveFromParticipants (phone):', realJid);
-      }
-    } catch (e) {
-      console.log('[INFO-LID] resolveFromParticipants error:', e?.message);
-    }
-    try {
-      lid = await getLidForJidAsync(rawSender, conn);
-      console.log('[INFO-LID] getLidForJidAsync:', lid);
-    } catch (e) {
-      console.log('[INFO-LID] getLidForJidAsync error:', e?.message);
-    }
-  }
-
-  const rawNumber = realJid.split('@')[0].replace(/[^0-9]/g, '');
-  const jid = rawNumber + '@s.whatsapp.net';
-  console.log('[INFO-LID] jid final:', jid, '| lid:', lid);
-
-  const storageJid = lid || jid;
-  try {
-    const tcData = await conn.authState?.keys?.get?.('tctoken', [storageJid]);
-    console.log('[TCTOKEN] storageJid:', storageJid, '| data:', JSON.stringify(tcData));
-  } catch (e) {
-    console.log('[TCTOKEN] error:', e?.message);
-  }
+  const hasPhone = isPhoneJid(realJid);
+  const phone = hasPhone ? realJid.split('@')[0].replace(/:\d+$/, '').replace(/\D/g, '') : null;
+  const displayJid = realJid || rawSender || '_(no disponible)_';
+  const unresolved = !!rawLid && !hasPhone;
+  const warnLine = unresolved
+    ? '\n\n⚠️ _LID sin resolver: WhatsApp/Baileys no entregó un mapeo para este usuario._'
+    : '';
 
   let pp = null;
-  const targets = [jid];
-  if (lid) targets.unshift(lid);
-  console.log('[INFO-LID] targets pp:', targets);
-
-  for (const t of targets) {
-    try {
-      const url = await conn.profilePictureUrl(t, 'image');
-      console.log(`[INFO-LID] profilePictureUrl image (${t}):`, url);
-      if (url) { pp = url; break; }
-    } catch (e) {
-      console.log(`[INFO-LID] profilePictureUrl image error (${t}):`, e?.message);
+  for (const target of [...new Set([lid, hasPhone ? realJid : null].filter(Boolean))]) {
+    for (const type of ['image', 'preview']) {
+      try {
+        pp = await conn.profilePictureUrl(target, type);
+        if (pp) break;
+      } catch {}
     }
-    try {
-      const url = await conn.profilePictureUrl(t, 'preview');
-      console.log(`[INFO-LID] profilePictureUrl preview (${t}):`, url);
-      if (url) { pp = url; break; }
-    } catch (e) {
-      console.log(`[INFO-LID] profilePictureUrl preview error (${t}):`, e?.message);
-    }
+    if (pp) break;
   }
-
-  console.log('[INFO-LID] pp final:', pp);
-
-  const notResolved = isLid && isLidJid(realJid);
-  const warnLine    = notResolved
-    ? `\n\n⚠️ _LID sin resolver: aún no hay mapping guardado para este usuario._`
-    : '';
 
   const caption =
 `╔═════✰⋆⋅☆⋅⋆✰═════╗
@@ -105,25 +64,21 @@ const handler = async (m, { conn, args }) => {
 ╚═════✰⋆⋅☆⋅⋆✰═════╝
 
 ✧ *Número de WhatsApp:*
-\`+${rawNumber}\`
+\`${phone ? `+${phone}` : 'No disponible (identidad LID)'}\`
 
 ✧ *JID (ID de WhatsApp):*
-\`${jid}\`
+\`${displayJid}\`
 
 ✧ *LID (ID Vinculado):*
 \`${lid || '_(no disponible)_'}\`${warnLine}
 
 ☆✦・*・✦・*・✦・*・✦・*・✦☆`;
-
-  if (pp) {
-    await conn.sendMessage(m.chat, { image: { url: pp }, caption, mentions: [jid] }, { quoted: m });
-  } else {
-    await conn.sendMessage(m.chat, { text: caption, mentions: [jid] }, { quoted: m });
-  }
+  const mentions = hasPhone ? [realJid] : [];
+  if (pp) await conn.sendMessage(m.chat, { image: { url: pp }, caption, mentions }, { quoted: m });
+  else await conn.sendMessage(m.chat, { text: caption, mentions }, { quoted: m });
 };
 
-handler.help    = ['jid', 'lid', 'myjid'];
-handler.tags    = ['info'];
+handler.help = ['jid', 'lid', 'myjid'];
+handler.tags = ['info'];
 handler.command = /^(jid|lid|myjid|miid|infojid)$/i;
-
 export default handler;

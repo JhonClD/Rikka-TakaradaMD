@@ -9,7 +9,7 @@ global.isBaileysFail = false;
 global.defaultLenguaje = 'es';
 
 global.owner = [
-  ['51925092348', '👑 Propietario 👑', true],
+  ['51925092348', '👑 Propietario 👑', true, '162234554671342@lid'],
 ];
 
 global.packname = 'Rikka';

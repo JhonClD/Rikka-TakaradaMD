@@ -8,7 +8,6 @@ import fs from 'fs';
 import chalk from 'chalk';
 import ws from 'ws';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
-import { resolveAnyJid } from './src/funcion/lid-resolver.js';
 
 import _printModule from './src/libraries/print.js';
 const _printMessage = _printModule?.default ?? _printModule;
@@ -291,15 +290,18 @@ export async function handler(chatUpdate) {
       if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
       return jid;
     };
-    const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
-    const _senderJid = (await resolveAnyJid(m.sender, this, m.chat)) || _resolveLidJid(m.sender);
+    const _phoneOnly = (jid) => typeof jid === 'string' ? jid.split('@')[0].replace(/:\d+$/, '').replace(/\D/g, '') : '';
+    const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+    const _normalizeLid = (jid) => typeof jid === 'string' && jid.endsWith('@lid') ? jid.replace(/:\d+@lid$/, '@lid') : jid;
+    const _senderLid = [m.sender, m.key?.participant, m.key?.remoteJid].map(_normalizeLid).find(jid => typeof jid === 'string' && jid.endsWith('@lid'));
+    const _ownerLids = global.owner.map(([, , , lid]) => _normalizeLid(lid)).filter(lid => typeof lid === 'string' && lid.endsWith('@lid'));
     const _senderPhone = _phoneOnly(_senderJid);
     const isROwner = _ownerList.some(ownerJid => {
       if (ownerJid === _senderJid) return true;
       const ownerPhone = _phoneOnly(ownerJid);
       return ownerPhone && _senderPhone && ownerPhone === _senderPhone;
-    }) || m.fromMe;
+    }) || _ownerLids.includes(_senderLid) || m.fromMe;
     const isOwner = isROwner || m.fromMe;
     const _modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const isMods = isOwner || _modsList.some(modJid => {
