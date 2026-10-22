@@ -16,6 +16,43 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 let isRunning = false;
 let childProcess = null;
 
+// WhatsApp devuelve 405/440 si dos procesos usan la misma sesión. El bloqueo
+// evita que un reinicio rápido de Pterodactyl deje dos instancias conectadas.
+const instanceLock = join('/tmp', 'rikka-takarada-md.lock');
+function acquireInstanceLock() {
+  try {
+    const fd = fs.openSync(instanceLock, 'wx');
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch (error) {
+    try {
+      const pid = Number(fs.readFileSync(instanceLock, 'utf8').trim());
+      if (pid && pid !== process.pid) {
+        try {
+          process.kill(pid, 0);
+          console.error(`Ya existe otra instancia de Rikka (PID ${pid}). Deteniendo esta instancia.`);
+          process.exit(1);
+        } catch {
+          fs.unlinkSync(instanceLock);
+          return acquireInstanceLock();
+        }
+      }
+    } catch {
+      try { fs.unlinkSync(instanceLock); } catch {}
+      return acquireInstanceLock();
+    }
+  }
+}
+acquireInstanceLock();
+const releaseInstanceLock = () => {
+  try {
+    if (Number(fs.readFileSync(instanceLock, 'utf8').trim()) === process.pid) fs.unlinkSync(instanceLock);
+  } catch {}
+};
+process.once('exit', releaseInstanceLock);
+process.once('SIGINT', () => process.exit(0));
+process.once('SIGTERM', () => process.exit(0));
+
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
 // Paleta Soft-Cyber
