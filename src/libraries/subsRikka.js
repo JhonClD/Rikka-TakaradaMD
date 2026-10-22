@@ -22,7 +22,7 @@ import {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason,
-} from '@itsliaaa/baileys';
+} from '@this-xys/baileys';
 import qrcode   from 'qrcode';
 import NodeCache from 'node-cache';
 import pino     from 'pino';

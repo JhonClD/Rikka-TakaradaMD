@@ -1,4 +1,4 @@
-import { generateWAMessageFromContent, getDevice } from '@itsliaaa/baileys'
+import { generateWAMessageFromContent, getDevice } from '@this-xys/baileys'
 import fs   from 'fs'
 import path from 'path'
 import { lookup as mimeLookup } from 'mime-types'

@@ -20,7 +20,7 @@ import { initializeSubBots, startSubBotWatcher } from './src/libraries/subsRikka
 import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser } = await import("@itsliaaa/baileys");
+const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("@this-xys/baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
 const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
 import readline from 'readline';
@@ -35,7 +35,10 @@ const msgRetryCounterMap = new Map();
 const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 let socketReloadInProgress = false;
-let lastDisplayedQr = null;
+const qrGuard = createQRGuard({
+  ttlMs: 60_000,
+  onBlocked: () => console.log(chalk.gray('[ ℹ️ ] QR repetido ignorado; usa el último QR mostrado.')),
+});
 
 global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
   return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
@@ -176,6 +179,15 @@ const connectionOptions = {
 
 global.conn = makeWASocket(connectionOptions);
 
+if (methodCode && !state.creds.registered) {
+  withPairingGuard(global.conn, {
+    maxPerHour: 3,
+    globalMaxPerHour: 6,
+    minIntervalMs: 60_000,
+    logger: pino({ level: 'silent' }),
+  });
+}
+
 if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
   if (opcion === '2' || methodCode) {
     opcion = '2';
@@ -288,8 +300,7 @@ async function connectionUpdate(update) {
     global.timestamp.connect = new Date;
   }
   if (global.db.data == null) loadDatabase();
-  if (update.qr && (opcion == '1' || methodCodeQR) && update.qr !== lastDisplayedQr) {
-    lastDisplayedQr = update.qr;
+  if (update.qr && (opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       console.log(qr);
       console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));

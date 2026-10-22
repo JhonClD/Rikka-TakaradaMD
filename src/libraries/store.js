@@ -1,7 +1,7 @@
 /*
  * This code is adapted and modified from the original source provided by the user.
  * The code integrates functionalities from the Baileys WhatsApp Web API library,
- * specifically the @itsliaaa/baileys version, to handle events, manage chats,
+ * specifically the @this-xys/baileys version, to handle events, manage chats,
  * groups, contacts, and presence updates for WhatsApp clients.
  *
  * Credits:
@@ -16,7 +16,7 @@
  * Ciphertext error fix and additional improvements by @BrunoSobrino
  * See: https://github.com/BrunoSobrino
  */
-const _storeBaileys = await import('@itsliaaa/baileys');
+const _storeBaileys = await import('@this-xys/baileys');
 const _storeDef = _storeBaileys.default || _storeBaileys;
 // Extraer del nivel raíz del módulo (named exports en itsliaaa/baileys)
 const { BufferJSON, proto, isJidBroadcast, WAMessageStubType, updateMessageWithReceipt, updateMessageWithReaction, jidNormalizedUser } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
@@ -171,7 +171,7 @@ export default makeInMemoryStore();
 
 // Version Skid, backup
 /*import {readFileSync, writeFileSync, existsSync} from 'fs';
-const {initAuthCreds, BufferJSON, proto, jidNormalizedUser} = (await import('@itsliaaa/baileys')).default;
+const {initAuthCreds, BufferJSON, proto, jidNormalizedUser} = (await import('@this-xys/baileys')).default;
 function bind(conn) {
   if (!conn.chats) conn.chats = {};
   function updateNameToDb(contacts) {

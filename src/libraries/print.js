@@ -1,4 +1,4 @@
-import { WAMessageStubType } from "@itsliaaa/baileys";
+import { WAMessageStubType } from "@this-xys/baileys";
 import PhoneNumber from 'awesome-phonenumber';
 import chalk from 'chalk';
 import { watchFile } from 'fs';

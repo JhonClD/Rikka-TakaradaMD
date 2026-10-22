@@ -22,9 +22,9 @@ import store from "./store.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * @type {import("@itsliaaa/baileys")}
+ * @type {import("@this-xys/baileys")}
  */
-const _baileys = await import("@itsliaaa/baileys");
+const _baileys = await import("@this-xys/baileys");
 // En itsliaaa/baileys el default export ES la función makeWASocket directamente
 const _makeWaSocket = _baileys.default;
 const {
@@ -47,7 +47,7 @@ const {
 
 export function makeWASocket(connectionOptions, options = {}) {
     /**
-     * @type {import("@itsliaaa/baileys").WASocket | import("@itsliaaa/baileys").WALegacySocket}
+     * @type {import("@this-xys/baileys").WASocket | import("@this-xys/baileys").WALegacySocket}
      */
     const conn = (global.opts["legacy"] ? makeWALegacySocket : _makeWaSocket)(
         connectionOptions,
@@ -261,7 +261,7 @@ export function makeWASocket(connectionOptions, options = {}) {
              * @param {String|Buffer} path
              * @param {String} filename
              * @param {String} caption
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
              * @param {Boolean} ptt
              * @param {Object} options
              */
@@ -334,7 +334,7 @@ export function makeWASocket(connectionOptions, options = {}) {
                     fileName: filename || pathFile.split("/").pop(),
                 };
                 /**
-                 * @type {import("@itsliaaa/baileys").proto.WebMessageInfo}
+                 * @type {import("@this-xys/baileys").proto.WebMessageInfo}
                  */
                 let m;
                 try {
@@ -367,7 +367,7 @@ export function makeWASocket(connectionOptions, options = {}) {
              * Send Contact
              * @param {String} jid
              * @param {String[][]|String[]} data
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
              * @param {Object} options
              */
             async value(jid, data, quoted, options) {
@@ -422,7 +422,7 @@ END:VCARD
              * Reply to a message
              * @param {String} jid
              * @param {String|Buffer} text
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
              * @param {Object} options
              */
             value(jid, text = "", quoted, options) {
@@ -889,7 +889,7 @@ END:VCARD
          * @param {String} footer
          * @param {Buffer} buffer
          * @param {String[] | String[][]} buttons
-         * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+         * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
          * @param {Object} options
          */
         /*   async value(jid, text = '', footer = '', buffer, buttons, quoted, options) {
@@ -1173,7 +1173,7 @@ END:VCARD
              * @param {String|string[]} call
              * @param {String|string[]} callText
              * @param {String[][]} buttons
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
              * @param {Object} options
              */
             async value(
@@ -1305,7 +1305,7 @@ END:VCARD
              * @param {String|string[]} call
              * @param {String|string[]} callText
              * @param {String[][]} buttons
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} quoted
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} quoted
              * @param {Object} options
              */
             async value(
@@ -1429,7 +1429,7 @@ END:VCARD
             /**
              * cMod
              * @param {String} jid
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} message
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} message
              * @param {String} text
              * @param {String} sender
              * @param {*} options
@@ -1475,7 +1475,7 @@ END:VCARD
             /**
              * Exact Copy Forward
              * @param {String} jid
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} message
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} message
              * @param {Boolean|Number} forwardingScore
              * @param {Object} options
              */
@@ -1655,7 +1655,7 @@ END:VCARD
             /**
              *
              * @param {String} messageID
-             * @returns {import("@itsliaaa/baileys").proto.WebMessageInfo}
+             * @returns {import("@this-xys/baileys").proto.WebMessageInfo}
              */
             value(messageID) {
                 return Object.entries(conn.chats)
@@ -1721,7 +1721,7 @@ END:VCARD
         processMessageStubType: {
             /**
              * to process MessageStubType
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} m
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} m
              */
             async value(m) {
                 if (!m.messageStubType) return;
@@ -1789,7 +1789,7 @@ END:VCARD
         pushMessage: {
             /**
              * pushMessage
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo[]} m
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo[]} m
              */
             async value(m) {
                 if (!m) return;
@@ -1820,7 +1820,7 @@ END:VCARD
                         );
                         if (message.message?.[mtype]?.contextInfo?.quotedMessage) {
                             /**
-                             * @type {import("@itsliaaa/baileys").proto.IContextInfo}
+                             * @type {import("@this-xys/baileys").proto.IContextInfo}
                              */
                             const context = message.message[mtype].contextInfo;
                             let participant = conn.decodeJid(context.participant);
@@ -1828,7 +1828,7 @@ END:VCARD
                                 context.remoteJid || participant,
                             );
                             /**
-                             * @type {import("@itsliaaa/baileys").proto.IMessage}
+                             * @type {import("@this-xys/baileys").proto.IMessage}
                              *
                              */
                             const quoted = message.message[mtype].contextInfo.quotedMessage;
@@ -1952,7 +1952,7 @@ END:VCARD
         serializeM: {
             /**
              * Serialize Message, so it easier to manipulate
-             * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} m
+             * @param {import("@this-xys/baileys").proto.WebMessageInfo} m
              */
             value(m) {
                 return smsg(conn, m);
@@ -2008,7 +2008,7 @@ END:VCARD
 /**
  * Serialize Message
  * @param {ReturnType<typeof makeWASocket>} conn
- * @param {import("@itsliaaa/baileys").proto.WebMessageInfo} m
+ * @param {import("@this-xys/baileys").proto.WebMessageInfo} m
  * @param {Boolean} hasParent
  */
 export function smsg(conn, m, hasParent) {

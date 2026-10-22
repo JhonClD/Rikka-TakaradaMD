@@ -21,7 +21,7 @@
     "@sefinek/google-tts-api": "*",
     "@vitalets/google-translate-api": "^8.0.0",
     "@shineiichijo/marika": "*",
-    "@itsliaaa/baileys": "github:itsliaaa/baileys",
+    "@this-xys/baileys": "github:this-xys/bails",
     "acrcloud": "^1.4.0",
     "aptoide-scraper": "github:DIEGO-OFC/dv-aptoide-scraper",
     "awesome-phonenumber": "^2.68.0",
