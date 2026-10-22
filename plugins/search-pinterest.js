@@ -9,7 +9,7 @@
 import axios from 'axios';
 
 const { proto, generateWAMessageFromContent, generateWAMessageContent } =
-  await import('@whiskeysockets/baileys');
+  await import('@itsliaaa/baileys');
 
 // ─── Utilidades ───────────────────────────────────────────────
 

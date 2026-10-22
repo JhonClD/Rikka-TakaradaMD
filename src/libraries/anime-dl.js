@@ -1,5 +1,5 @@
 import { spawn }         from 'child_process'
-import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@whiskeysockets/baileys'
+import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@itsliaaa/baileys'
 import fs                from 'fs'
 import path              from 'path'
 import fetch             from 'node-fetch'

@@ -11,7 +11,7 @@
 import fs   from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { jidDecode } from '@whiskeysockets/baileys';
+import { jidDecode } from '@itsliaaa/baileys';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
 const JADIBTS_DIR = path.join(__dirname, '../jadibts');

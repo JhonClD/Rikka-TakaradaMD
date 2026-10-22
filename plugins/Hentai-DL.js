@@ -7,7 +7,7 @@
 // ╚══════════════════════════════════════════════════════════════╝
 
 import nodeFetch from 'node-fetch'
-import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@whiskeysockets/baileys'
+import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@itsliaaa/baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
 import { pipeline } from 'stream/promises'

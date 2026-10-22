@@ -1,4 +1,4 @@
-const { default: WAMessageStubType } = await import('@whiskeysockets/baileys');
+const { default: WAMessageStubType } = await import('@itsliaaa/baileys');
 
 const DEFAULT_PP = 'https://i.ibb.co/7JWfJBQ/avatar.jpg';
 

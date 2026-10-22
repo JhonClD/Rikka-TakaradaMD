@@ -43,7 +43,7 @@ let handler = async (m, { conn, text, command, args }) => {
 
     const downloadMediaStream = async (quoted, outputPath) => {
         try {
-            const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+            const { downloadContentFromMessage } = await import('@itsliaaa/baileys');
             const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
             const type = Object.keys(message)[0];
             const media = message[type];
@@ -229,7 +229,7 @@ let handler = async (m, { conn, text, command, args }) => {
         if (command === 'dw') {
             if (!m.quoted) return reply('Responde a un video o documento.');
             try {
-                const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+                const { downloadContentFromMessage } = await import('@itsliaaa/baileys');
                 const quoted  = m.quoted;
                 const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
                 const type    = Object.keys(message)[0];

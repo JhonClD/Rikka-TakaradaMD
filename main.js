@@ -20,7 +20,7 @@ import { initializeSubBots, startSubBotWatcher } from './src/libraries/subsRikka
 import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser } = await import("@whiskeysockets/baileys");
+const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser } = await import("@itsliaaa/baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
 const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
 import readline from 'readline';
