@@ -8,7 +8,6 @@ import fs from 'fs';
 import chalk from 'chalk';
 import ws from 'ws';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
-import { resolveAnyJid } from './src/funcion/lid-resolver.js';
 
 import _printModule from './src/libraries/print.js';
 const _printMessage = _printModule?.default ?? _printModule;
@@ -292,11 +291,7 @@ export async function handler(chatUpdate) {
       return jid;
     };
     const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
-    const _resolvedSender = await Promise.race([
-      resolveAnyJid(m.sender, this, m.chat).catch(() => null),
-      new Promise(resolve => setTimeout(() => resolve(null), 1200)),
-    ]);
-    const _senderJid = _resolvedSender || _resolveLidJid(m.sender);
+    const _senderJid = _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const _senderPhone = _phoneOnly(_senderJid);
     const isROwner = _ownerList.some(ownerJid => {
