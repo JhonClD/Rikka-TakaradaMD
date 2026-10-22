@@ -27,12 +27,7 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     const now = Date.now()
     const oneDay = 24 * 60 * 60 * 1000
     const cooldowns = {
-      crime: Math.max(0, (user.lastcrime || 0) - now),
-      mine: Math.max(0, (user.lastmine || 0) - now),
-      ritual: Math.max(0, (user.lastinvoke || 0) - now),
       work: Math.max(0, (user.lastwork || 0) - now),
-      slut: Math.max(0, (user.lastslut || 0) - now),
-      steal: Math.max(0, (user.laststeal || 0) - now),
       daily: Math.max(0, (user.lastdaily || 0) + oneDay - now),
       weekly: Math.max(0, (user.lastweekly || 0) + 7 * oneDay - now),
       monthly: Math.max(0, (user.lastmonthly || 0) + 30 * oneDay - now)
@@ -55,11 +50,6 @@ const handler = async (m, { conn, command, usedPrefix, args }) => {
     const mensaje = `✿ Usuario \`<${name}>\`
 
 ⴵ Work » *${formatTime(cooldowns.work)}*
-ⴵ Slut » *${formatTime(cooldowns.slut)}*
-ⴵ Crime » *${formatTime(cooldowns.crime)}*
-ⴵ Mine » *${formatTime(cooldowns.mine)}*
-ⴵ Ritual » *${formatTime(cooldowns.ritual)}*
-ⴵ Steal » *${formatTime(cooldowns.steal)}*
 ⴵ Daily » *${formatTime(cooldowns.daily)}*
 ⴵ Weekly » *${formatTime(cooldowns.weekly)}*
 ⴵ Monthly » *${formatTime(cooldowns.monthly)}*
