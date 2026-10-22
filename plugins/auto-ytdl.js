@@ -133,11 +133,15 @@ handler.all = async function (m) {
 
     // 4. Ignorar si el mensaje empieza con un prefijo de comando
     //    (no interferir con .ytmp3, .ytmp4, etc.)
-    const prefixes = global.prefix instanceof RegExp
+    const activePrefix = this.prefix || global.prefix;
+    const prefixes = activePrefix instanceof RegExp
         ? null
-        : (Array.isArray(global.prefix) ? global.prefix : [global.prefix]);
+        : (Array.isArray(activePrefix) ? activePrefix : [activePrefix]);
     if (prefixes && prefixes.some(p => text.startsWith(p))) return;
-    if (global.prefix instanceof RegExp && global.prefix.test(text[0])) return;
+    if (activePrefix instanceof RegExp) {
+        activePrefix.lastIndex = 0;
+        if (activePrefix.test(text)) return;
+    }
 
     // 5. Detectar link de YouTube
     const ytUrl = extractYTUrl(text);

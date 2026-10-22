@@ -203,8 +203,7 @@ export async function handler(chatUpdate) {
         Object.assign(chat, { ...chats, ...chat });
       }
 
-      const settings = global.db.data.settings[this.user.jid];
-      if (typeof settings !== 'object') global.db.data.settings[this.user.jid] = {};
+      const settings = global.db.data.settings[this.user.jid] ??= {};
       if (settings) {
         const setttings = {
           self: false,
@@ -222,9 +221,11 @@ export async function handler(chatUpdate) {
         if (settings.prefix !== undefined) {
           if (settings.prefix === true) {
             // noprefix mode: acepta cualquier texto como comando
-            this.prefix = new RegExp('^[\s\S]?', '');
+            this.prefix = /^[\s\S]?/;
           } else if (Array.isArray(settings.prefix)) {
             this.prefix = settings.prefix;
+          } else if (typeof settings.prefix === 'string' && settings.prefix.length) {
+            this.prefix = [settings.prefix];
           } else {
             this.prefix = global.prefix;
           }
@@ -406,23 +407,29 @@ export async function handler(chatUpdate) {
       }
 
       const _str2Regex = (str) => {
-        if (_prefixRegexCache.has(str)) return _prefixRegexCache.get(str);
-        const re = new RegExp(str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'));
-        _prefixRegexCache.set(str, re);
+        const key = String(str);
+        if (_prefixRegexCache.has(key)) return _prefixRegexCache.get(key);
+        const re = new RegExp('^' + key.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'));
+        _prefixRegexCache.set(key, re);
         return re;
+      };
+      const _execPrefix = (prefix) => {
+        if (!(prefix instanceof RegExp)) return _str2Regex(prefix).exec(m.text);
+        prefix.lastIndex = 0;
+        return prefix.exec(m.text);
       };
       const _prefix = plugin.customPrefix ? plugin.customPrefix : conn.prefix ? conn.prefix : global.prefix;
       const match = (_prefix instanceof RegExp ?
-        [[_prefix.exec(m.text), _prefix]] :
+        [[_execPrefix(_prefix), _prefix]] :
         Array.isArray(_prefix) ?
           _prefix.map((p) => {
             const re = p instanceof RegExp ? p : _str2Regex(p);
-            return [re.exec(m.text), re];
+            return [_execPrefix(re), re];
           }) :
-          typeof _prefix === 'string' ?
-            [[_str2Regex(_prefix).exec(m.text), _str2Regex(_prefix)]] :
+        typeof _prefix === 'string' ?
+            [[_execPrefix(_prefix), _str2Regex(_prefix)]] :
             [[[], new RegExp]]
-      ).find((p) => p[1]);
+      ).find((p) => p[0]);
 
       if (typeof plugin.before === 'function') {
         const _beforeResult = await plugin.before.call(this, m, {
@@ -447,8 +454,9 @@ export async function handler(chatUpdate) {
 
       if (typeof plugin !== 'function') continue;
 
-      if ((usedPrefix = (match[0] || '')[0])) {
-        const noPrefix = m.text.replace(usedPrefix, '');
+      if ((usedPrefix = match?.[0]?.[0] || '')) {
+        const matchedPrefix = match[0][0];
+        const noPrefix = m.text.slice(matchedPrefix.length);
         let [command, ...args] = noPrefix.trim().split` `.filter((v) => v);
         args = args || [];
         const _args = noPrefix.trim().split` `.slice(1);
