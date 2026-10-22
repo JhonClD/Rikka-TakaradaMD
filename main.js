@@ -338,20 +338,11 @@ async function connectionUpdate(update) {
     return true;
   }
   if (reason == 405 || reason == 440 || reason === DisconnectReason.connectionReplaced) {
-    // WhatsApp puede cerrar el socket temporal usado para vincular el número.
-    // El código anterior ya no sirve después de crear el nuevo socket, por lo
-    // que hay que permitir que connection.update solicite uno nuevo.
-    if (pairingPhoneNumber && !conn.authState.creds.registered) {
-      pairingCodeDone = false;
-      pairingAttemptCount = 0;
-      if (pairingRequestTimer) {
-        clearTimeout(pairingRequestTimer);
-        pairingRequestTimer = null;
-      }
-    }
-    console.log(chalk.bold.redBright(`[ ⚠️ ] Conexión reemplazada; generando un nuevo código en 5 segundos...`));
-    await new Promise(r => setTimeout(r, 5000));
-    await global.reloadHandler(true).catch(console.error);
+    // No reintentar aquí: cada socket nuevo invalida el anterior y mantiene
+    // el conflicto activo (405/440). El usuario debe cerrar las sesiones
+    // vinculadas y arrancar una única vez para obtener un código nuevo.
+    console.log(chalk.bold.redBright('[ ⚠️ ] WhatsApp rechazó esta sesión porque fue reemplazada (405/440).'));
+    console.log(chalk.yellow('[ ℹ️ ] Cierra todas las sesiones en WhatsApp > Dispositivos vinculados, detén el servidor y vuelve a iniciar una sola vez.'));
     return;
   }
   if (connection === 'close') {
