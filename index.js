@@ -39,17 +39,10 @@ function verificarCredsJson() {
 }
 
 function formatearNumeroTelefono(numero) {
-  let formattedNumber = numero.replace(/[^\d+]/g, '');
-  if (formattedNumber.startsWith('+52') && !formattedNumber.startsWith('+521')) {
-    formattedNumber = formattedNumber.replace('+52', '+521');
-  } else if (formattedNumber.startsWith('52') && !formattedNumber.startsWith('521')) {
-    formattedNumber = `+521${formattedNumber.slice(2)}`;
-  } else if (formattedNumber.startsWith('52') && formattedNumber.length >= 12) {
-    formattedNumber = `+${formattedNumber}`;
-  } else if (!formattedNumber.startsWith('+')) {
-    formattedNumber = `+${formattedNumber}`;
-  }
-  return formattedNumber;
+  const digits = numero.replace(/\D/g, '');
+  // Baileys espera el formato internacional actual: +52XXXXXXXXXX,
+  // no el antiguo formato móvil mexicano +521XXXXXXXXXX.
+  return `+${digits}`;
 }
 
 function esNumeroValido(numeroTelefono) {

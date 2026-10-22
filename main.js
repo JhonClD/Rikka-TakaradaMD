@@ -103,6 +103,7 @@ let opcion;
 let pairingPhoneNumber = null;
 let pairingCodeDone = false;
 let pairingAttemptCount = 0;
+let pairingRequestTimer = null;
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -264,14 +265,19 @@ async function connectionUpdate(update) {
   // ── PAIRING CODE: solicitar cuando el WS esté conectando ──
   if (connection === 'connecting' && pairingPhoneNumber && !pairingCodeDone) {
     if (!global.conn.authState.creds.registered) {
-      setTimeout(async () => {
+      if (!pairingRequestTimer) pairingRequestTimer = setTimeout(async () => {
+        pairingRequestTimer = null;
         if (pairingCodeDone) return;
         pairingAttemptCount++;
         try {
-          let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
+          const socket = global.conn;
+          if (!socket?.requestPairingCode) throw new Error('La conexión no tiene habilitado el código de vinculación');
+          let codigo = await socket.requestPairingCode(pairingPhoneNumber);
           if (!codigo) throw new Error('Código vacío recibido');
+          codigo = String(codigo).replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+          if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
           pairingCodeDone = true;
-          codigo = codigo?.match(/.{1,4}/g)?.join('-') || codigo;
+          codigo = codigo.match(/.{1,4}/g).join('-');
           console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
           console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(chalk.black(` ${codigo} `))));
         } catch (err) {
@@ -282,7 +288,7 @@ async function connectionUpdate(update) {
           }
           // El siguiente 'connecting' reintentará automáticamente
         }
-      }, 1500);
+      }, 3000);
     }
   }
   // ──────────────────────────────────────────────────────────
