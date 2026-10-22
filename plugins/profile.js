@@ -202,7 +202,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
   if (u.birthday === undefined) u.birthday = null
   if (u.gender === undefined) u.gender = null
-  if (u.harem === undefined) u.harem = 0
   if (u.totalCommand === undefined) u.totalCommand = 0
   if (u.exp === undefined) u.exp = 0
   if (u.level === undefined) u.level = 0
@@ -256,7 +255,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 \`[${progressBar(pct)}] ${pct}%\`
 # Puesto » *#${rank || 0}*
 
-ꕥ Harem » *${u.harem}*
 ✧ Valor total » *${numFmt((u.money || 0) + (u.wallet || 0))}*
 ⛁ Coins totales » *¥${numFmt(u.coin || 0)} vidas*
 ❒ Comandos totales » *${numFmt(u.totalCommand)}*`.trim()

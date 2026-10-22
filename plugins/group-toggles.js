@@ -16,12 +16,6 @@ const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin
     }
   };
 
-  if (['gacha', 'gacharoll'].includes(command)) {
-    return toggle('gacha', 'Gacha',
-      'Los usuarios ya pueden usar `.rw`, `.claim`, `.harem` y más.',
-      'Los comandos de gacha están bloqueados hasta nuevo aviso.');
-  }
-
   if (['economy', 'economia', 'eco'].includes(command)) {
     return toggle('economy', 'Economía',
       'Los usuarios ya pueden usar `.daily`, `.work`, `.balance` y más.',
@@ -36,7 +30,7 @@ const handler = async (m, { conn, command, usedPrefix, args, isAdmin, isBotAdmin
   }
 };
 
-handler.command = ['gacha', 'gacharoll', 'economy', 'economia', 'eco', 'nsfw'];
+handler.command = ['economy', 'economia', 'eco', 'nsfw'];
 handler.tags = ['group'];
 handler.group = true;
 handler.admin = true;
