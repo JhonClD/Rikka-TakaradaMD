@@ -9,7 +9,15 @@ const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000; // ✅ mata procesos colgados a los 20
 const RES_MIN           = 144;
 const RES_MAX           = 2160;
 const activeChats       = new Set(); // ✅ evita que un mismo chat sature con varios jobs a la vez
-const MESSAGE_WRAPPERS = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage']);
+const MESSAGE_WRAPPERS = new Set([
+    'associatedChildMessage', 'botForwardedMessage', 'botInvokeMessage', 'botPlatformRegistrationSuccessMessage',
+    'botTaskMessage', 'documentWithCaptionMessage', 'editedMessage', 'ephemeralMessage', 'eventCoverImage',
+    'groupMentionedMessage', 'groupStatusMentionMessage', 'groupStatusMessage', 'groupStatusMessageV2',
+    'limitSharingMessage', 'lottieStickerMessage', 'newsletterAdminProfileMessage', 'newsletterAdminProfileMessageV2',
+    'newsletterAdminProfileStatusMessage', 'newsletterScheduledMessage', 'pollCreationMessageV4',
+    'pollCreationOptionImageMessage', 'questionMessage', 'questionReplyMessage', 'spoilerMessage', 'statusAddYours',
+    'statusMentionMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'
+]);
 const unwrapMessage = (message) => {
     let current = message;
     for (let i = 0; i < 8 && current && typeof current === 'object'; i++) {

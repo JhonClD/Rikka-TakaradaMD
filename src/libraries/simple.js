@@ -2505,9 +2505,11 @@ export function serialize() {
             get() {
                 try {
                     const self = this;
-                    const msg = self.msg;
+                    const normalizedMessage = extractMessageContent(self.message) || self.message;
+                    const msg = Object.values(normalizedMessage || {}).find(value => value?.contextInfo?.quotedMessage) || self.msg;
                     const contextInfo = msg?.contextInfo;
-                    const quoted = contextInfo?.quotedMessage;
+                    const rawQuoted = contextInfo?.quotedMessage;
+                    const quoted = rawQuoted ? (extractMessageContent(rawQuoted) || rawQuoted) : null;
 
                     if (!msg || !contextInfo || !quoted) return null;
 
