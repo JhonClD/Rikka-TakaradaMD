@@ -292,11 +292,7 @@ export async function handler(chatUpdate) {
       return jid;
     };
     const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
-    const _resolvedSender = await Promise.race([
-      resolveAnyJid(m.sender, this, m.chat).catch(() => null),
-      new Promise(resolve => setTimeout(() => resolve(null), 1200)),
-    ]);
-    const _senderJid = _resolvedSender || _resolveLidJid(m.sender);
+    const _senderJid = (await resolveAnyJid(m.sender, this, m.chat)) || _resolveLidJid(m.sender);
     const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     const _senderPhone = _phoneOnly(_senderJid);
     const isROwner = _ownerList.some(ownerJid => {
