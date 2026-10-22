@@ -16,7 +16,6 @@ import pino from 'pino';
 import Pino from 'pino';
 import { Boom } from '@hapi/boom';
 import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
-import { initializeSubBots, startSubBotWatcher } from './src/libraries/subsRikka.js';
 import { Low, JSONFile } from 'lowdb';
 import store from './src/libraries/store.js';
 
@@ -311,14 +310,6 @@ async function connectionUpdate(update) {
     global.timestamp.connect = new Date();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
     isFirstConnection = true;
-    if (!global.subBotsInitialized) {
-      global.subBotsInitialized = true;
-      try {
-        await initializeSubBots();
-      } catch (error) {
-        console.error(chalk.red('[ ⚠️ ] Error al inicializar sub-bots:'), error);
-      }
-    }
   }
   let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
   const lastErrors = {};

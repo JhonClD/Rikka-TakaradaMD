@@ -6,7 +6,6 @@ import path, { join } from 'path';
 import { unwatchFile, watchFile } from 'fs';
 import fs from 'fs';
 import chalk from 'chalk';
-import ws from 'ws';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
 
 import _printModule from './src/libraries/print.js';
@@ -137,9 +136,6 @@ export async function handler(chatUpdate) {
           trofi: 0,
           unreglast: 0,
           warn: 0,
-          subbot_requested: false,
-          subbot_request_ts: 0,
-          subbot_jid: '',
           language: 'es',
           wallet: 0,
           wait: 0,
@@ -207,7 +203,6 @@ export async function handler(chatUpdate) {
           game: true,
           expired: 0,
           language: 'es',
-          setPrimaryBot: '',
         };
         Object.assign(chat, { ...chats, ...chat });
       }
@@ -222,7 +217,6 @@ export async function handler(chatUpdate) {
           restrict: false,
           antiCall: false,
           antiPrivate: false,
-          modejadibot: true,
           antispam: false,
           audios_bot: true,
           modoia: false,
@@ -303,32 +297,6 @@ export async function handler(chatUpdate) {
     const isPremium = _premExpiry > Date.now();
     if (_premExpiry > 0 && !isPremium) { _userDb.premiumTime = 0; _userDb.premium = false; }
 
-    const _thisBotJid = this.user?.jid || '';
-    const _isSubBot = !_ownerList.includes(_thisBotJid) && global.conns?.some(c => c.user?.jid === _thisBotJid);
-
-    const _subBotAllowed = new Set([
-      's', 'sticker', 'st',
-      'tiktok', 'ttdl', 'tiktokdl', 'tiktoknowm', 'tt', 'ttnowm', 'tiktokaudio', 'tiktok2', 'tt2',
-      'fb', 'facebook', 'fbdl',
-      'play', 'play2', 'playaudio', 'mp4', 'video',
-      'balance', 'bal', 'monedas', 'coins', 'deposit', 'depositar', 'withdraw', 'retirar',
-      'daily', 'diario', 'weekly', 'semanal', 'monthly', 'mensual', 'work', 'trabajar', 'farm',
-      ...['pat','kiss','hug','slap','fuck','bite','lick','dance','cry','blush','wave',
-          'punch','run','sleep','laugh','angry','bored','clap','coffee','cuddle',
-          'pout','sad','scared','shy','smile','stare','think','wink','eat','bleh',
-          'bonk','blowkiss','call','cold','comfort','cringe','curious','draw','dramatic',
-          'drunk','gaming','handhold','happy','heat','highfive','impregnate','jump',
-          'kill','kisscheek','love','nope','peek','push','scream','seduce','sing',
-          'smoke','smug','sniff','snuggle','spit','step','thinkhard','tickle',
-          'trip','walk','bath','bully','abrazar','besar','acariciar','morder','lamer',
-          'bailar','llorar','sonrojarse','saludar','golpear','correr','dormir',
-          'reir','enojado','aburrido','aplaudir','cafe','acurrucar','mueca',
-          'triste','asustado','timido','sonreir','fumar','escupir','pisar',
-          'caminar','guiñar','comer','nom','bañarse','molestar','pensar',
-          'muak','choca','tomarlamano','calor','jugar','dibujar','llamar',
-          'besito','tropezar','mirar','oler','curioso','consolar','embarazar',
-          'besomejilla','coger','follar','preñar'],
-    ]);
 
     const isPrems = isROwner || isOwner || isMods || isPremium;
 
@@ -502,7 +470,6 @@ export async function handler(chatUpdate) {
         if (isAccept) console.log('[DEBUG] Comando aceptado:', command, 'plugin:', name);
         if (!isAccept) continue;
 
-        if (_isSubBot && !_subBotAllowed.has(command)) continue;
 
         if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return;
 
@@ -576,25 +543,6 @@ export async function handler(chatUpdate) {
           continue;
         }
 
-        const normalizeJid = (jid) => jid?.replace(/[^0-9]/g, '');
-        const isActiveBot = (jid) => {
-          const normalizedJid = normalizeJid(jid) + '@s.whatsapp.net';
-          return normalizedJid === global.conn.user.jid ||
-            global.conns.some(bot => bot.user.jid === normalizedJid);
-        };
-        const chatPrim = global.db.data.chats[m.chat] || {};
-        if (chatPrim.setPrimaryBot) {
-          const primaryNumber = normalizeJid(chatPrim.setPrimaryBot) + '@s.whatsapp.net';
-          const currentBotNumber = normalizeJid(mconn.conn.user.jid) + '@s.whatsapp.net';
-          if (!isActiveBot(chatPrim.setPrimaryBot)) {
-            console.log(`⚠ Bot primario ${primaryNumber} no está activo - Liberando chat`);
-            delete chatPrim.setPrimaryBot;
-            global.db.data.chats[m.chat] = chatPrim;
-          } else if (primaryNumber && currentBotNumber !== primaryNumber) {
-            return;
-          }
-        }
-
         const extra = {
           match,
           usedPrefix,
@@ -615,7 +563,6 @@ export async function handler(chatUpdate) {
           isBotAdmin,
           isPrems,
           isPremium,
-          isSubBot: _isSubBot,
           chatUpdate,
           __dirname: ___dirname,
           __filename,
@@ -855,23 +802,7 @@ global.dfail = (type, m, conn) => {
   const aa = { quoted: m, userJid: conn.user.jid };
   const prep = generateWAMessageFromContent(m.chat, { extendedTextMessage: { text: msg, contextInfo: { externalAdReply: { title: warn[0], body: warn[1], thumbnail: imagen1, sourceUrl: warn[2] } } } }, aa);
 
-  const chatPrim2 = global.db.data.chats[m.chat] || {};
-  const normalizeJid2 = (jid) => jid?.replace(/[^0-9]/g, '');
-  const isActiveBot2 = (jid) => {
-    const normalizedJid2 = normalizeJid2(jid) + '@s.whatsapp.net';
-    return normalizedJid2 === global.conn.user.jid ||
-      global.conns.some(bot => bot.user.jid === normalizedJid2);
-  };
-  if (chatPrim2.setPrimaryBot) {
-    const primaryNumber2 = normalizeJid2(chatPrim2.setPrimaryBot) + '@s.whatsapp.net';
-    const currentBotNumber2 = normalizeJid2(mconn.conn.user.jid) + '@s.whatsapp.net';
-    if (!isActiveBot2(chatPrim2.setPrimaryBot)) {
-      delete chatPrim2.setPrimaryBot;
-      global.db.data.chats[m.chat] = chatPrim2;
-    } else if (primaryNumber2 && currentBotNumber2 !== primaryNumber2) {
-      return;
-    }
-  } else if (msg) return conn.relayMessage(m.chat, prep.message, { messageId: prep.key.id });
+  if (msg) return conn.relayMessage(m.chat, prep.message, { messageId: prep.key.id });
 };
 
 const file = global.__filename(import.meta.url, true);
@@ -879,10 +810,4 @@ watchFile(file, async () => {
   unwatchFile(file);
   console.log(chalk.redBright("Update 'handler.js'"));
   if (global.reloadHandler) console.log(await global.reloadHandler());
-  if (global.conns && global.conns.length > 0) {
-    const users = [...new Set([...global.conns.filter((conn) => conn.user && conn.ws.socket && conn.ws.socket.readyState !== ws.CLOSED).map((conn) => conn)])];
-    for (const userr of users) {
-      userr.subreloadHandler(false);
-    }
-  }
 });

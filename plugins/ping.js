@@ -102,11 +102,8 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const privados = allChats.length - groups.length;
 
   const settings = global.db?.data?.settings?.[conn.user?.jid] ?? {};
-  const { restrict, antiCall, antiprivado, modejadibot } = settings;
+  const { restrict, antiCall, antiprivado } = settings;
   const { autoread, gconly, pconly, self } = global.opts ?? {};
-
-  const isSubBot = conn.user?.jid && global.conn?.user?.jid && conn.user.jid !== global.conn.user.jid;
-  const subBotLine = isSubBot ? `Sub-bot de:\n ▢ +${global.conn.user.jid.split("@")[0]}` : "No es sub-bot";
 
   const on  = (v) => (v ? "✅ activo"   : "❌ desactivado");
   const onP = (v) => (v ? "✅ activado" : "❌ desactivado");
@@ -135,7 +132,6 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   ˖ *Modo:* ${self ? "privado" : "público"}
   ˖ *Usuarios reg.:* ${totalusrReg}
   ˖ *Total usuarios:* ${totalusr}
-  ˖ *Sub-bot:* ${subBotLine}
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
 𓂃 ࣪˖ *Chats*

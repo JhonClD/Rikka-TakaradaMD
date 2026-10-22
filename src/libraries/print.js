@@ -83,7 +83,7 @@ export default async function(m, conn = { user: {} }) {
 
   console.log(
     `▣────────────···\n│ ${chalk.hex('#7ecfff').bold('%s')}\n│⏰ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#cdb4db')('%s'))}\n│📑ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#b5ead7')('%s'))}\n│📊ㅤ${chalk.hex('#ffafcc')('%s [%s %sB]')}\n│📤ㅤ${chalk.hex('#ff85c2').bold('%s')}\n│📃ㅤ${chalk.hex('#ffd6e7')('%s%s')}\n│📥ㅤ${chalk.hex('#a8dadc').bold('%s')}\n│💬ㅤ${chalk.hex('#1a1a2e')(chalk.bgHex('#ffafcc')('%s'))}\n▣────────────···`.trim(),
-    me + ' ~' + conn.user.name + (conn.user.jid == global.conn.user.jid ? '' : ' (Sub Bot)'),
+    me + ' ~' + conn.user.name,
     (m.messageTimestamp
       ? new Date(1000 * (m.messageTimestamp.low || m.messageTimestamp))
       : new Date()).toTimeString(),
