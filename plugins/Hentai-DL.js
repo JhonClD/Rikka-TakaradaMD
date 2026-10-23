@@ -232,7 +232,7 @@ async function fetchViaProxy(url) {
 
 // ─── fetchText: CACHÉ + 7 capas de fallback ────────────────────────────
 // Cache → scrape.do → ScraperAPI → WebScrapingAPI → Scrapingdog → ScrapingBee → CF Worker → Directo → Proxies
-async function fetchText(url) {
+export async function fetchText(url) {
     // 1. Ver cache
     const cached = cacheGet(url)
     if (cached) {

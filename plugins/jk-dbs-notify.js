@@ -5,6 +5,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
+import { fetchText } from './Hentai-DL.js'
 
 const JKANIME_URL = 'https://jkanime.net'
 const ANIMEDBS_URL = 'https://www.animedbs.online'
@@ -31,16 +32,30 @@ global.jkQueueRunning = global.jkQueueRunning || false
 global.jkConn = global.jkConn || null
 
 async function request(url, options = {}) {
+  if (isJKAnimeUrl(url)) {
+    try {
+      if (/\/ajax\//i.test(new URL(url).pathname)) {
+        try {
+          return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers }, timeout: options.timeout || 15000 })
+        } catch (_) { /* Si JKAnime bloquea el acceso directo, probar la cadena de Hentai-DL. */ }
+      }
+      let data = await fetchText(url)
+      if (/\/ajax\//i.test(new URL(url).pathname)) {
+        try { data = JSON.parse(data) } catch (_) {}
+      }
+      return { data, status: 200 }
+    } catch (err) {
+      const blocked = new Error(`No se pudo acceder a JKAnime ni con la cadena de solicitudes de Hentai-DL: ${err.message}`)
+      blocked.code = 'JKANIME_FETCH_FAILED'
+      throw blocked
+    }
+  }
+
   let retries = 3
   while (retries > 0) {
     try {
       return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
     } catch (err) {
-      if (err.response?.status === 403 && isJKAnimeUrl(url)) {
-        const blocked = new Error('JKAnime respondió HTTP 403 desde el hosting del bot (bloqueo de acceso/Cloudflare). No es un fallo de /jkexample y reintentar no lo resuelve.')
-        blocked.code = 'JKANIME_HTTP_403'
-        throw blocked
-      }
       retries--
       if (retries === 0) throw err
       await new Promise(r => setTimeout(r, 2000))
@@ -794,8 +809,8 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
       lista = await fetchLatestEpisodesJK()
       if (!lista.length) return m.reply(`❌ Sin episodios de JKAnime disponibles.`)
     } catch (err) {
-      if (err.code === 'JKANIME_HTTP_403') {
-        return m.reply(`❌ ${err.message}\n\nEste comando seguirá usando solo JKAnime. Para que funcione, ejecútalo desde un entorno/red cuya IP no esté bloqueada por JKAnime.`)
+      if (err.code === 'JKANIME_FETCH_FAILED') {
+        return m.reply(`❌ ${err.message}\n\nEste comando sigue usando únicamente JKAnime; no cambia a AnimeDBS.`)
       }
       return m.reply(`❌ Error: ${err.message}`)
     }
