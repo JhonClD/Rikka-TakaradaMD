@@ -552,20 +552,6 @@ export function elegirPorTemporada(links, temporada) {
   )
 }
 
-const isJKAnimeUrl = url => {
-  try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
-}
-
-const isJKAnimeBlockError = error => error?.code === 'JKANIME_HTTP_403'
-
-function createJKAnimeBlockError() {
-  const error = new Error(
-    'JKAnime respondió HTTP 403 (bloqueo de Cloudflare) desde el hosting del bot. No se puede resolver con reintentos; usa otro sitio con .animedl o pega una URL directa permitida.'
-  )
-  error.code = 'JKANIME_HTTP_403'
-  return error
-}
-
 export async function fetchHtml(url) {
   try {
     const res = await fetch(url, {
@@ -573,9 +559,6 @@ export async function fetchHtml(url) {
       timeout: 15000,
     })
     const html = await res.text()
-    if (isJKAnimeUrl(url) && (res.status === 403 || /cloudflare|challenge-platform|cf-browser-verification|Just a moment/i.test(html))) {
-      throw createJKAnimeBlockError()
-    }
     const necesitaDinamico =
       html.length < 5000 ||
       /<div id="app"|ng-app|window\.__INITIAL_STATE__|_next\/static/.test(html) ||
@@ -584,8 +567,7 @@ export async function fetchHtml(url) {
       html.includes('Just a moment')
     if (necesitaDinamico) return await fetchHtmlConPuppeteer(url)
     return html
-  } catch (error) {
-    if (isJKAnimeBlockError(error)) throw error
+  } catch (_) {
     return await fetchHtmlConPuppeteer(url)
   }
 }
@@ -1316,10 +1298,7 @@ export async function scrapeJKanime(url) {
       console.log(`[jkanime] video iframes: ${servidores.length}`)
       return servidores
     }
-  } catch (e) {
-    if (isJKAnimeBlockError(e)) throw e
-    console.error('[jkanime] var servers parse:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] var servers parse:', e.message) }
 
   const jkMatch = url.match(/jkanime\.net\/([^/]+)\/(\d+)/)
   const slug    = jkMatch?.[1]
@@ -1421,10 +1400,7 @@ export async function scrapeJKanime(url) {
       }
       if (servidores.length > 0) return servidores
     }
-  } catch (e) {
-    if (isJKAnimeBlockError(e)) throw e
-    console.error('[jkanime] Puppeteer:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] Puppeteer:', e.message) }
 
   if (slug && cap && servidores.length === 0) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
@@ -1554,7 +1530,6 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
       headers: { ...buildHeaders({ Referer: 'https://jkanime.net/' }), 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
       timeout: 10000,
     })
-    if (res.status === 403) throw createJKAnimeBlockError()
     if (res.ok) {
       const json   = await res.json()
       const animes = json?.animes || json?.results || json?.data || []
@@ -1567,10 +1542,7 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
         if (slug) return `https://jkanime.net/${slug}/${episodio}/`
       }
     }
-  } catch (e) {
-    if (isJKAnimeBlockError(e)) throw e
-    console.error('[jkanime] API search:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] API search:', e.message) }
 
   try {
     const html  = await fetchHtml(`https://jkanime.net/buscar/?q=${encodeURIComponent(query)}`)
@@ -1603,10 +1575,7 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
       const slugMatch = elegido.href.match(/jkanime\.net\/([a-z0-9-]+)\/?$/)
       if (slugMatch) return `https://jkanime.net/${slugMatch[1]}/${episodio}/`
     }
-  } catch (e) {
-    if (isJKAnimeBlockError(e)) throw e
-    console.error('[jkanime] HTML search:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] HTML search:', e.message) }
 
   try {
     const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
@@ -1618,18 +1587,12 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
       const epUrl = `https://jkanime.net/${slug}/${episodio}/`
       try {
         const res = await fetch(epUrl, { headers: buildHeaders({ Referer: 'https://jkanime.net/' }), timeout: 8000, redirect: 'manual' })
-        if (res.status === 403) throw createJKAnimeBlockError()
         if (res.status === 200 || res.status === 301 || res.status === 302) {
           return res.status === 200 ? epUrl : (res.headers.get('location') || epUrl)
         }
-      } catch (error) {
-        if (isJKAnimeBlockError(error)) throw error
-      }
+      } catch (_) {}
     }
-  } catch (e) {
-    if (isJKAnimeBlockError(e)) throw e
-    console.error('[jkanime] slug directo:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] slug directo:', e.message) }
 
   return null
 }

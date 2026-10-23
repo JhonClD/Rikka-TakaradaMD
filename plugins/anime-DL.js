@@ -28,14 +28,6 @@ import {
   esServidorConocido,
 } from '../src/libraries/anime-dl.js'
 
-const mensajeBloqueoJKAnime = (nombre, episodio, temporada, usedPrefix) => {
-  const tSuffix = temporada > 1 ? ` t${temporada}` : ''
-  const opciones = SITIOS.filter(s => s.id !== 4)
-    .map(s => `  ${usedPrefix}animedl ${s.id} ${nombre}${tSuffix} ${episodio}`)
-    .join('\n')
-  return `⛔ JKAnime está rechazando las solicitudes del hosting del bot con HTTP 403 (Cloudflare). No es un error de tu búsqueda y reintentar no lo soluciona.\n\nPrueba otro sitio:\n${opciones}`
-}
-
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 
   if (command === 'anilist') {
@@ -371,28 +363,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     await m.reply(`🔎 Buscando *${nombre}*${labelTemp} ep *${episodio}*${labelSitio}...`)
 
     if (sitioElegido) {
-      try {
-        episodeUrl = await sitioElegido.buscar(nombre, episodio, temporada)
-      } catch (err) {
-        if (err.code === 'JKANIME_HTTP_403') {
-          await m.reply('⛔ JKAnime está bloqueado por Cloudflare desde el hosting del bot. Intento buscar el episodio en los otros sitios...')
-          for (const sitio of SITIOS.filter(s => s.id !== 4)) {
-            try {
-              episodeUrl = await sitio.buscar(nombre, episodio, temporada)
-              if (episodeUrl) {
-                sitioElegido = sitio
-                await m.reply(`✅ JKAnime bloqueó la solicitud; encontré el episodio en *${sitio.nombre}* y continuaré desde ahí.`)
-                break
-              }
-            } catch (fallbackErr) {
-              console.error(`[busqueda] alternativa ${sitio.nombre}:`, fallbackErr.message)
-            }
-          }
-          if (!episodeUrl) return m.reply(mensajeBloqueoJKAnime(nombre, episodio, temporada, usedPrefix))
-        } else {
-          throw err
-        }
-      }
+      episodeUrl = await sitioElegido.buscar(nombre, episodio, temporada)
       if (!episodeUrl) {
         const tSuffix = temporada > 1 ? ` t${temporada}` : ''
         return m.reply(
@@ -434,9 +405,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       ? await sitioElegido.scrape(episodeUrl)
       : [{ nombre: 'directo', url: episodeUrl, directo: true }]
   } catch (err) {
-    if (err.code === 'JKANIME_HTTP_403') {
-      return m.reply(mensajeBloqueoJKAnime(nombre || 'anime', episodio, temporada, usedPrefix))
-    }
     return m.reply(`❌ Error al analizar la página:\n\`${err.message}\``)
   }
 
