@@ -1879,6 +1879,54 @@ export async function descargarDirecto(embedUrl, outputDir) {
   return outFile
 }
 
+async function descargarMediaFirePorRangos(axios, url, outputPath, sizeBytes, signal, hilos = 6) {
+  if (!sizeBytes || sizeBytes < 5 * 1024 * 1024) return false
+  const partes = []
+  const chunkSize = Math.ceil(sizeBytes / hilos)
+  for (let i = 0; i < hilos; i++) {
+    const start = i * chunkSize
+    const end = Math.min(start + chunkSize - 1, sizeBytes - 1)
+    if (start > end) break
+    partes.push({ start, end, path: `${outputPath}.part${i}` })
+  }
+
+  try {
+    await Promise.all(partes.map(async parte => {
+      const response = await axios({
+        method: 'get', url, responseType: 'stream', httpsAgent, signal,
+        headers: { 'User-Agent': randomUA(), Range: `bytes=${parte.start}-${parte.end}` },
+      })
+      if (response.status !== 206) throw new Error(`El servidor ignoró Range (HTTP ${response.status})`)
+      await pipeline(response.data, fs.createWriteStream(parte.path), { signal })
+    }))
+
+    const salida = fs.createWriteStream(outputPath)
+    for (const parte of partes) {
+      await new Promise((resolve, reject) => {
+        const entrada = fs.createReadStream(parte.path)
+        entrada.on('error', reject)
+        entrada.on('end', resolve)
+        entrada.pipe(salida, { end: false })
+      })
+    }
+    await new Promise((resolve, reject) => {
+      salida.on('error', reject)
+      salida.end(resolve)
+    })
+    for (const parte of partes) {
+      try { fs.unlinkSync(parte.path) } catch (_) {}
+    }
+    return true
+  } catch (error) {
+    for (const parte of partes) {
+      try { fs.unlinkSync(parte.path) } catch (_) {}
+    }
+    if (signal?.aborted) throw error
+    console.log(`[MediaFire] Rangos paralelos fallaron: ${error.message}. Se usará un solo flujo.`)
+    return false
+  }
+}
+
 export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m, conn) {
   const { tmpDir, sitioElegido, argsParaAnime, nombre, episodio, temporada = 1 } = pick
   let archivoPath = null
@@ -1933,29 +1981,27 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
         if (!mfData.link) throw new Error('MediaFire: no se encontró el link de descarga')
         const { name, link: downloadUrl } = mfData
         let sizeBytes = 0
+        let soportaRangos = false
         try {
           const head = await axios.head(downloadUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, httpsAgent })
           sizeBytes = parseInt(head.headers['content-length'] || '0')
+          soportaRangos = /bytes/i.test(head.headers['accept-ranges'] || '')
         } catch (_) {}
         const sizeH = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(2) + ' MB' : '?'
         await updateStatus(`📥 *MediaFire:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
         const tempPath = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
-        const response = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent, signal })
-        let dld = 0, mfLastTime = Date.now(), mfLastDld = 0
-        response.data.on('data', chunk => {
-          dld += chunk.length
-          const now = Date.now()
-          const dt  = (now - mfLastTime) / 1000
-          if (dt >= 0.5) {
-            const speed = ((dld - mfLastDld) / dt / 1024 / 1024).toFixed(1)
-            mfLastTime  = now; mfLastDld = dld
-            const p     = sizeBytes ? ((dld / sizeBytes) * 100).toFixed(1) : '?'
-            const dlMB  = (dld / 1024 / 1024).toFixed(1)
-            const totMB = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(1) : '?'
-            process.stdout.write(`\r[MediaFire] ${p}% | ${dlMB} MB / ${totMB} MB | ${speed} MB/s`)
-          }
-        })
-        await pipeline(response.data, fs.createWriteStream(tempPath), { signal })
+        let paralelo = false
+        if (soportaRangos) {
+          const hilos = Number(process.env.ANIME_DL_THREADS || 6)
+          paralelo = await descargarMediaFirePorRangos(
+            axios, downloadUrl, tempPath, sizeBytes, signal,
+            Math.max(2, Math.min(8, Number.isFinite(hilos) ? hilos : 6))
+          )
+        }
+        if (!paralelo) {
+          const simple = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent, signal })
+          await pipeline(simple.data, fs.createWriteStream(tempPath), { signal })
+        }
         console.log(`\n[MediaFire] ✅ ${name}`)
         archivoPath = tempPath
         break
