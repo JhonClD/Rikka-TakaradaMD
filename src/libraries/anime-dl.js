@@ -1682,7 +1682,7 @@ export class MegaQuotaError extends Error {
   constructor() { super('EOVERQUOTA'); this.name = 'MegaQuotaError' }
 }
 
-export async function descargarMega(url, m, tmpDir) {
+export async function descargarMega(url, m, tmpDir, signal = null) {
   let file
   try {
     file = MegaFile.fromURL(url)
@@ -1698,14 +1698,14 @@ export async function descargarMega(url, m, tmpDir) {
   await m.reply(`📥 *Mega:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
 
   const tempPath   = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
-  const fileStream = file.download()
+  const fileStream = file.download(signal ? { signal } : undefined)
   let dld = 0
   fileStream.on('data', chunk => {
     dld += chunk.length
     process.stdout.write(`\r[MEGA] ${((dld / file.size) * 100).toFixed(1)}% | ${(dld / 1024 / 1024).toFixed(2)} MB`)
   })
   try {
-    await pipeline(fileStream, fs.createWriteStream(tempPath))
+    await pipeline(fileStream, fs.createWriteStream(tempPath), signal ? { signal } : undefined)
   } catch (err) {
     const isQuota = err?.message?.includes('EOVERQUOTA') || err?.message?.includes('-18')
     if (isQuota) throw new MegaQuotaError()
@@ -1882,6 +1882,8 @@ export async function descargarDirecto(embedUrl, outputDir) {
 export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, pick, m, conn) {
   const { tmpDir, sitioElegido, argsParaAnime, nombre, episodio, temporada = 1 } = pick
   let archivoPath = null
+  const controller = pick.controller || new AbortController()
+  const signal = controller.signal
 
   let statusKey = null
   const updateStatus = async (txt) => {
@@ -1891,6 +1893,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       } else {
         const sent = await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
         statusKey = sent?.key || null
+        if (statusKey) global.activeDownloads.set(statusKey, { controller })
       }
     } catch (_) {
       try {
@@ -1904,6 +1907,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   await updateStatus(`⏳ Preparando descarga desde *${servidoresPendientes[0]?.nombre?.toUpperCase() || 'servidor'}*...`)
 
   for (const srv of servidoresPendientes) {
+    if (signal.aborted) break
     const u = srv.url.toLowerCase()
 
     if (u.includes('hqq.tv') || u.includes('netu.tv') || u.includes('netu.ac') ||
@@ -1916,7 +1920,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     try {
       if (/mega\.nz|mega\.co\.nz/.test(u)) {
         await updateStatus(`📦 *Mega* detectado — descargando...`)
-        archivoPath = await descargarMega(srv.url, m, tmpDir)
+        archivoPath = await descargarMega(srv.url, m, tmpDir, signal)
         break
       }
 
@@ -1936,7 +1940,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
         const sizeH = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(2) + ' MB' : '?'
         await updateStatus(`📥 *MediaFire:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
         const tempPath = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
-        const response = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent })
+        const response = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent, signal })
         let dld = 0, mfLastTime = Date.now(), mfLastDld = 0
         response.data.on('data', chunk => {
           dld += chunk.length
@@ -1951,7 +1955,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
             process.stdout.write(`\r[MediaFire] ${p}% | ${dlMB} MB / ${totMB} MB | ${speed} MB/s`)
           }
         })
-        await pipeline(response.data, fs.createWriteStream(tempPath))
+        await pipeline(response.data, fs.createWriteStream(tempPath), { signal })
         console.log(`\n[MediaFire] ✅ ${name}`)
         archivoPath = tempPath
         break
@@ -2012,15 +2016,17 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   }
 
   if (!archivoPath) {
+    if (statusKey) global.activeDownloads.delete(statusKey)
     fs.rmSync(tmpDir, { recursive: true, force: true })
     const intentados = listaIntentos.slice(indiceInicio, indiceInicio + 4).map(s => s.nombre).join(', ')
     const sugerencias = SITIOS.filter(s => s.id !== sitioElegido?.id)
           .slice(0, 4)
           .map(s => `  .animedl ${s.id} ${(argsParaAnime || []).join(' ')}`)
           .join('\n')
-    return updateStatus(
+    await updateStatus(
       `❌ *Todos los servidores fallaron.*\n*Intentados:* ${intentados}\n\nPrueba con otro sitio:\n${sugerencias}`
     )
+    return false
   }
 
   try {
@@ -2056,11 +2062,16 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       }
     }
     if (!enviado) throw new Error('No se pudo enviar tras 3 intentos')
+    if (statusKey) global.activeDownloads.delete(statusKey)
 
   } catch (err) {
     console.error('[animedl] Error envío:', err.message)
     await updateStatus(`❌ Falló el envío:\n${err.message}`)
+    if (statusKey) global.activeDownloads.delete(statusKey)
+    return false
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+
+  return true
 }
