@@ -237,8 +237,10 @@ async function enviarBotonesFinales(m, conn, pick) {
   }
 }
 
-async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, temporada, sitioElegido, forceServers }) {
-  const encontrado = await buscarAnime(nombre, episodio, temporada, sitioElegido)
+async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, temporada, sitioElegido, forceServers, directEpisodeUrl = null }) {
+  const encontrado = directEpisodeUrl
+    ? { sitio: sitioElegido, url: directEpisodeUrl }
+    : await buscarAnime(nombre, episodio, temporada, sitioElegido)
   const episodeUrl = encontrado.url
   sitioElegido = encontrado.sitio || sitioElegido
 
@@ -373,9 +375,25 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   if (parsed.url) {
     const sitio = getSitioPorDominio(parsed.url)
-    const nombre = parsed.nombre || parsed.url.split('/').filter(Boolean).pop() || 'anime'
+    let nombre = parsed.nombre || parsed.url.split('/').filter(Boolean).pop() || 'anime'
+    let episodio = parsed.episodio
     try {
-      await procesarEpisodio({ m, conn, usedPrefix, nombre, episodio: parsed.episodio || 1, temporada: parsed.temporada, sitioElegido: sitio, forceServers: parsed.forceServers })
+      const pathname = decodeURIComponent(new URL(parsed.url).pathname).replace(/\/+$/, '')
+      const lastSegment = pathname.split('/').filter(Boolean).pop() || nombre
+      const episodeMatch = lastSegment.match(/(?:episodio-|[-/])(\d+)$/i) || pathname.match(/\/(\d+)\/?$/)
+      if (episodio == null && episodeMatch) episodio = Number(episodeMatch[1])
+      nombre = lastSegment
+        .replace(/-episodio-\d+$/i, '')
+        .replace(/-\d+$/, '')
+        .replace(/-/g, ' ')
+        .trim()
+        .replace(/\b\w/g, c => c.toUpperCase())
+    } catch (_) {}
+    try {
+      await procesarEpisodio({
+        m, conn, usedPrefix, nombre, episodio: episodio || 1, temporada: parsed.temporada,
+        sitioElegido: sitio, forceServers: parsed.forceServers, directEpisodeUrl: parsed.url,
+      })
     } catch (error) {
       return m.reply(`Error: ${error.message}`)
     }
