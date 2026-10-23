@@ -10,6 +10,21 @@ import { lookup as mimeLookup } from 'mime-types'
 import { pipeline }      from 'stream/promises'
 import https             from 'https'
 import vm                from 'vm'
+import { fetchText as hentaiFetchText } from '../../plugins/Hentai-DL.js'
+
+const isJKAnimeUrl = url => {
+  try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
+}
+
+async function fetchJKAnimeText(url) {
+  try {
+    return await hentaiFetchText(url)
+  } catch (error) {
+    const wrapped = new Error(`No se pudo obtener JKAnime mediante la cadena de Hentai-DL: ${error.message}`)
+    wrapped.code = 'JKANIME_FETCH_FAILED'
+    throw wrapped
+  }
+}
 
 export async function getPuppeteer() {
   if (!_puppeteerExtra) {
@@ -553,6 +568,7 @@ export function elegirPorTemporada(links, temporada) {
 }
 
 export async function fetchHtml(url) {
+  if (isJKAnimeUrl(url)) return fetchJKAnimeText(url)
   try {
     const res = await fetch(url, {
       headers: buildHeaders({ Referer: new URL(url).origin }),
@@ -1298,7 +1314,10 @@ export async function scrapeJKanime(url) {
       console.log(`[jkanime] video iframes: ${servidores.length}`)
       return servidores
     }
-  } catch (e) { console.error('[jkanime] var servers parse:', e.message) }
+  } catch (e) {
+    if (e.code === 'JKANIME_FETCH_FAILED') throw e
+    console.error('[jkanime] var servers parse:', e.message)
+  }
 
   const jkMatch = url.match(/jkanime\.net\/([^/]+)\/(\d+)/)
   const slug    = jkMatch?.[1]
@@ -1400,18 +1419,18 @@ export async function scrapeJKanime(url) {
       }
       if (servidores.length > 0) return servidores
     }
-  } catch (e) { console.error('[jkanime] Puppeteer:', e.message) }
+  } catch (e) {
+    if (e.code === 'JKANIME_FETCH_FAILED') throw e
+    console.error('[jkanime] Puppeteer:', e.message)
+  }
 
   if (slug && cap && servidores.length === 0) {
     const SERVIDORES_JK = ['sw', 'jkvideo', 'okru', 'stape', 'mp4upload', 'filemoon', 'voe', 'uqload', 'doodstream', 'vidhide', 'mixdrop', 'streamwish']
-    const headers = { ...buildHeaders({ Referer: url }), 'X-Requested-With': 'XMLHttpRequest' }
 
     for (const srv of SERVIDORES_JK) {
       try {
         const apiUrl = `https://jkanime.net/ajax/episode/2/?id=${slug}&cap=${cap}&server=${srv}`
-        const res    = await fetch(apiUrl, { headers, timeout: 12000 })
-        if (!res.ok) continue
-        const json   = await res.json()
+        const json = JSON.parse(await fetchJKAnimeText(apiUrl))
 
         if (json?.remote) {
           try {
@@ -1434,7 +1453,10 @@ export async function scrapeJKanime(url) {
           const finalUrl = embedUrl.includes('jkplayers.com') ? await resolverRedirect(embedUrl) : embedUrl
           servidores.push({ nombre: srv, url: normalizarMegaUrl(finalUrl) })
         }
-      } catch (e) { console.error(`[jkanime] API ${srv}:`, e.message) }
+      } catch (e) {
+        if (e.code === 'JKANIME_FETCH_FAILED') throw e
+        console.error(`[jkanime] API ${srv}:`, e.message)
+      }
     }
   }
 
@@ -1526,21 +1548,15 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
 
   try {
     const apiSearch = `https://jkanime.net/api/search/?q=${encodeURIComponent(nombre)}`
-    const res = await fetch(apiSearch, {
-      headers: { ...buildHeaders({ Referer: 'https://jkanime.net/' }), 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
-      timeout: 10000,
-    })
-    if (res.ok) {
-      const json   = await res.json()
-      const animes = json?.animes || json?.results || json?.data || []
-      if (Array.isArray(animes) && animes.length > 0) {
-        const nombreNorm = normalizarTitulo(nombre)
-        const mejor = animes
-          .map(a => ({ ...a, score: puntuarMatch(a.title || a.name || '', nombreNorm) }))
-          .sort((a, b) => b.score - a.score)[0]
-        const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
-        if (slug) return `https://jkanime.net/${slug}/${episodio}/`
-      }
+    const json   = JSON.parse(await fetchJKAnimeText(apiSearch))
+    const animes = json?.animes || json?.results || json?.data || []
+    if (Array.isArray(animes) && animes.length > 0) {
+      const nombreNorm = normalizarTitulo(nombre)
+      const mejor = animes
+        .map(a => ({ ...a, score: puntuarMatch(a.title || a.name || '', nombreNorm) }))
+        .sort((a, b) => b.score - a.score)[0]
+      const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
+      if (slug) return `https://jkanime.net/${slug}/${episodio}/`
     }
   } catch (e) { console.error('[jkanime] API search:', e.message) }
 
@@ -1575,7 +1591,10 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
       const slugMatch = elegido.href.match(/jkanime\.net\/([a-z0-9-]+)\/?$/)
       if (slugMatch) return `https://jkanime.net/${slugMatch[1]}/${episodio}/`
     }
-  } catch (e) { console.error('[jkanime] HTML search:', e.message) }
+  } catch (e) {
+    if (e.code === 'JKANIME_FETCH_FAILED') throw e
+    console.error('[jkanime] HTML search:', e.message)
+  }
 
   try {
     const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
@@ -1586,13 +1605,16 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     for (const slug of candidatos) {
       const epUrl = `https://jkanime.net/${slug}/${episodio}/`
       try {
-        const res = await fetch(epUrl, { headers: buildHeaders({ Referer: 'https://jkanime.net/' }), timeout: 8000, redirect: 'manual' })
-        if (res.status === 200 || res.status === 301 || res.status === 302) {
-          return res.status === 200 ? epUrl : (res.headers.get('location') || epUrl)
-        }
-      } catch (_) {}
+        const html = await fetchJKAnimeText(epUrl)
+        if (html.length > 500 && !/404|not found|page not found/i.test(html.slice(0, 2000))) return epUrl
+      } catch (error) {
+        if (error.code === 'JKANIME_FETCH_FAILED') throw error
+      }
     }
-  } catch (e) { console.error('[jkanime] slug directo:', e.message) }
+  } catch (e) {
+    if (e.code === 'JKANIME_FETCH_FAILED') throw e
+    console.error('[jkanime] slug directo:', e.message)
+  }
 
   return null
 }
