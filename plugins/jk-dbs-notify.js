@@ -21,6 +21,10 @@ const HEADERS = {
   'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
 }
 
+const isJKAnimeUrl = url => {
+  try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
+}
+
 global.jkActiveChats = global.jkActiveChats || new Map()
 global.jkEpisodeQueue = global.jkEpisodeQueue || []
 global.jkQueueRunning = global.jkQueueRunning || false
@@ -32,6 +36,11 @@ async function request(url, options = {}) {
     try {
       return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
     } catch (err) {
+      if (err.response?.status === 403 && isJKAnimeUrl(url)) {
+        const blocked = new Error('JKAnime respondió HTTP 403 desde el hosting del bot (bloqueo de acceso/Cloudflare). No es un fallo de /jkexample y reintentar no lo resuelve.')
+        blocked.code = 'JKANIME_HTTP_403'
+        throw blocked
+      }
       retries--
       if (retries === 0) throw err
       await new Promise(r => setTimeout(r, 2000))
@@ -784,9 +793,20 @@ let handler = async (m, { conn, text, usedPrefix, command }) => {
     try {
       lista = await fetchLatestEpisodesJK()
       if (!lista.length) return m.reply(`❌ Sin episodios de JKAnime disponibles.`)
-    } catch (err) { return m.reply(`❌ Error: ${err.message}`) }
+    } catch (err) {
+      if (err.code !== 'JKANIME_HTTP_403') return m.reply(`❌ Error: ${err.message}`)
+      try {
+        lista = await fetchLatestEpisodesDBS()
+      } catch (fallbackErr) {
+        return m.reply(`❌ JKAnime devolvió HTTP 403 y AnimeDBS tampoco respondió: ${fallbackErr.message}`)
+      }
+      if (!lista.length) {
+        return m.reply('❌ JKAnime devolvió HTTP 403 y AnimeDBS no tiene episodios de ejemplo disponibles ahora.')
+      }
+      await m.reply('⚠️ JKAnime está bloqueando las solicitudes desde el hosting del bot. Para que la prueba continúe, usaré episodios de AnimeDBS como respaldo.')
+    }
     const seleccion = lista.slice(0, cantidad)
-    if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (JKAnime 🇯🇵):*\n\n` + seleccion.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._`)
+    if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (${seleccion[0].fuente === 'animedbs' ? 'AnimeDBS 🌐' : 'JKAnime 🇯🇵'}):*\n\n` + seleccion.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._`)
     for (const ep of seleccion) global.jkEpisodeQueue.push({ chatId: m.chat, ep })
     procesarCola().catch(() => {})
     return
