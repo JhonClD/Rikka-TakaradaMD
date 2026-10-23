@@ -1,4 +1,6 @@
 import { getDevice } from '@this-xys/baileys'
+import fetch from 'node-fetch'
+import * as cheerio from 'cheerio'
 import fs from 'fs'
 import path from 'path'
 
@@ -211,6 +213,82 @@ async function enviarSelector(m, conn, servidores, pick, usedPrefix, sitioNombre
   return false
 }
 
+async function listarEpisodios(sitio, nombre, temporada) {
+  const episodioUrl = await buscarConTimeout(sitio, nombre, 1, temporada)
+  if (!episodioUrl) return []
+  const response = await fetch(episodioUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'es-419,es;q=0.9' },
+  })
+  if (!response.ok) return []
+  const html = await response.text()
+  const $ = cheerio.load(html)
+  const episodios = new Map()
+  const esJK = sitio.dominio === 'jkanime'
+  let slug = ''
+  try {
+    const parts = new URL(episodioUrl).pathname.split('/').filter(Boolean)
+    slug = esJK ? parts[0] : (parts[parts.length - 1] || '').replace(/-episodio-\d+$/i, '')
+  } catch (_) {}
+
+  $('a[href]').each((_, element) => {
+    const href = $(element).attr('href') || ''
+    let absolute
+    try { absolute = new URL(href, episodioUrl) } catch (_) { return }
+    if (absolute.hostname !== new URL(episodioUrl).hostname) return
+    const pathname = absolute.pathname
+    let match
+    if (esJK) {
+      match = pathname.match(new RegExp(`/${slug}/(\\d+)/?$`, 'i'))
+    } else {
+      match = pathname.match(new RegExp(`${slug}-episodio-(\\d+)/?$`, 'i'))
+    }
+    if (match) episodios.set(Number(match[1]), absolute.href)
+  })
+
+  const currentMatch = episodioUrl.match(esJK ? /\/([^/]+)\/(\d+)\/?$/ : /-episodio-(\d+)\/?$/i)
+  if (currentMatch) {
+    const currentEp = Number(esJK ? currentMatch[2] : currentMatch[1])
+    episodios.set(currentEp, episodioUrl)
+  }
+  return [...episodios.keys()].sort((a, b) => a - b)
+}
+
+async function enviarListaEpisodios(m, conn, usedPrefix, sitio, nombre, temporada, episodios) {
+  const lista = episodios.slice(-26)
+  const filas = lista.map(ep => ({
+    header: `Episodio ${ep}`,
+    title: `Episodio ${ep}`,
+    description: `Descargar desde ${sitio.nombre}`,
+    id: `${usedPrefix}animedl -s ${sitio.id} ${nombre} t${temporada} ${ep}`,
+  }))
+  const { isMobile } = dispositivoMovil(m)
+  if (isMobile) {
+    try {
+      await conn.sendMessage(m.chat, {
+        text: `Episodios disponibles de ${nombre}`,
+        footer: global.wm || 'Rikka-TakaradaMD',
+        nativeFlow: [{
+          text: 'Elegir episodio',
+          icon: 'default',
+          sections: [{
+            title: `${sitio.nombre} · ${episodios.length} episodios`,
+            rows: filas,
+          }],
+        }],
+      }, { quoted: m })
+      return true
+    } catch (error) {
+      console.error('[animedl episodios nativeFlow]', error.message)
+    }
+  }
+  await m.reply(
+    `*${sitio.nombre} · Episodios de ${nombre}*\n\n` +
+    lista.map(ep => `· ${ep}`).join('\n') +
+    `\n\nUsa: ${usedPrefix}animedl -s ${sitio.id} ${nombre} <episodio>`
+  )
+  return false
+}
+
 async function enviarBotonesFinales(m, conn, pick) {
   const { isMobile } = dispositivoMovil(m)
   if (!isMobile || !pick.nombre || pick.episodio == null) return
@@ -401,6 +479,17 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   }
 
   if (parsed.episodio == null) {
+    if (parsed.nombre && parsed.sitio) {
+      try {
+        const episodios = await listarEpisodios(parsed.sitio, parsed.nombre, parsed.temporada)
+        if (episodios.length > 0) {
+          return enviarListaEpisodios(m, conn, usedPrefix, parsed.sitio, parsed.nombre, parsed.temporada, episodios)
+        }
+      } catch (error) {
+        console.error('[animedl listar episodios]', error.message)
+      }
+      return m.reply(`No pude obtener los episodios de ${parsed.sitio.nombre}. Indica uno, por ejemplo: ${usedPrefix}animedl -s ${parsed.sitio.id} ${parsed.nombre} 1`)
+    }
     return m.reply(`Indica el episodio. Ejemplo: ${usedPrefix}animedl naruto t2 1`)
   }
   if (!parsed.nombre) return m.reply(`Falta el nombre del anime. Ejemplo: ${usedPrefix}animedl naruto 1`)
