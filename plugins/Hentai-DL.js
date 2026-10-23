@@ -137,10 +137,10 @@ function cacheSet(url, html) {
 }
 
 // ─── Capa 1a: scrape.do ──────────────────────────────────────────────────
-async function fetchViaScrapeDo(url, timeout = 35000) {
+async function fetchViaScrapeDo(url) {
     if (!SCRAPE_DO_TOKEN) throw new Error('sin token')
     const apiUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(url)}&render=false`
-    const res = await fetchGet(apiUrl, { timeout, agent: null })
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
     if (res.status === 401) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -148,10 +148,10 @@ async function fetchViaScrapeDo(url, timeout = 35000) {
 }
 
 // ─── Capa 1b: ScraperAPI ─────────────────────────────────────────────────
-async function fetchViaScraperAPI(url, timeout = 35000) {
+async function fetchViaScraperAPI(url) {
     if (!SCRAPERAPI_KEY) throw new Error('sin token')
     const apiUrl = `http://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=false`
-    const res = await fetchGet(apiUrl, { timeout, agent: null })
+    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
     if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -192,17 +192,17 @@ async function fetchViaScrapingBee(url) {
 }
 
 // ─── Capa 2: Via Cloudflare Worker ──────────────────────────────────────
-async function fetchViaWorker(url, timeout = 30000) {
+async function fetchViaWorker(url) {
     if (!CF_WORKER_URL) throw new Error('sin URL')
     const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
-    const res = await fetchGet(proxyUrl, { timeout, agent: null })
+    const res = await fetchGet(proxyUrl, { timeout: 30000, agent: null })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
 
 // ─── Capa 3: Fetch directo ──────────────────────────────────────────────
-async function fetchDirecto(url, timeout = 25000) {
-    const res = await fetchGet(url, { headers: CF_HEADERS, timeout, compress: true })
+async function fetchDirecto(url) {
+    const res = await fetchGet(url, { headers: CF_HEADERS, timeout: 25000, compress: true })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
@@ -215,60 +215,6 @@ const PUBLIC_CORS_PROXIES = [
     (url) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`,
 ]
 let _proxyIndex = 0
-
-const _jkanimeInflight = new Map()
-
-function isJKAnimeRequest(url) {
-    try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
-}
-
-function isUsableJKAnimeResponse(url, text) {
-    if (!text) return false
-    if (/\/(?:api|ajax)\//i.test(new URL(url).pathname)) {
-        try { JSON.parse(text); return true } catch (_) { return false }
-    }
-    return !esCFBloqueado(text)
-}
-
-async function fetchJKAnimeFast(url) {
-    const cached = cacheGet(url)
-    if (cached) return cached
-    if (_jkanimeInflight.has(url)) return _jkanimeInflight.get(url)
-
-    const pending = (async () => {
-        const layers = [
-            ...(CF_WORKER_URL ? [['CF Worker', () => fetchViaWorker(url, 7000)]] : []),
-            ...(SCRAPE_DO_TOKEN ? [['scrape.do', () => fetchViaScrapeDo(url, 8000)]] : []),
-            ...(SCRAPERAPI_KEY ? [['ScraperAPI', () => fetchViaScraperAPI(url, 8000)]] : []),
-            ['directo', () => fetchDirecto(url, 4000)],
-            ...PUBLIC_CORS_PROXIES.slice(0, 2).map((proxy, index) => [
-                `proxy público ${index + 1}`,
-                async () => {
-                    const response = await fetchGet(proxy(url), { timeout: 6000, agent: null })
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-                    return response.text()
-                },
-            ]),
-        ]
-
-        const failures = []
-        for (const [name, request] of layers) {
-            try {
-                const text = await request()
-                if (!isUsableJKAnimeResponse(url, text)) throw new Error('respuesta bloqueada o vacía')
-                cacheSet(url, text)
-                console.log(`[HDL] ✅ JKAnime vía ${name}: ${new URL(url).pathname}`)
-                return text
-            } catch (error) {
-                failures.push(`${name}: ${error.message}`)
-            }
-        }
-        throw new Error(`JKAnime no respondió por la cadena rápida (${failures.join('; ')})`)
-    })().finally(() => _jkanimeInflight.delete(url))
-
-    _jkanimeInflight.set(url, pending)
-    return pending
-}
 
 async function fetchViaProxy(url) {
     for (let i = 0; i < PUBLIC_CORS_PROXIES.length; i++) {
@@ -293,10 +239,6 @@ export async function fetchText(url) {
         console.log(`[HDL] ✅ Caché hit: ${url.replace(BASE, '')}`)
         return cached
     }
-
-    // JKAnime usa una ruta rápida independiente: evita la cola de Hentai-DL
-    // y no espera 35 s por proveedor. El fetch general conserva su flujo actual.
-    if (isJKAnimeRequest(url)) return fetchJKAnimeFast(url)
 
     return queuedFetch(async () => {
         // Capa 1a: scrape.do

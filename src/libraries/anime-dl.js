@@ -1558,10 +1558,7 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
       const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
       if (slug) return `https://jkanime.net/${slug}/${episodio}/`
     }
-  } catch (e) {
-    if (e.code === 'JKANIME_FETCH_FAILED') throw e
-    console.error('[jkanime] API search:', e.message)
-  }
+  } catch (e) { console.error('[jkanime] API search:', e.message) }
 
   try {
     const html  = await fetchHtml(`https://jkanime.net/buscar/?q=${encodeURIComponent(query)}`)
