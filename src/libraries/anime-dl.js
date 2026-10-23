@@ -41,7 +41,6 @@ export const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 20 
 global.activeDownloads    = global.activeDownloads    || new Map()
 global.pendingServerPicks = global.pendingServerPicks || new Map()
 global.animeDlSessions    = global.animeDlSessions    || {}
-global.pendingAnimeSearch = global.pendingAnimeSearch || new Map()
 
 const PICKS_FILE = path.join(process.cwd(), '.anime_dl_picks.json')
 
@@ -53,6 +52,7 @@ export function guardarPicks() {
         servers      : pick.servers,
         tmpDir       : pick.tmpDir,
         sitioId      : pick.sitioElegido?.id ?? null,
+        sitioIdVersion: 2,
         argsParaAnime: pick.argsParaAnime,
         nombre       : pick.nombre ?? null,
         episodio     : pick.episodio ?? null,
@@ -71,13 +71,16 @@ export function cargarPicks() {
     const ahora = Date.now()
     for (const [chatId, p] of Object.entries(data)) {
       if (ahora - p.timestamp > 10 * 60 * 1000) continue
+      const savedSiteId = Number(p.sitioId)
+      if (p.sitioIdVersion !== 2 && savedSiteId === 1) continue
+      const sitioId = p.sitioIdVersion === 2 || !savedSiteId ? savedSiteId : savedSiteId - 1
       if (!fs.existsSync(p.tmpDir)) {
         try { fs.mkdirSync(p.tmpDir, { recursive: true }) } catch (_) {}
       }
       global.pendingServerPicks.set(chatId, {
         servers      : p.servers,
         tmpDir       : p.tmpDir,
-        sitioElegido : getSitioPorId(p.sitioId),
+        sitioElegido : getSitioPorId(sitioId),
         argsParaAnime: p.argsParaAnime,
         nombre       : p.nombre ?? null,
         episodio     : p.episodio ?? null,
@@ -92,22 +95,17 @@ export function cargarPicks() {
 
 export const SITIOS = [
   {
-    id: 1, nombre: 'AnimeFLV',    dominio: 'animeflv',
-    url: 'https://www3.animeflv.net',
-    buscar: buscarEnAnimeFLV,    scrape: scrapeAnimeFLV,
-  },
-  {
-    id: 2, nombre: 'MonosChinos', dominio: 'monoschinos',
+    id: 1, nombre: 'MonosChinos', dominio: 'monoschinos',
     url: 'https://monoschinos.st',
     buscar: buscarEnMonosChinos, scrape: scrapeMonosChinos,
   },
   {
-    id: 3, nombre: 'LatAnime',    dominio: 'latanime',
+    id: 2, nombre: 'LatAnime',    dominio: 'latanime',
     url: 'https://latanime.org',
     buscar: buscarEnLatAnime,    scrape: scrapeLatAnime,
   },
   {
-    id: 4, nombre: 'JKanime',     dominio: 'jkanime',
+    id: 3, nombre: 'JKanime',     dominio: 'jkanime',
     url: 'https://jkanime.net',
     buscar: buscarEnJKanime,     scrape: scrapeJKanime,
   },

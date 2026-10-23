@@ -16,10 +16,6 @@ import {
   httpsAgent,
   normalizarMegaUrl,
   numToLetter,
-  enviarListaWA,
-  buscarResultadosAnimeFLV,
-  mostrarInfoYEpisodios,
-  puntuarMatch,
   parseMegaError,
   descargarMega,
   descargarConYtDlp,
@@ -41,7 +37,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       `*Ejemplos:*\n` +
       `  .animedl one piece 1100\n` +
       `  .animedl shingeki no kyojin t4 1\n` +
-      `  .animedl 7 naruto shippuden t2 30\n\n` +
+      `  .animedl 3 naruto shippuden t2 30\n\n` +
       `_t<N> = temporada. Sin t = temporada 1_`
     )
   }
@@ -54,24 +50,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     dl.controller.abort()
     global.activeDownloads.delete(quotedMsgId)
     return m.reply(`🚫 Descarga cancelada.`)
-  }
-
-  const letraInput = text?.trim().toLowerCase()
-  if (/^[a-z]$/.test(letraInput)) {
-    const animeSearch = global.pendingAnimeSearch.get(m.chat)
-    if (animeSearch) {
-      if (animeSearch.owner && animeSearch.owner !== m.sender) {
-        return conn.sendMessage(m.chat,
-          { text: `⛔ @${m.sender.split('@')[0]}, esta selección pertenece a otro usuario.` },
-          { quoted: m, mentions: [m.sender] }
-        )
-      }
-      const idxSearch = letraInput.charCodeAt(0) - 97
-      const elegido   = animeSearch.resultados[idxSearch]
-      if (!elegido) return m.reply(`❌ Letra inválida. Elige entre *a* y *${numToLetter(animeSearch.resultados.length - 1)}*.`)
-      global.pendingAnimeSearch.delete(m.chat)
-      return mostrarInfoYEpisodios(elegido, m, conn, usedPrefix, animeSearch.temporada)
-    }
   }
 
   if ((command === 'animedl' || command === 'dl') && /^(\d+|[a-z])$/i.test(text?.trim())) {
@@ -108,7 +86,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       `• *.animedl <url mega/mediafire>* — Descargar archivo\n\n` +
       `*Ejemplos:*\n` +
       `  .animedl shingeki no kyojin t4 1\n` +
-      `  .animedl 7 tioanime naruto 1\n\n` +
+      `  .animedl 3 naruto 1\n\n` +
       `_Usa .anilist para ver los números de sitio_`
     )
   }
@@ -275,7 +253,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         const slugSeg = parts[parts.length - 2] || parts[0]
         nombre = slugSeg.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
       } else {
-        // Formato: /ver/slug-episodio-8 (AnimeFLV, LatAnime, MonosChinos)
+        // Formato: /ver/slug-episodio-8 (LatAnime, MonosChinos)
         const m = lastSeg.match(/^(.*?)(?:-episodio)?-(\d+)$/)
         if (m) {
           episodio = parseInt(m[2])
@@ -298,51 +276,13 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
         tokensSinEp  = tokensSinEp.filter((_, i) => i !== tempIdx2)
       }
       const nombreBusq = tokensSinEp.join(' ')
-      if (!nombreBusq) return m.reply(`❌ Escribe el nombre del anime.\nEjemplo: *.animedl naruto*`)
-
-      const { key: statusKey } = await m.reply(`🔎 Buscando *${nombreBusq}*...`)
-      const editStatus = async (txt) => {
-        try { await conn.sendMessage(m.chat, { text: txt, edit: statusKey }) } catch (_) {}
-      }
-
-      const resultados = await buscarResultadosAnimeFLV(nombreBusq, temporada)
-
-      if (resultados.length === 0) {
-        return editStatus(
-          `❌ No encontré ningún anime llamado *${nombreBusq}*.\n\n` +
-          `Prueba con el sitio + episodio:\n  ${usedPrefix}animedl ${nombreBusq} 1`
-        )
-      }
-
-      if (resultados.length === 1 || puntuarMatch(resultados[0].title, nombreBusq) >= 85) {
-        return mostrarInfoYEpisodios(resultados[0], m, conn, usedPrefix, temporada, statusKey)
-      }
-
-      await editStatus(`🔍 *${resultados.length} resultados para "${nombreBusq}"* — elige uno:`)
-
-      const maxR = Math.min(resultados.length, 26)
-      global.pendingAnimeSearch.set(m.chat, {
-        resultados: resultados.slice(0, maxR),
-        nombre    : nombreBusq,
-        temporada,
-        owner     : m.sender,
-        timestamp : Date.now(),
-        usedPrefix,
-      })
-
-      return enviarListaWA(conn, m, {
-        title     : `🔍 Resultados para "${nombreBusq}"`,
-        body      : `Encontré ${resultados.length} resultados. Elige el anime correcto:`,
-        buttonText: 'ELEGIR ANIME',
-        sections  : [{
-          title: 'Animes encontrados',
-          rows : resultados.slice(0, maxR).map(r => ({
-            title      : r.title,
-            description: r.sitio?.nombre || 'AnimeFLV',
-            id         : `__animeselect__${r.slug}`,
-          })),
-        }],
-      })
+      if (!nombreBusq) return m.reply(`❌ Escribe el nombre del anime y el episodio.\nEjemplo: *.animedl naruto 1*`)
+      const seasonArg = temporada > 1 ? ` t${temporada}` : ''
+      return m.reply(
+        `❌ Indica el episodio que quieres descargar.\n` +
+        `Ejemplo: ${usedPrefix}animedl ${nombreBusq}${seasonArg} 1\n\n` +
+        `Usa *.anilist* para ver los sitios disponibles.`
+      )
     }
 
     let tokensSinEp = argsParaAnime.slice(0, -1)
@@ -524,27 +464,6 @@ handler.before = async function (m, { conn }) {
       const params     = JSON.parse(nativeFlow.paramsJson || '{}')
       const selectedId = params?.id || null
       if (!selectedId) return false
-
-      if (selectedId.startsWith('__animeselect__')) {
-        const slug        = selectedId.replace('__animeselect__', '')
-        const animeSearch = global.pendingAnimeSearch.get(m.chat)
-        if (!animeSearch) return false
-
-        if (animeSearch.owner && animeSearch.owner !== m.sender) {
-          await conn.sendMessage(m.chat,
-            { text: `⛔ @${m.sender.split('@')[0]}, estos botones son de otro usuario.` },
-            { quoted: m, mentions: [m.sender] }
-          )
-          return true
-        }
-
-        global.pendingAnimeSearch.delete(m.chat)
-        const elegido = animeSearch.resultados.find(r => r.slug === slug)
-        if (!elegido) return false
-
-        await mostrarInfoYEpisodios(elegido, m, conn, animeSearch.usedPrefix || '.', animeSearch.temporada)
-        return true
-      }
 
       const pick = global.pendingServerPicks.get(m.chat)
       if (!pick) return false
