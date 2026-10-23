@@ -57,6 +57,8 @@ export function guardarPicks() {
         nombre       : pick.nombre ?? null,
         episodio     : pick.episodio ?? null,
         temporada    : pick.temporada ?? 1,
+        statusKey    : pick.statusKey ?? null,
+        selectorKey  : pick.selectorKey ?? null,
         timestamp    : pick.timestamp,
       }
     }
@@ -85,6 +87,8 @@ export function cargarPicks() {
         nombre       : p.nombre ?? null,
         episodio     : p.episodio ?? null,
         temporada    : p.temporada ?? 1,
+        statusKey    : p.statusKey ?? null,
+        selectorKey  : p.selectorKey ?? null,
         timestamp    : p.timestamp,
       })
     }
@@ -1682,7 +1686,38 @@ export class MegaQuotaError extends Error {
   constructor() { super('EOVERQUOTA'); this.name = 'MegaQuotaError' }
 }
 
-export async function descargarMega(url, m, tmpDir, signal = null) {
+export function construirBarraProgreso(percent) {
+  const value = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0
+  const filled = Math.round(value / 100 * 12)
+  return '█'.repeat(filled) + '░'.repeat(12 - filled)
+}
+
+export function crearReporteProgreso(onStatus, pick, servidor) {
+  const startedAt = Date.now()
+  let lastAt = null
+  let lastText = ''
+  return ({ downloaded = 0, total = 0, speed = null, percent: suppliedPercent = null } = {}) => {
+    const now = Date.now()
+    const percent = suppliedPercent == null
+      ? (total > 0 ? Math.max(0, Math.min(100, downloaded / total * 100)) : 0)
+      : Math.max(0, Math.min(100, Number(suppliedPercent) || 0))
+    if (lastAt != null && now - lastAt < 4000 && percent < 100) return
+    const elapsed = Math.max((now - startedAt) / 1000, 0.001)
+    const rate = speed == null ? downloaded / elapsed : speed
+    const totalMb = total > 0 ? (total / 1024 / 1024).toFixed(0) : '?'
+    const downloadedMb = (downloaded / 1024 / 1024).toFixed(1)
+    const rateMb = (rate / 1024 / 1024).toFixed(1)
+    const text = `🎌 ${pick.nombre || 'Anime'} · ep ${pick.episodio ?? '?'}\n` +
+      `📦 ${servidor || 'servidor'}\n` +
+      `⬇️ ${construirBarraProgreso(percent)} ${percent.toFixed(0)}% · ${rateMb} MB/s · ${downloadedMb}/${totalMb} MB`
+    if (text === lastText) return
+    lastAt = now
+    lastText = text
+    Promise.resolve(onStatus(text)).catch(() => {})
+  }
+}
+
+export async function descargarMega(url, m, tmpDir, onStatus = null, signal = null, pick = null) {
   let file
   try {
     file = MegaFile.fromURL(url)
@@ -1695,13 +1730,16 @@ export async function descargarMega(url, m, tmpDir, signal = null) {
 
   const name     = file.name
   const sizeH    = (file.size / 1024 / 1024).toFixed(2) + ' MB'
-  await m.reply(`📥 *Mega:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
+  const say = onStatus || ((text) => m.reply(text))
+  await say(`📥 *Mega:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
 
   const tempPath   = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
   const fileStream = file.download(signal ? { signal } : undefined)
+  const reportar = pick && onStatus ? crearReporteProgreso(onStatus, pick, 'Mega') : null
   let dld = 0
   fileStream.on('data', chunk => {
     dld += chunk.length
+    if (reportar) reportar({ downloaded: dld, total: file.size })
     process.stdout.write(`\r[MEGA] ${((dld / file.size) * 100).toFixed(1)}% | ${(dld / 1024 / 1024).toFixed(2)} MB`)
   })
   try {
@@ -1715,7 +1753,7 @@ export async function descargarMega(url, m, tmpDir, signal = null) {
   return tempPath
 }
 
-export async function descargarConYtDlp(embedUrl, outputDir) {
+export async function descargarConYtDlp(embedUrl, outputDir, onProgress = null) {
   const outputTemplate = path.join(outputDir, '%(title)s.%(ext)s')
 
   let videoUrl = embedUrl
@@ -1757,6 +1795,14 @@ export async function descargarConYtDlp(embedUrl, outputDir) {
       const t = d.toString()
       stdoutBuf += t
       process.stdout.write(`[yt-dlp] ${t}`)
+      if (onProgress) {
+        const match = t.match(/\[download\]\s+([\d.]+)%.*?\bat\s+([\d.]+)\s*([KMG]?i?B)\/s/i)
+        if (match) {
+          const units = { B: 1, KB: 1024, KIB: 1024, MB: 1024 ** 2, MIB: 1024 ** 2, GB: 1024 ** 3, GIB: 1024 ** 3 }
+          const unit = match[3].toUpperCase()
+          onProgress({ percent: Number(match[1]), speed: Number(match[2]) * (units[unit] || 1) })
+        }
+      }
     })
     proc.stderr.on('data', d => {
       const t = d.toString()
@@ -1879,9 +1925,10 @@ export async function descargarDirecto(embedUrl, outputDir) {
   return outFile
 }
 
-async function descargarMediaFirePorRangos(axios, url, outputPath, sizeBytes, signal, hilos = 6) {
+async function descargarMediaFirePorRangos(axios, url, outputPath, sizeBytes, signal, hilos = 6, onProgress = null) {
   if (!sizeBytes || sizeBytes < 5 * 1024 * 1024) return false
   const partes = []
+  let descargado = 0
   const chunkSize = Math.ceil(sizeBytes / hilos)
   for (let i = 0; i < hilos; i++) {
     const start = i * chunkSize
@@ -1897,6 +1944,10 @@ async function descargarMediaFirePorRangos(axios, url, outputPath, sizeBytes, si
         headers: { 'User-Agent': randomUA(), Range: `bytes=${parte.start}-${parte.end}` },
       })
       if (response.status !== 206) throw new Error(`El servidor ignoró Range (HTTP ${response.status})`)
+      response.data.on('data', chunk => {
+        descargado += chunk.length
+        if (onProgress) onProgress({ downloaded: descargado, total: sizeBytes })
+      })
       await pipeline(response.data, fs.createWriteStream(parte.path), { signal })
     }))
 
@@ -1933,7 +1984,9 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   const controller = pick.controller || new AbortController()
   const signal = controller.signal
 
-  let statusKey = null
+  let statusKey = pick.statusKey || null
+  const activeKey = () => statusKey?.id || statusKey
+  if (statusKey) global.activeDownloads.set(activeKey(), { controller })
   const updateStatus = async (txt) => {
     try {
       if (statusKey) {
@@ -1941,9 +1994,10 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       } else {
         const sent = await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
         statusKey = sent?.key || null
-        if (statusKey) global.activeDownloads.set(statusKey, { controller })
+        if (statusKey) global.activeDownloads.set(activeKey(), { controller })
       }
     } catch (_) {
+      if (statusKey) return
       try {
         const sent = await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
         statusKey = sent?.key || null
@@ -1968,7 +2022,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     try {
       if (/mega\.nz|mega\.co\.nz/.test(u)) {
         await updateStatus(`📦 *Mega* detectado — descargando...`)
-        archivoPath = await descargarMega(srv.url, m, tmpDir, signal)
+        archivoPath = await descargarMega(srv.url, m, tmpDir, updateStatus, signal, pick)
         break
       }
 
@@ -1990,16 +2044,22 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
         const sizeH = sizeBytes ? (sizeBytes / 1024 / 1024).toFixed(2) + ' MB' : '?'
         await updateStatus(`📥 *MediaFire:* ${name}\n⚖️ ${sizeH}\n_Descargando..._`)
         const tempPath = path.join(tmpDir, name.replace(/[/\\:*?"<>|]/g, '_'))
+        const reportar = crearReporteProgreso(updateStatus, pick, 'MediaFire')
         let paralelo = false
         if (soportaRangos) {
           const hilos = Number(process.env.ANIME_DL_THREADS || 6)
           paralelo = await descargarMediaFirePorRangos(
             axios, downloadUrl, tempPath, sizeBytes, signal,
-            Math.max(2, Math.min(8, Number.isFinite(hilos) ? hilos : 6))
+            Math.max(2, Math.min(8, Number.isFinite(hilos) ? hilos : 6)), reportar
           )
         }
         if (!paralelo) {
           const simple = await axios({ method: 'get', url: downloadUrl, responseType: 'stream', httpsAgent, signal })
+          let descargado = 0
+          simple.data.on('data', chunk => {
+            descargado += chunk.length
+            reportar({ downloaded: descargado, total: sizeBytes })
+          })
           await pipeline(simple.data, fs.createWriteStream(tempPath), { signal })
         }
         console.log(`\n[MediaFire] ✅ ${name}`)
@@ -2016,7 +2076,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
           sfHtml.match(/href=["'](https?:\/\/[^"']+\.(?:mp4|mkv|webm)[^"']*)['"]/i)?.[1] ||
           sfHtml.match(/window\.location\s*=\s*["'](https?:\/\/[^"']+)["']/)?.[1]
         if (!sfLink) throw new Error('Savefiles: no encontré URL de descarga')
-        archivoPath = await descargarConYtDlp(sfLink, tmpDir)
+        archivoPath = await descargarConYtDlp(sfLink, tmpDir, crearReporteProgreso(updateStatus, pick, 'Savefiles'))
         break
       }
 
@@ -2032,13 +2092,13 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
         if (!files.length) throw new Error('Gofile: no encontré archivos')
         const videoFile = files.find(f => /\.(mp4|mkv|webm)$/i.test(f.name)) || files[0]
         if (!videoFile?.link) throw new Error('Gofile: sin link de descarga')
-        archivoPath = await descargarConYtDlp(videoFile.link, tmpDir)
+        archivoPath = await descargarConYtDlp(videoFile.link, tmpDir, crearReporteProgreso(updateStatus, pick, 'Gofile'))
         break
       }
 
       await updateStatus(`⬇️ Descargando desde *${srv.nombre.toUpperCase()}*...`)
       try {
-        archivoPath = await descargarConYtDlp(srv.url, tmpDir)
+        archivoPath = await descargarConYtDlp(srv.url, tmpDir, crearReporteProgreso(updateStatus, pick, srv.nombre))
       } catch (ytErr) {
         const isUnsupported = /(unsupported url|no suitable extractor)/i.test(ytErr.message)
         if (!isUnsupported) throw ytErr
@@ -2062,7 +2122,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   }
 
   if (!archivoPath) {
-    if (statusKey) global.activeDownloads.delete(statusKey)
+    if (statusKey) global.activeDownloads.delete(activeKey())
     fs.rmSync(tmpDir, { recursive: true, force: true })
     const intentados = listaIntentos.slice(indiceInicio, indiceInicio + 4).map(s => s.nombre).join(', ')
     const sugerencias = SITIOS.filter(s => s.id !== sitioElegido?.id)
@@ -2083,7 +2143,8 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     }
     const sizeMB  = fs.statSync(archivoPath).size / 1024 / 1024
     const fileName = path.basename(archivoPath).replace(/_c\.mp4$/, '.mp4')
-    const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · KanaArima-MD`
+    const botName = global.botName ?? global.wm ?? 'Rikka-TakaradaMD'
+    const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · ${botName}`
 
     await updateStatus(`⬆️ Subiendo a WhatsApp...`)
 
@@ -2095,7 +2156,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
           caption, mimetype: 'video/mp4', fileName,
         }, { quoted: m })
         enviado = true
-        await updateStatus(`✅ *¡Enviado!* ${fileName}`)
+        await updateStatus(`✅ Enviado · ${fileName}`)
         break
       } catch (sendErr) {
         const isConnErr = sendErr.message?.includes('Connection Closed') ||
@@ -2108,12 +2169,12 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       }
     }
     if (!enviado) throw new Error('No se pudo enviar tras 3 intentos')
-    if (statusKey) global.activeDownloads.delete(statusKey)
+    if (statusKey) global.activeDownloads.delete(activeKey())
 
   } catch (err) {
     console.error('[animedl] Error envío:', err.message)
     await updateStatus(`❌ Falló el envío:\n${err.message}`)
-    if (statusKey) global.activeDownloads.delete(statusKey)
+    if (statusKey) global.activeDownloads.delete(activeKey())
     return false
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })

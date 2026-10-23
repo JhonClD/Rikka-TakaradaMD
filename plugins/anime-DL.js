@@ -107,6 +107,20 @@ function dispositivoMovil(m) {
   return { device, isMobile: device !== 'desktop' && device !== 'web' }
 }
 
+async function crearEstado(m, conn, text) {
+  try {
+    const sent = await conn.sendMessage(m.chat, { text }, { quoted: m })
+    return sent?.key || null
+  } catch (_) {
+    return null
+  }
+}
+
+async function editarEstado(conn, chat, statusKey, text) {
+  if (!statusKey) return
+  try { await conn.sendMessage(chat, { text, edit: statusKey }) } catch (_) {}
+}
+
 function esperar(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -188,7 +202,7 @@ async function enviarSelector(m, conn, servidores, pick, usedPrefix, sitioNombre
 
   if (isMobile) {
     try {
-      await conn.sendMessage(m.chat, {
+      const sent = await conn.sendMessage(m.chat, {
         text: 'Elige el servidor para descargar',
         footer: global.wm || 'Rikka-TakaradaMD',
         nativeFlow: [{
@@ -197,6 +211,8 @@ async function enviarSelector(m, conn, servidores, pick, usedPrefix, sitioNombre
           sections: [{ title: `${sitioNombre || 'Anime'} · ${servidores.length} servidores`, rows: filas }],
         }],
       }, { quoted: m })
+      pick.selectorKey = sent?.key || null
+      guardarPicks()
       return true
     } catch (error) {
       console.error('[animedl nativeFlow]', error.message)
@@ -315,12 +331,17 @@ async function enviarBotonesFinales(m, conn, pick) {
   }
 }
 
-async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, temporada, sitioElegido, forceServers, directEpisodeUrl = null }) {
+async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, temporada, sitioElegido, forceServers, directEpisodeUrl = null, statusKey = null }) {
+  await editarEstado(conn, m.chat, statusKey, `🔎 Buscando *${nombre}* · ep *${episodio}*...`)
   const encontrado = directEpisodeUrl
     ? { sitio: sitioElegido, url: directEpisodeUrl }
     : await buscarAnime(nombre, episodio, temporada, sitioElegido)
   const episodeUrl = encontrado.url
   sitioElegido = encontrado.sitio || sitioElegido
+  if (episodeUrl) {
+    await editarEstado(conn, m.chat, statusKey, `✅ Encontrado en *${sitioElegido?.nombre || 'sitio'}*`)
+    console.log(`[animedl] URL encontrada: ${episodeUrl}`)
+  }
 
   if (!episodeUrl) {
     if (sitioElegido && typeof sitioElegido.mostrarInfoYEpisodios === 'function') {
@@ -333,7 +354,7 @@ async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, tempora
     throw new Error(`No encontré *${nombre}* ep *${episodio}*${temporada > 1 ? ` (temporada ${temporada})` : ''}.${sitios}`)
   }
 
-  await m.reply(`📡 Extrayendo servidores de *${sitioElegido?.nombre || 'sitio desconocido'}*...`)
+  await editarEstado(conn, m.chat, statusKey, `📡 Extrayendo servidores de *${sitioElegido?.nombre || 'sitio desconocido'}*...`)
   let servidores
   try {
     servidores = sitioElegido?.scrape
@@ -351,6 +372,8 @@ async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, tempora
     servers: listaIntentos,
     tmpDir,
     controller: new AbortController(),
+    statusKey,
+    selectorKey: null,
     sitioElegido,
     sitioId: sitioElegido?.id || null,
     argsParaAnime: [nombre, String(episodio)],
@@ -386,6 +409,26 @@ async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, tempora
   return { waiting: false, pick }
 }
 
+async function seleccionarServidorPendiente(m, conn, raw, pick) {
+  const value = String(raw || '').trim().toLowerCase()
+  const num = /^[a-z]$/.test(value) ? value.charCodeAt(0) - 96 : Number(value)
+  if (!Number.isInteger(num) || num < 1 || num > pick.servers.length) {
+    await m.reply(`Selección inválida. Elige entre 1 y ${pick.servers.length}`)
+    return true
+  }
+  if (pick.selectorKey) {
+    try { await conn.sendMessage(m.chat, { delete: pick.selectorKey }) } catch (_) {}
+    pick.selectorKey = null
+  }
+  const key = clavePick(m)
+  global.pendingServerPicks.delete(key)
+  delete global.animeDlSessions[key]
+  guardarPicks()
+  const descargado = await ejecutarDescargaServidor(pick.servers, num - 1, pick, m, conn)
+  if (descargado) await enviarBotonesFinales(m, conn, pick)
+  return true
+}
+
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (command === 'anilist') {
     const lista = SITIOS.map(s => `*${s.id}.* ${s.nombre}\n   ${s.url}`).join('\n\n')
@@ -411,6 +454,11 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply('Descarga cancelada')
   }
 
+  if (command === 'dl' && /^(?:\d+|[a-z])$/i.test(text?.trim() || '')) {
+    const pick = global.pendingServerPicks.get(clavePick(m))
+    if (pick) return seleccionarServidorPendiente(m, conn, text, pick)
+  }
+
   if (!text || !text.trim()) {
     return m.reply(
       `*Descargador de Anime*\n\n` +
@@ -433,10 +481,13 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     const sitio = isMega ? 'mega' : 'mediafire'
     const tmpDir = path.join(process.env.TMPDIR || '/tmp', `anime_direct_${Date.now()}`)
     fs.mkdirSync(tmpDir, { recursive: true })
+    const statusKey = await crearEstado(m, conn, `🔎 Preparando descarga de ${sitio}...`)
     const pick = {
       servers: [{ nombre: sitio, url: directUrl }],
       tmpDir,
       controller: new AbortController(),
+      statusKey,
+      selectorKey: null,
       sitioElegido: null,
       argsParaAnime: [directUrl],
       nombre: null,
@@ -453,6 +504,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   if (parsed.url) {
     const sitio = getSitioPorDominio(parsed.url)
+    const statusKey = await crearEstado(m, conn, `🔎 Preparando episodio...`)
     let nombre = parsed.nombre || parsed.url.split('/').filter(Boolean).pop() || 'anime'
     let episodio = parsed.episodio
     try {
@@ -470,10 +522,10 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     try {
       await procesarEpisodio({
         m, conn, usedPrefix, nombre, episodio: episodio || 1, temporada: parsed.temporada,
-        sitioElegido: sitio, forceServers: parsed.forceServers, directEpisodeUrl: parsed.url,
+        sitioElegido: sitio, forceServers: parsed.forceServers, directEpisodeUrl: parsed.url, statusKey,
       })
     } catch (error) {
-      return m.reply(`Error: ${error.message}`)
+      await editarEstado(conn, m.chat, statusKey, `❌ ${error.message}`)
     }
     return
   }
@@ -500,26 +552,27 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   const total = finalEp - parsed.episodio + 1
   if (total > MAX_RANGE) return m.reply(`El rango máximo es de ${MAX_RANGE} episodios`)
 
+  const statusKey = await crearEstado(m, conn, `🔎 Buscando *${parsed.nombre}*...`)
   const resumen = []
   for (let offset = 0; offset < total; offset++) {
     if (global.activeDownloads.get(`${m.chat}|${m.sender}`)?.cancelled) break
     const episodio = parsed.episodio + offset
-    if (total > 1) await m.reply(`Episodio ${offset + 1}/${total}`)
+    if (total > 1) await editarEstado(conn, m.chat, statusKey, `🔎 Episodio ${offset + 1}/${total} · buscando *${parsed.nombre}*...`)
     try {
       const outcome = await procesarEpisodio({
         m, conn, usedPrefix, nombre: parsed.nombre, episodio,
-        temporada: parsed.temporada, sitioElegido: parsed.sitio, forceServers: parsed.forceServers,
+        temporada: parsed.temporada, sitioElegido: parsed.sitio, forceServers: parsed.forceServers, statusKey,
       })
       resumen.push(`${episodio}: ${outcome.waiting ? 'pendiente de servidor' : 'ok'}`)
       if (outcome.waiting) break
     } catch (error) {
       console.error('[animedl episodio]', episodio, error)
       resumen.push(`${episodio}: falló`)
-      await m.reply(`Episodio ${episodio}: ${error.message}`)
+      await editarEstado(conn, m.chat, statusKey, `❌ Episodio ${episodio}: ${error.message}`)
     }
     if (offset + 1 < total) await esperar(250)
   }
-  if (total > 1) await m.reply(`Resumen: ${resumen.join(' · ')}`)
+  if (total > 1) await editarEstado(conn, m.chat, statusKey, `Resumen: ${resumen.join(' · ')}`)
 }
 
 handler.before = async function (m, { conn }) {
@@ -535,17 +588,7 @@ handler.before = async function (m, { conn }) {
     const pick = global.pendingServerPicks.get(key)
     if (isServerPick && !pick) return false
     if (isServerPick) {
-      const num = Number(selectedId.split(/\s+/)[1])
-      if (num < 1 || num > pick.servers.length) {
-        await m.reply(`Selección inválida. Elige entre 1 y ${pick.servers.length}`)
-        return true
-      }
-      global.pendingServerPicks.delete(key)
-      delete global.animeDlSessions[key]
-      guardarPicks()
-      await ejecutarDescargaServidor(pick.servers, num - 1, pick, m, conn)
-      await enviarBotonesFinales(m, conn, pick)
-      return true
+      return seleccionarServidorPendiente(m, conn, selectedId.split(/\s+/)[1], pick)
     }
 
     const prefix = selectedId[0]
