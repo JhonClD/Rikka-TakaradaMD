@@ -1217,7 +1217,7 @@ export async function scrapeMonosChinos(url) {
     } catch (_) {}
     if (!embedUrl.startsWith('http') || servidores.find(s => s.url === embedUrl)) return
     servidores.push({
-      nombre : label || detectarServidor(embedUrl),
+      nombre : !label || /[/:]/.test(label) ? detectarServidor(embedUrl) : label,
       url    : normalizarMegaUrl(embedUrl),
       directo: /mega\.nz|mediafire\.com/.test(embedUrl),
     })
@@ -1618,65 +1618,64 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
 }
 
 export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
-  const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
+  const tokens = nombre.trim().split(/\s+/)
+  const queries = [...new Set([
+    nombre.trim(),
+    ...(tokens.length > 2 ? [tokens.slice(0, 2).join(' ')] : []),
+    ...(tokens[0]?.length >= 3 ? [tokens[0]] : []),
+  ])]
+  let searchUrl = ''
+  let links = []
 
-  const tryBuscarAPI = async () => {
-    try {
-      const apiUrl = `https://monoschinos.st/api/search?q=${encodeURIComponent(nombre)}&_=${Date.now()}`
-      const res = await fetch(apiUrl, {
-        headers: buildHeaders({ Referer: 'https://monoschinos.st/', Accept: 'application/json' }),
-        timeout: 10000,
-      })
-      if (!res.ok) return null
-      const json   = await res.json()
-      const animes = json?.data || json?.results || json?.animes || []
-      if (!Array.isArray(animes) || animes.length === 0) return null
-      const mejor = animes
-        .map(a => ({ ...a, score: puntuarMatch(a.titulo || a.title || a.name || '', nombre) }))
-        .sort((a, b) => b.score - a.score)[0]
-      const slug = mejor.slug || mejor.id || mejor.url?.split('/').filter(Boolean).pop()
-      if (slug) return `https://monoschinos.st/ver/${slug}-episodio-${episodio}`
-    } catch (_) {}
-    return null
-  }
-
-  const fromApi = await tryBuscarAPI()
-  if (fromApi) return fromApi
-
-  const searchUrl = `https://monoschinos.st/buscar?q=${encodeURIComponent(query)}`
-  const html = await fetchHtmlDirecto(searchUrl, 'https://monoschinos.st/')
-  const $    = cheerio.load(html)
-
-  const links = []
-
-  $('a[href*="/anime/"]').each((_, el) => {
-    const href  = $(el).attr('href') || ''
-    const title = (
-      $(el).find('h3, h3.title_cap, .title, .name').first().text() ||
-      $(el).attr('title') ||
-      $(el).text()
-    ).trim().toLowerCase()
-    const img = $(el).find('img')
-    if (!href || !title || img.length === 0) return
-    if (!links.find(l => l.href === href)) links.push({ href, title })
-  })
-
-  if (links.length === 0) {
-    $('a[href*="/anime/"]').each((_, el) => {
-      const href  = $(el).attr('href') || ''
-      const title = ($(el).attr('title') || $(el).text()).trim().toLowerCase()
-      if (href && title.length > 2 && !links.find(l => l.href === href)) links.push({ href, title })
+  for (const query of queries) {
+    searchUrl = `https://monoschinos.st/buscar?q=${encodeURIComponent(query)}`
+    const html = await fetchHtmlDirecto(searchUrl, 'https://monoschinos.st/')
+    if (!html) continue
+    const $ = cheerio.load(html)
+    const found = []
+    $('a.card-wrap[href*="/anime/"], a[href*="/anime/"]').each((_, el) => {
+      const href = $(el).attr('href') || ''
+      const title = (
+        $(el).find('.card-title').first().text() ||
+        $(el).find('h3').first().text() ||
+        $(el).find('img').attr('alt') ||
+        $(el).attr('title') ||
+        $(el).text()
+      ).trim()
+      if (!href || !title) return
+      let animeUrl
+      try { animeUrl = new URL(href, 'https://monoschinos.st').href } catch (_) { return }
+      if (!new URL(animeUrl).pathname.startsWith('/anime/')) return
+      if (!found.find(link => link.href === animeUrl)) found.push({ href: animeUrl, title })
     })
+    if (found.length) { links = found; break }
   }
 
   if (links.length === 0) return null
 
-  const elegido  = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
-  const slugMatch = elegido.href.match(/\/anime\/([^/?#]+)/)
-  if (!slugMatch) return null
-  const slug = slugMatch[1]
+  const seasonPattern = temporada > 1
+    ? new RegExp(`(?:temporada|season|parte|part)[\\s-]*${temporada}(?!\\d)`, 'i')
+    : null
+  const matchTemporada = links.find(link => seasonPattern?.test(`${link.title} ${link.href}`))
+  const seriesSinSecuela = temporada <= 1
+    ? links.filter(link => !/(?:temporada|season|parte|part)[\s-]*[2-9]\d*/i.test(`${link.title} ${link.href}`))
+    : links
+  const elegido = matchTemporada || mejorMatch(seriesSinSecuela.length ? seriesSinSecuela : links, nombre)
+  if (!elegido) return null
 
-  return `https://monoschinos.st/ver/${slug}-episodio-${episodio}`
+  const animeHtml = await fetchHtmlDirecto(elegido.href, searchUrl)
+  if (!animeHtml) return null
+  const $anime = cheerio.load(animeHtml)
+  const episodeHref = $anime('a[href*="/ver/"]').toArray()
+    .map(el => $anime(el).attr('href'))
+    .find(href => href && /-episodio-\d+\/?$/i.test(href))
+  if (!episodeHref) return null
+
+  let episodeUrl
+  try { episodeUrl = new URL(episodeHref, elegido.href) } catch (_) { return null }
+  const episodePath = episodeUrl.pathname.match(/^(.*-episodio-)\d+\/?$/i)
+  if (!episodePath) return null
+  return `${episodeUrl.origin}${episodePath[1]}${episodio}`
 }
 
 export class MegaQuotaError extends Error {
