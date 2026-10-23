@@ -876,9 +876,7 @@ async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus
     try {
         await updateStatus(`✅ *Descarga completa!*\n📤 _Enviando a WhatsApp..._`)
 
-        // FIX 4: Leer el archivo como Buffer — Baileys necesita el contenido,
-        // NO una ruta de archivo local. "document: { url: '/tmp/...' }" no funciona.
-        const fileBuffer = fs.readFileSync(tempPath)
+        // Baileys admite rutas locales y las transmite desde disco como stream.
         const stats = fs.statSync(tempPath)
         const epNum = String(episodio).padStart(2, '0')
         const cleanTitle = title.replace(/[/\\:*?"<>|]/g, '').trim()
@@ -886,7 +884,7 @@ async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus
         const fileSizeH = (stats.size / 1048576).toFixed(2) + ' MB'
 
         await conn.sendMessage(m.chat, {
-            document: fileBuffer,               // ← Buffer directo, no { url: path }
+            document: { url: tempPath },
             fileName: finalName,
             mimetype: 'video/mp4',
             caption:

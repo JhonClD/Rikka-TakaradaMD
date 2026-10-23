@@ -132,18 +132,17 @@ function buildProgressMsg(st, torrentName) {
 }
 
 async function sendFile(conn, chat, filePath, m) {
-  const buf  = fs.readFileSync(filePath)
   const name = path.basename(filePath)
-  const size = buf.length
+  const size = fs.statSync(filePath).size
   const ext  = name.split('.').pop().toLowerCase()
   const cap  = `📁 *${name}*\n📦 ${fmtBytes(size)}`
 
   if (/mp4|mkv|webm|mov|avi/.test(ext)) {
-    await conn.sendMessage(chat, { video: buf, caption: cap, mimetype: 'video/mp4', fileName: name }, { quoted: m })
+    await conn.sendMessage(chat, { video: { url: filePath }, caption: cap, mimetype: 'video/mp4', fileName: name }, { quoted: m })
   } else if (/mp3|m4a|flac|wav|ogg|aac/.test(ext)) {
-    await conn.sendMessage(chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false, fileName: name }, { quoted: m })
+    await conn.sendMessage(chat, { audio: { url: filePath }, mimetype: 'audio/mpeg', ptt: false, fileName: name }, { quoted: m })
   } else {
-    await conn.sendMessage(chat, { document: buf, mimetype: 'application/octet-stream', fileName: name, caption: cap }, { quoted: m })
+    await conn.sendMessage(chat, { document: { url: filePath }, mimetype: 'application/octet-stream', fileName: name, caption: cap }, { quoted: m })
   }
 }
 
@@ -294,4 +293,3 @@ handler.tags        = ['downloader']
 handler.command     = ['torrent', 'bt', 'tcancel']
 
 export default handler
-

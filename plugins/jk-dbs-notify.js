@@ -576,7 +576,7 @@ async function enviarEpisodio(chatId, ep, conn) {
 
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
     await conn.sendMessage(chatId, {
-      document: fs.readFileSync(videoPath),
+      document: { url: videoPath },
       fileName,
       mimetype: 'video/mp4',
       caption: `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}`,

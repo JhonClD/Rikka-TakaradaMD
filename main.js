@@ -6,6 +6,7 @@ import path, { join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { platform } from 'process';
 import fs, { readdirSync, statSync, unlinkSync, existsSync, readFileSync, watch } from 'fs';
+import https from 'https';
 import yargs from 'yargs';
 import { spawn } from 'child_process';
 import lodash from 'lodash';
@@ -33,6 +34,14 @@ serialize();
 const msgRetryCounterMap = new Map();
 const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+// Reutiliza conexiones TLS del upload endpoint de WhatsApp entre envíos.
+const mediaUploadAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+  maxSockets: 8,
+  maxFreeSockets: 4,
+  scheduling: 'lifo',
+});
 let socketReloadInProgress = false;
 const qrGuard = createQRGuard({
   ttlMs: 60_000,
@@ -157,6 +166,7 @@ const connectionOptions = {
   msgRetryCounterCache: msgRetryCounterCache || new Map(),
   userDevicesCache: userDevicesCache || new Map(),
   defaultQueryTimeoutMs: 20000,
+  fetchAgent: mediaUploadAgent,
   cachedGroupMetadata: (jid) => global.conn.chats[jid]?.metadata ?? {},
   keepAliveIntervalMs: 30000,
   maxIdleTimeMs: 120000,
