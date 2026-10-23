@@ -531,16 +531,24 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   }
 
   if (parsed.episodio == null) {
-    if (parsed.nombre && parsed.sitio) {
+    if (parsed.nombre) {
+      let sitioParaLista = parsed.sitio
       try {
-        const episodios = await listarEpisodios(parsed.sitio, parsed.nombre, parsed.temporada)
+        if (!sitioParaLista) {
+          const encontrado = await buscarAnime(parsed.nombre, 1, parsed.temporada, null)
+          sitioParaLista = encontrado.sitio
+        }
+        if (!sitioParaLista) return m.reply(`No encontré *${parsed.nombre}* en los sitios disponibles`)
+        const episodios = await listarEpisodios(sitioParaLista, parsed.nombre, parsed.temporada)
         if (episodios.length > 0) {
-          return enviarListaEpisodios(m, conn, usedPrefix, parsed.sitio, parsed.nombre, parsed.temporada, episodios)
+          return enviarListaEpisodios(m, conn, usedPrefix, sitioParaLista, parsed.nombre, parsed.temporada, episodios)
         }
       } catch (error) {
         console.error('[animedl listar episodios]', error.message)
       }
-      return m.reply(`No pude obtener los episodios de ${parsed.sitio.nombre}. Indica uno, por ejemplo: ${usedPrefix}animedl -s ${parsed.sitio.id} ${parsed.nombre} 1`)
+      const sitioTexto = sitioParaLista ? ` de ${sitioParaLista.nombre}` : ''
+      const sitioId = sitioParaLista ? ` -s ${sitioParaLista.id}` : ''
+      return m.reply(`No pude obtener los episodios${sitioTexto}. Indica uno, por ejemplo: ${usedPrefix}animedl${sitioId} ${parsed.nombre} 1`)
     }
     return m.reply(`Indica el episodio. Ejemplo: ${usedPrefix}animedl naruto t2 1`)
   }
