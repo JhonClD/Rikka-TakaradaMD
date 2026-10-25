@@ -306,33 +306,6 @@ function emojiServidor(nombre) {
 }
 
 async function enviarSelector(m, conn, servidores, pick, usedPrefix, sitioNombre) {
-  const { isMobile } = dispositivoMovil(m)
-  const filas = servidores.map((s, i) => ({
-    header: `${emojiServidor(s.nombre)} ${String(s.nombre || 'servidor').toUpperCase()}`,
-    title: `${emojiServidor(s.nombre)} ${String(s.nombre || 'servidor').toUpperCase()}${s.directo ? ' ✅' : ''}`,
-    description: s.directo ? 'Link directo' : 'Servidor de streaming',
-    id: `${usedPrefix}dl ${i + 1}`,
-  }))
-
-  if (isMobile) {
-    try {
-      const sent = await conn.sendMessage(m.chat, {
-        text: 'Elige el servidor para descargar',
-        footer: global.wm || 'Rikka-TakaradaMD',
-        nativeFlow: [{
-          text: 'Elegir servidor',
-          icon: 'default',
-          sections: [{ title: `${sitioNombre || 'Anime'} · ${servidores.length} servidores`, rows: filas }],
-        }],
-      }, { quoted: m })
-      pick.selectorKey = sent?.key || null
-      guardarPicks()
-      return true
-    } catch (error) {
-      console.error('[animedl nativeFlow]', error.message)
-    }
-  }
-
   const lista = servidores.map((s, i) =>
     `${emojiServidor(s.nombre)} *${numToLetter(i)}.* ${String(s.nombre || 'servidor').toUpperCase()}${s.directo ? ' ✅' : ''}`
   ).join('\n')
@@ -385,32 +358,6 @@ async function listarEpisodios(sitio, nombre, temporada) {
 
 async function enviarListaEpisodios(m, conn, usedPrefix, sitio, nombre, temporada, episodios) {
   const lista = episodios.slice(-26)
-  const filas = lista.map(ep => ({
-    header: `Episodio ${ep}`,
-    title: `Episodio ${ep}`,
-    description: `Descargar desde ${sitio.nombre}`,
-    id: `${usedPrefix}animedl -s ${sitio.id} ${nombre} t${temporada} ${ep}`,
-  }))
-  const { isMobile } = dispositivoMovil(m)
-  if (isMobile) {
-    try {
-      await conn.sendMessage(m.chat, {
-        text: `Episodios disponibles de ${nombre}`,
-        footer: global.wm || 'Rikka-TakaradaMD',
-        nativeFlow: [{
-          text: 'Elegir episodio',
-          icon: 'default',
-          sections: [{
-            title: `${sitio.nombre} · ${episodios.length} episodios`,
-            rows: filas,
-          }],
-        }],
-      }, { quoted: m })
-      return true
-    } catch (error) {
-      console.error('[animedl episodios nativeFlow]', error.message)
-    }
-  }
   await m.reply(
     `*${sitio.nombre} · Episodios de ${nombre}*\n\n` +
     lista.map(ep => `· ${ep}`).join('\n') +
@@ -420,29 +367,7 @@ async function enviarListaEpisodios(m, conn, usedPrefix, sitio, nombre, temporad
 }
 
 async function enviarBotonesFinales(m, conn, pick) {
-  const { isMobile } = dispositivoMovil(m)
-  if (!isMobile || !pick.nombre || pick.episodio == null) return
-  const sitio = pick.sitioId ? ` -s ${pick.sitioId}` : ''
-  try {
-    await conn.sendMessage(m.chat, {
-      text: 'Descarga terminada',
-      footer: global.wm || 'Rikka-TakaradaMD',
-      nativeFlow: [
-        {
-          text: 'Siguiente episodio',
-          id: `.animedl${sitio} ${pick.nombre} t${pick.temporada} ${Number(pick.episodio) + 1}`,
-          icon: 'default',
-        },
-        {
-          text: 'Otro servidor',
-          id: `.animedl${sitio} ${pick.nombre} t${pick.temporada} ${pick.episodio} --srv`,
-          icon: 'default',
-        },
-      ],
-    }, { quoted: m })
-  } catch (error) {
-    console.error('[animedl botones]', error.message)
-  }
+  // La interfaz de AnimeDL es únicamente por texto.
 }
 
 async function procesarEpisodio({ m, conn, usedPrefix, nombre, episodio, temporada, sitioElegido, forceServers, directEpisodeUrl = null, statusKey = null }) {
