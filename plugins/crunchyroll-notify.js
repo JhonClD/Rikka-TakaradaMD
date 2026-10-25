@@ -294,8 +294,8 @@ function startCron(conn) {
   stopCron()
 
   const cfg     = loadCfg()
-  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 5)
-  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 5
+  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 1)
+  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 1
 
   // El cron siempre arranca, pero nunca permite dos consultas simultáneas.
   cronTimer = setInterval(async () => {
@@ -353,7 +353,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
       startCron(conn)
       const cfg = loadCfg()
       return conn.sendMessage(m.chat, {
-        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 5} min\n🔁 Refresh automático habilitado`,
+        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 1} min\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
     } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
   }
@@ -403,7 +403,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   // ── .crstatus ─────────────────────────────────────────────────────────────
   if (command === 'crstatus') {
     const cfg  = loadCfg()
-    const mins = process.env.CR_MINUTES || cfg.minutes || '5'
+    const mins = process.env.CR_MINUTES || cfg.minutes || '1'
     const seen = loadSeen()
     const exp  = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
     const gruposList = cfg.targetJids.length
