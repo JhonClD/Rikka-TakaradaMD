@@ -2000,7 +2000,9 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     }
   }
 
-  const servidoresPendientes = listaIntentos.slice(indiceInicio, indiceInicio + 6)
+  // Probar todos los servidores del mismo sitio. Mega y MediaFire quedan
+  // primero por ordenarServidores(), pero si fallan se continúa con los demás.
+  const servidoresPendientes = listaIntentos.slice(indiceInicio)
   await updateStatus(`⏳ Preparando descarga desde *${servidoresPendientes[0]?.nombre?.toUpperCase() || 'servidor'}*...`)
 
   for (const srv of servidoresPendientes) {
@@ -2119,7 +2121,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
   if (!archivoPath) {
     if (statusKey) global.activeDownloads.delete(activeKey())
     fs.rmSync(tmpDir, { recursive: true, force: true })
-    const intentados = listaIntentos.slice(indiceInicio, indiceInicio + 4).map(s => s.nombre).join(', ')
+    const intentados = servidoresPendientes.map(s => s.nombre).join(', ')
     const sugerencias = SITIOS.filter(s => s.id !== sitioElegido?.id)
           .slice(0, 4)
           .map(s => `  .animedl ${s.id} ${(argsParaAnime || []).join(' ')}`)
