@@ -155,14 +155,24 @@ async function crFetch(path, params = {}, base = CR_BASE) {
 
 // ─── Lógica de Procesamiento ──────────────────────────────────────────────────
 function extractImage(images = {}) {
-  const src = images.thumbnail || images.poster_tall || images.poster_wide
-  if (!src) return ''
-  if (typeof src === 'string') return src
-  if (Array.isArray(src)) {
-    const flat = src.flat().filter(Boolean)
-    return flat.sort((a, b) => (b.width || 0) - (a.width || 0))[0]?.source || ''
-  }
-  return ''
+  // Crunchyroll devuelve thumbnail, poster_tall y poster_wide con varias
+  // resoluciones. No usar `thumbnail` por defecto: suele ser una miniatura.
+  const candidates = Object.values(images)
+    .flat(Infinity)
+    .filter(Boolean)
+    .map(item => {
+      if (typeof item === 'string') return { source: item, width: 0, height: 0 }
+      if (typeof item !== 'object') return null
+      return {
+        source: item.source || item.url || '',
+        width: Number(item.width) || 0,
+        height: Number(item.height) || 0,
+      }
+    })
+    .filter(item => item?.source)
+
+  return candidates
+    .sort((a, b) => (b.width * b.height || b.width) - (a.width * a.height || a.width))[0]?.source || ''
 }
 
 function normalizeEpisode(p) {
