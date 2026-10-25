@@ -99,11 +99,6 @@ export function cargarPicks() {
 
 export const SITIOS = [
   {
-    id: 1, nombre: 'MonosChinos', dominio: 'monoschinos',
-    url: 'https://monoschinos.st',
-    buscar: buscarEnMonosChinos, scrape: scrapeMonosChinos,
-  },
-  {
     id: 2, nombre: 'LatAnime',    dominio: 'latanime',
     url: 'https://latanime.org',
     buscar: buscarEnLatAnime,    scrape: scrapeLatAnime,
