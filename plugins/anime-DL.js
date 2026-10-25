@@ -74,6 +74,10 @@ async function buscarInfoJikan(nombre) {
     .filter(relation => /sequel/i.test(relation.relation))
     .flatMap(relation => relation.entry || [])
     .filter(entry => entry.type === 'anime')
+    .map(entry => ({
+      ...entry,
+      ...(resultados.find(result => result.mal_id === entry.mal_id) || {}),
+    }))
   const alternativos = resultados
     .filter(item => item.mal_id !== principal.mal_id)
     .slice(0, 5)
@@ -94,15 +98,15 @@ function formatearInfoJikan(info, temporada = 1) {
     `❏ *T${index + 1}* » ${season.title || anime.title} (${season.episodes || season.episodios?.length || '?'} ep.)`
   )
   const alternativos = info.alternativos.length
-    ? `\n\n✐ Otros resultados: ${info.alternativos.map((title, i) => `*${String.fromCharCode(97 + i)})* ${title}`).join(' · ')}`
+    ? `\n✐ Otros resultados: ${info.alternativos.map((title, i) => `*${String.fromCharCode(97 + i)})* ${title}`).join(' · ')}`
     : ''
-  return `「✐」*${anime.title}*\n` +
+  return `「✐」*${info.principal.title || anime.title}*\n` +
     `${temporadas.join('\n')}\n` +
-    `❏ Audio » No disponible en Jikan\n` +
-    `❏ Subs » No disponible en Jikan\n\n` +
+    `❏ Audio » No disponible\n` +
+    `❏ Subs » No disponible\n\n` +
     `*T${temporada} · ${anime.title}*\n` +
     `${lista || '> No hay títulos de episodios disponibles'}\n\n` +
-    `✐ Responde a este mensaje con el episodio: *5* · *5 lat* · *5 sub:en* · *s2 5* · *s2*` +
+    `✐ Responde a este mensaje con el episodio: *5* · *5 720p* · *5 lat* · *5 sub:en* · *5 doc* · *s2 5* · *s2* (ver la T2)` +
     alternativos
 }
 
