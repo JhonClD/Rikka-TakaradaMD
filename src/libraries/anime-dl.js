@@ -1483,7 +1483,7 @@ export async function buscarEnAnimeFLV(nombre, episodio, temporada = 1) {
 
 export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
   const query = temporada > 1 ? `${nombre} temporada ${temporada}` : nombre
-  const html  = await fetchHtml(`https://latanime.org/?s=${encodeURIComponent(query)}`)
+  const html  = await fetchHtml(`https://latanime.org/buscar?q=${encodeURIComponent(query)}`)
   const $     = cheerio.load(html)
 
   const links = []
@@ -1524,7 +1524,16 @@ export async function buscarEnLatAnime(nombre, episodio, temporada = 1) {
 
   if (links.length === 0) return null
 
-  const elegido = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
+  const seasonPattern = temporada > 1
+    ? new RegExp(`(?:temporada|season|parte|part|s)\\s*[- ]?${temporada}\\b`, 'i')
+    : /(?:temporada|season|parte|part|s)\s*[2-9]\b/i
+  const seasonLinks = temporada > 1
+    ? links.filter(link => seasonPattern.test(`${link.title} ${link.href}`))
+    : links.filter(link => !seasonPattern.test(`${link.title} ${link.href}`))
+  const candidatos = seasonLinks.length > 0 ? seasonLinks : links
+  const latinos = candidatos.filter(link => /latino/i.test(`${link.title} ${link.href}`))
+  const preferidos = latinos.length > 0 ? latinos : candidatos
+  const elegido = mejorMatch(preferidos, nombre) || elegirPorTemporada(preferidos, temporada) || preferidos[0]
 
   let baseHref = elegido.href
   const slugMatch =
