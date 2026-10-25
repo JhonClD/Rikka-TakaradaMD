@@ -6,21 +6,6 @@ const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DO
 const TTL = 10 * 60 * 1000
 const MAX_SEARCH_RESULTS = 12
 const MAX_OTHER_RESULTS = 4
-const SOLO_LEVELING_EPISODES = {
-  '1': 'Ya estoy acostumbrado',
-  '2': 'Si tuviera otra oportunidad',
-  '3': 'Es como un videojuego',
-  '4': 'Tengo que hacerme más fuerte',
-  '5': 'Un muy buen trato',
-  '6': 'Comienza la verdadera caza',
-  '7': 'Veamos hasta dónde puedo llegar',
-  '7.5': 'Episodio especial',
-  '8': 'Esto es frustrante',
-  '9': 'Has estado ocultando tus habilidades',
-  '10': '¿Qué es esto, un pícnic?',
-  '11': 'Un caballero defendiendo un trono vacío',
-  '12': 'Surjan',
-}
 
 global.nidlSessions = global.nidlSessions || new Map()
 global.nidlDownloadLocks = global.nidlDownloadLocks || new Set()
@@ -85,9 +70,6 @@ function formatSeasonTitle(season) {
 
 function formatEpisodeTitle(season, episode, index) {
   const number = episodeNumber(episode, index)
-  if (isSoloSeasonData(season) && season.number === 1) {
-    return SOLO_LEVELING_EPISODES[String(number)] || clean(episode.title || `Episodio ${number}`)
-  }
   const title = clean(episode.title)
   return !title || /^episodio\s+\d+(?:\.\d+)?$/i.test(title)
     ? `Episodio ${number}`
