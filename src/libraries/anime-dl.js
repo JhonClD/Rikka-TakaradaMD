@@ -1602,12 +1602,17 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     console.error('[jkanime] HTML search:', e.message)
   }
 
+  const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
+  const candidatos = temporada > 1
+    ? [
+        `${slugBase}-${temporada}nd-season`,
+        `${slugBase}-season-${temporada}`,
+        `${slugBase}-temporada-${temporada}`,
+        `${slugBase}-${temporada}`,
+        slugBase,
+      ]
+    : [slugBase]
   try {
-    const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
-    const candidatos = [slugBase]
-    if (temporada > 1) {
-      candidatos.push(`${slugBase}-${temporada}nd-season`, `${slugBase}-temporada-${temporada}`, `${slugBase}-season-${temporada}`)
-    }
     for (const slug of candidatos) {
       const epUrl = `https://jkanime.net/${slug}/${episodio}/`
       try {
@@ -1622,7 +1627,10 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
     console.error('[jkanime] slug directo:', e.message)
   }
 
-  return null
+  // JKAnime suele bloquear las búsquedas con 403. Devuelve el candidato
+  // canónico para que el extractor de servidores lo intente mediante sus
+  // propios fallbacks y proxies.
+  return `https://jkanime.net/${candidatos[0]}/${episodio}/`
 }
 
 export async function buscarEnMonosChinos(nombre, episodio, temporada = 1) {
