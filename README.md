@@ -63,33 +63,6 @@ npm start
 
 Escanea el QR o ingresa el código de emparejamiento en WhatsApp → Dispositivos vinculados.
 
-### 5. Mantenerlo activo en el servidor
-
-Para que el bot se reinicie si Node.js falla y vuelva a arrancar después de reiniciar el servidor, instala PM2 una sola vez:
-
-```bash
-npm install -g pm2
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup
-```
-
-Ejecuta el comando que muestre `pm2 startup` y después vuelve a guardar la lista:
-
-```bash
-pm2 save
-```
-
-Comandos útiles:
-
-```bash
-pm2 status
-pm2 logs rikka-takarada-md
-pm2 restart rikka-takarada-md
-```
-
-La configuración deja el notificador de Crunchyroll en un intervalo de un minuto. Si el servidor está completamente apagado, ningún proceso puede enviar mensajes hasta que el servidor vuelva a encenderse; PM2 se encarga de arrancarlo automáticamente después del reinicio del sistema.
-
 ---
 
 ## ✨ Funciones disponibles
