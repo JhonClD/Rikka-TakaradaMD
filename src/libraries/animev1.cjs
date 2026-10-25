@@ -736,7 +736,19 @@ function normalizeTextForSearch(value) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
     .trim();
+}
+
+function getSearchQueryVariants(query) {
+  const normalized = normalizeTextForSearch(query);
+  const variants = [String(query || "").trim()];
+  if (/\bsolo\s+leveling\b/.test(normalized)) {
+    const remaining = normalized.replace(/\bsolo\s+leveling\b/g, " ").trim();
+    variants.push(`ore dake level up na ken ${remaining}`.trim());
+  }
+  return [...new Map(variants.filter(Boolean).map((item) => [normalizeTextForSearch(item), item])).values()];
 }
 
 function filterSearchResultsByQuery(results, query) {
@@ -745,34 +757,31 @@ function filterSearchResultsByQuery(results, query) {
     return results.slice(0, 20);
   }
 
-  const queryTerms = normalizedQuery.split(/\s+/).filter(Boolean);
+  const queryTerms = normalizedQuery.split(/\s+/).filter((term) => term.length >= 2 || /^\d$/.test(term));
+  const soloLevelingQuery = queryTerms.includes("solo") && queryTerms.includes("leveling");
   const scored = [];
 
   for (const result of results) {
     const title = normalizeTextForSearch(result.title);
     const slug = normalizeTextForSearch(result.slug);
     const combined = `${title} ${slug}`.trim();
+    const titleTokens = combined.split(/\s+/).filter(Boolean);
 
-    let score = 0;
-    if (title === normalizedQuery || slug === normalizedQuery) {
-      score += 5;
-    }
+    const phraseMatch = title === normalizedQuery || slug === normalizedQuery ||
+      title.includes(normalizedQuery) || slug.includes(normalizedQuery);
+    const termMatches = (term) => {
+      const variants = [term];
+      if (term.length >= 6 && term.endsWith("ing")) variants.push(term.slice(0, -3));
+      if (term.length >= 5 && term.endsWith("s")) variants.push(term.slice(0, -1));
+      return titleTokens.some((token) => variants.some((variant) => token === variant || token.startsWith(variant)));
+    };
+    const matchedTerms = queryTerms.filter(termMatches);
+    const allTermsMatch = queryTerms.length > 0 && matchedTerms.length === queryTerms.length;
+    const soloLevelingAlias = soloLevelingQuery && /\bore dake level up na ken\b/.test(combined) &&
+      queryTerms.filter((term) => term !== "solo" && term !== "leveling").every(termMatches);
 
-    if (title.includes(normalizedQuery) || slug.includes(normalizedQuery)) {
-      score += 3;
-    }
-
-    for (const term of queryTerms) {
-      if (term.length < 2) {
-        continue;
-      }
-
-      if (combined.includes(term)) {
-        score += 1;
-      }
-    }
-
-    if (score > 0) {
+    if (phraseMatch || allTermsMatch || soloLevelingAlias || (queryTerms.length === 1 && matchedTerms.length === 1)) {
+      const score = (phraseMatch ? 20 : 0) + (soloLevelingAlias ? 15 : 0) + matchedTerms.length * 4;
       scored.push({ result, score });
     }
   }
@@ -883,38 +892,40 @@ async function searchAnime(query, domainCandidate) {
   let bestResults = [];
   let bestSource = "html";
 
-  const candidates = [
-    { key: "search", value: cleanQuery },
-    { key: "q", value: cleanQuery },
-  ];
+  const queryVariants = getSearchQueryVariants(cleanQuery);
+  const candidates = ["search", "q"];
+  const seenResults = new Set();
 
-  for (const candidate of candidates) {
-    const searchUrl = `https://${domain}/catalogo?${candidate.key}=${encodeURIComponent(candidate.value)}`;
-    const html = await fetchHtml(searchUrl);
+  for (const searchValue of queryVariants) {
+    for (const key of candidates) {
+      const searchUrl = `https://${domain}/catalogo?${key}=${encodeURIComponent(searchValue)}`;
+      const html = await fetchHtml(searchUrl);
 
-    let results = [];
-    const svelteData = extractSvelteData(html);
-    if (svelteData) {
-      const bestArray = chooseLikelySearchArray(svelteData);
-      if (bestArray) {
-        results = mapSearchResults(bestArray, domain);
+      let results = [];
+      const svelteData = extractSvelteData(html);
+      if (svelteData) {
+        const bestArray = chooseLikelySearchArray(svelteData);
+        if (bestArray) {
+          results = mapSearchResults(bestArray, domain);
+        }
       }
-    }
 
-    if (results.length === 0) {
-      results = parseSearchResultsFromHtml(html, domain);
-    }
+      if (results.length === 0) {
+        results = parseSearchResultsFromHtml(html, domain);
+      }
 
-    results = filterSearchResultsByQuery(results, cleanQuery);
+      results = filterSearchResultsByQuery(results, cleanQuery);
 
-    if (results.length > bestResults.length) {
-      bestResults = results;
-      bestSource = svelteData ? "json" : "html";
-    }
+      for (const result of results) {
+        if (seenResults.has(result.url)) continue;
+        seenResults.add(result.url);
+        bestResults.push(result);
+      }
+      if (results.length > 0) bestSource = svelteData ? "json" : "html";
 
-    if (bestResults.length >= 5) {
-      break;
+      if (bestResults.length >= 20) break;
     }
+    if (bestResults.length >= 20) break;
   }
 
   return {

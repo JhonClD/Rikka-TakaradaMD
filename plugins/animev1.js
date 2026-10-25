@@ -57,7 +57,13 @@ function parseIndex(value, length) {
 function formatSearchResults(query, results) {
   const lines = results.slice(0, MAX_RESULTS).map((item, index) => {
     const meta = [item.type, item.year, item.status].filter(Boolean).join(' · ')
-    return `*${index + 1}.* ${clean(item.title, 120)}${meta ? `\n   ${clean(meta, 100)}` : ''}`
+    const isSoloLeveling = /ore dake level up na ken/i.test(`${item.title} ${item.slug || ''}`)
+    const displayTitle = isSoloLeveling
+      ? /season 2|arise from the shadow/i.test(item.title)
+        ? `Solo Leveling: Arise from the Shadow (${item.title})`
+        : `Solo Leveling (${item.title})`
+      : item.title
+    return `*${index + 1}.* ${clean(displayTitle, 150)}${meta ? `\n   ${clean(meta, 100)}` : ''}`
   })
   return `*AnimeV1 · Resultados para “${clean(query, 100)}”*\n\n${lines.join('\n')}\n\n` +
     `Usa *.animev1info <número>* para ver la ficha y episodios.`
