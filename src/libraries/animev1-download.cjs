@@ -323,7 +323,7 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   return { filePath, extension, mimetype }
 }
 
-function listCandidates(data, variant) {
+function listCandidates(data, variant, preferredQuality = null) {
   const key = String(variant || 'SUB').toUpperCase() === 'DUB' ? 'DUB' : 'SUB'
   const stream = data?.streamLinks?.[key] || data?.servers?.[key.toLowerCase()] || []
   const downloads = data?.downloadLinks?.[key] || []
@@ -345,7 +345,11 @@ function listCandidates(data, variant) {
         const text = `${item.server || ''} ${item.url || ''}`.toLowerCase()
         const index = PRIORITY.findIndex(token => text.includes(token))
         const kindBonus = item.kind === 'descarga' ? 0 : 1
-        return index < 0 ? PRIORITY.length * 2 + kindBonus : index * 2 + kindBonus
+        const serverRank = index < 0 ? PRIORITY.length * 2 + kindBonus : index * 2 + kindBonus
+        const qualityRank = preferredQuality && item.quality
+          ? String(item.quality).toLowerCase().includes(String(preferredQuality).toLowerCase()) ? -100 : 20
+          : 0
+        return qualityRank + serverRank
       }
       return rank(a) - rank(b)
     })
@@ -356,7 +360,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
   if (!normalizedEpisodeUrl) throw new Error('La URL del episodio no es válida.')
   const variant = String(options.variant || 'SUB').toUpperCase() === 'DUB' ? 'DUB' : 'SUB'
   const response = await animeV1.getEpisodeLinks(normalizedEpisodeUrl, false)
-  const candidates = listCandidates(response?.data, variant)
+  const candidates = listCandidates(response?.data, variant, options.quality)
   if (!candidates.length) throw new Error(`AnimeV1 no encontró enlaces para la variante ${variant}.`)
 
   await fs.promises.mkdir(TEMP_DIR, { recursive: true })
