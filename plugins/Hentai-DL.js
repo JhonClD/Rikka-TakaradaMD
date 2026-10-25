@@ -32,7 +32,8 @@ const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar 
 // ║  CONFIGURACIÓN DE TOKENS — TODOS GRATUITOS                        ║
 // ║                                                                   ║
 // ║  Crea cuenta gratis en cada uno y pega el token:                 ║
-// ║  1. https://scrape.do          → 1,000/mes  → SCRAPE_DO_TOKEN    ║
+// ║  1. https://scrape.do          → general     → SCRAPE_DO_TOKEN    ║
+// ║     https://scrape.do          → JKAnime     → SCRAPE_DO_JK_TOKEN ║
 // ║  2. https://scraperapi.com      → 1,000/mes  → SCRAPERAPI_KEY     ║
 // ║  3. https://webscraping.ai      → clave opcional → WEBSCRAPING_AI_KEY ║
 // ║  4. https://webscrapingapi.com  → 5,000/mes  → WEBSCRAPINGAPI_KEY ║
@@ -44,6 +45,7 @@ const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar 
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 const SCRAPE_DO_TOKEN    = '6868b58ba96148b4b282f0075795119e67a595611e7'  // scrape.do → 1,000/mes
+const SCRAPE_DO_JK_TOKEN = process.env.SCRAPE_DO_JK_TOKEN || ''
 const SCRAPERAPI_KEY     = '56971a05b709caed0f17204ccc1f4532'             // scraperapi.com → 1,000/mes
 const WEBSCRAPING_AI_KEY = process.env.WEBSCRAPING_AI_KEY || ''
 const WEBSCRAPINGAPI_KEY = ''  // webscrapingapi.com → 5,000/mes
@@ -150,9 +152,10 @@ function cacheSet(url, html) {
 
 // ─── Capa 1a: scrape.do ──────────────────────────────────────────────────
 async function fetchViaScrapeDo(url, options = {}) {
-    if (!SCRAPE_DO_TOKEN) throw new Error('sin token')
+    const token = options.token || SCRAPE_DO_TOKEN
+    if (!token) throw new Error('sin token')
     const params = new URLSearchParams({
-        token: SCRAPE_DO_TOKEN,
+        token,
         url,
         render: String(Boolean(options.render)),
         timeout: String(options.render ? 55000 : 30000),
@@ -343,10 +346,11 @@ export async function fetchText(url) {
         // Capa 1a: scrape.do; JKAnime necesita navegador, espera y proxy avanzado.
         if (SCRAPE_DO_TOKEN) {
             try {
-                const esJKAnime = /(^|\.)jkanime\.net\//i.test(url)
+                const esJKAnime = esJKAnimeUrl(url)
                 const html = await fetchViaScrapeDo(url, {
                     render: esJKAnime,
                     superProxy: esJKAnime,
+                    token: esJKAnime ? (SCRAPE_DO_JK_TOKEN || SCRAPE_DO_TOKEN) : SCRAPE_DO_TOKEN,
                 })
                 if (!esCFBloqueado(html)) {
                     console.log(`[HDL] ✅ scrape.do${esJKAnime ? ' render' : ''} OK: ${url.replace(BASE, '')}`)
