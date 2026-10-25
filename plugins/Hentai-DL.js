@@ -34,9 +34,10 @@ const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar 
 // ║  Crea cuenta gratis en cada uno y pega el token:                 ║
 // ║  1. https://scrape.do          → 1,000/mes  → SCRAPE_DO_TOKEN    ║
 // ║  2. https://scraperapi.com      → 1,000/mes  → SCRAPERAPI_KEY     ║
-// ║  3. https://webscrapingapi.com  → 5,000/mes  → WEBSCRAPINGAPI_KEY ║
-// ║  4. https://www.scrapingdog.com → 1,000/mes  → SCRAPINGDOG_KEY    ║
-// ║  5. https://www.scrapingbee.com → 1,000/mes  → SCRAPINGBEE_KEY    ║
+// ║  3. https://webscraping.ai      → clave opcional → WEBSCRAPING_AI_KEY ║
+// ║  4. https://webscrapingapi.com  → 5,000/mes  → WEBSCRAPINGAPI_KEY ║
+// ║  5. https://www.scrapingdog.com → 1,000/mes  → SCRAPINGDOG_KEY    ║
+// ║  6. https://www.scrapingbee.com → 1,000/mes  → SCRAPINGBEE_KEY    ║
 // ║                                                                   ║
 // ║  Con estos + caché de 6h: ~300+ descargas/día gratis              ║
 // ║  Tokens que no ponés quedan como ''  — el bot los salta          ║
@@ -44,6 +45,7 @@ const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar 
 
 const SCRAPE_DO_TOKEN    = '6868b58ba96148b4b282f0075795119e67a595611e7'  // scrape.do → 1,000/mes
 const SCRAPERAPI_KEY     = '56971a05b709caed0f17204ccc1f4532'             // scraperapi.com → 1,000/mes
+const WEBSCRAPING_AI_KEY = process.env.WEBSCRAPING_AI_KEY || ''
 const WEBSCRAPINGAPI_KEY = ''  // webscrapingapi.com → 5,000/mes
 const SCRAPINGDOG_KEY    = ''  // scrapingdog.com → 1,000/mes
 const SCRAPINGBEE_KEY    = ''  // scrapingbee.com → 1,000/mes
@@ -137,17 +139,45 @@ function cacheSet(url, html) {
 }
 
 // ─── Capa 1a: scrape.do ──────────────────────────────────────────────────
-async function fetchViaScrapeDo(url) {
+async function fetchViaScrapeDo(url, options = {}) {
     if (!SCRAPE_DO_TOKEN) throw new Error('sin token')
-    const apiUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(url)}&render=false`
-    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    const params = new URLSearchParams({
+        token: SCRAPE_DO_TOKEN,
+        url,
+        render: String(Boolean(options.render)),
+        timeout: String(options.render ? 55000 : 30000),
+        retryTimeout: '15000',
+        waitUntil: options.render ? 'networkidle2' : 'domcontentloaded',
+        customWait: options.render ? '2500' : '0',
+        super: String(Boolean(options.superProxy)),
+        blockResources: options.render ? 'false' : 'true',
+    })
+    const apiUrl = `https://api.scrape.do/?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: options.render ? 65000 : 35000, agent: null })
     if (res.status === 401) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
 
-// ─── Capa 1b: ScraperAPI ─────────────────────────────────────────────────
+// ─── Capa 1b: WebScraping.AI (opcional) ─────────────────────────────────
+async function fetchViaWebScrapingAI(url) {
+    if (!WEBSCRAPING_AI_KEY) throw new Error('sin token')
+    const params = new URLSearchParams({
+        api_key: WEBSCRAPING_AI_KEY,
+        url,
+        js_rendering: 'true',
+        timeout: '30000',
+    })
+    const apiUrl = `https://api.webscraping.ai/html?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: 45000, agent: null })
+    if (res.status === 401 || res.status === 403) throw new Error('Token WebScraping.AI inválido')
+    if (res.status === 429) throw new Error('Límite de WebScraping.AI alcanzado')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.text()
+}
+
+// ─── Capa 1c: ScraperAPI ─────────────────────────────────────────────────
 async function fetchViaScraperAPI(url) {
     if (!SCRAPERAPI_KEY) throw new Error('sin token')
     const apiUrl = `http://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=false`
@@ -241,12 +271,16 @@ export async function fetchText(url) {
     }
 
     return queuedFetch(async () => {
-        // Capa 1a: scrape.do
+        // Capa 1a: scrape.do; JKAnime necesita navegador, espera y proxy avanzado.
         if (SCRAPE_DO_TOKEN) {
             try {
-                const html = await fetchViaScrapeDo(url)
+                const esJKAnime = /(^|\.)jkanime\.net\//i.test(url)
+                const html = await fetchViaScrapeDo(url, {
+                    render: esJKAnime,
+                    superProxy: esJKAnime,
+                })
                 if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ scrape.do OK: ${url.replace(BASE, '')}`)
+                    console.log(`[HDL] ✅ scrape.do${esJKAnime ? ' render' : ''} OK: ${url.replace(BASE, '')}`)
                     cacheSet(url, html)
                     return html
                 }
@@ -255,7 +289,21 @@ export async function fetchText(url) {
             }
         }
 
-        // Capa 1b: ScraperAPI
+        // Capa 1b: WebScraping.AI con Chrome/proxy, si se configuró su clave.
+        if (WEBSCRAPING_AI_KEY) {
+            try {
+                const html = await fetchViaWebScrapingAI(url)
+                if (!esCFBloqueado(html)) {
+                    console.log(`[HDL] ✅ WebScraping.AI OK: ${url.replace(BASE, '')}`)
+                    cacheSet(url, html)
+                    return html
+                }
+            } catch (e) {
+                console.warn(`[HDL] WebScraping.AI falló: ${e.message}`)
+            }
+        }
+
+        // Capa 1c: ScraperAPI
         if (SCRAPERAPI_KEY) {
             try {
                 const html = await fetchViaScraperAPI(url)
@@ -269,7 +317,7 @@ export async function fetchText(url) {
             }
         }
 
-        // Capa 1c: WebScrapingAPI
+        // Capa 1d: WebScrapingAPI
         if (WEBSCRAPINGAPI_KEY) {
             try {
                 const html = await fetchViaWebScrapingAPI(url)
@@ -283,7 +331,7 @@ export async function fetchText(url) {
             }
         }
 
-        // Capa 1d: Scrapingdog
+        // Capa 1e: Scrapingdog
         if (SCRAPINGDOG_KEY) {
             try {
                 const html = await fetchViaScrapingdog(url)
@@ -297,7 +345,7 @@ export async function fetchText(url) {
             }
         }
 
-        // Capa 1e: ScrapingBee
+        // Capa 1f: ScrapingBee
         if (SCRAPINGBEE_KEY) {
             try {
                 const html = await fetchViaScrapingBee(url)
