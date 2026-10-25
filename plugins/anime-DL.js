@@ -116,8 +116,8 @@ function parsearSeleccionInfo(text) {
     if (/^s\d+$/.test(token)) temporada = Number(token.slice(1))
     else if (/^\d+$/.test(token) && episodio == null) episodio = Number(token)
     else if (token === 'lat' || token === 'latino') sitioId = 2
-    else if (token === 'jk' || token === 'jkanime') sitioId = 3
-    else if (/^(?:720p|1080p|doc|sub(?::[a-z-]+)?|dub)$/i.test(token)) continue
+    else if (token === 'jk' || token === 'jkanime' || /^sub(?::[a-z-]+)?$/i.test(token)) sitioId = 3
+    else if (/^(?:720p|1080p|doc|dub)$/i.test(token)) continue
     else return null
   }
   if (temporada == null && episodio == null) return null
