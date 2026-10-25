@@ -266,14 +266,17 @@ async function buscarAnime(nombre, episodio, temporada, sitioElegido) {
 }
 
 function ordenarServidores(servidores) {
-  const esMegaMf = s => /mega\.nz|mega\.co\.nz|mediafire\.com/i.test(s.url || '')
-  const megaYMf = servidores.filter(esMegaMf)
-  const sinMegaMf = servidores.filter(s => !esMegaMf(s))
+  const esMediaFire = s => /mediafire\.com/i.test(s.url || '')
+  const esMega = s => /mega\.nz|mega\.co\.nz/i.test(s.url || '')
+  const mediafire = servidores.filter(esMediaFire)
+  const mega = servidores.filter(s => !esMediaFire(s) && esMega(s))
+  const sinMegaMf = servidores.filter(s => !esMediaFire(s) && !esMega(s))
   const conocidos = sinMegaMf.filter(s => esServidorConocido(s.nombre, s.url))
   const base = conocidos.length > 0 ? conocidos : sinMegaMf
   const directas = base.filter(s => s.directo && CONFIG.videoExtensions.test(s.url))
   return [
-    ...megaYMf,
+    ...mediafire,
+    ...mega,
     ...(directas.length > 0 ? [...directas, ...base.filter(s => !s.directo)] : base),
   ]
 }
