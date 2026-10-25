@@ -19,9 +19,110 @@ import {
 
 const SEARCH_TIMEOUT = 12_000
 const MAX_RANGE = 12
+const JIKAN_TIMEOUT = 10_000
 
 const sitioFlags = new Set(['-s'])
 const temporadaRe = /^(?:t|temp|temporada)(\d+)$/i
+
+global.animeInfoSessions = global.animeInfoSessions || new Map()
+
+async function jikanGet(endpoint) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), JIKAN_TIMEOUT)
+  try {
+    const response = await fetch(`https://api.jikan.moe/v4${endpoint}`, {
+      headers: { Accept: 'application/json', 'User-Agent': 'Rikka-TakaradaMD/AnimeDL' },
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`Jikan HTTP ${response.status}`)
+    return await response.json()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function cargarEpisodiosJikan(malId) {
+  const episodios = []
+  for (let page = 1; page <= 4; page++) {
+    const result = await jikanGet(`/anime/${malId}/episodes?page=${page}`)
+    for (const episode of result.data || []) {
+      if (episode.mal_id != null) {
+        episodios.push({
+          numero: episode.mal_id,
+          titulo: episode.title || 'Título no disponible',
+        })
+      }
+    }
+    if (!result.pagination?.has_next_page) break
+    await esperar(350)
+  }
+  return episodios.sort((a, b) => a.numero - b.numero)
+}
+
+async function cargarAnimeJikan(malId) {
+  const info = await jikanGet(`/anime/${malId}/full`)
+  return { ...info.data, episodios: await cargarEpisodiosJikan(malId) }
+}
+
+async function buscarInfoJikan(nombre) {
+  const result = await jikanGet(`/anime?q=${encodeURIComponent(nombre)}&limit=8&sfw=true`)
+  const resultados = (result.data || []).filter(item => item.type !== 'Movie')
+  if (!resultados.length) return null
+  const principal = resultados[0]
+  const principalInfo = await cargarAnimeJikan(principal.mal_id)
+  const relaciones = (principalInfo.relations || [])
+    .filter(relation => /sequel/i.test(relation.relation))
+    .flatMap(relation => relation.entry || [])
+    .filter(entry => entry.type === 'anime')
+  const alternativos = resultados
+    .filter(item => item.mal_id !== principal.mal_id)
+    .slice(0, 5)
+    .map(item => item.title)
+  return {
+    principal: { ...principal, ...principalInfo },
+    current: { ...principal, ...principalInfo },
+    temporadas: [{ ...principal, ...principalInfo }, ...relaciones],
+    alternativos,
+  }
+}
+
+function formatearInfoJikan(info, temporada = 1) {
+  const anime = info.current || info.principal
+  const episodios = anime.episodios || []
+  const lista = episodios.slice(0, 60).map(ep => `> *${ep.numero}.* ${ep.titulo}`).join('\n')
+  const temporadas = info.temporadas.slice(0, 5).map((season, index) =>
+    `❏ *T${index + 1}* » ${season.title || anime.title} (${season.episodes || season.episodios?.length || '?'} ep.)`
+  )
+  const alternativos = info.alternativos.length
+    ? `\n\n✐ Otros resultados: ${info.alternativos.map((title, i) => `*${String.fromCharCode(97 + i)})* ${title}`).join(' · ')}`
+    : ''
+  return `「✐」*${anime.title}*\n` +
+    `${temporadas.join('\n')}\n` +
+    `❏ Audio » No disponible en Jikan\n` +
+    `❏ Subs » No disponible en Jikan\n\n` +
+    `*T${temporada} · ${anime.title}*\n` +
+    `${lista || '> No hay títulos de episodios disponibles'}\n\n` +
+    `✐ Responde a este mensaje con el episodio: *5* · *5 lat* · *5 sub:en* · *s2 5* · *s2*` +
+    alternativos
+}
+
+function parsearSeleccionInfo(text) {
+  const tokens = String(text || '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!tokens.length || tokens.length > 4) return null
+  let temporada = null
+  let episodio = null
+  let sitioId = null
+  for (const token of tokens) {
+    if (/^s\d+$/.test(token)) temporada = Number(token.slice(1))
+    else if (/^\d+$/.test(token) && episodio == null) episodio = Number(token)
+    else if (token === 'lat' || token === 'latino') sitioId = 2
+    else if (token === 'jk' || token === 'jkanime') sitioId = 3
+    else if (/^(?:720p|1080p|doc|sub(?::[a-z-]+)?|dub)$/i.test(token)) continue
+    else return null
+  }
+  if (temporada == null && episodio == null) return null
+  return { temporada: temporada || 1, episodio, sitioId }
+}
 
 export function parseArgs(input = '') {
   const tokens = Array.isArray(input) ? input.slice() : String(input).trim().split(/\s+/).filter(Boolean)
@@ -532,6 +633,21 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   if (parsed.episodio == null) {
     if (parsed.nombre) {
+      try {
+        const infoJikan = await buscarInfoJikan(parsed.nombre)
+        if (infoJikan) {
+          const infoKey = clavePick(m)
+          global.animeInfoSessions.set(infoKey, {
+            info: infoJikan,
+            nombre: parsed.nombre,
+            temporada: parsed.temporada,
+            expires: Date.now() + 10 * 60 * 1000,
+          })
+          return m.reply(formatearInfoJikan(infoJikan, parsed.temporada))
+        }
+      } catch (error) {
+        console.error('[animedl jikan]', error.message)
+      }
       let sitioParaLista = parsed.sitio
       try {
         if (!sitioParaLista) {
@@ -584,6 +700,36 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 }
 
 handler.before = async function (m, { conn }) {
+  const infoKey = clavePick(m)
+  const infoSession = global.animeInfoSessions?.get(infoKey)
+  if (infoSession) {
+    if (Date.now() > infoSession.expires) {
+      global.animeInfoSessions.delete(infoKey)
+    } else {
+      const selection = parsearSeleccionInfo(m.text)
+      if (selection) {
+        if (selection.episodio == null) {
+          const season = infoSession.info.temporadas?.[selection.temporada - 1]
+          if (!season) return m.reply(`No encontré la temporada ${selection.temporada} en Jikan`)
+          try {
+            if (!season.episodios) {
+              const loaded = await cargarAnimeJikan(season.mal_id)
+              Object.assign(season, loaded)
+            }
+            infoSession.info.current = season
+          } catch (error) {
+            return m.reply(`No pude cargar la temporada ${selection.temporada}: ${error.message}`)
+          }
+          infoSession.temporada = selection.temporada
+          return m.reply(formatearInfoJikan(infoSession.info, selection.temporada))
+        }
+        global.animeInfoSessions.delete(infoKey)
+        const site = selection.sitioId ? ` -s ${selection.sitioId}` : ''
+        const text = `${infoSession.nombre} t${selection.temporada} ${selection.episodio}${site}`
+        return handler.call(conn, m, { conn, text, usedPrefix: '.', command: 'animedl' })
+      }
+    }
+  }
   const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
   if (!nativeFlow) return false
   try {
