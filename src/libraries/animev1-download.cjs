@@ -19,6 +19,21 @@ const MIN_VALID_BYTES = 256 * 1024
 const PRIORITY = ['yourupload', 'pixeldrain', 'pdrain', '1fichier', 'mp4upload', 'upnshare', 'hls', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
+function downloadLog(event, details = {}) {
+  console.log(`[NIDL-DL][${new Date().toISOString()}] ${event} ${JSON.stringify(details)}`)
+}
+
+function hostOf(value) {
+  try { return new URL(value).host } catch (_) { return 'host-desconocido' }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
 function safePart(value) {
   return String(value || 'anime')
     .normalize('NFD')
@@ -112,6 +127,7 @@ async function downloadHls(url, filePath, referer, extraHeaders = {}) {
   const headers = `User-Agent: ${UA}\r\nReferer: ${referer}\r\n${extra}`
   const args = [
     '-hide_banner', '-loglevel', 'error',
+    '-stats_period', '5', '-progress', 'pipe:2',
     '-headers', headers,
     '-i', url,
     '-c', 'copy',
@@ -120,16 +136,54 @@ async function downloadHls(url, filePath, referer, extraHeaders = {}) {
     '-fs', String(MAX_DOWNLOAD_BYTES),
     '-y', filePath,
   ]
+  const startedAt = Date.now()
+  const sourceHost = hostOf(url)
+  downloadLog('ffmpeg iniciado', { host: sourceHost, salida: path.basename(filePath), límite: formatBytes(MAX_DOWNLOAD_BYTES) })
   const child = spawn(getFfmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
   let stderr = ''
-  child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000) })
-  const timer = setTimeout(() => child.kill('SIGKILL'), DOWNLOAD_TIMEOUT_MS)
+  let progressBuffer = ''
+  let progressFields = {}
+  let lastProgressLog = 0
+  child.stderr.on('data', chunk => {
+    const text = chunk.toString()
+    stderr = (stderr + text).slice(-4000)
+    progressBuffer += text
+    const lines = progressBuffer.split(/\r?\n/)
+    progressBuffer = lines.pop() || ''
+    for (const line of lines) {
+      const separator = line.indexOf('=')
+      if (separator < 0) continue
+      const key = line.slice(0, separator).trim()
+      const value = line.slice(separator + 1).trim()
+      if (!key || !value) continue
+      progressFields[key] = value
+      if (key === 'progress' && Date.now() - lastProgressLog >= 5000) {
+        lastProgressLog = Date.now()
+        downloadLog('ffmpeg progreso', {
+          host: sourceHost,
+          tiempoVideo: progressFields.out_time || progressFields.out_time_ms || 'pendiente',
+          velocidad: progressFields.speed || 'n/d',
+          tiempoTranscurridoSeg: Math.round((Date.now() - startedAt) / 1000),
+          estado: value,
+        })
+      }
+    }
+  })
+  const timer = setTimeout(() => {
+    downloadLog('ffmpeg excedió tiempo límite', { host: sourceHost, límiteMs: DOWNLOAD_TIMEOUT_MS })
+    child.kill('SIGKILL')
+  }, DOWNLOAD_TIMEOUT_MS)
   try {
     await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('close', code => {
-        if (code === 0) resolve()
-        else reject(new Error(`FFmpeg no pudo descargar el stream (código ${code}): ${stderr.trim().slice(-700)}`))
+        if (code === 0) {
+          downloadLog('ffmpeg terminó', { host: sourceHost, tiempoSeg: Math.round((Date.now() - startedAt) / 1000) })
+          resolve()
+        } else {
+          downloadLog('ffmpeg error', { host: sourceHost, código: code, detalle: stderr.trim().slice(-700) })
+          reject(new Error(`FFmpeg no pudo descargar el stream (código ${code}): ${stderr.trim().slice(-700)}`))
+        }
       })
     })
   } finally {
@@ -140,10 +194,14 @@ async function downloadHls(url, filePath, referer, extraHeaders = {}) {
 
 async function resolveWithBrowser(url, referer, onStatus) {
   let puppeteer
-  try { puppeteer = require('puppeteer') } catch (_) { return null }
+  try { puppeteer = require('puppeteer') } catch (_) {
+    downloadLog('fallback headless omitido; Puppeteer no instalado', { host: hostOf(url) })
+    return null
+  }
   let browser
   let page
   try {
+    downloadLog('resolución headless iniciada', { host: hostOf(url) })
     onStatus?.('El servidor bloqueó el acceso directo; intentando resolverlo con navegador…')
     browser = await puppeteer.launch({
       headless: true,
@@ -181,8 +239,12 @@ async function resolveWithBrowser(url, referer, onStatus) {
       Origin: new URL(url).origin,
       ...(cookies.length ? { Cookie: cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ') } : {}),
     }
+    downloadLog(mediaUrl ? 'resolución headless encontró medio' : 'resolución headless sin medio', {
+      host: mediaUrl ? hostOf(mediaUrl) : hostOf(url),
+    })
     return mediaUrl ? { url: mediaUrl, headers } : null
   } catch (error) {
+    downloadLog('resolución headless fallida', { host: hostOf(url), error: error.message })
     console.warn('[animev1 browser resolver]', error.message)
     return null
   } finally {
@@ -195,8 +257,12 @@ async function downloadHlsWithFallback(candidate, url, basePath, referer, onStat
   try {
     return await downloadHls(url, `${basePath}.mp4`, referer, candidate.headers)
   } catch (firstError) {
+    downloadLog('HLS directo falló; intentando fallback headless', { servidor: candidate.server || 'servidor', host: hostOf(url), error: firstError.message })
     const browserResult = await resolveWithBrowser(candidate.url || url, referer, onStatus)
-    if (!browserResult?.url) throw firstError
+    if (!browserResult?.url) {
+      downloadLog('fallback headless no resolvió el HLS', { servidor: candidate.server || 'servidor' })
+      throw firstError
+    }
     if (browserResult.url === url || isHlsUrl(browserResult.url)) {
       return downloadHls(browserResult.url, `${basePath}.mp4`, browserResult.headers?.Referer || referer, browserResult.headers)
     }
@@ -249,11 +315,18 @@ async function readLimitedText(stream, maxBytes = 4 * 1024 * 1024) {
 async function fetchCandidate(candidate, basePath, onStatus) {
   let url = normalizeCandidateUrl(candidate.url, candidate.server)
   if (!url) throw new Error('URL de servidor no válida.')
+  downloadLog('abriendo candidato', {
+    servidor: candidate.server || 'servidor',
+    tipo: candidate.kind || 'stream',
+    calidad: candidate.quality || 'no indicada',
+    host: hostOf(url),
+  })
   const origin = new URL(url).origin
   const referer = `${origin}/`
   let filePath = `${basePath}.mp4`
 
   if (isHlsUrl(url)) {
+    downloadLog('candidato detectado como HLS', { servidor: candidate.server || 'servidor' })
     onStatus?.(`Convirtiendo stream HLS de ${candidate.server}…`)
     return { filePath: await downloadHlsWithFallback(candidate, url, basePath, referer, onStatus), extension: '.mp4', mimetype: 'video/mp4' }
   }
@@ -274,6 +347,12 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   const finalUrl = response.request?.res?.responseUrl || url
   const contentType = String(response.headers['content-type'] || '').toLowerCase()
   const contentLength = Number(response.headers['content-length'] || 0)
+  downloadLog('respuesta del servidor', {
+    servidor: candidate.server || 'servidor',
+    status: response.status,
+    contentType: contentType || 'no indicado',
+    tamañoEsperado: contentLength ? formatBytes(contentLength) : 'desconocido',
+  })
   if (contentLength > MAX_DOWNLOAD_BYTES) {
     response.data.destroy()
     throw new Error(`El archivo supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`)
@@ -287,9 +366,13 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   }
 
   if (/text\/html|application\/json|application\/javascript|text\/plain/i.test(contentType)) {
+    downloadLog('respuesta HTML; buscando video directo', { servidor: candidate.server || 'servidor' })
     const html = await readLimitedText(response.data)
     const mediaUrl = extractMediaUrl(html, finalUrl)
-    if (mediaUrl && mediaUrl !== finalUrl) return fetchCandidate({ ...candidate, url: mediaUrl }, basePath, onStatus)
+    if (mediaUrl && mediaUrl !== finalUrl) {
+      downloadLog('medio extraído de HTML', { servidor: candidate.server || 'servidor', host: hostOf(mediaUrl) })
+      return fetchCandidate({ ...candidate, url: mediaUrl }, basePath, onStatus)
+    }
     const browserResult = await resolveWithBrowser(finalUrl, referer, onStatus)
     if (browserResult?.url && browserResult.url !== finalUrl) {
       return fetchCandidate({ ...candidate, url: browserResult.url, headers: browserResult.headers }, basePath, onStatus)
@@ -300,12 +383,25 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   const extension = extensionFor(finalUrl, contentType)
   filePath = `${basePath}${extension}`
   let downloadedBytes = 0
+  const progressStep = Math.max(10 * 1024 * 1024, contentLength ? Math.ceil(contentLength / 20) : 25 * 1024 * 1024)
+  let nextProgressAt = progressStep
   const limiter = new Transform({
     transform(chunk, _encoding, callback) {
       downloadedBytes += chunk.length
       if (downloadedBytes > MAX_DOWNLOAD_BYTES) {
         callback(new Error(`El archivo supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`))
-      } else callback(null, chunk)
+      } else {
+        if (downloadedBytes >= nextProgressAt) {
+          const percent = contentLength ? Math.min(100, Math.round(downloadedBytes / contentLength * 100)) : null
+          downloadLog('progreso de descarga directa', {
+            servidor: candidate.server || 'servidor',
+            descargado: formatBytes(downloadedBytes),
+            porcentaje: percent == null ? 'n/d' : `${percent}%`,
+          })
+          nextProgressAt += progressStep
+        }
+        callback(null, chunk)
+      }
     },
   })
   try {
@@ -315,6 +411,11 @@ async function fetchCandidate(candidate, basePath, onStatus) {
     throw error
   }
   const stat = await fs.promises.stat(filePath)
+  downloadLog('descarga directa completada', {
+    servidor: candidate.server || 'servidor',
+    archivo: path.basename(filePath),
+    tamaño: formatBytes(stat.size),
+  })
   if (stat.size < MIN_VALID_BYTES) {
     await fs.promises.rm(filePath, { force: true })
     throw new Error(`La descarga de ${candidate.server} quedó incompleta o no era un video.`)
@@ -359,14 +460,33 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
   const normalizedEpisodeUrl = safeHttpUrl(episodeUrl)
   if (!normalizedEpisodeUrl) throw new Error('La URL del episodio no es válida.')
   const variant = String(options.variant || 'SUB').toUpperCase() === 'DUB' ? 'DUB' : 'SUB'
+  downloadLog('solicitando enlaces de episodio', {
+    título: options.title || 'Anime',
+    episodio: options.episode || 'n/d',
+    variante: variant,
+    calidadPreferida: options.quality || 'automática',
+    host: hostOf(normalizedEpisodeUrl),
+    límite: formatBytes(MAX_DOWNLOAD_BYTES),
+    tiempoLímiteMin: Math.round(DOWNLOAD_TIMEOUT_MS / 60_000),
+  })
   const response = await animeV1.getEpisodeLinks(normalizedEpisodeUrl, false)
   const candidates = listCandidates(response?.data, variant, options.quality)
+  downloadLog('enlaces de episodio recibidos', {
+    variante: variant,
+    cantidad: candidates.length,
+    servidores: candidates.map(item => ({ nombre: item.server || 'servidor', tipo: item.kind, calidad: item.quality || 'n/d' })),
+  })
   if (!candidates.length) throw new Error(`AnimeV1 no encontró enlaces para la variante ${variant}.`)
 
   await fs.promises.mkdir(TEMP_DIR, { recursive: true })
   const basePath = path.join(TEMP_DIR, `${safePart(options.title)}-ep${safePart(options.episode || response?.data?.episode || 'x')}-${randomUUID()}`)
   const errors = []
   for (const candidate of candidates) {
+    downloadLog('intentando servidor', {
+      servidor: candidate.server || 'servidor',
+      tipo: candidate.kind,
+      calidad: candidate.quality || 'n/d',
+    })
     options.onStatus?.(`Probando ${candidate.server || 'servidor'} (${variant})…`)
     try {
       const file = await fetchCandidate(candidate, basePath, options.onStatus)
@@ -375,6 +495,11 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
         await fs.promises.rm(file.filePath, { force: true })
         throw new Error('El archivo descargado no tiene un tamaño válido.')
       }
+      downloadLog('candidato completado', {
+        servidor: candidate.server || 'servidor',
+        archivo: path.basename(file.filePath),
+        tamaño: formatBytes(stat.size),
+      })
       return {
         ...file,
         fileName: `${safePart(options.title)}-ep${safePart(options.episode || response?.data?.episode || 'x')}${file.extension}`,
@@ -383,18 +508,25 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
         variant,
       }
     } catch (error) {
+      downloadLog('candidato fallido', { servidor: candidate.server || 'servidor', error: error.message })
       errors.push(`${candidate.server || 'servidor'}: ${error.message}`)
       for (const extension of ['.mp4', '.webm', '.mkv', '.mov']) {
         await fs.promises.rm(`${basePath}${extension}`, { force: true })
       }
     }
   }
+  downloadLog('ningún servidor completó la descarga', { cantidadIntentos: candidates.length, fallos: errors.length })
   throw new Error(`No pude completar la descarga desde los servidores disponibles. ${errors.slice(0, 4).join(' | ')}`)
 }
 
 async function cleanupDownloadFile(filePath) {
   if (!filePath) return
-  try { await fs.promises.rm(filePath, { force: true }) } catch (_) {}
+  try {
+    await fs.promises.rm(filePath, { force: true })
+    downloadLog('archivo temporal eliminado', { archivo: path.basename(filePath) })
+  } catch (error) {
+    downloadLog('no se pudo eliminar temporal', { archivo: path.basename(filePath), error: error.message })
+  }
 }
 
 module.exports = { downloadEpisodeFile, cleanupDownloadFile, MAX_DOWNLOAD_BYTES }

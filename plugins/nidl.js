@@ -10,6 +10,17 @@ const MAX_OTHER_RESULTS = 4
 global.nidlSessions = global.nidlSessions || new Map()
 global.nidlDownloadLocks = global.nidlDownloadLocks || new Set()
 
+function terminalLog(event, details = {}) {
+  console.log(`[NIDL][${new Date().toISOString()}] ${event} ${JSON.stringify(details)}`)
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
 function clean(value, max = 160) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
@@ -140,6 +151,14 @@ function quotedMessageId(m) {
 }
 
 async function sendMenu(conn, m, session, onlySeason = null) {
+  const visible = findSeason(session, onlySeason || session.seasons[0]?.number)
+  terminalLog('menú enviado', {
+    anime: session.title,
+    temporadas: session.seasons.map(item => item.number),
+    temporadaVisible: visible?.number || null,
+    episodios: visible ? seasonEpisodes(visible).length : 0,
+    resultadosAlternativos: session.otherResults.length,
+  })
   const sent = await conn.sendMessage(m.chat, { text: menuText(session, onlySeason) }, { quoted: m })
   session.menuMessageId = sent?.key?.id || sent?.id || null
   session.visibleSeason = onlySeason || session.seasons[0]?.number || 1
@@ -203,8 +222,10 @@ async function loadSeason(item, number) {
 }
 
 async function makeSession(m, query, requestedSeason = null) {
+  terminalLog('búsqueda iniciada', { query: clean(query), domain: DOMAIN })
   const result = await animeV1.searchAnime(query, DOMAIN)
   const results = (result?.data?.results || []).filter(item => item?.title && item?.url).slice(0, MAX_SEARCH_RESULTS)
+  terminalLog('resultados recibidos', { query: clean(query), cantidad: results.length })
   if (!results.length) throw new Error(`No encontré *${clean(query)}* en AnimeV1. Revisa el nombre o intenta con el título japonés/inglés.`)
 
   const first = results[0]
@@ -216,7 +237,14 @@ async function makeSession(m, query, requestedSeason = null) {
 
   const seasons = []
   for (const item of seasonResults.slice(0, 5)) {
-    try { seasons.push(await loadSeason(item, seasonNumber(item))) } catch (error) {
+    const number = seasonNumber(item)
+    terminalLog('cargando temporada', { temporada: number, anime: clean(item.title) })
+    try {
+      const season = await loadSeason(item, number)
+      seasons.push(season)
+      terminalLog('temporada cargada', { temporada: number, episodios: seasonEpisodes(season).length, anime: clean(item.title) })
+    } catch (error) {
+      terminalLog('falló carga de temporada', { temporada: number, anime: clean(item.title), error: error.message })
       console.warn('[nidl season]', item.title, error.message)
     }
   }
@@ -235,6 +263,7 @@ async function makeSession(m, query, requestedSeason = null) {
   if (!otherResults.length && query.trim().split(/\s+/).length > 1) {
     try {
       const broadQuery = query.trim().split(/\s+/)[0]
+      terminalLog('búsqueda de resultados alternativos', { query: broadQuery })
       const broadResponse = await animeV1.searchAnime(broadQuery, DOMAIN)
       const seen = new Set(groupUrls)
       otherResults = (broadResponse?.data?.results || [])
@@ -245,6 +274,7 @@ async function makeSession(m, query, requestedSeason = null) {
           return true
         })
         .slice(0, MAX_OTHER_RESULTS)
+      terminalLog('resultados alternativos recibidos', { cantidad: otherResults.length })
     } catch (error) {
       console.warn('[nidl related results]', error.message)
     }
@@ -271,11 +301,13 @@ function findSeason(session, number) {
 async function downloadSelection(m, conn, session, season, episode, option = null) {
   const ep = findSeasonEpisodes(season, episode)
   if (!ep) {
+    terminalLog('episodio no encontrado', { anime: session.title, temporada: season.number, episodio: episode })
     await conn.sendMessage(m.chat, { text: `No encuentro el episodio *${episode}* en T${season.number}. Hay ${seasonEpisodes(season).length} episodios registrados.` }, { quoted: m })
     return true
   }
   const lockKey = session.key
   if (global.nidlDownloadLocks.has(lockKey)) {
+    terminalLog('descarga duplicada bloqueada', { anime: session.title, temporada: season.number, episodio: episode })
     await conn.sendMessage(m.chat, { text: 'Ya hay una descarga /nidl activa en este chat. Espera a que termine.' }, { quoted: m })
     return true
   }
@@ -285,7 +317,16 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
   const selectedOption = parseOption(option)
   const episodeName = formatEpisodeTitle(season, ep, seasonEpisodes(season).indexOf(ep))
   const title = `${session.title}-T${season.number}`
+  terminalLog('descarga solicitada', {
+    anime: session.title,
+    temporada: season.number,
+    episodio: episode,
+    variante: selectedOption.variant,
+    calidad: selectedOption.quality || 'automática',
+    nombreEpisodio: episodeName,
+  })
   const statusText = text => {
+    terminalLog('estado', { mensaje: text })
     if (!statusKey) return Promise.resolve()
     return conn.sendMessage(m.chat, { text, edit: statusKey }).catch(() => null)
   }
@@ -301,6 +342,12 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
       quality: selectedOption.quality,
       onStatus: statusText,
     })
+    terminalLog('archivo descargado', {
+      archivo: file.fileName,
+      tamaño: formatBytes(file.fileSize),
+      servidor: file.server,
+      variante: file.variant,
+    })
     await statusText(`📤 Subiendo *${episodeName}* a WhatsApp…`)
     const audio = selectedOption.variant === 'DUB' ? 'Doblaje (según fuente)' : 'Japonés (SUB)'
     const caption = `🎬 ${session.title} · T${season.number} Ep. ${episode}\n${episodeName}\nAudio: ${audio} · Subs: Español (según fuente)\nServidor: ${clean(file.server, 70)}`
@@ -308,9 +355,21 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
     const payload = isSmallVideo
       ? { video: { url: file.filePath }, mimetype: 'video/mp4', fileName: file.fileName, caption }
       : { document: { url: file.filePath }, mimetype: file.mimetype, fileName: file.fileName, caption }
+    terminalLog('envío a WhatsApp iniciado', {
+      tipo: isSmallVideo ? 'video' : 'documento',
+      archivo: file.fileName,
+      tamaño: formatBytes(file.fileSize),
+    })
     await conn.sendMessage(m.chat, payload, { quoted: m })
+    terminalLog('envío a WhatsApp completado', { archivo: file.fileName })
     await statusText(`✅ Descarga enviada: *${file.fileName}*`)
   } catch (error) {
+    terminalLog('descarga fallida', {
+      anime: session.title,
+      temporada: season.number,
+      episodio: episode,
+      error: error?.message || String(error),
+    })
     console.error('[nidl download]', error?.stack || error)
     let manualLinks = ''
     try {
@@ -322,14 +381,18 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
       ].filter(item => /^https?:\/\//i.test(item?.url || '')).slice(0, 4)
       if (links.length) {
         manualLinks = `\n\nEnlaces manuales (${key}):\n${links.map(item => `· ${clean(item.server || 'Servidor', 45)}: ${item.url}`).join('\n')}`
+        terminalLog('enlaces manuales disponibles', { cantidad: links.length, variante: key })
       }
     } catch (_) {}
     const message = `❌ No se pudo descargar T${season.number} Ep. ${episode}: ${clean(error?.message || 'error desconocido', 350)}${manualLinks || '\n\nPrueba otra vez con /nidl nombre episodio T' + season.number + '.'}`
     if (statusKey) await statusText(message)
     else await conn.sendMessage(m.chat, { text: message }, { quoted: m })
   } finally {
-    if (file?.filePath) await animeV1Downloader.cleanupDownloadFile(file.filePath)
+    if (file?.filePath) {
+      await animeV1Downloader.cleanupDownloadFile(file.filePath)
+    }
     global.nidlDownloadLocks.delete(lockKey)
+    terminalLog('proceso terminado', { anime: session.title, temporada: season.number, episodio: episode })
   }
   return true
 }
@@ -352,6 +415,7 @@ async function selectOtherResult(m, conn, session, letter) {
 
 async function handleSelection(m, conn, session, input) {
   const text = String(input || '').trim().toLowerCase()
+  terminalLog('respuesta al menú recibida', { selección: text })
   const otherMatch = text.match(/^([a-d])$/)
   if (otherMatch) return selectOtherResult(m, conn, session, otherMatch[1])
 
@@ -379,6 +443,7 @@ async function handleSelection(m, conn, session, input) {
 }
 
 async function startNidl(m, conn, text) {
+  terminalLog('comando recibido', { argumento: clean(text) })
   const parsed = parseCommand(text)
   if (!parsed.query) {
     await m.reply(formatUsage('/'))
@@ -405,6 +470,7 @@ const handler = async (m, { conn, text = '' }) => {
   try {
     await startNidl(m, conn, text)
   } catch (error) {
+    terminalLog('error de comando', { error: error?.message || String(error) })
     console.error('[nidl]', error?.stack || error)
     await m.reply(`「✐」 ${clean(error?.message || 'No pude buscar ese anime.', 400)}\n\n${formatUsage('/')}`)
   }
