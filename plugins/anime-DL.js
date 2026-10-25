@@ -121,7 +121,7 @@ function parsearSeleccionInfo(text) {
     else return null
   }
   if (temporada == null && episodio == null) return null
-  return { temporada: temporada || 1, episodio, sitioId }
+  return { temporada, episodio, sitioId }
 }
 
 export function parseArgs(input = '') {
@@ -646,9 +646,10 @@ handler.before = async function (m, { conn }) {
     } else {
       const selection = parsearSeleccionInfo(m.text)
       if (selection) {
+        const temporada = selection.temporada || infoSession.temporada || 1
         if (selection.episodio == null) {
-          const season = infoSession.info.temporadas?.[selection.temporada - 1]
-          if (!season) return m.reply(`No encontré la temporada ${selection.temporada} en Jikan`)
+          const season = infoSession.info.temporadas?.[temporada - 1]
+          if (!season) return m.reply(`No encontré la temporada ${temporada} en Jikan`)
           try {
             if (!season.episodios) {
               const loaded = await cargarAnimeJikan(season.mal_id)
@@ -656,14 +657,14 @@ handler.before = async function (m, { conn }) {
             }
             infoSession.info.current = season
           } catch (error) {
-            return m.reply(`No pude cargar la temporada ${selection.temporada}: ${error.message}`)
+            return m.reply(`No pude cargar la temporada ${temporada}: ${error.message}`)
           }
-          infoSession.temporada = selection.temporada
-          return m.reply(formatearInfoJikan(infoSession.info, selection.temporada))
+          infoSession.temporada = temporada
+          return m.reply(formatearInfoJikan(infoSession.info, temporada))
         }
         global.animeInfoSessions.delete(infoKey)
         const site = selection.sitioId ? ` -s ${selection.sitioId}` : ''
-        const text = `${infoSession.nombre} t${selection.temporada} ${selection.episodio}${site}`
+        const text = `${infoSession.nombre} t${temporada} ${selection.episodio}${site}`
         return handler.call(conn, m, { conn, text, usedPrefix: '.', command: 'animedl' })
       }
     }
