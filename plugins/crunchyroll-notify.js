@@ -6,7 +6,7 @@
  * v2: Auto-start al arrancar el bot + soporte multi-grupo
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -25,6 +25,13 @@ const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU
 const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
 const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
 const DEVICE_TYPE= 'ANDROIDTV'
+const MAX_SEEN   = 500
+
+function writeJsonAtomic(path, value) {
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
+  renameSync(tmp, path)
+}
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
 function loadCfg() {
@@ -36,13 +43,19 @@ function loadCfg() {
       delete cfg.targetJid
       writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2), 'utf-8')
     }
-    if (!cfg.targetJids) cfg.targetJids = []
+    if (!Array.isArray(cfg.targetJids)) cfg.targetJids = cfg.targetJids ? [cfg.targetJids] : []
+    cfg.targetJids = [...new Set(cfg.targetJids.filter(j => typeof j === 'string' && j.trim()))]
     return cfg
   } catch { return { targetJids: [] } }
 }
-function saveCfg(d)    { writeFileSync(CFG_PATH, JSON.stringify(d, null, 2), 'utf-8') }
-function loadSeen()    { try { return JSON.parse(readFileSync(DB_PATH,  'utf-8')) } catch { return [] } }
-function saveSeen(ids) { writeFileSync(DB_PATH,  JSON.stringify(ids.slice(-300)), 'utf-8') }
+function saveCfg(d)    { writeJsonAtomic(CFG_PATH, d) }
+function loadSeen() {
+  try {
+    const ids = JSON.parse(readFileSync(DB_PATH, 'utf-8'))
+    return Array.isArray(ids) ? [...new Set(ids.filter(id => typeof id === 'string' && id))] : []
+  } catch { return [] }
+}
+function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN)) }
 
 // ─── Cookie jar ──────────────────────────────────────────────────────────────
 let _cookies = ''
@@ -120,15 +133,24 @@ async function getToken() {
 
 // ─── Fetch autenticado ────────────────────────────────────────────────────────
 async function crFetch(path, params = {}, base = CR_BASE) {
-  const token = await getToken()
   const url   = new URL(`${base}${path}`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-  const res   = await fetch(url.toString(), {
-    headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': CR_UA, 'Accept': 'application/json', 'Cookie': _cookies },
-    signal: AbortSignal.timeout(20_000),
-  })
-  if (!res.ok) throw new Error(`CR API HTTP ${res.status} → ${path}`)
-  return res.json()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const token = await getToken()
+    const res = await fetch(url.toString(), {
+      headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': CR_UA, 'Accept': 'application/json', 'Cookie': _cookies },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (res.ok) return res.json()
+    if (res.status === 401 && attempt === 0) {
+      _token = null
+      _tokenExp = 0
+      continue
+    }
+    const detail = (await res.text().catch(() => '')).slice(0, 120)
+    throw new Error(`CR API HTTP ${res.status} → ${path}${detail ? `: ${detail}` : ''}`)
+  }
+  throw new Error(`CR API no pudo renovar el token → ${path}`)
 }
 
 // ─── Lógica de Procesamiento ──────────────────────────────────────────────────
@@ -206,7 +228,9 @@ function formatCaption(ep) {
 async function fetchNewEpisodes() {
   const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
   const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  const valid = rows.map(normalizeEpisode).filter(i => i.id && i.series && ALLOWED_LOCALES.has(i.audioLocale))
+  const valid = [...new Map(rows.map(normalizeEpisode)
+    .filter(i => i.id && i.series && ALLOWED_LOCALES.has(i.audioLocale))
+    .map(i => [i.id, i])).values()]
   if (!valid.length) return []
 
   const seen = loadSeen()
@@ -227,9 +251,11 @@ function markSeen(id) {
 }
 
 async function getLatestEpisodes(limit = 10) {
-  const data = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows = Array.isArray(data?.items) ? data.items : []
-  return rows.map(normalizeEpisode).filter(i => ALLOWED_LOCALES.has(i.audioLocale)).slice(0, limit)
+  const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
+  const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
+  return [...new Map(rows.map(normalizeEpisode)
+    .filter(i => i.id && ALLOWED_LOCALES.has(i.audioLocale))
+    .map(i => [i.id, i])).values()].slice(0, limit)
 }
 
 // ─── Envío ────────────────────────────────────────────────────────────────────
@@ -246,6 +272,7 @@ const delay = ms => new Promise(r => setTimeout(r, ms))
 // ─── Cron ─────────────────────────────────────────────────────────────────────
 let cronTimer = null
 let storedConn = null
+let cronRunning = false
 
 function stopCron() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null } }
 
@@ -257,16 +284,19 @@ function startCron(conn) {
   stopCron()
 
   const cfg     = loadCfg()
-  const minutes = parseInt(process.env.CR_MINUTES ?? cfg.minutes ?? '5')
+  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 5)
+  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 5
 
-  // ✅ El cron SIEMPRE arranca — espera la conexión y los grupos en cada tick
+  // El cron siempre arranca, pero nunca permite dos consultas simultáneas.
   cronTimer = setInterval(async () => {
+    if (cronRunning) return
     const activeConn = getConn()
     if (!activeConn) return  // Bot aún no conectado, siguiente tick
 
     const jids = loadCfg().targetJids || []
     if (!jids.length) return  // Sin grupos configurados aún
 
+    cronRunning = true
     try {
       const items = await fetchNewEpisodes()
       if (!items.length) return
@@ -289,6 +319,7 @@ function startCron(conn) {
       }
       console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
     } catch (err) { console.error('[CR-Notify] Cron:', err.message) }
+    finally { cronRunning = false }
   }, minutes * 60_000)
 
   const jids = loadCfg().targetJids || []
