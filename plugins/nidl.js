@@ -378,7 +378,7 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
       const links = [
         ...(result?.data?.downloadLinks?.[key] || []),
         ...(result?.data?.streamLinks?.[key] || []),
-      ].filter(item => /^https?:\/\//i.test(item?.url || '')).slice(0, 4)
+      ].filter(item => /^https?:\/\//i.test(item?.url || '') && !/mp4upload/i.test(`${item.server || ''} ${item.url || ''}`)).slice(0, 4)
       if (links.length) {
         manualLinks = `\n\nEnlaces manuales (${key}):\n${links.map(item => `· ${clean(item.server || 'Servidor', 45)}: ${item.url}`).join('\n')}`
         terminalLog('enlaces manuales disponibles', { cantidad: links.length, variante: key })
