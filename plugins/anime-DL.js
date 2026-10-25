@@ -18,6 +18,7 @@ import {
 } from '../src/libraries/anime-dl.js'
 
 const SEARCH_TIMEOUT = 12_000
+const JK_SEARCH_TIMEOUT = 90_000
 const MAX_RANGE = 12
 const JIKAN_TIMEOUT = 10_000
 
@@ -242,11 +243,12 @@ function esperar(ms) {
 
 async function buscarConTimeout(sitio, nombre, episodio, temporada) {
   let timer
+  const timeoutMs = sitio?.dominio === 'jkanime' ? JK_SEARCH_TIMEOUT : SEARCH_TIMEOUT
   try {
     return await Promise.race([
       sitio.buscar(nombre, episodio, temporada),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`timeout de ${SEARCH_TIMEOUT / 1000}s`)), SEARCH_TIMEOUT)
+        timer = setTimeout(() => reject(new Error(`timeout de ${timeoutMs / 1000}s`)), timeoutMs)
       }),
     ])
   } finally {
