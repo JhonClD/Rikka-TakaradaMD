@@ -117,6 +117,16 @@ function esCFBloqueado(html) {
     return false
 }
 
+function esJKAnimeUrl(url) {
+    return /(^|\.)jkanime\.net\//i.test(String(url || ''))
+}
+
+function headersProveedor(url) {
+    return esJKAnimeUrl(url)
+        ? { Referer: 'https://jkanime.net/', 'Accept-Language': 'es-419,es;q=0.9,en;q=0.8' }
+        : {}
+}
+
 // ─── CACHÉ inteligente de páginas (6 horas) ────────────────────────────────
 // Si el mismo anime/episodio se pide varias veces, NO consume tokens adicionales
 const _htmlCache = new Map()
@@ -170,7 +180,7 @@ async function fetchViaWebScrapingAI(url) {
         timeout: '30000',
     })
     const apiUrl = `https://api.webscraping.ai/html?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: 45000, agent: null })
+    const res = await fetchGet(apiUrl, { timeout: 45000, agent: null, headers: headersProveedor(url) })
     if (res.status === 401 || res.status === 403) throw new Error('Token WebScraping.AI inválido')
     if (res.status === 429) throw new Error('Límite de WebScraping.AI alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -180,8 +190,17 @@ async function fetchViaWebScrapingAI(url) {
 // ─── Capa 1c: ScraperAPI ─────────────────────────────────────────────────
 async function fetchViaScraperAPI(url) {
     if (!SCRAPERAPI_KEY) throw new Error('sin token')
-    const apiUrl = `http://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=false`
-    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    const render = esJKAnimeUrl(url)
+    const params = new URLSearchParams({
+        api_key: SCRAPERAPI_KEY,
+        url,
+        render: String(render),
+        premium: String(render),
+        country_code: 'us',
+        session_number: String(Math.floor(Date.now() / 1000) % 100000),
+    })
+    const apiUrl = `https://api.scraperapi.com/?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
     if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -191,8 +210,16 @@ async function fetchViaScraperAPI(url) {
 // ─── Capa 1c: WebScrapingAPI (5,000/mes gratis) ───────────────────────
 async function fetchViaWebScrapingAPI(url) {
     if (!WEBSCRAPINGAPI_KEY) throw new Error('sin token')
-    const apiUrl = `https://api.webscrapingapi.com/v2?api_key=${WEBSCRAPINGAPI_KEY}&url=${encodeURIComponent(url)}&render_js=0`
-    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    const render = esJKAnimeUrl(url)
+    const params = new URLSearchParams({
+        api_key: WEBSCRAPINGAPI_KEY,
+        url,
+        render_js: String(render ? 1 : 0),
+        timeout: render ? '45000' : '25000',
+        country: 'us',
+    })
+    const apiUrl = `https://api.webscrapingapi.com/v2?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
     if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -202,8 +229,16 @@ async function fetchViaWebScrapingAPI(url) {
 // ─── Capa 1d: Scrapingdog (1,000/mes gratis) ─────────────────────────
 async function fetchViaScrapingdog(url) {
     if (!SCRAPINGDOG_KEY) throw new Error('sin token')
-    const apiUrl = `https://api.scrapingdog.com/scrape?api_key=${SCRAPINGDOG_KEY}&url=${encodeURIComponent(url)}`
-    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    const render = esJKAnimeUrl(url)
+    const params = new URLSearchParams({
+        api_key: SCRAPINGDOG_KEY,
+        url,
+        dynamic: String(render),
+        premium: String(render),
+        country: 'us',
+    })
+    const apiUrl = `https://api.scrapingdog.com/scrape?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
     if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -213,8 +248,18 @@ async function fetchViaScrapingdog(url) {
 // ─── Capa 1e: ScrapingBee (1,000/mes gratis) ─────────────────────────
 async function fetchViaScrapingBee(url) {
     if (!SCRAPINGBEE_KEY) throw new Error('sin token')
-    const apiUrl = `https://app.scrapingbee.com/api/v1/?api_key=${SCRAPINGBEE_KEY}&url=${encodeURIComponent(url)}`
-    const res = await fetchGet(apiUrl, { timeout: 35000, agent: null })
+    const render = esJKAnimeUrl(url)
+    const params = new URLSearchParams({
+        api_key: SCRAPINGBEE_KEY,
+        url,
+        render_js: String(render),
+        wait: render ? '2500' : '0',
+        premium_proxy: String(render),
+        country_code: 'us',
+        block_ads: 'true',
+    })
+    const apiUrl = `https://app.scrapingbee.com/api/v1/?${params.toString()}`
+    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
     if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
     if (res.status === 429) throw new Error('Límite mensual alcanzado')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -224,17 +269,37 @@ async function fetchViaScrapingBee(url) {
 // ─── Capa 2: Via Cloudflare Worker ──────────────────────────────────────
 async function fetchViaWorker(url) {
     if (!CF_WORKER_URL) throw new Error('sin URL')
-    const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
-    const res = await fetchGet(proxyUrl, { timeout: 30000, agent: null })
+    const params = new URLSearchParams({ url, cache: 'bypass' })
+    const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?${params.toString()}`
+    const res = await fetchGet(proxyUrl, {
+        timeout: esJKAnimeUrl(url) ? 45000 : 30000,
+        agent: null,
+        headers: headersProveedor(url),
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.text()
 }
 
-// ─── Capa 3: Fetch directo ──────────────────────────────────────────────
+// ─── Capa 3: Fetch directo ────────────────────────────────────────────────
 async function fetchDirecto(url) {
-    const res = await fetchGet(url, { headers: CF_HEADERS, timeout: 25000, compress: true })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
+    let ultimoError
+    for (let intento = 0; intento < 2; intento++) {
+        try {
+            const res = await fetchGet(url, {
+                headers: { ...CF_HEADERS, ...headersProveedor(url), 'Cache-Control': 'no-cache' },
+                timeout: 25000,
+                compress: true,
+                redirect: 'follow',
+            })
+            if (res.ok) return res.text()
+            if (![408, 425, 429, 500, 502, 503, 504].includes(res.status)) throw new Error(`HTTP ${res.status}`)
+            ultimoError = new Error(`HTTP ${res.status}`)
+        } catch (error) {
+            ultimoError = error
+        }
+        if (intento === 0) await new Promise(resolve => setTimeout(resolve, 800))
+    }
+    throw ultimoError || new Error('Fetch directo falló')
 }
 
 // ─── Capa 4: Proxies públicos rotativos ──────────────────────────────────
@@ -242,7 +307,7 @@ const PUBLIC_CORS_PROXIES = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`,
+    (url) => `https://r.jina.ai/http://${url.replace(/^https?:\/\//i, '')}`,
 ]
 let _proxyIndex = 0
 
@@ -251,7 +316,11 @@ async function fetchViaProxy(url) {
         const proxyFn = PUBLIC_CORS_PROXIES[_proxyIndex % PUBLIC_CORS_PROXIES.length]
         _proxyIndex++
         try {
-            const res = await fetchGet(proxyFn(url), { timeout: 20000, agent: null })
+            const res = await fetchGet(proxyFn(url), {
+                timeout: 25000,
+                agent: null,
+                headers: { ...CF_HEADERS, ...headersProveedor(url) },
+            })
             if (!res.ok) continue
             const text = await res.text()
             if (!esCFBloqueado(text)) return text
