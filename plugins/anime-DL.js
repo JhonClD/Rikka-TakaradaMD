@@ -19,6 +19,7 @@ import {
 
 const SEARCH_TIMEOUT = 12_000
 const JK_SEARCH_TIMEOUT = 90_000
+const LAT_SEARCH_TIMEOUT = 60_000
 const MAX_RANGE = 12
 const JIKAN_TIMEOUT = 10_000
 
@@ -243,7 +244,9 @@ function esperar(ms) {
 
 async function buscarConTimeout(sitio, nombre, episodio, temporada) {
   let timer
-  const timeoutMs = sitio?.dominio === 'jkanime' ? JK_SEARCH_TIMEOUT : SEARCH_TIMEOUT
+  const timeoutMs = sitio?.dominio === 'jkanime'
+    ? JK_SEARCH_TIMEOUT
+    : sitio?.dominio === 'latanime' ? LAT_SEARCH_TIMEOUT : SEARCH_TIMEOUT
   try {
     return await Promise.race([
       sitio.buscar(nombre, episodio, temporada),
