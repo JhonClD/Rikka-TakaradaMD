@@ -1920,6 +1920,34 @@ export async function descargarDirecto(embedUrl, outputDir) {
   return outFile
 }
 
+async function crearJpegThumbnail(videoPath, outputDir) {
+  const thumbnailPath = path.join(outputDir, 'thumbnail.jpg')
+  const ejecutar = (segundo) => new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-ss', String(segundo), '-i', videoPath,
+      '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '5', thumbnailPath,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    proc.stderr.on('data', data => { stderr += data.toString() })
+    proc.on('error', reject)
+    proc.on('close', code => {
+      if (code === 0 && fs.existsSync(thumbnailPath)) resolve()
+      else reject(new Error(stderr.trim() || `ffmpeg terminó con código ${code}`))
+    })
+  })
+
+  try {
+    await ejecutar(1)
+  } catch (_) {
+    try { await ejecutar(0) } catch (error) {
+      console.error('[animeDL thumbnail]', error.message)
+      return null
+    }
+  }
+  try { return fs.readFileSync(thumbnailPath) } catch (_) { return null }
+}
+
 async function descargarMediaFirePorRangos(axios, url, outputPath, sizeBytes, signal, hilos = 6, onProgress = null) {
   if (!sizeBytes || sizeBytes < 5 * 1024 * 1024) return false
   const partes = []
@@ -2142,6 +2170,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
     const fileName = path.basename(archivoPath).replace(/_c\.mp4$/, '.mp4')
     const botName = global.botName ?? global.wm ?? 'Rikka-TakaradaMD'
     const caption  = `🎌 *${fileName.replace(/\.[^.]+$/, '')}*\n📦 ${sizeMB.toFixed(1)} MB · ${botName}`
+    const jpegThumbnail = await crearJpegThumbnail(archivoPath, tmpDir)
 
     await updateStatus(`⬆️ Subiendo a WhatsApp...`)
 
@@ -2150,6 +2179,7 @@ export async function ejecutarDescargaServidor(listaIntentos, indiceInicio = 0, 
       try {
         await conn.sendMessage(m.chat, {
           document: { url: archivoPath },
+          ...(jpegThumbnail ? { jpegThumbnail } : {}),
           caption, mimetype: 'video/mp4', fileName,
         }, { quoted: m })
         enviado = true
