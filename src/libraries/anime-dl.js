@@ -36,6 +36,29 @@ export async function getPuppeteer() {
   return _puppeteerExtra
 }
 
+async function fetchJKAnimeBrowserText(url) {
+  const browser = await (await getPuppeteer()).launch({
+    headless: 'new',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  })
+  const page = await browser.newPage()
+  try {
+    await page.setUserAgent(randomUA())
+    await page.setExtraHTTPHeaders(buildHeaders({ Referer: 'https://jkanime.net/' }))
+    await page.setRequestInterception(true)
+    page.on('request', request => {
+      if (['image', 'stylesheet', 'font', 'media'].includes(request.resourceType())) request.abort()
+      else request.continue()
+    })
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    return await page.content()
+  } finally {
+    try { await page.close({ runBeforeUnload: false }) } catch (_) {}
+    try { await browser.close() } catch (_) {}
+  }
+}
+
 export const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 20 })
 
 global.activeDownloads    = global.activeDownloads    || new Map()
@@ -1600,6 +1623,47 @@ export async function buscarEnJKanime(nombre, episodio, temporada = 1) {
   } catch (e) {
     if (e.code === 'JKANIME_FETCH_FAILED') throw e
     console.error('[jkanime] HTML search:', e.message)
+  }
+
+  // JKAnime alterna entre /buscar/{consulta} y /buscar?q={consulta};
+  // si el HTTP directo devuelve 403, repetir la búsqueda en navegador.
+  try {
+    const searchUrls = [
+      `https://jkanime.net/buscar/${encodeURIComponent(query)}`,
+      `https://jkanime.net/buscar?q=${encodeURIComponent(query)}`,
+    ]
+    let links = []
+    for (const searchUrl of searchUrls) {
+      let html = ''
+      try { html = await fetchJKAnimeText(searchUrl) } catch (_) {}
+      if (!html || html.length < 500) {
+        try { html = await fetchJKAnimeBrowserText(searchUrl) } catch (_) {}
+      }
+      if (!html) continue
+      const $ = cheerio.load(html)
+      const found = []
+      $('a[href]').each((_, el) => {
+        const href = $(el).attr('href') || ''
+        const absolute = (() => { try { return new URL(href, 'https://jkanime.net/').href } catch (_) { return '' } })()
+        const slug = absolute.match(/jkanime\.net\/([a-z0-9][a-z0-9-]+)\/?$/i)?.[1]
+        const title = (
+          $(el).attr('title') ||
+          $(el).find('h2,h3,h4,h5,.title,.name').first().text() ||
+          $(el).text()
+        ).replace(/\s+/g, ' ').trim().toLowerCase()
+        if (!slug || !title || /^(buscar|login|registro|categoria|contacto|top|calendario)$/.test(slug)) return
+        if (!found.some(item => item.href === absolute)) found.push({ href: absolute, title })
+      })
+      if (found.length > links.length) links = found
+      if (links.length >= 5) break
+    }
+    if (links.length > 0) {
+      const elegido = mejorMatch(links, nombre) || elegirPorTemporada(links, temporada) || links[0]
+      const slug = elegido.href.match(/jkanime\.net\/([a-z0-9-]+)\/?$/i)?.[1]
+      if (slug) return `https://jkanime.net/${slug}/${episodio}/`
+    }
+  } catch (e) {
+    console.error('[jkanime] búsqueda robusta:', e.message)
   }
 
   const slugBase = normalizarTitulo(nombre).replace(/\s+/g, '-')
