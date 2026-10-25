@@ -45,9 +45,9 @@ const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar 
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 const SCRAPE_DO_TOKEN    = '6868b58ba96148b4b282f0075795119e67a595611e7'  // scrape.do → 1,000/mes
-const SCRAPE_DO_JK_TOKEN = process.env.SCRAPE_DO_JK_TOKEN || ''
+const SCRAPE_DO_JK_TOKEN = 'db51bcb2edaf40ed9457e4f121357d66c253eb7d830'
 const SCRAPERAPI_KEY     = '56971a05b709caed0f17204ccc1f4532'             // scraperapi.com → 1,000/mes
-const WEBSCRAPING_AI_KEY = process.env.WEBSCRAPING_AI_KEY || ''
+const WEBSCRAPING_AI_KEY = '6a9771e5-2a40-4571-9a0f-5d3730388c36'
 const WEBSCRAPINGAPI_KEY = ''  // webscrapingapi.com → 5,000/mes
 const SCRAPINGDOG_KEY    = ''  // scrapingdog.com → 1,000/mes
 const SCRAPINGBEE_KEY    = ''  // scrapingbee.com → 1,000/mes
