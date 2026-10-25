@@ -106,7 +106,7 @@ function menuText(session, onlySeason = null) {
   const other = session.otherResults.length
     ? `\n\n✐ Otros resultados: ${session.otherResults.map((item, index) => `*${String.fromCharCode(97 + index)})* ${clean(item.title, 90)}`).join(' · ')}`
     : ''
-  const instructions = '\n\n✐ Responde a este mensaje con el episodio: *1* · *1 720p* · *1 lat* · *1 sub* · *s2 5* · *s2* (ver la T2)'
+  const instructions = '\n\n✐ Responde a este mensaje con el episodio: *1* · *1 720p* · *1 lat* · *1 sub* · *1 dub* · *s2 5* · *s2* (ver la T2)'
   const summary = `${header}\n${seasonLines}\n${languages}`
   return `${summary}\n\n${formatSeasonEpisodeList(selected)}${instructions}${onlySeason == null ? other : ''}`
 }
@@ -162,34 +162,38 @@ function parseOption(text) {
 }
 
 function parseCommand(text) {
-  let rest = String(text || '').trim()
+  const tokens = String(text || '').trim().split(/\s+/).filter(Boolean)
   let option = null
-  const optionMatch = rest.match(/\s+(720p|480p|1080p|lat|sub|dub)$/i)
-  if (optionMatch) {
-    option = optionMatch[1].toLowerCase()
-    rest = rest.slice(0, optionMatch.index).trim()
-  }
   let season = null
-  const seasonMatch = rest.match(/\s+(?:t|s)(\d+)$/i)
-  if (seasonMatch) {
-    season = Number(seasonMatch[1])
-    rest = rest.slice(0, seasonMatch.index).trim()
-  }
   let episode = null
-  const episodeMatch = rest.match(/\s+(\d+(?:\.\d+)?)$/)
-  if (episodeMatch) {
-    episode = Number(episodeMatch[1])
-    rest = rest.slice(0, episodeMatch.index).trim()
+  let changed = true
+  while (tokens.length && changed) {
+    changed = false
+    const token = tokens[tokens.length - 1].replace(/^\[|\]$/g, '').replace(/^\(|\)$/g, '')
+    if (option == null && /^(720p|480p|1080p|lat|sub|dub)$/i.test(token)) {
+      option = token.toLowerCase()
+      tokens.pop()
+      changed = true
+    } else if (season == null && /^(?:t|s)\d+$/i.test(token)) {
+      season = Number(token.slice(1))
+      tokens.pop()
+      changed = true
+    } else if (episode == null && /^\d+(?:\.\d+)?$/.test(token)) {
+      episode = Number(token)
+      tokens.pop()
+      changed = true
+    }
   }
-  return { query: rest, episode, season, option }
+  return { query: tokens.join(' ').trim(), episode, season, option }
 }
 
 function formatUsage(prefix = '/') {
   return '「✐」 *Uso de /nidl*\n\n' +
     `❏ *${prefix}nidl nombre del anime* — muestra temporadas y episodios\n` +
-    `❏ *${prefix}nidl nombre episodio* — descarga episodio de T1\n` +
-    `❏ *${prefix}nidl nombre episodio T2* — descarga de otra temporada\n\n` +
-    'Responde al menú: *1* · *1 720p* · *1 lat* · *1 sub* · *s2 5* · *s2* (ver episodios de T2).'
+    `❏ *${prefix}nidl nombre episodio SUB|DUB* — descarga de T1\n` +
+    `❏ *${prefix}nidl nombre episodio SUB|DUB T2* — descarga de otra temporada\n\n` +
+    'Ejemplo: */nidl Solo Leveling 5 DUB T2*. No escribas los corchetes de los argumentos opcionales.\n' +
+    'Responde al menú: *1* · *1 720p* · *1 lat* · *1 sub* · *1 dub* · *s2 5* · *s2* (ver episodios de T2).'
 }
 
 async function loadSeason(item, number) {
@@ -424,7 +428,7 @@ handler.before = async function (m, { conn }) {
   }
 }
 
-handler.help = ['nidl <nombre> [episodio] [T2] [720p|lat|sub|dub]']
+handler.help = ['nidl <nombre> [episodio] [SUB|DUB] [T2]']
 handler.tags = ['anime', 'downloader']
 handler.command = /^(?:nidl)$/i
 

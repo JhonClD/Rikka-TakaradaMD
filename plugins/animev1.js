@@ -280,7 +280,7 @@ const handler = async (m, { conn, text, command }) => {
         '· *.animev1ep <número-anime> <episodio> [sub|dub]* — enlaces desde resultados\n' +
         '· *.animev1dl <episodio> [sub|dub]* — descargar y enviar el episodio\n' +
         '· *.animev1dl <número-anime> <episodio> [sub|dub]* — descargar desde resultados\n\n' +
-        '· */nidl <nombre> [episodio] [T2]* — menú y descarga; responde 1, 1 720p, 1 lat, s2 5 o s2\n\n' +
+        '· */nidl <nombre> [episodio] [SUB|DUB] [T2]* — menú o descarga directa; ej. /nidl Solo Leveling 5 DUB T2\n\n' +
         'Las búsquedas y selecciones se guardan durante 10 minutos.'
       )
     }
