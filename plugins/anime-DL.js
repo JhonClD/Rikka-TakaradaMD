@@ -152,6 +152,16 @@ export function parseArgs(input = '') {
       remaining.push(token)
       continue
     }
+    if (token.toLowerCase() === 'lat' || token.toLowerCase() === 'latino') {
+      result.sitioId = 2
+      result.sitio = getSitioPorId(2)
+      continue
+    }
+    if (/^sub(?::[a-z-]+)?$/i.test(token) || token.toLowerCase() === 'jkanime' || token.toLowerCase() === 'jk') {
+      result.sitioId = 3
+      result.sitio = getSitioPorId(3)
+      continue
+    }
     if (token.toLowerCase() === '--srv') {
       result.forceServers = true
       continue
