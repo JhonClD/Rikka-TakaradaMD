@@ -354,7 +354,13 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
     const isSmallVideo = file.extension === '.mp4' && file.fileSize <= 60 * 1024 * 1024
     const payload = isSmallVideo
       ? { video: { url: file.filePath }, mimetype: 'video/mp4', fileName: file.fileName, caption }
-      : { document: { url: file.filePath }, mimetype: file.mimetype, fileName: file.fileName, caption }
+      : {
+          document: { url: file.filePath },
+          mimetype: file.mimetype,
+          fileName: file.fileName,
+          caption,
+          jpegThumbnail: await animeV1Downloader.createJpegThumbnail(file.filePath),
+        }
     terminalLog('envío a WhatsApp iniciado', {
       tipo: isSmallVideo ? 'video' : 'documento',
       archivo: file.fileName,

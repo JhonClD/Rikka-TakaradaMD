@@ -529,4 +529,20 @@ async function cleanupDownloadFile(filePath) {
   }
 }
 
-module.exports = { downloadEpisodeFile, cleanupDownloadFile, MAX_DOWNLOAD_BYTES }
+async function createJpegThumbnail(filePath) {
+  if (!filePath) return null
+  return new Promise(resolve => {
+    const child = spawn(getFfmpegPath(), [
+      '-hide_banner', '-loglevel', 'error',
+      '-ss', '1', '-i', filePath,
+      '-frames:v', '1', '-vf', 'scale=480:-2',
+      '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '5', 'pipe:1',
+    ], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const chunks = []
+    child.stdout.on('data', chunk => chunks.push(chunk))
+    child.once('error', () => resolve(null))
+    child.once('close', code => resolve(code === 0 && chunks.length ? Buffer.concat(chunks) : null))
+  })
+}
+
+module.exports = { downloadEpisodeFile, cleanupDownloadFile, createJpegThumbnail, MAX_DOWNLOAD_BYTES }

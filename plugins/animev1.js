@@ -255,7 +255,13 @@ async function downloadEpisode(m, conn, text) {
     const sendAsVideo = file.extension === '.mp4' && file.fileSize <= 60 * 1024 * 1024
     const payload = sendAsVideo
       ? { video: { url: file.filePath }, mimetype: 'video/mp4', fileName: file.fileName, caption }
-      : { document: { url: file.filePath }, mimetype: file.mimetype, fileName: file.fileName, caption }
+      : {
+          document: { url: file.filePath },
+          mimetype: file.mimetype,
+          fileName: file.fileName,
+          caption,
+          jpegThumbnail: await animeV1Downloader.createJpegThumbnail(file.filePath),
+        }
     await conn.sendMessage(m.chat, payload, { quoted: m })
     await update(`✅ Descarga enviada: ${file.fileName}`)
   } catch (error) {
