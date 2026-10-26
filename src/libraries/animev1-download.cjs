@@ -460,6 +460,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
   const normalizedEpisodeUrl = safeHttpUrl(episodeUrl)
   if (!normalizedEpisodeUrl) throw new Error('La URL del episodio no es válida.')
   const variant = String(options.variant || 'SUB').toUpperCase() === 'DUB' ? 'DUB' : 'SUB'
+  const apiKeys = options.apiKeys || {}
   downloadLog('solicitando enlaces de episodio', {
     título: options.title || 'Anime',
     episodio: options.episode || 'n/d',
@@ -468,6 +469,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     host: hostOf(normalizedEpisodeUrl),
     límite: formatBytes(MAX_DOWNLOAD_BYTES),
     tiempoLímiteMin: Math.round(DOWNLOAD_TIMEOUT_MS / 60_000),
+    apiConfiguradas: Object.entries(apiKeys).filter(([, value]) => Boolean(value)).map(([name]) => name),
   })
   const response = await animeV1.getEpisodeLinks(normalizedEpisodeUrl, false)
   const candidates = listCandidates(response?.data, variant, options.quality)

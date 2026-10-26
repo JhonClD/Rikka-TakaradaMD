@@ -1,11 +1,31 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+
+function loadEnvFile() {
+  const envPath = path.resolve(process.cwd(), '.env')
+  if (!fs.existsSync(envPath)) return
+  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/)
+    if (!match || match[1] in process.env) continue
+    process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2')
+  }
+}
+
+loadEnvFile()
 
 const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DOMAIN || 'animeav1.com')
   .replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase()
 const TTL = 10 * 60 * 1000
 const MAX_SEARCH_RESULTS = 12
 const MAX_OTHER_RESULTS = 4
+const PROVIDER_API_KEYS = {
+  upnShare: process.env.UPN_SHARE_API_KEY || '',
+  voe: process.env.VOE_API_KEY || '',
+  byse: process.env.BYSE_API_KEY || '',
+  oneFichier: process.env.ONE_FICHIER_API_KEY || '',
+}
 
 global.nidlSessions = global.nidlSessions || new Map()
 global.nidlDownloadLocks = global.nidlDownloadLocks || new Set()
@@ -340,6 +360,7 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
       episode,
       variant: selectedOption.variant,
       quality: selectedOption.quality,
+      apiKeys: PROVIDER_API_KEYS,
       onStatus: statusText,
     })
     terminalLog('archivo descargado', {
