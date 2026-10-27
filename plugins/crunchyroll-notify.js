@@ -20,12 +20,14 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
-const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
-const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
-const DEVICE_TYPE= 'ANDROIDTV'
+const BASIC_ANON = process.env.CR_BASIC_ANON || 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+const BASIC_AUTH = process.env.CR_BASIC_AUTH || 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
+const CR_UA      = process.env.CR_USER_AGENT || 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
+const DEVICE_ID  = process.env.CR_DEVICE_ID || '00000000-dead-beef-cafe-000000000000'
+const DEVICE_TYPE= process.env.CR_DEVICE_TYPE || 'ANDROIDTV'
+const MAX_API_ATTEMPTS = 3
 const MAX_SEEN   = 500
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
@@ -56,6 +58,12 @@ function loadSeen() {
   } catch { return [] }
 }
 function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN)) }
+
+function retryAfterMs(res, attempt) {
+  const retryAfter = Number(res.headers.get('retry-after'))
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1000, 30_000)
+  return Math.min(1000 * (2 ** attempt) + Math.floor(Math.random() * 250), 10_000)
+}
 
 // ─── Cookie jar ──────────────────────────────────────────────────────────────
 let _cookies = ''
@@ -135,16 +143,25 @@ async function getToken() {
 async function crFetch(path, params = {}, base = CR_BASE) {
   const url   = new URL(`${base}${path}`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let tokenRefreshed = false
+  for (let attempt = 0; attempt < MAX_API_ATTEMPTS; attempt++) {
     const token = await getToken()
     const res = await fetch(url.toString(), {
       headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': CR_UA, 'Accept': 'application/json', 'Cookie': _cookies },
       signal: AbortSignal.timeout(20_000),
     })
     if (res.ok) return res.json()
-    if (res.status === 401 && attempt === 0) {
+    if (res.status === 401 && !tokenRefreshed) {
       _token = null
       _tokenExp = 0
+      tokenRefreshed = true
+      continue
+    }
+    const retryable = res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500
+    if (retryable && attempt < MAX_API_ATTEMPTS - 1) {
+      const waitMs = retryAfterMs(res, attempt)
+      console.warn(`[CR-Notify] API HTTP ${res.status}; reintento ${attempt + 1}/${MAX_API_ATTEMPTS - 1} en ${waitMs} ms.`)
+      await sleep(waitMs)
       continue
     }
     const detail = (await res.text().catch(() => '')).slice(0, 120)
@@ -175,6 +192,16 @@ function extractImage(images = {}) {
     .sort((a, b) => (b.width * b.height || b.width) - (a.width * a.height || a.width))[0]?.source || ''
 }
 
+function normalizeLocale(value) {
+  const locale = String(value || '').trim().replace('_', '-').toLowerCase()
+  return {
+    'ja-jp': 'ja-JP',
+    'es-419': 'es-419',
+    'es-la': 'es-LA',
+    'es-es': 'es-ES',
+  }[locale] || value
+}
+
 function normalizeEpisode(p) {
   const meta    = p.episode_metadata || {}
   const airRaw  = p.episode_air_date || p.premium_available_date || p.availability_starts || ''
@@ -189,6 +216,7 @@ function normalizeEpisode(p) {
     else if (epId.endsWith('ES419') || epId.endsWith('LA')) locale = 'es-419'
     else if (epId.endsWith('ESES')) locale = 'es-ES'
   }
+  locale = normalizeLocale(locale)
 
   let seriesName = p.series_title || meta.series_title || ''
   const seasonTitle = p.season_title || meta.season_title || ''
