@@ -138,6 +138,9 @@ function cleanTitle(titulo, epNum) {
     .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
     .replace(/\s*\b(?:S|T)\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)\b/ig, '')
     .replace(/(^|[\s()[\]{}\-_:])(?:VIII|VII|VI|IX|IV|V|III|II|X)(?=$|[\s()[\]{}\-_:])/ig, '$1')
+    .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s*(?:latino|castellano)\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s*\(\s*(?:720p|1080p)\s*\)/ig, '')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -753,7 +756,6 @@ async function enviarEpisodio(chatId, ep, conn) {
       document : { url: videoPath },
       fileName,
       mimetype : 'video/mp4',
-      caption  : `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}`,
       jpegThumbnail,
     })
 
