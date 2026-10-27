@@ -20,14 +20,37 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = process.env.CR_BASIC_ANON || 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
-const BASIC_AUTH = process.env.CR_BASIC_AUTH || 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA      = process.env.CR_USER_AGENT || 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
+const CR_RSS     = 'https://feeds.feedburner.com/crunchyroll/rss/anime'
+const PLATFORM_CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/main/credentials.tv.json'
+let BASIC_ANON = process.env.CR_BASIC_ANON || 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+let BASIC_AUTH = process.env.CR_BASIC_AUTH || 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
+let CR_UA      = process.env.CR_USER_AGENT || 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
 const DEVICE_ID  = process.env.CR_DEVICE_ID || '00000000-dead-beef-cafe-000000000000'
 const DEVICE_TYPE= process.env.CR_DEVICE_TYPE || 'ANDROIDTV'
 const MAX_API_ATTEMPTS = 3
 const MAX_SEEN   = 500
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+let platformCredentialsLoaded = false
+
+async function loadPlatformCredentials() {
+  if (platformCredentialsLoaded) return
+  platformCredentialsLoaded = true
+  if (process.env.CR_BASIC_ANON && process.env.CR_BASIC_AUTH && process.env.CR_USER_AGENT) return
+  try {
+    const res = await fetch(PLATFORM_CREDENTIALS_URL, { signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const credentials = await res.json()
+    if (!process.env.CR_BASIC_ANON && credentials.authorization) BASIC_ANON = credentials.authorization
+    if (!process.env.CR_BASIC_AUTH && credentials.authorization) BASIC_AUTH = credentials.authorization
+    if (!process.env.CR_USER_AGENT && credentials.version) {
+      const version = String(credentials.version).replace(' ', '_').replace(/[()]/g, '')
+      CR_UA = `Crunchyroll/ANDROIDTV/${version} (Android 16; en-US; sdk_gphone64_x86_64)`
+    }
+    console.log(`[CR-Notify] Credenciales de plataforma actualizadas (${credentials.version || 'versión desconocida'}).`)
+  } catch (err) {
+    console.warn(`[CR-Notify] No se pudieron actualizar credenciales de plataforma: ${err.message}`)
+  }
+}
 
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
@@ -80,6 +103,7 @@ let _token = null, _tokenExp = 0
 
 async function getAnonToken() {
   if (_token && Date.now() < _tokenExp - 30_000) return _token
+  await loadPlatformCredentials()
   if (!_cookies) await preLogin()
   const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
@@ -94,6 +118,7 @@ async function getAnonToken() {
 }
 
 async function loginWithAccount(email, password) {
+  await loadPlatformCredentials()
   if (!_cookies) await preLogin()
   const body = new URLSearchParams({ grant_type: 'password', username: email, password, scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
@@ -110,6 +135,7 @@ async function loginWithAccount(email, password) {
 }
 
 async function refreshAccountToken() {
+  await loadPlatformCredentials()
   const cfg = loadCfg()
   if (!cfg.refreshToken) throw new Error('Sin refresh_token — usa .crlogin de nuevo')
   if (!_cookies) await preLogin()
@@ -129,12 +155,31 @@ async function refreshAccountToken() {
   return _token
 }
 
+function clearAccountSession() {
+  const cfg = loadCfg()
+  delete cfg.accessToken
+  delete cfg.refreshToken
+  delete cfg.tokenExp
+  delete cfg.accountId
+  delete cfg.loggedIn
+  saveCfg(cfg)
+  _token = null
+  _tokenExp = 0
+}
+
 async function getToken() {
   const cfg = loadCfg()
   if (cfg.loggedIn) {
     if (_token && Date.now() < _tokenExp - 30_000) return _token
     if (cfg.accessToken && cfg.tokenExp && Date.now() < cfg.tokenExp - 30_000) { _token = cfg.accessToken; _tokenExp = cfg.tokenExp; return _token }
-    return refreshAccountToken()
+    try {
+      return await refreshAccountToken()
+    } catch (err) {
+      if (!/invalid_grant|400|401|unauthorized/i.test(err.message)) throw err
+      console.warn('[CR-Notify] Sesión rechazada; cambiando a modo anónimo.')
+      clearAccountSession()
+      return getAnonToken()
+    }
   }
   return getAnonToken()
 }
@@ -263,12 +308,42 @@ function formatCaption(ep) {
 }
 
 // ─── Fetch episodios ──────────────────────────────────────────────────────────
+function decodeXml(value = '') {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+function rssLocale(title) {
+  const value = title.toLowerCase()
+  if (/(?:spanish|español|castellano)\s+dub|\blatino\b/.test(value)) return 'es-419'
+  if (/\bcastellano\b/.test(value)) return 'es-ES'
+  if (/\([^)]*\bdub\b[^)]*\)/.test(value)) return ''
+  return 'ja-JP'
+}
+async function fetchRssEpisodes(limit = 100) {
+  const res = await fetch(CR_RSS, { headers: { 'User-Agent': CR_UA, Accept: 'application/rss+xml, application/xml' }, signal: AbortSignal.timeout(20_000) })
+  if (!res.ok) throw new Error(`RSS HTTP ${res.status}`)
+  const xml = await res.text()
+  const items = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].slice(0, limit)
+  return items.map(([, raw]) => {
+    const read = tag => decodeXml(raw.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'))?.[1] || '')
+    const title = read('title')
+    const link = read('link')
+    const description = raw.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] || ''
+    const id = link.match(/\/watch\/([^/?]+)/i)?.[1] || read('guid') || link
+    const epMatch = title.match(/\bEpisode\s+(\d+)\b/i)
+    const epNum = epMatch ? Number(epMatch[1]) : 'Especial'
+    const series = title.split(/\s+-\s+(?:Episode|Episodio)\b/i)[0].trim() || title
+    const epTitle = title.replace(/^.*?\s+-\s+(?:Episode|Episodio)\s+\d+\s*-?\s*/i, '').trim()
+    const image = description.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
+    const pubDate = read('pubDate')
+    return { id: `rss-${id}`, series, epTitle, epNum, link, audioLocale: rssLocale(title), image, airTime: pubDate ? new Date(pubDate).getTime() : 0 }
+  }).filter(ep => ep.id && ep.link && ep.audioLocale && ALLOWED_LOCALES.has(ep.audioLocale))
+}
 async function fetchNewEpisodes() {
-  const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  const valid = [...new Map(rows.map(normalizeEpisode)
-    .filter(i => i.id && i.series && ALLOWED_LOCALES.has(i.audioLocale))
-    .map(i => [i.id, i])).values()]
+  const valid = await fetchRssEpisodes()
   if (!valid.length) return []
 
   const seen = loadSeen()
@@ -289,11 +364,7 @@ function markSeen(id) {
 }
 
 async function getLatestEpisodes(limit = 10) {
-  const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  return [...new Map(rows.map(normalizeEpisode)
-    .filter(i => i.id && ALLOWED_LOCALES.has(i.audioLocale))
-    .map(i => [i.id, i])).values()].slice(0, limit)
+  return (await fetchRssEpisodes(Math.max(limit, 10))).slice(0, limit)
 }
 
 // ─── Envío ────────────────────────────────────────────────────────────────────
@@ -395,7 +466,16 @@ let handler = async (m, { conn, command, args, isOwner }) => {
       return conn.sendMessage(m.chat, {
         text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Watcher cada ${process.env.CR_SECONDS || cfg.seconds || 60} segundos\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
-    } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
+    } catch (e) {
+      if (/invalid_grant/i.test(e.message)) {
+        clearAccountSession()
+        startCron(conn)
+        return conn.sendMessage(m.chat, {
+          text: '⚠️ Crunchyroll rechazó el login de cuenta (`invalid_grant`).\n\n✅ El watcher continuará en *modo anónimo*, suficiente para detectar y notificar episodios públicos.\n\nNo vuelvas a enviar tu contraseña por el bot; el login de cuenta depende del flujo externo de Crunchyroll.',
+        }, { quoted: m })
+      }
+      return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m })
+    }
   }
 
   // ── .crlogout ─────────────────────────────────────────────────────────────
@@ -408,7 +488,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     saveCfg(cfg)
     _token = null; _tokenExp = 0
     return conn.sendMessage(m.chat, {
-      text: `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
+      text: `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl watcher continúa en modo anónimo.`,
     }, { quoted: m })
   }
 
