@@ -107,16 +107,35 @@ function detectarServidor(url, label = '') {
 
 function zeroPad(n)  { return String(n).padStart(2, '0') }
 function safeFile(s) { return s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
+const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
+function seasonValue(value) {
+  const token = String(value || '').toUpperCase()
+  return /^\d+$/.test(token) ? Number(token) : ROMAN_SEASONS[token] || 1
+}
 function getSeasonNumber(...values) {
   const text = values.filter(Boolean).join(' ')
-  const match = text.match(/(?:temporada|season)\s*[-_: ]?\s*(\d+)|\bT(\d+)\b/i)
-  const season = Number(match?.[1] || match?.[2] || 1)
+  const token = '(\\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)'
+  const patterns = [
+    new RegExp(`(?:temporada|season|saison)\\s*[-_: ]?\\s*${token}`, 'i'),
+    new RegExp(`${token}\\s*(?:st|nd|rd|th|ª|º)?\\s*(?:temporada|season|saison)`, 'i'),
+    new RegExp(`\\b(?:S|T)\\s*${token}\\b`, 'i'),
+    /\b(?:first|second|third|fourth|fifth)\s+season\b/i,
+  ]
+  let match
+  for (const pattern of patterns) {
+    match = text.match(pattern)
+    if (match) break
+  }
+  const wordSeasons = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5 }
+  const season = match?.[1] ? seasonValue(match[1]) : wordSeasons[match?.[0]?.split(/\s+/)[0]?.toLowerCase()] || 1
   return season > 1 ? season : 1
 }
 function cleanTitle(titulo) {
   return titulo
-    .replace(/\s*(?:temporada|season)\s*[-_: ]?\s*\d+/ig, '')
-    .replace(/\s*\bT\d+\b/ig, '')
+    .replace(/\s*(?:first|second|third|fourth|fifth)\s+season/ig, '')
+    .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
+    .replace(/\s*\b(?:S|T)\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)\b/ig, '')
+    .replace(/(^|[\s()[\]{}\-_:])(?:VIII|VII|VI|IX|IV|V|III|II|X)(?=$|[\s()[\]{}\-_:])/ig, '$1')
     .replace(/\s+/g, ' ')
     .trim()
 }
