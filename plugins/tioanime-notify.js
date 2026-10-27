@@ -107,7 +107,28 @@ function detectarServidor(url, label = '') {
 
 function zeroPad(n)  { return String(n).padStart(2, '0') }
 function safeFile(s) { return s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
-function buildFileName(titulo, epNum) { return `${zeroPad(epNum)} ${safeFile(titulo)}.mp4` }
+function getSeasonNumber(...values) {
+  const text = values.filter(Boolean).join(' ')
+  const match = text.match(/(?:temporada|season)\s*[-_: ]?\s*(\d+)|\bT(\d+)\b/i)
+  const season = Number(match?.[1] || match?.[2] || 1)
+  return season > 1 ? season : 1
+}
+function cleanTitle(titulo) {
+  return titulo
+    .replace(/\s*(?:temporada|season)\s*[-_: ]?\s*\d+/ig, '')
+    .replace(/\s*\bT\d+\b/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function buildFileName(titulo, epNum, fuente = 'tioanime', idioma = 'latino', slug = '') {
+  const season = getSeasonNumber(titulo, slug)
+  const seasonLabel = season > 1 ? `T${season} ` : ''
+  const title = cleanTitle(titulo)
+  const details = fuente === 'latanime'
+    ? `Español ${idioma === 'castellano' ? 'Castellano 🇪🇸' : 'Latino 🇲🇽'} (1080p)`
+    : 'Sub Español (720p)'
+  return `${zeroPad(epNum)} ${seasonLabel}${safeFile(title)} ${details} [[𝗖𝗜𝗗]].mp4`
+}
 
 function fmtBytes(b) {
   if (!b || b <= 0) return '0 KB'
@@ -643,8 +664,8 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 
 async function enviarEpisodio(chatId, ep, conn) {
-  const { titulo, epNum, epUrl, imgUrl, fuente = 'tioanime', idioma = 'latino' } = ep
-  const fileName = buildFileName(titulo, epNum)
+  const { titulo, epNum, epUrl, imgUrl, slug = '', fuente = 'tioanime', idioma = 'latino' } = ep
+  const fileName = buildFileName(titulo, epNum, fuente, idioma, slug)
   
   // [CORRECCIÓN 2] Usar carpeta local segura para descargar y evitar ENOSPC
   const localTmp = path.join(process.cwd(), 'temp_videos')
