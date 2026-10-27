@@ -116,9 +116,10 @@ function getSeasonNumber(...values) {
   const text = values.filter(Boolean).join(' ')
   const token = '(\\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)'
   const patterns = [
-    new RegExp(`(?:temporada|season|saison)\\s*[-_: ]?\\s*${token}`, 'i'),
     new RegExp(`${token}\\s*(?:st|nd|rd|th|ª|º)?\\s*(?:temporada|season|saison)`, 'i'),
+    new RegExp(`(?:temporada|season|saison)\\s*[-_: ]?\\s*${token}`, 'i'),
     new RegExp(`\\b(?:S|T)\\s*${token}\\b`, 'i'),
+    /\b(?:VIII|VII|VI|IX|IV|V|III|II|X)\b/i,
     /\b(?:first|second|third|fourth|fifth)\s+season\b/i,
   ]
   let match
@@ -130,8 +131,9 @@ function getSeasonNumber(...values) {
   const season = match?.[1] ? seasonValue(match[1]) : wordSeasons[match?.[0]?.split(/\s+/)[0]?.toLowerCase()] || 1
   return season > 1 ? season : 1
 }
-function cleanTitle(titulo) {
+function cleanTitle(titulo, epNum) {
   return titulo
+    .replace(new RegExp(`\\s*[-–—:]?\\s*${Number(epNum)}\\s*$`), '')
     .replace(/\s*(?:first|second|third|fourth|fifth)\s+season/ig, '')
     .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
     .replace(/\s*\b(?:S|T)\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)\b/ig, '')
@@ -142,7 +144,7 @@ function cleanTitle(titulo) {
 function buildFileName(titulo, epNum, fuente = 'tioanime', idioma = 'latino', slug = '') {
   const season = getSeasonNumber(titulo, slug)
   const seasonLabel = season > 1 ? `T${season} ` : ''
-  const title = cleanTitle(titulo)
+  const title = cleanTitle(titulo, epNum)
   const details = fuente === 'latanime'
     ? `Español ${idioma === 'castellano' ? 'Castellano 🇪🇸' : 'Latino 🇲🇽'} (1080p)`
     : 'Sub Español (720p)'
