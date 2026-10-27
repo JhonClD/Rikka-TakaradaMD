@@ -308,7 +308,7 @@ async function sendItem(conn, jid, ep, quoted = null) {
 }
 const delay = ms => new Promise(r => setTimeout(r, ms))
 
-// ─── Cron ─────────────────────────────────────────────────────────────────────
+// ─── Watcher ──────────────────────────────────────────────────────────────────
 let cronTimer = null
 let storedConn = null
 let cronRunning = false
@@ -323,10 +323,10 @@ function startCron(conn) {
   stopCron()
 
   const cfg     = loadCfg()
-  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 1)
-  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 1
+  const configuredSeconds = Number(process.env.CR_SECONDS ?? cfg.seconds ?? 60)
+  const seconds = Number.isFinite(configuredSeconds) ? Math.min(Math.max(15, configuredSeconds), 3600) : 60
 
-  // El cron siempre arranca, pero nunca permite dos consultas simultáneas.
+  // El watcher nunca permite dos consultas simultáneas.
   cronTimer = setInterval(async () => {
     if (cronRunning) return
     const activeConn = getConn()
@@ -357,12 +357,12 @@ function startCron(conn) {
         await delay(3000)
       }
       console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
-    } catch (err) { console.error('[CR-Notify] Cron:', err.message) }
+    } catch (err) { console.error('[CR-Notify] Watcher:', err.message) }
     finally { cronRunning = false }
-  }, minutes * 60_000)
+  }, seconds * 1000)
 
   const jids = loadCfg().targetJids || []
-  console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${jids.length} grupo(s) configurado(s)`)
+  console.log(`[CR-Notify] Watcher activo → cada ${seconds} s | ${jids.length} grupo(s) configurado(s)`)
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -370,7 +370,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   // Guardar conexión en cada llamada para que el cron la use
   if (conn) storedConn = conn
   if (!cronTimer && loadCfg().cronEnabled !== false) startCron(conn)
-  // ── .crcron — Activa o desactiva el monitor automático ────────────────────
+  // ── .crcron — Activa o desactiva el monitor automático ─────────────────────
   if (command === 'crcron') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     const mode = String(args?.[0] || 'status').toLowerCase()
@@ -379,15 +379,28 @@ let handler = async (m, { conn, command, args, isOwner }) => {
       cfg.cronEnabled = false
       saveCfg(cfg)
       stopCron()
-      return conn.sendMessage(m.chat, { text: '⏸️ *Cron de Crunchyroll desactivado.*\nUsa *.crcron on* para activarlo.' }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: '⏸️ *Watcher de Crunchyroll desactivado.*\nUsa *.crcron on* para activarlo.' }, { quoted: m })
     }
     if (mode === 'on' || mode === 'enable' || mode === 'activar') {
       cfg.cronEnabled = true
       saveCfg(cfg)
       startCron(conn)
-      return conn.sendMessage(m.chat, { text: '▶️ *Cron de Crunchyroll activado.*' }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: '▶️ *Watcher de Crunchyroll activado.*' }, { quoted: m })
     }
-    return conn.sendMessage(m.chat, { text: `⚙️ Cron de Crunchyroll: *${cfg.cronEnabled === false ? 'desactivado' : 'activado'}*\nUso: *.crcron on* o *.crcron off*` }, { quoted: m })
+    return conn.sendMessage(m.chat, { text: `⚙️ Watcher de Crunchyroll: *${cfg.cronEnabled === false ? 'desactivado' : 'activado'}*\nUso: *.crcron on* o *.crcron off*` }, { quoted: m })
+  }
+  // ── .crinterval — Cambia el intervalo en segundos ──────────────────────────
+  if (command === 'crinterval') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    const seconds = Number(args?.[0])
+    if (!Number.isInteger(seconds) || seconds < 15 || seconds > 3600) {
+      return conn.sendMessage(m.chat, { text: '💡 Usa un intervalo entre *15* y *3600* segundos.\nEjemplo: *.crinterval 30*' }, { quoted: m })
+    }
+    const cfg = loadCfg()
+    cfg.seconds = seconds
+    saveCfg(cfg)
+    if (cfg.cronEnabled !== false) startCron(conn)
+    return conn.sendMessage(m.chat, { text: `⏱️ Watcher actualizado: cada *${seconds} segundos*.` }, { quoted: m })
   }
   // ── .crlogin ──────────────────────────────────────────────────────────────
   if (command === 'crlogin') {
@@ -397,10 +410,10 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     await conn.sendMessage(m.chat, { text: '🔐 Conectando con Crunchyroll...' }, { quoted: m })
     try {
       await loginWithAccount(email, pass)
-      startCron(conn)
       const cfg = loadCfg()
+      if (cfg.cronEnabled !== false) startCron(conn)
       return conn.sendMessage(m.chat, {
-        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 1} min\n🔁 Refresh automático habilitado`,
+        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Watcher cada ${process.env.CR_SECONDS || cfg.seconds || 60} segundos\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
     } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
   }
@@ -450,7 +463,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   // ── .crstatus ─────────────────────────────────────────────────────────────
   if (command === 'crstatus') {
     const cfg  = loadCfg()
-    const mins = process.env.CR_MINUTES || cfg.minutes || '1'
+    const seconds = process.env.CR_SECONDS || cfg.seconds || '60'
     const seen = loadSeen()
     const exp  = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
     const gruposList = cfg.targetJids.length
@@ -461,9 +474,9 @@ let handler = async (m, { conn, command, args, isOwner }) => {
             `🔑 Modo: *${cfg.loggedIn ? '👤 Cuenta real ✅' : '👻 Anónimo'}*\n` +
             `⏳ Token expira: *${exp}*\n` +
             `🔁 Refresh token: *${cfg.refreshToken ? 'Sí ✅' : 'No ❌'}*\n` +
-            `⏱ Cron: cada *${mins} min*\n` +
-            `⚙️ Auto-cron: *${cfg.cronEnabled === false ? 'Desactivado ⏸️' : 'Activado ▶️'}*\n` +
-            `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
+            `⏱ Watcher: cada *${seconds} segundos*\n` +
+            `⚙️ Auto-watcher: *${cfg.cronEnabled === false ? 'Desactivado ⏸️' : 'Activado ▶️'}*\n` +
+            `🔄 Watcher activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
             `💾 IDs caché: *${seen.length}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
     }, { quoted: m })
@@ -493,14 +506,14 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   }
 }
 
-handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crcron <on|off>', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify']
+handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crcron <on|off>', 'crinterval <segundos>', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify']
 handler.tags    = ['anime']
-handler.command = /^(crcron|crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify)$/i
+handler.command = /^(crcron|crinterval|crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify)$/i
 
 // ─── Auto-arranque al cargar el plugin ───────────────────────────────────────
 // Se ejecuta inmediatamente al importar el archivo.
 // global.conn es la conexión de Baileys que el bot principal expone globalmente.
-// El cron arranca aunque global.conn aún no esté listo — cada tick lo reintenta.
+// El watcher arranca aunque global.conn aún no esté listo — cada tick lo reintenta.
 ;(async () => {
   const cfg = loadCfg()
   // Restaurar token de sesión si existe
@@ -509,7 +522,7 @@ handler.command = /^(crcron|crlogin|crlogout|crset|crrem|crstatus|crlist|crnotif
     _tokenExp = cfg.tokenExp || 0
   }
   if (cfg.cronEnabled !== false) startCron(null)
-  console.log(`[CR-Notify] Auto-inicio | Cron: ${cfg.cronEnabled === false ? 'desactivado' : 'activado'} | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'}`)
+  console.log(`[CR-Notify] Auto-inicio | Watcher: ${cfg.cronEnabled === false ? 'desactivado' : 'activado'} | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'}`)
 })()
 
 export default handler
