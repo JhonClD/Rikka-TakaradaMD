@@ -28,14 +28,15 @@ const CHECK_INTERVAL_DEFAULT = 10        // minutos
 const QUEUE_DELAY            = 90_000    // ms entre ítems de cola (90 seg)
 const DL_TIMEOUT             = 3 * 60 * 60 * 1000
 
-// [MEJORA VELOCIDAD] Conexiones paralelas para acelerar descargas
-// Ajustado para conexión ~90 Mbps de bajada (11+ MB/s teóricos)
-const MEGA_MAX_CONNECTIONS   = 10  // default de megajs es 4
+// [MEJORA VELOCIDAD] megajs descarga por bloques y conexiones paralelas.
+// Se puede ajustar con MEGA_MAX_CONNECTIONS; se limita para no saturar Mega ni el bot.
+const MEGA_MAX_CONNECTIONS   = Math.min(Math.max(Number(process.env.MEGA_MAX_CONNECTIONS) || 16, 4), 32)
+const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 MB
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
 const TIO_SERVIDORES = ['mega', 'voe', 'yourupload']
-const LAT_SERVIDORES = ['gofile', 'mediafire', 'mp4upload', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
+const LAT_SERVIDORES = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -91,8 +92,6 @@ function detectarServidor(url, label = '') {
   const u = `${url} ${label}`.toLowerCase()
   if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
   if (u.includes('mediafire')) return 'mediafire'
-  if (u.includes('gofile')) return 'gofile'
-  if (u.includes('mp4upload')) return 'mp4upload'
   if (u.includes('voe')) return 'voe'
   if (u.includes('yourupload')) return 'yourupload'
   if (u.includes('savefiles')) return 'savefiles'
@@ -302,7 +301,7 @@ async function scrapeServidoresLatAnime(epUrl) {
       const res = await axios.get(r.url, { headers: { 'User-Agent': UA, 'Referer': LATANIME_URL }, maxRedirects: 5, timeout: 10000, validateStatus: () => true })
       const body     = typeof res.data === 'string' ? res.data : ''
       const finalUrl = res.request?.res?.responseUrl || ''
-      const dominios = ['mega.nz','mediafire.com','gofile.io','mp4upload.com','voe.sx','yourupload.com','savefiles','hexload','dsvplay','byse']
+      const dominios = ['mega.nz','mediafire.com','voe.sx','yourupload.com','savefiles','hexload','dsvplay','byse']
       let urlReal = null
       for (const d of dominios) {
         const match = body.match(new RegExp(`https?://[^"'\\s]*${d.replace('.','\\.')}[^"'\\s]*`))
@@ -349,7 +348,7 @@ function detectarServNombre(url) {
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
 const PREFS_TIO = ['mega', 'voe', 'yourupload']
-const PREFS_LAT = ['gofile', 'mediafire', 'mp4upload', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
+const PREFS_LAT = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 function ordenarServidores(srvs, fuente = 'tioanime') {
   const preferencias = fuente === 'latanime' ? PREFS_LAT : PREFS_TIO
@@ -361,45 +360,81 @@ function ordenarServidores(srvs, fuente = 'tioanime') {
 }
 
 async function descargarMega(megaUrl, outputDir, fileName) {
-  let url = megaUrl
-  const m1 = megaUrl.match(/mega\.nz\/(?:embed\/)?[#!]*([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{40,})/)
-  if (m1) url = `https://mega.nz/file/${m1[1]}#${m1[2]}`
-  const m2 = megaUrl.match(/mega\.nz\/file\/([A-Za-z0-9_-]+)!([A-Za-z0-9_-]+)/)
-  if (m2) url = `https://mega.nz/file/${m2[1]}#${m2[2]}`
+  if (!megaUrl || typeof megaUrl !== 'string') throw new Error('Mega: URL vacía')
 
-  const file = MegaFile.fromURL(url)
-  await file.loadAttributes()
-  const total      = file.size || 0
-  const destPath   = path.join(outputDir, fileName)
-  // [MEJORA VELOCIDAD] megajs usa 4 conexiones por defecto; subimos a MEGA_MAX_CONNECTIONS
-  const fileStream = file.download({ maxConnections: MEGA_MAX_CONNECTIONS })
+  const normalizarMegaUrl = (value) => {
+    const raw = value.trim()
+    if (!/^https?:\/\/(?:www\.)?mega\.(?:nz|co\.nz)\//i.test(raw)) {
+      throw new Error('Mega: dominio o URL no válidos')
+    }
+    if (/\/folder\//i.test(raw) || /#F!/i.test(raw)) {
+      throw new Error('Mega: los enlaces de carpetas no están soportados')
+    }
 
-  let done = 0
-  const start = Date.now()
-  let lastLog = 0
-  const tracker = new Transform({
-    transform(chunk, _enc, cb) {
-      done += chunk.length
-      const secs  = (Date.now() - start) / 1000 || 0.001
-      const speed = done / secs
-      const now   = Date.now()
-      if (now - lastLog > 1000) {
-        lastLog = now
-        const pct = total > 0 ? (done / total) * 100 : 0
-        process.stdout.write(`\r[MEGA] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
-      }
-      cb(null, chunk)
-    },
-  })
-
-  try {
-    await pipeline(fileStream, tracker, fs.createWriteStream(destPath))
-    process.stdout.write('\n')
-  } catch (err) {
-    process.stdout.write('\n')
-    throw new Error(`Mega error: ${err.message}`)
+    const match = raw.match(/\/\/(?:www\.)?mega\.(?:nz|co\.nz)\/(?:file|embed)\/([A-Za-z0-9_-]{8,})[#!]([A-Za-z0-9_-]{20,})/i) ||
+      raw.match(/#!?([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{20,})/i)
+    if (!match) throw new Error('Mega: enlace sin ID o clave de archivo')
+    return `https://mega.nz/file/${match[1]}#${match[2]}`
   }
-  return destPath
+
+  const url      = normalizarMegaUrl(megaUrl)
+  const destPath = path.join(outputDir, fileName)
+  const partPath = `${destPath}.part`
+  const maxIntentos = 2
+  let ultimoError
+
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    try {
+      try { fs.rmSync(partPath, { force: true }) } catch (_) {}
+
+      const file = MegaFile.fromURL(url)
+      await file.loadAttributes()
+      const total = Number(file.size || 0)
+      const fileStream = file.download({
+        maxConnections: MEGA_MAX_CONNECTIONS,
+        initialChunkSize: MEGA_CHUNK_SIZE,
+        chunkSizeIncrement: 0,
+        maxChunkSize: MEGA_CHUNK_SIZE,
+        forceHttps: true,
+      })
+      let done = 0
+      const start = Date.now()
+      let lastLog = 0
+      const tracker = new Transform({
+        transform(chunk, _enc, cb) {
+          done += chunk.length
+          const secs  = (Date.now() - start) / 1000 || 0.001
+          const speed = done / secs
+          const now   = Date.now()
+          if (now - lastLog > 1000) {
+            lastLog = now
+            const pct = total > 0 ? (done / total) * 100 : 0
+            process.stdout.write(`\r[MEGA] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s | intento ${intento}/${maxIntentos}   `)
+          }
+          cb(null, chunk)
+        },
+      })
+
+      await pipeline(fileStream, tracker, fs.createWriteStream(partPath))
+      const downloadedSize = fs.statSync(partPath).size
+      if (total > 0 && downloadedSize !== total) {
+        throw new Error(`Mega: tamaño incompleto (${downloadedSize} de ${total} bytes)`)
+      }
+      fs.renameSync(partPath, destPath)
+      process.stdout.write('\n')
+      return destPath
+    } catch (err) {
+      ultimoError = err
+      process.stdout.write('\n')
+      try { fs.rmSync(partPath, { force: true }) } catch (_) {}
+      if (intento < maxIntentos) {
+        console.log(`[tioanime-notify] ⚠️ Mega falló; reintentando (${intento}/${maxIntentos}): ${err.message}`)
+        await new Promise(resolve => setTimeout(resolve, 3000))
+      }
+    }
+  }
+
+  throw new Error(`Mega error: ${ultimoError?.message || 'descarga fallida'}`)
 }
 
 async function descargarMediaFire(mfUrl, outputDir, fileName) {
@@ -522,6 +557,55 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
   return destPath
 }
 
+async function descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor) {
+  if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace de vídeo`)
+  const destPath = path.join(outputDir, fileName)
+  const res = await axios.get(directUrl, {
+    responseType: 'stream',
+    headers: { ...HEADERS, Referer: serverUrl },
+    httpsAgent,
+    timeout: DL_TIMEOUT,
+    maxRedirects: 8,
+    validateStatus: status => status >= 200 && status < 400,
+  })
+  const contentType = String(res.headers['content-type'] || '').toLowerCase()
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
+  }
+  await pipeline(res.data, fs.createWriteStream(destPath))
+  const size = fs.statSync(destPath).size
+  if (!size) {
+    try { fs.rmSync(destPath, { force: true }) } catch (_) {}
+    throw new Error(`${servidor}: archivo vacío`)
+  }
+  return destPath
+}
+
+async function extraerUrlServidor(serverUrl, servidor, patrones) {
+  const page = await axios.get(serverUrl, {
+    headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
+    timeout: 15000,
+    maxRedirects: 8,
+    responseType: 'text',
+  })
+  const html = String(page.data || '').replace(/\\u0026/g, '&').replace(/\\\//g, '/')
+  for (const patron of patrones) {
+    const match = html.match(patron)
+    if (match?.[1]?.startsWith('http')) return match[1].replace(/&amp;/g, '&')
+  }
+  throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
+}
+
+async function descargarYourUpload(serverUrl, outputDir, fileName) {
+  const directUrl = await extraerUrlServidor(serverUrl, 'yourupload', [
+    /file["']?\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+    /sources?\s*:\s*\[\s*\{[^}]*src\s*:\s*["'](https?:\/\/[^"']+)["']/i,
+    /video\[[^\]]+\]\s*=\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+    /(https?:\/\/[^"'\s<>]+\.mp4(?:\?[^"'\s<>]*)?)/i,
+  ])
+  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'YourUpload')
+}
+
 async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
   const extraerCandidatos = (html) => {
     const encontrados = []
@@ -552,21 +636,7 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
   }
   if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
 
-  const destPath = path.join(outputDir, fileName)
-  const res = await axios.get(directUrl, {
-    responseType: 'stream',
-    headers: { ...HEADERS, Referer: serverUrl },
-    httpsAgent,
-    timeout: DL_TIMEOUT,
-    maxRedirects: 5,
-    validateStatus: status => status >= 200 && status < 400,
-  })
-  const contentType = String(res.headers['content-type'] || '').toLowerCase()
-  if (contentType.includes('text/html') || contentType.includes('application/json')) {
-    throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
-  }
-  await pipeline(res.data, fs.createWriteStream(destPath))
-  return destPath
+  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor)
 }
 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
@@ -609,7 +679,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     for (const srv of orden) {
       const nombreServidor = (srv.nombre || 'servidor').toUpperCase()
       try {
-        if (srv.nombre === 'mega' || srv.nombre === 'mediafire' || (fuente === 'tioanime' && ['voe', 'yourupload'].includes(srv.nombre)) || (fuente === 'latanime' && LAT_SERVIDORES.includes(srv.nombre))) {
+        if (srv.nombre === 'mega' || srv.nombre === 'mediafire' || (fuente === 'tioanime' && srv.nombre === 'yourupload') || (fuente === 'latanime' && LAT_SERVIDORES.includes(srv.nombre))) {
           console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
         } else {
           continue
@@ -617,6 +687,7 @@ async function enviarEpisodio(chatId, ep, conn) {
 
         if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
         else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
+        else if (srv.nombre === 'yourupload') videoPath = await descargarYourUpload(srv.url, tmpDir, fileName)
         else videoPath = await descargarServidorVideo(srv.url, tmpDir, fileName, srv.nombre)
 
         if (videoPath) break // solo cortar tras una descarga exitosa
