@@ -211,11 +211,12 @@ async function crFetch(path, params = {}, base = CR_BASE) {
 }
 
 // ─── Lógica de Procesamiento ──────────────────────────────────────────────────
-function extractImage(images = {}) {
-  // Crunchyroll devuelve thumbnail, poster_tall y poster_wide con varias
-  // resoluciones. Se elige la de mayor área; `thumbnail` suele ser miniatura.
+// Orden de preferencia: imágenes horizontales (16:9) primero; el póster vertical queda de último recurso.
+const IMAGE_KEYS = ['poster_wide', 'thumbnail', 'poster_tall']
+
+function pickLargest(list) {
   const area = c => c.width * c.height || c.width
-  const candidates = Object.values(images)
+  return [].concat(list || [])
     .flat(Infinity)
     .filter(Boolean)
     .map(item => {
@@ -228,8 +229,16 @@ function extractImage(images = {}) {
       }
     })
     .filter(item => item?.source)
+    .sort((a, b) => area(b) - area(a))[0]?.source || ''
+}
 
-  return candidates.sort((a, b) => area(b) - area(a))[0]?.source || ''
+function extractImage(images = {}) {
+  // Cada clave trae varias resoluciones: se toma la de mayor área dentro de la clave preferida.
+  for (const key of IMAGE_KEYS) {
+    const src = pickLargest(images[key])
+    if (src) return src
+  }
+  return pickLargest(Object.values(images))
 }
 
 function normalizeEpisode(p) {
@@ -293,15 +302,26 @@ function formatCaption(ep) {
 }
 
 // ─── Fetch episodios ──────────────────────────────────────────────────────────
-// Una sola consulta compartida: episodios únicos, en idiomas permitidos (más nuevos primero).
-async function fetchBrowse() {
-  const data = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
+// Consulta compartida: episodios únicos, en idiomas permitidos (más nuevos primero).
+// `pages` > 1 pide páginas extra (start=100, 200…) por si los últimos 100 traen pocos idiomas permitidos.
+async function fetchBrowse(pages = 1) {
   const byId = new Map()
-  for (const row of rows) {
-    const ep = normalizeEpisode(row)
-    if (ep.id && ep.series && ALLOWED_LOCALES.has(ep.audioLocale) && !byId.has(ep.id)) byId.set(ep.id, ep)
+  let recibidos = 0
+  for (let page = 0; page < pages; page++) {
+    const params = { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
+    if (page > 0) params.start = String(page * 100)
+    const data = await crFetch('/content/v1/browse', params, CR_BETA)
+    const rows = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
+    recibidos += rows.length
+    const antes = byId.size
+    for (const row of rows) {
+      const ep = normalizeEpisode(row)
+      if (ep.id && ep.series && ALLOWED_LOCALES.has(ep.audioLocale) && !byId.has(ep.id)) byId.set(ep.id, ep)
+    }
+    if (!rows.length) break
+    if (page > 0 && byId.size === antes && !rows.some(r => !byId.has(r.id))) break
   }
+  console.log(`[CR-Notify] browse: ${recibidos} recibidos → ${byId.size} en ja/es-419/es-ES`)
   return [...byId.values()]
 }
 
@@ -326,7 +346,7 @@ async function fetchNewEpisodes() {
 }
 
 async function getLatestEpisodes(limit = 10) {
-  return (await fetchBrowse()).slice(0, limit)
+  return (await fetchBrowse(limit > 5 ? 3 : 1)).slice(0, limit)
 }
 
 // ─── Envío ────────────────────────────────────────────────────────────────────
@@ -355,13 +375,19 @@ function stopCron() {
   global.__crNotifyGen = (global.__crNotifyGen || 0) + 1
 }
 
-// Devuelve la conexión activa: primero la guardada, si no global.conn del bot
-function getConn() { return storedConn || global.conn || null }
+// Devuelve la conexión activa: primero global.conn (siempre la más reciente tras
+// una reconexión de Baileys); la guardada por el handler es solo respaldo.
+function getConn() { return global.conn || storedConn || null }
+let sinConnTicks = 0
 
 async function runCycle() {
   if (cronRunning) return
   const conn = getConn()
-  if (!conn) return                          // Bot aún no conectado, siguiente tick
+  if (!conn) {                               // Bot aún no conectado, siguiente tick
+    if (++sinConnTicks % 5 === 1) console.warn('[CR-Notify] Sin conexión del bot (global.conn vacío). Ejecuta cualquier .cr* para registrarla.')
+    return
+  }
+  sinConnTicks = 0
   const jids = loadCfg().targetJids
   if (!jids.length) return                   // Sin grupos configurados aún
 
