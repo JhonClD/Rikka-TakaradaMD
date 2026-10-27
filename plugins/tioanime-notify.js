@@ -106,7 +106,7 @@ function detectarServidor(url, label = '') {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function zeroPad(n)  { return String(n).padStart(2, '0') }
-function safeFile(s) { return s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
+function safeFile(s) { return s.replace(/[\\/\\*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
 const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
 function seasonValue(value) {
   const token = String(value || '').toUpperCase()
