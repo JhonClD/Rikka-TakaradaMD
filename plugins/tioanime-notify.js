@@ -11,6 +11,7 @@ import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
 import { File as MegaFile } from 'megajs'
+import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -703,6 +704,7 @@ async function enviarEpisodio(chatId, ep, conn) {
 
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
     console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — subiendo a WhatsApp...`)
+    const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
 
     // [CORRECCIÓN 3] Usar { url: videoPath } para usar streaming real y no congelar el bot ni la memoria RAM
     await conn.sendMessage(chatId, {
@@ -710,6 +712,7 @@ async function enviarEpisodio(chatId, ep, conn) {
       fileName,
       mimetype : 'video/mp4',
       caption  : `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}`,
+      jpegThumbnail,
     })
 
     console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
