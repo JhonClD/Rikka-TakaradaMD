@@ -34,6 +34,9 @@ const MEGA_MAX_CONNECTIONS   = 10  // default de megajs es 4
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
+const TIO_SERVIDORES = ['mega', 'voe', 'yourupload']
+const LAT_SERVIDORES = ['gofile', 'mediafire', 'mp4upload', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
+
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -49,13 +52,56 @@ global.tioActiveChats  = global.tioActiveChats  || new Map()
 global.tioEpisodeQueue = global.tioEpisodeQueue || []
 global.tioQueueRunning = global.tioQueueRunning || false
 global.tioConn         = global.tioConn         || null
+global.tioQueuedIds    = global.tioQueuedIds    || new Set()
+global.tioCheckingChats = global.tioCheckingChats || new Set()
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
 
-function loadSeen()   { try { return JSON.parse(fs.readFileSync(SEEN_FILE,  'utf-8')) } catch (_) { return {} } }
-function saveSeen(d)  { try { fs.writeFileSync(SEEN_FILE,  JSON.stringify(d, null, 2)) } catch (_) {} }
-function loadState()  { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) } catch (_) { return {} } }
-function saveState(d) { try { fs.writeFileSync(STATE_FILE, JSON.stringify(d, null, 2)) } catch (_) {} }
+function loadJson(file, fallback = {}) {
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    return value && typeof value === 'object' ? value : fallback
+  } catch (err) {
+    if (fs.existsSync(file)) console.error(`[tioanime-notify] No se pudo leer ${file}: ${err.message}`)
+    return fallback
+  }
+}
+
+function saveJsonAtomic(file, data) {
+  const tempFile = `${file}.tmp-${process.pid}`
+  try {
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2))
+    fs.renameSync(tempFile, file)
+  } catch (err) {
+    try { fs.unlinkSync(tempFile) } catch (_) {}
+    console.error(`[tioanime-notify] No se pudo guardar ${file}: ${err.message}`)
+  }
+}
+
+function loadSeen()   { return loadJson(SEEN_FILE) }
+function saveSeen(d)  { saveJsonAtomic(SEEN_FILE, d) }
+function loadState()  { return loadJson(STATE_FILE) }
+function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+
+function absoluteUrl(value, base) {
+  try { return new URL(value, base).href } catch (_) { return '' }
+}
+
+function detectarServidor(url, label = '') {
+  const u = `${url} ${label}`.toLowerCase()
+  if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
+  if (u.includes('mediafire')) return 'mediafire'
+  if (u.includes('gofile')) return 'gofile'
+  if (u.includes('mp4upload')) return 'mp4upload'
+  if (u.includes('voe')) return 'voe'
+  if (u.includes('yourupload')) return 'yourupload'
+  if (u.includes('savefiles')) return 'savefiles'
+  if (u.includes('hexload')) return 'hexload'
+  if (u.includes('dsvplay')) return 'dsvplay'
+  if (u.includes('byse')) return 'byse'
+  if (u.includes('cloud')) return 'cloud'
+  return ''
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,8 +139,8 @@ async function fetchLatestEpisodes() {
     const titulo = ($el.find('h3, h2, .title, .anime-title, p').first().text() || aTag.attr('title') || slug.replace(/-/g, ' ')).trim()
     const imgEl  = $el.find('img').first()
     const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || ''
-    const imgUrl = imgSrc.startsWith('http') ? imgSrc : imgSrc.startsWith('//') ? 'https:' + imgSrc : imgSrc ? TIOANIME_URL + imgSrc : ''
-    const epUrl  = href.startsWith('http') ? href : TIOANIME_URL + href
+    const imgUrl = !imgSrc ? '' : imgSrc.startsWith('//') ? 'https:' + imgSrc : absoluteUrl(imgSrc, TIOANIME_URL)
+    const epUrl  = absoluteUrl(href, TIOANIME_URL)
     const normSlug = slug.replace(/-(?:sub|hd|fhd|1080p|720p|480p)$/i, '').toLowerCase()
     const id       = `${normSlug}-${epNum}`
 
@@ -109,7 +155,7 @@ async function fetchLatestEpisodes() {
       const slug   = m[1]
       const epNum  = parseInt(m[2])
       const titulo = ($(el).attr('title') || $(el).text() || slug.replace(/-/g, ' ')).trim()
-      const epUrl  = href.startsWith('http') ? href : TIOANIME_URL + href
+      const epUrl  = absoluteUrl(href, TIOANIME_URL)
       const normSlug = slug.replace(/-(?:sub|hd|fhd|1080p|720p|480p)$/i, '').toLowerCase()
       const id       = `${normSlug}-${epNum}`
       if (!lista.find(e => e.id === id)) lista.push({ id, slug: normSlug, titulo, epNum, epUrl, imgUrl: '' })
@@ -141,9 +187,9 @@ async function scrapeServidores(epUrl) {
         if (!url.startsWith('http') || srvs.find(s => s.url === url)) continue
         const sinSoporte = url.includes('hqq.tv') || url.includes('netu.tv') || url.includes('netu.ac')
         if (sinSoporte) continue
-        const esMega      = url.includes('mega.nz') || url.includes('mega.co.nz')
-        const esMediafire = url.includes('mediafire.com')
-        srvs.push({ nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : nombre, url, directo: esMega || esMediafire })
+        const servidor = detectarServidor(url, nombre)
+        if (!servidor || !TIO_SERVIDORES.includes(servidor)) continue
+        srvs.push({ nombre: servidor, url, directo: servidor === 'mega' })
       }
     } catch (err) {}
   }
@@ -151,14 +197,13 @@ async function scrapeServidores(epUrl) {
   $('a[href]').each((_, el) => {
     const href  = $(el).attr('href') || ''
     if (!href.startsWith('http')) return
-    const esMega      = href.includes('mega.nz') || href.includes('mega.co.nz')
-    const esMediafire = href.includes('mediafire.com')
-    const esOtro      = href.includes('gofile.io') || href.includes('1fichier') || href.includes('pixeldrain')
+    const servidor    = detectarServidor(href, $(el).text())
+    const esTio       = TIO_SERVIDORES.includes(servidor)
     const sinSoporte  = href.includes('hqq.tv') || href.includes('netu.tv')
-    if (sinSoporte || (!esMega && !esMediafire && !esOtro)) return
+    if (sinSoporte || !esTio) return
     if (!srvs.find(s => s.url === href)) {
       const label = $(el).text().trim().toLowerCase()
-      srvs.push({ nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : label || 'descarga', url: href, directo: true })
+      srvs.push({ nombre: servidor || label || 'descarga', url: href, directo: servidor === 'mega' })
     }
   })
 
@@ -173,11 +218,10 @@ async function scrapeServidores(epUrl) {
           const url    = item[1]
           const nombre = String(item[0]).toLowerCase()
           if (srvs.find(s => s.url === url)) continue
-          const esMega      = url.includes('mega.nz') || url.includes('mega.co.nz')
-          const esMediafire = url.includes('mediafire.com')
+          const servidor = detectarServidor(url, nombre)
           const sinSoporte  = url.includes('hqq.tv') || url.includes('netu.tv') || url.includes('netu.ac')
-          if (sinSoporte) continue
-          srvs.push({ nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : nombre, url, directo: esMega || esMediafire })
+          if (sinSoporte || !TIO_SERVIDORES.includes(servidor)) continue
+          srvs.push({ nombre: servidor, url, directo: servidor === 'mega' })
         }
       } catch (_) {}
     }
@@ -188,10 +232,10 @@ async function scrapeServidores(epUrl) {
           const url = item?.url || item?.file || item?.code || ''
           const nom = (item?.title || item?.label || item?.server || '').toLowerCase()
           if (!url.startsWith('http') || srvs.find(s => s.url === url)) continue
-          const esMega     = url.includes('mega.nz')
-          const sinSoporte = url.includes('hqq.tv') || url.includes('netu.tv') || url.includes('netu.ac')
-          if (sinSoporte) continue
-          srvs.push({ nombre: esMega ? 'mega' : nom || url, url, directo: esMega })
+          const servidor   = detectarServidor(url, nom)
+          const sinSoporte = url.includes('hqq.tv') || url.includes('netu.tv')
+          if (sinSoporte || !TIO_SERVIDORES.includes(servidor)) continue
+          srvs.push({ nombre: servidor, url, directo: servidor === 'mega' })
         }
       } catch (_) {}
     }
@@ -223,8 +267,8 @@ async function fetchLatestEpisodesLatAnime() {
     const titulo = tAttr || tFind || tSlug
     const imgEl  = $(el).find('img').first()
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy') || imgEl.attr('data-original') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
-    const imgUrl = (!imgSrc || imgSrc.startsWith('data:')) ? '' : imgSrc.startsWith('http') ? imgSrc : LATANIME_URL + imgSrc
-    const epUrl  = href.startsWith('http') ? href : LATANIME_URL + href
+    const imgUrl = (!imgSrc || imgSrc.startsWith('data:')) ? '' : imgSrc.startsWith('//') ? 'https:' + imgSrc : absoluteUrl(imgSrc, LATANIME_URL)
+    const epUrl  = absoluteUrl(href, LATANIME_URL)
     const normSlugLat = slug.replace(/-episodio$/i, '').replace(/-(?:castellano|latino|espanol|español|esp|sub|dub|hd)$/i, '').replace(/-episodio$/i, '').toLowerCase()
     const id     = `lat-${normSlugLat}-${epNum}`
     const idioma = href.toLowerCase().includes('castellano') ? 'castellano' : 'latino'
@@ -243,14 +287,12 @@ async function scrapeServidoresLatAnime(epUrl) {
     const label = $(el).text().trim().toLowerCase()
     if (!href.startsWith('http')) return
 
-    const esMega      = href.includes('mega.nz')
-    const esMediafire = href.includes('mediafire.com')
-    const esOtro = href.includes('voe.sx') || href.includes('streamtape') || href.includes('filemoon') || href.includes('mp4upload') || href.includes('streamwish') || href.includes('dood') || href.includes('upstream') || href.includes('ok.ru') || href.includes('vidhide') || href.includes('mixdrop') || href.includes('savefiles') || href.includes('gofile.io') || href.includes('byse')
+    const servidor = detectarServidor(href, label)
+    const esLat = LAT_SERVIDORES.includes(servidor)
     const esRedirector = !href.includes('latanime.org') && !href.includes('javascript') && !href.includes('#') && href.length > 20 && !href.match(/\.(jpg|png|gif|css|js)$/)
 
     if (srvs.find(s => s.url === href)) return
-    if (esMega || esMediafire) srvs.push({ nombre: esMega ? 'mega' : 'mediafire', url: href, directo: true })
-    else if (esOtro) srvs.push({ nombre: label || detectarServNombre(href), url: href, directo: false })
+    if (esLat) srvs.push({ nombre: servidor, url: href, directo: servidor === 'mega' || servidor === 'mediafire' })
     else if (esRedirector) srvs.push({ nombre: label || 'redir', url: href, directo: false, esRedirector: true })
   })
 
@@ -260,7 +302,7 @@ async function scrapeServidoresLatAnime(epUrl) {
       const res = await axios.get(r.url, { headers: { 'User-Agent': UA, 'Referer': LATANIME_URL }, maxRedirects: 5, timeout: 10000, validateStatus: () => true })
       const body     = typeof res.data === 'string' ? res.data : ''
       const finalUrl = res.request?.res?.responseUrl || ''
-      const dominios = ['mega.nz','mediafire.com','voe.sx','streamtape','filemoon','mp4upload','streamwish','dood','ok.ru']
+      const dominios = ['mega.nz','mediafire.com','gofile.io','mp4upload.com','voe.sx','yourupload.com','savefiles','hexload','dsvplay','byse']
       let urlReal = null
       for (const d of dominios) {
         const match = body.match(new RegExp(`https?://[^"'\\s]*${d.replace('.','\\.')}[^"'\\s]*`))
@@ -271,8 +313,8 @@ async function scrapeServidoresLatAnime(epUrl) {
         const idx = srvs.findIndex(s => s.url === r.url)
         if (idx !== -1) {
           srvs[idx].url      = urlReal
-          srvs[idx].nombre   = urlReal.includes('mediafire') ? 'mediafire' : urlReal.includes('mega.nz') ? 'mega' : detectarServNombre(urlReal)
-          srvs[idx].directo  = urlReal.includes('mega.nz') || urlReal.includes('mediafire.com')
+          srvs[idx].nombre   = detectarServidor(urlReal) || detectarServNombre(urlReal)
+          srvs[idx].directo  = ['mega', 'mediafire'].includes(srvs[idx].nombre)
           delete srvs[idx].esRedirector
         }
       } else {
@@ -292,40 +334,30 @@ async function scrapeServidoresLatAnime(epUrl) {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8')
       if (decoded.startsWith('http')) embedUrl = decoded
     } catch (_) {}
-    if (embedUrl.startsWith('http') && !srvs.find(s => s.url === embedUrl)) srvs.push({ nombre: detectarServNombre(embedUrl), url: embedUrl, directo: false })
+    const servidor = detectarServidor(embedUrl)
+    if (embedUrl.startsWith('http') && servidor && LAT_SERVIDORES.includes(servidor) && !srvs.find(s => s.url === embedUrl)) {
+      srvs.push({ nombre: servidor, url: embedUrl, directo: servidor === 'mega' || servidor === 'mediafire' })
+    }
   })
   return srvs
 }
 
 function detectarServNombre(url) {
-  const u = url.toLowerCase()
-  if (u.includes('mediafire')) return 'mediafire'
-  if (u.includes('mega.nz'))   return 'mega'
-  if (u.includes('voe'))       return 'voe'
-  if (u.includes('filemoon'))  return 'filemoon'
-  if (u.includes('mp4upload')) return 'mp4upload'
-  if (u.includes('streamwish'))return 'streamwish'
-  if (u.includes('streamtape'))return 'streamtape'
-  if (u.includes('dood'))      return 'doodstream'
-  if (u.includes('ok.ru'))     return 'okru'
-  return 'embed'
+  return detectarServidor(url) || 'embed'
 }
 
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_EMBED = ['mp4upload', 'filemoon', 'streamwish', 'streamtape', 'doodstream', 'voe', 'vidhide', 'okru', 'mixdrop']
+const PREFS_TIO = ['mega', 'voe', 'yourupload']
+const PREFS_LAT = ['gofile', 'mediafire', 'mp4upload', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 function ordenarServidores(srvs, fuente = 'tioanime') {
-  const mega      = srvs.filter(s => s.nombre === 'mega')
-  const mediafire = srvs.filter(s => s.nombre === 'mediafire')
-  const otros     = srvs.filter(s => s.directo && s.nombre !== 'mega' && s.nombre !== 'mediafire')
-  const embeds    = [...srvs.filter(s => !s.directo)].sort((a, b) => {
-    const ia = PREFS_EMBED.findIndex(p => a.nombre.includes(p) || a.url.includes(p))
-    const ib = PREFS_EMBED.findIndex(p => b.nombre.includes(p) || b.url.includes(p))
+  const preferencias = fuente === 'latanime' ? PREFS_LAT : PREFS_TIO
+  return [...srvs].sort((a, b) => {
+    const ia = preferencias.indexOf(a.nombre)
+    const ib = preferencias.indexOf(b.nombre)
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
   })
-  if (fuente === 'latanime') return [...mediafire, ...mega, ...otros, ...embeds]
-  return [...mega, ...mediafire, ...otros, ...embeds]
 }
 
 async function descargarMega(megaUrl, outputDir, fileName) {
@@ -429,6 +461,11 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
           httpsAgent,
           timeout : DL_TIMEOUT,
         })
+        if (res.status !== 206) throw new Error(`MediaFire ignoró el rango solicitado (HTTP ${res.status})`)
+        const contentRange = res.headers['content-range'] || ''
+        if (!contentRange.startsWith(`bytes ${p.start}-${p.end}/`)) {
+          throw new Error(`MediaFire devolvió un rango inesperado: ${contentRange || 'sin Content-Range'}`)
+        }
         res.data.on('data', chunk => reportar(chunk.length))
         await pipeline(res.data, fs.createWriteStream(p.path))
       }))
@@ -436,6 +473,8 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
       // Unir las partes en orden
       const out = fs.createWriteStream(destPath)
       for (const p of partes) {
+        const expected = p.end - p.start + 1
+        if (fs.statSync(p.path).size !== expected) throw new Error(`Parte incompleta: ${path.basename(p.path)}`)
         await new Promise((resolve, reject) => {
           const rs = fs.createReadStream(p.path)
           rs.pipe(out, { end: false })
@@ -483,6 +522,53 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
   return destPath
 }
 
+async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
+  const extraerCandidatos = (html) => {
+    const encontrados = []
+    const patrones = [
+      /https?:\/\/[^"'\s<>]+\.mp4(?:\?[^"'\s<>]*)?/gi,
+      /(?:file|src|source|url|video_url)\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi,
+    ]
+    for (const patron of patrones) {
+      for (const match of html.matchAll(patron)) {
+        const raw = match[1] || match[0]
+        const url = raw.replace(/\\\//g, '/').replace(/&amp;/g, '&')
+        if (url.startsWith('http') && !encontrados.includes(url)) encontrados.push(url)
+      }
+    }
+    return encontrados
+  }
+
+  let directUrl = /\.mp4(?:[?#]|$)/i.test(serverUrl) ? serverUrl : ''
+  if (!directUrl) {
+    const page = await axios.get(serverUrl, {
+      headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
+      timeout: 15000,
+      maxRedirects: 5,
+      responseType: 'text',
+    })
+    const candidatos = extraerCandidatos(String(page.data || ''))
+    directUrl = candidatos[0] || ''
+  }
+  if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
+
+  const destPath = path.join(outputDir, fileName)
+  const res = await axios.get(directUrl, {
+    responseType: 'stream',
+    headers: { ...HEADERS, Referer: serverUrl },
+    httpsAgent,
+    timeout: DL_TIMEOUT,
+    maxRedirects: 5,
+    validateStatus: status => status >= 200 && status < 400,
+  })
+  const contentType = String(res.headers['content-type'] || '').toLowerCase()
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
+  }
+  await pipeline(res.data, fs.createWriteStream(destPath))
+  return destPath
+}
+
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 
 async function enviarEpisodio(chatId, ep, conn) {
@@ -517,20 +603,21 @@ async function enviarEpisodio(chatId, ep, conn) {
     if (!srvs.length) throw new Error('No se encontraron servidores')
 
     await new Promise(r => setTimeout(r, 15_000))
-    const orden = ordenarServidores(srvs, fuente).slice(0, 5)
+    const orden = ordenarServidores(srvs, fuente).slice(0, fuente === 'latanime' ? 10 : 3)
     let videoPath = null
 
     for (const srv of orden) {
       const nombreServidor = (srv.nombre || 'servidor').toUpperCase()
       try {
-        if (srv.nombre === 'mega' || srv.nombre === 'mediafire') {
+        if (srv.nombre === 'mega' || srv.nombre === 'mediafire' || (fuente === 'tioanime' && ['voe', 'yourupload'].includes(srv.nombre)) || (fuente === 'latanime' && LAT_SERVIDORES.includes(srv.nombre))) {
           console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
         } else {
-          continue // "otros" directos y embeds: sin soporte de descarga por ahora, seguir probando
+          continue
         }
 
         if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
         else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
+        else videoPath = await descargarServidorVideo(srv.url, tmpDir, fileName, srv.nombre)
 
         if (videoPath) break // solo cortar tras una descarga exitosa
       } catch (err) {
@@ -577,6 +664,10 @@ async function procesarCola() {
       const item = global.tioEpisodeQueue[0]
       if (!item) { global.tioEpisodeQueue.shift(); continue }
       const { chatId, ep } = item
+      const quitarItemActual = () => {
+        const index = global.tioEpisodeQueue.indexOf(item)
+        if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
+      }
       let intentos = 0
       let exito    = false
 
@@ -590,18 +681,25 @@ async function procesarCola() {
         try {
           await enviarEpisodio(chatId, ep, connActivo)
           exito = true
-          global.tioEpisodeQueue.shift()
+          const seen = loadSeen()
+          if (!seen[chatId]) seen[chatId] = []
+          if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
+          if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
+          saveSeen(seen)
+          quitarItemActual()
+          global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
         } catch (err) {
-          const esConexion = /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)
+          const esConexion = /connection closed|stream errored|timed out|econnreset|econnrefused|socket hang up|precondition required/i.test(err.message)
           if (esConexion && intentos < MAX_REINTENTOS) {
             await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
           } else if (esConexion) {
-            global.tioEpisodeQueue.shift()
+            quitarItemActual()
             global.tioEpisodeQueue.push({ chatId, ep })
             await new Promise(r => setTimeout(r, ESPERA_REQUEUEUE))
             break
           } else {
-            global.tioEpisodeQueue.shift()
+            quitarItemActual()
+            global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
             try {
               const connErr = global.tioConn
               if (connErr) await connErr.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
@@ -612,34 +710,40 @@ async function procesarCola() {
       if (global.tioEpisodeQueue.length > 0) await new Promise(r => setTimeout(r, QUEUE_DELAY))
     }
   } catch (fatalErr) {
+    console.error(`[tioanime-notify] Error fatal en la cola: ${fatalErr.message}`)
   } finally {
     global.tioQueueRunning = false
   }
 }
 
 async function checkNuevosEpisodios(chatId, conn) {
+  if (global.tioCheckingChats.has(chatId)) return
+  global.tioCheckingChats.add(chatId)
   let lista = []
-  try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) {}
-  try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) {}
-  if (!lista.length) return
+  try {
+    try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) { console.error(`[tioanime-notify] TioAnime: ${err.message}`) }
+    try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) { console.error(`[tioanime-notify] LatAnime: ${err.message}`) }
+    if (!lista.length) return
 
-  const seen = loadSeen()
-  if (!seen[chatId]) seen[chatId] = []
-  const nuevos = lista.filter(e => !seen[chatId].includes(e.id))
-  if (!nuevos.length) return
+    const seen = loadSeen()
+    if (!seen[chatId]) seen[chatId] = []
+    const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.tioQueuedIds.has(`${chatId}:${e.id}`))
+    if (!nuevos.length) return
 
-  for (const ep of nuevos) seen[chatId].push(ep.id)
-  if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
-  saveSeen(seen)
+    if (nuevos.length > 1) {
+      try {
+        await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._` })
+      } catch (err) { console.error(`[tioanime-notify] No se pudo enviar el resumen: ${err.message}`) }
+    }
 
-  if (nuevos.length > 1) {
-    try {
-      await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._` })
-    } catch (_) {}
+    for (const ep of nuevos) {
+      global.tioEpisodeQueue.push({ chatId, ep })
+      global.tioQueuedIds.add(`${chatId}:${ep.id}`)
+    }
+    procesarCola().catch(err => console.error(`[tioanime-notify] Error procesando cola: ${err.message}`))
+  } finally {
+    global.tioCheckingChats.delete(chatId)
   }
-
-  for (const ep of nuevos) global.tioEpisodeQueue.push({ chatId, ep })
-  procesarCola().catch(err => {})
 }
 
 function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT) {
@@ -739,16 +843,17 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 
   if (command === 'tioflush') {
     const antes = global.tioEpisodeQueue.length
+    const eliminados = global.tioEpisodeQueue.filter(i => i.chatId === m.chat)
     global.tioEpisodeQueue = global.tioEpisodeQueue.filter(i => i.chatId !== m.chat)
+    for (const item of eliminados) global.tioQueuedIds.delete(`${item.chatId}:${item.ep.id}`)
     return m.reply(`🗑️ *${antes - global.tioEpisodeQueue.length}* episodio(s) eliminado(s).`)
   }
 
   if (command === 'tiounblock') {
     const estaba = global.tioQueueRunning
-    global.tioQueueRunning = false
     if (global.tioEpisodeQueue.length > 0) {
       await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.tioEpisodeQueue.length} episodio(s)...`)
-      procesarCola().catch(e => {})
+      if (!estaba) procesarCola().catch(e => console.error(`[tioanime-notify] Error reanudando cola: ${e.message}`))
     } else {
       await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`)
     }
@@ -787,8 +892,13 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       await m.reply(`📋 *${seleccion.length} episodios seleccionados (TioAnime):*\n\n` + seleccion.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._`)
     }
 
-    for (const ep of seleccion) global.tioEpisodeQueue.push({ chatId: m.chat, ep })
-    procesarCola().catch(e => {})
+    for (const ep of seleccion) {
+      const queueId = `${m.chat}:${ep.id}`
+      if (global.tioQueuedIds.has(queueId)) continue
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep })
+      global.tioQueuedIds.add(queueId)
+    }
+    procesarCola().catch(e => console.error(`[tioanime-notify] Error en tioexample: ${e.message}`))
     return
   }
 
@@ -807,8 +917,13 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       await m.reply(`📋 *${seleccion.length} episodios seleccionados (LatAnime):*\n\n` + seleccion.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._`)
     }
 
-    for (const ep of seleccion) global.tioEpisodeQueue.push({ chatId: m.chat, ep })
-    procesarCola().catch(e => {})
+    for (const ep of seleccion) {
+      const queueId = `${m.chat}:${ep.id}`
+      if (global.tioQueuedIds.has(queueId)) continue
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep })
+      global.tioQueuedIds.add(queueId)
+    }
+    procesarCola().catch(e => console.error(`[tioanime-notify] Error en latexample: ${e.message}`))
     return
   }
 }
