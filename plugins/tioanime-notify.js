@@ -89,6 +89,36 @@ function absoluteUrl(value, base) {
   try { return new URL(value, base).href } catch (_) { return '' }
 }
 
+function parseEpisodeHref(href, baseUrl) {
+  const epUrl = absoluteUrl(href, baseUrl)
+  if (!epUrl) return null
+  let pathname
+  try { pathname = decodeURIComponent(new URL(epUrl).pathname) } catch (_) { return null }
+  const match = pathname.match(/\/ver\/([^/]+?)(?:[-_](?:episode|episodio|ep)[-_]?)?(?:[-_])?(\d+)(?:[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p))?\/?$/i)
+    || pathname.match(/\/ver\/([^/]+?)[-_](\d+)\/?$/i)
+  if (!match) return null
+  const epNum = Number.parseInt(match[2], 10)
+  if (!Number.isInteger(epNum) || epNum < 0) return null
+  const slug = match[1].replace(/[-_](?:episode|episodio|ep)$/i, '')
+  const normSlug = slug
+    .replace(/[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p)$/i, '')
+    .toLowerCase()
+  return { slug, normSlug, epNum, epUrl }
+}
+
+async function getPage(url, options = {}, attempts = 3) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await axios.get(url, { ...options, timeout: options.timeout || 15000 })
+    } catch (err) {
+      lastError = err
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+    }
+  }
+  throw lastError
+}
+
 function detectarServidor(url, label = '') {
   const u = `${url} ${label}`.toLowerCase()
   if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
@@ -166,7 +196,7 @@ function fmtBytes(b) {
 // ─── Scraping ─────────────────────────────────────────────────────────────────
 
 async function fetchLatestEpisodes() {
-  const { data } = await axios.get(TIOANIME_URL, { headers: HEADERS, timeout: 15000 })
+  const { data } = await getPage(TIOANIME_URL, { headers: HEADERS })
   const $    = cheerio.load(data)
   const lista = []
 
@@ -176,17 +206,13 @@ async function fetchLatestEpisodes() {
     const href  = aTag.attr('href') || ''
     if (!href) return
 
-    const m = href.match(/\/ver\/(.+?)[-_](\d+)\/?$/)
-    if (!m) return
-
-    const slug   = m[1]
-    const epNum  = parseInt(m[2])
+    const parsed = parseEpisodeHref(href, TIOANIME_URL)
+    if (!parsed) return
+    const { slug, normSlug, epNum, epUrl } = parsed
     const titulo = ($el.find('h3, h2, .title, .anime-title, p').first().text() || aTag.attr('title') || slug.replace(/-/g, ' ')).trim()
     const imgEl  = $el.find('img').first()
     const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || ''
     const imgUrl = !imgSrc ? '' : imgSrc.startsWith('//') ? 'https:' + imgSrc : absoluteUrl(imgSrc, TIOANIME_URL)
-    const epUrl  = absoluteUrl(href, TIOANIME_URL)
-    const normSlug = slug.replace(/-(?:sub|hd|fhd|1080p|720p|480p)$/i, '').toLowerCase()
     const id       = `${normSlug}-${epNum}`
 
     if (!lista.find(e => e.id === id)) lista.push({ id, slug: normSlug, titulo, epNum, epUrl, imgUrl })
@@ -195,13 +221,10 @@ async function fetchLatestEpisodes() {
   if (lista.length === 0) {
     $('a[href*="/ver/"]').each((_, el) => {
       const href = $(el).attr('href') || ''
-      const m    = href.match(/\/ver\/(.+?)[-_](\d+)\/?$/)
-      if (!m) return
-      const slug   = m[1]
-      const epNum  = parseInt(m[2])
+      const parsed = parseEpisodeHref(href, TIOANIME_URL)
+      if (!parsed) return
+      const { slug, normSlug, epNum, epUrl } = parsed
       const titulo = ($(el).attr('title') || $(el).text() || slug.replace(/-/g, ' ')).trim()
-      const epUrl  = absoluteUrl(href, TIOANIME_URL)
-      const normSlug = slug.replace(/-(?:sub|hd|fhd|1080p|720p|480p)$/i, '').toLowerCase()
       const id       = `${normSlug}-${epNum}`
       if (!lista.find(e => e.id === id)) lista.push({ id, slug: normSlug, titulo, epNum, epUrl, imgUrl: '' })
     })
@@ -296,16 +319,15 @@ async function scrapeServidores(epUrl) {
 }
 
 async function fetchLatestEpisodesLatAnime() {
-  const { data } = await axios.get(LATANIME_URL, { headers: HEADERS, timeout: 15000 })
+  const { data } = await getPage(LATANIME_URL, { headers: HEADERS })
   const $    = cheerio.load(data)
   const lista = []
 
   $('a[href*="/ver/"]').each((_, el) => {
     const href  = $(el).attr('href') || ''
-    const m     = href.match(/\/ver\/(.+?)[-_](\d+)(?:-[a-z]+)?(?:\/|$)/)
-    if (!m) return
-    const slug   = m[1]
-    const epNum  = parseInt(m[2])
+    const parsed = parseEpisodeHref(href, LATANIME_URL)
+    if (!parsed) return
+    const { slug, normSlug, epNum, epUrl } = parsed
     const tAttr  = ($(el).attr('title') || '').trim()
     const tFind  = $(el).find('h3, h2, p, span, [class*="title"], [class*="name"]').first().text().trim()
     const tSlug  = slug.replace(/-episodio$/i, '').replace(/-/g, ' ').trim()
@@ -313,9 +335,7 @@ async function fetchLatestEpisodesLatAnime() {
     const imgEl  = $(el).find('img').first()
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy') || imgEl.attr('data-original') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
     const imgUrl = (!imgSrc || imgSrc.startsWith('data:')) ? '' : imgSrc.startsWith('//') ? 'https:' + imgSrc : absoluteUrl(imgSrc, LATANIME_URL)
-    const epUrl  = absoluteUrl(href, LATANIME_URL)
-    const normSlugLat = slug.replace(/-episodio$/i, '').replace(/-(?:castellano|latino|espanol|español|esp|sub|dub|hd)$/i, '').replace(/-episodio$/i, '').toLowerCase()
-    const id     = `lat-${normSlugLat}-${epNum}`
+    const id     = `lat-${normSlug}-${epNum}`
     const idioma = href.toLowerCase().includes('castellano') ? 'castellano' : 'latino'
     if (!lista.find(e => e.id === id)) lista.push({ id, slug, titulo, epNum, epUrl, imgUrl, fuente: 'latanime', idioma })
   })
@@ -864,7 +884,7 @@ async function checkNuevosEpisodios(chatId, conn) {
   }
 }
 
-function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT) {
+function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT, checkNow = true) {
   if (conn) global.tioConn = conn
   if (global.tioActiveChats.has(chatId)) clearInterval(global.tioActiveChats.get(chatId).timer)
   const timer = setInterval(() => {
@@ -876,6 +896,8 @@ function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT) 
   const state = loadState()
   state[chatId] = { intervalMin, startedAt: Date.now() }
   saveState(state)
+  // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
+  if (checkNow && global.tioConn) checkNuevosEpisodios(chatId, global.tioConn).catch(() => {})
 }
 
 function detenerNotificador(chatId) {
@@ -916,7 +938,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (command === 'tiostart') {
     const min = parseInt(text?.trim())
     const intervalMin = (!isNaN(min) && min >= 5 && min <= 60) ? min : CHECK_INTERVAL_DEFAULT
-    iniciarNotificador(m.chat, conn, intervalMin)
+    iniciarNotificador(m.chat, conn, intervalMin, false)
     await conn.sendMessage(m.chat, {
       text: `✅ *Notificador TioAnime + LatAnime activado*\n\n╭━━━━━━〔 📡 〕━━━━━━\n┃ ⏱️ Intervalo: *${intervalMin} min*\n┃ 🇯🇵 TioAnime — Sub japonés\n┃ 🇲🇽🇪🇸 LatAnime — Latino / Castellano\n┃ 💬 Chat registrado\n╰━━━━━━━━━━━━━━━━━━\n\n_Usa ${usedPrefix}tiostop para detener._`
     }, { quoted: m })
