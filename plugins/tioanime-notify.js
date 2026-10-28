@@ -87,6 +87,18 @@ function loadSeen()   { return loadJson(SEEN_FILE) }
 function saveSeen(d)  { saveJsonAtomic(SEEN_FILE, d) }
 function loadState()  { return loadJson(STATE_FILE) }
 function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+function getGlobalIntervalSec() {
+  const state = loadState()
+  const configured = Number(state.__config?.intervalSec)
+  return Number.isFinite(configured)
+    ? Math.min(Math.max(configured, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS)
+    : CHECK_INTERVAL_SECONDS
+}
+function setGlobalIntervalSec(intervalSec) {
+  const state = loadState()
+  state.__config = { ...(state.__config || {}), intervalSec }
+  saveState(state)
+}
 
 function absoluteUrl(value, base) {
   try { return new URL(value, base).href } catch (_) { return '' }
@@ -913,9 +925,10 @@ async function checkNuevosEpisodios(chatId, conn) {
   }
 }
 
-function iniciarNotificador(chatId, conn, intervalSec = CHECK_INTERVAL_SECONDS, checkNow = true) {
+function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
   if (conn) global.tioConn = conn
   if (global.tioActiveChats.has(chatId)) clearInterval(global.tioActiveChats.get(chatId).timer)
+  intervalSec = Number(intervalSec) || getGlobalIntervalSec()
   const timer = setInterval(() => {
     const c = global.tioConn
     if (!c) return
@@ -942,9 +955,9 @@ function detenerNotificador(chatId) {
 function restaurarNotificadores(conn) {
   const state = loadState()
   for (const [chatId, cfg] of Object.entries(state)) {
+    if (chatId === '__config') continue
     if (!global.tioActiveChats.has(chatId)) {
-      const intervalSec = Number(cfg.intervalSec) || (Number(cfg.intervalMin) || CHECK_INTERVAL_DEFAULT) * 60
-      iniciarNotificador(chatId, conn, Math.min(Math.max(intervalSec, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS))
+      iniciarNotificador(chatId, conn, getGlobalIntervalSec())
     }
   }
 }
@@ -955,9 +968,9 @@ if (!global.tioWatchdog) {
     if (!conn) return
     const state = loadState()
     for (const [chatId, cfg] of Object.entries(state)) {
+      if (chatId === '__config') continue
       if (!global.tioActiveChats.has(chatId)) {
-        const intervalSec = Number(cfg.intervalSec) || (Number(cfg.intervalMin) || CHECK_INTERVAL_DEFAULT) * 60
-        iniciarNotificador(chatId, conn, Math.min(Math.max(intervalSec, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS))
+        iniciarNotificador(chatId, conn, getGlobalIntervalSec())
       }
     }
   }, 2 * 60 * 1000)
@@ -1055,8 +1068,12 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     const seconds = parseIntervalInput(text)
     if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}tiointerval 60s* o *${usedPrefix}tiointerval 10m*`)
     if (!global.tioActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}tiostart* primero.`)
-    iniciarNotificador(m.chat, conn, seconds)
-    return m.reply(`⏱️ Intervalo actualizado a *${formatInterval(seconds)}*.`)
+    setGlobalIntervalSec(seconds)
+    const registrados = Object.keys(loadState()).filter(chatId => chatId !== '__config')
+    for (const chatId of registrados) {
+      iniciarNotificador(chatId, conn, seconds, false)
+    }
+    return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}* para *${registrados.length}* chat(s) registrado(s).`)
   }
 
   if (command === 'tioexample') {
