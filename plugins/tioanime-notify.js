@@ -25,7 +25,10 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 const SEEN_FILE              = path.join(DB_DIR, 'tioanime_seen.json')
 const STATE_FILE             = path.join(DB_DIR, 'tioanime_state.json')
 
-const CHECK_INTERVAL_DEFAULT = 10        // minutos
+const CHECK_INTERVAL_DEFAULT = 10        // minutos históricos
+const CHECK_INTERVAL_SECONDS = CHECK_INTERVAL_DEFAULT * 60
+const MIN_INTERVAL_SECONDS   = 15
+const MAX_INTERVAL_SECONDS   = 3600
 const QUEUE_DELAY            = 90_000    // ms entre ítems de cola (90 seg)
 const DL_TIMEOUT             = 3 * 60 * 60 * 1000
 
@@ -884,17 +887,17 @@ async function checkNuevosEpisodios(chatId, conn) {
   }
 }
 
-function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT, checkNow = true) {
+function iniciarNotificador(chatId, conn, intervalSec = CHECK_INTERVAL_SECONDS, checkNow = true) {
   if (conn) global.tioConn = conn
   if (global.tioActiveChats.has(chatId)) clearInterval(global.tioActiveChats.get(chatId).timer)
   const timer = setInterval(() => {
     const c = global.tioConn
     if (!c) return
     checkNuevosEpisodios(chatId, c).catch(e => {})
-  }, intervalMin * 60 * 1000)
-  global.tioActiveChats.set(chatId, { timer, intervalMin, startedAt: Date.now() })
+  }, intervalSec * 1000)
+  global.tioActiveChats.set(chatId, { timer, intervalSec, startedAt: Date.now() })
   const state = loadState()
-  state[chatId] = { intervalMin, startedAt: Date.now() }
+  state[chatId] = { intervalSec, startedAt: Date.now() }
   saveState(state)
   // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
   if (checkNow && global.tioConn) checkNuevosEpisodios(chatId, global.tioConn).catch(() => {})
@@ -911,7 +914,10 @@ function detenerNotificador(chatId) {
 function restaurarNotificadores(conn) {
   const state = loadState()
   for (const [chatId, cfg] of Object.entries(state)) {
-    if (!global.tioActiveChats.has(chatId)) iniciarNotificador(chatId, conn, cfg.intervalMin || CHECK_INTERVAL_DEFAULT)
+    if (!global.tioActiveChats.has(chatId)) {
+      const intervalSec = Number(cfg.intervalSec) || (Number(cfg.intervalMin) || CHECK_INTERVAL_DEFAULT) * 60
+      iniciarNotificador(chatId, conn, Math.min(Math.max(intervalSec, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS))
+    }
   }
 }
 
@@ -921,7 +927,10 @@ if (!global.tioWatchdog) {
     if (!conn) return
     const state = loadState()
     for (const [chatId, cfg] of Object.entries(state)) {
-      if (!global.tioActiveChats.has(chatId)) iniciarNotificador(chatId, conn, cfg.intervalMin || CHECK_INTERVAL_DEFAULT)
+      if (!global.tioActiveChats.has(chatId)) {
+        const intervalSec = Number(cfg.intervalSec) || (Number(cfg.intervalMin) || CHECK_INTERVAL_DEFAULT) * 60
+        iniciarNotificador(chatId, conn, Math.min(Math.max(intervalSec, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS))
+      }
     }
   }, 2 * 60 * 1000)
 }
@@ -936,11 +945,13 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiostart') {
-    const min = parseInt(text?.trim())
-    const intervalMin = (!isNaN(min) && min >= 5 && min <= 60) ? min : CHECK_INTERVAL_DEFAULT
-    iniciarNotificador(m.chat, conn, intervalMin, false)
+    const secondsArg = Number.parseInt(text?.trim(), 10)
+    const intervalSec = Number.isInteger(secondsArg) && secondsArg >= MIN_INTERVAL_SECONDS && secondsArg <= MAX_INTERVAL_SECONDS
+      ? secondsArg
+      : CHECK_INTERVAL_SECONDS
+    iniciarNotificador(m.chat, conn, intervalSec, false)
     await conn.sendMessage(m.chat, {
-      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n╭━━━━━━〔 📡 〕━━━━━━\n┃ ⏱️ Intervalo: *${intervalMin} min*\n┃ 🇯🇵 TioAnime — Sub japonés\n┃ 🇲🇽🇪🇸 LatAnime — Latino / Castellano\n┃ 💬 Chat registrado\n╰━━━━━━━━━━━━━━━━━━\n\n_Usa ${usedPrefix}tiostop para detener._`
+      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n╭━━━━━━〔 📡 〕━━━━━━\n┃ ⏱️ Intervalo: *${intervalSec} segundos*\n┃ 🇯🇵 TioAnime — Sub japonés\n┃ 🇲🇽🇪🇸 LatAnime — Latino / Castellano\n┃ 💬 Chat registrado\n╰━━━━━━━━━━━━━━━━━━\n\n_Usa ${usedPrefix}tiostop para detener._`
     }, { quoted: m })
     try {
       const tio  = await fetchLatestEpisodes()
@@ -968,7 +979,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     const cola   = global.tioEpisodeQueue.filter(i => i.chatId === m.chat)
     const vistos = (loadSeen()[m.chat] || []).length
     let txt = `📡 *Estado TioAnime*\n\n`
-    txt += activo ? `✅ *Activo* — cada ${entry.intervalMin} min\n` : `🔴 *Inactivo*\n`
+    txt += activo ? `✅ *Activo* — cada ${entry.intervalSec} segundos\n` : `🔴 *Inactivo*\n`
     txt += `📋 Cola: *${cola.length}* pendiente(s)\n`
     txt += `🔵 Procesando: *${global.tioQueueRunning ? 'Sí' : 'No'}*\n`
     txt += `👁️ Vistos: *${vistos}*`
@@ -1010,11 +1021,11 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiointerval') {
-    const min = parseInt(text?.trim())
-    if (isNaN(min) || min < 5 || min > 60) return m.reply(`❌ Número entre *5* y *60*.\nEj: *${usedPrefix}tiointerval 15*`)
+    const seconds = Number.parseInt(text?.trim(), 10)
+    if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Número entre *${MIN_INTERVAL_SECONDS}* y *${MAX_INTERVAL_SECONDS}* segundos.\nEj: *${usedPrefix}tiointerval 60*`)
     if (!global.tioActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}tiostart* primero.`)
-    iniciarNotificador(m.chat, conn, min)
-    return m.reply(`⏱️ Intervalo actualizado a *${min} minutos*.`)
+    iniciarNotificador(m.chat, conn, seconds)
+    return m.reply(`⏱️ Intervalo actualizado a *${seconds} segundos*.`)
   }
 
   if (command === 'tioexample') {
@@ -1070,7 +1081,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 
 handler.command = /^(tiostart|tiostop|tiostatus|tiocheck|tioqueue|tioflush|tiounblock|tiointerval|tioexample|latexample)$/i
 handler.tags    = ['anime', 'notificaciones']
-handler.help    = ['tiostart', 'tiostop', 'tiostatus', 'tiocheck', 'tioqueue', 'tioflush', 'tiounblock', 'tiointerval <min>', 'tioexample [N]', 'latexample [N]']
+handler.help    = ['tiostart [segundos]', 'tiostop', 'tiostatus', 'tiocheck', 'tioqueue', 'tioflush', 'tiounblock', 'tiointerval <segundos>', 'tioexample [N]', 'latexample [N]']
 handler.exp     = 0
 handler.level   = 0
 handler.limit   = false
