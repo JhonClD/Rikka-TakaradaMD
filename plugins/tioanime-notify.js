@@ -144,6 +144,15 @@ function formatInterval(seconds) {
   if (Number.isInteger(value) && value % 60 === 0) return `${value / 60} min`
   return `${value} segundos`
 }
+function parseIntervalInput(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(',', '.')
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(s|seg|segs|segundo|segundos|m|min|mins|minuto|minutos)?$/i)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const seconds = /^m/i.test(match[2] || '') ? amount * 60 : amount
+  return Number.isInteger(seconds) ? seconds : Math.round(seconds)
+}
 function formatActiveTime(startedAt) {
   const totalMinutes = Math.max(0, Math.floor((Date.now() - Number(startedAt || Date.now())) / 60_000))
   const hours = Math.floor(totalMinutes / 60)
@@ -1043,11 +1052,11 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiointerval') {
-    const seconds = Number.parseInt(text?.trim(), 10)
-    if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Número entre *${MIN_INTERVAL_SECONDS}* y *${MAX_INTERVAL_SECONDS}* segundos.\nEj: *${usedPrefix}tiointerval 60*`)
+    const seconds = parseIntervalInput(text)
+    if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}tiointerval 60s* o *${usedPrefix}tiointerval 10m*`)
     if (!global.tioActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}tiostart* primero.`)
     iniciarNotificador(m.chat, conn, seconds)
-    return m.reply(`⏱️ Intervalo actualizado a *${seconds} segundos*.`)
+    return m.reply(`⏱️ Intervalo actualizado a *${formatInterval(seconds)}*.`)
   }
 
   if (command === 'tioexample') {
