@@ -955,20 +955,20 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       ? secondsArg
       : CHECK_INTERVAL_SECONDS
     iniciarNotificador(m.chat, conn, intervalSec, false)
-    await conn.sendMessage(m.chat, {
-      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
-    }, { quoted: m })
+    let tio = [], lat = []
     try {
-      const tio  = await fetchLatestEpisodes()
-      const lat  = await fetchLatestEpisodesLatAnime()
+      tio = await fetchLatestEpisodes()
+      lat = await fetchLatestEpisodesLatAnime()
       const lista = [...tio, ...lat]
       const seen  = loadSeen()
       if (!seen[m.chat]) seen[m.chat] = []
       for (const ep of lista) { if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id) }
       if (seen[m.chat].length > 500) seen[m.chat] = seen[m.chat].slice(-500)
       saveSeen(seen)
-      await conn.sendMessage(m.chat, { text: `📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.` }, { quoted: m })
     } catch (err) {}
+    await conn.sendMessage(m.chat, {
+      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
+    }, { quoted: m })
     return
   }
 
