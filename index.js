@@ -187,9 +187,7 @@ function forkProcess(file) {
   }
 }
 
-try {
-  start('main.js');
-} catch (error) {
+start('main.js').catch((error) => {
   console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
   process.exit(1);
-}
+});

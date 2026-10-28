@@ -42,6 +42,19 @@ const mediaUploadAgent = new https.Agent({
   scheduling: 'lifo',
 });
 let socketReloadInProgress = false;
+const disconnectErrorCounters = new Map();
+function shouldLogDisconnectError(errorType) {
+  const now = Date.now();
+  let data = disconnectErrorCounters.get(errorType);
+  if (!data || now - data.windowStarted >= 60_000) {
+    data = { count: 0, lastShown: 0, windowStarted: now };
+    disconnectErrorCounters.set(errorType, data);
+  }
+  if (data.count >= 5 || now - data.lastShown < 2_000) return false;
+  data.count++;
+  data.lastShown = now;
+  return true;
+}
 const qrGuard = createQRGuard({
   ttlMs: 60_000,
   onBlocked: () => console.log(chalk.gray('[ ℹ️ ] QR repetido ignorado; usa el último QR mostrado.')),
@@ -239,7 +252,7 @@ if (!opts['test']) {
       if (global.db.data) await global.db.write();
       if (opts['autocleartmp'] && (global.support || {}).find) {
         const tmp = [os.tmpdir(), 'tmp', 'jadibts'];
-        tmp.forEach((filename) => cp.spawn('find', [filename, '-amin', '3', '-type', 'f', '-delete']));
+        tmp.forEach((filename) => spawn('find', [filename, '-amin', '3', '-type', 'f', '-delete']));
       }
     }, 30 * 1000);
   }
@@ -248,9 +261,10 @@ if (!opts['test']) {
 if (opts['server']) (await import('./server.js')).default(global.conn, PORT);
 
 function clearTmp() {
-  const tmp = [join(__dirname, './src/tmp')];
+  const tmp = join(__dirname, './src/tmp');
+  if (!existsSync(tmp)) return [];
   const filename = [];
-  tmp.forEach((dirname) => readdirSync(dirname).forEach((file) => filename.push(join(dirname, file))));
+  readdirSync(tmp).forEach((file) => filename.push(join(tmp, file)));
   return filename.map((file) => {
     const stats = statSync(file);
     if (stats.isFile() && (Date.now() - stats.mtimeMs >= 1000 * 60 * 3)) return unlinkSync(file);
@@ -280,7 +294,6 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
 
 
 async function connectionUpdate(update) {
-  let isFirstConnection = '';
   const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
@@ -301,21 +314,10 @@ async function connectionUpdate(update) {
   if (connection == 'open') {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
+    disconnectErrorCounters.clear();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
-    isFirstConnection = true;
   }
   let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-  const errorCounters = {};
-  function shouldLogError(errorType) {
-    if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };
-    const now = Date.now();
-    const errorData = errorCounters[errorType];
-    if (errorData.count >= 5) return false;
-    if (now - errorData.lastShown < 2000) return false;
-    errorData.count++;
-    errorData.lastShown = now;
-    return true;
-  }
   if (reason == 405 || reason == 440 || reason === DisconnectReason.connectionReplaced) {
     // No reintentar aquí: cada socket nuevo invalida el anterior y mantiene
     // el conflicto activo (405/440). El usuario debe cerrar las sesiones
@@ -326,46 +328,39 @@ async function connectionUpdate(update) {
   }
   if (connection === 'close') {
     if (reason === DisconnectReason.badSession) {
-      if (shouldLogError('badSession')) {
+      if (shouldLogDisconnectError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
       await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.connectionClosed) {
-      if (shouldLogError('connectionClosed')) {
+      if (shouldLogDisconnectError('connectionClosed')) {
         conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
       }
       await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.connectionLost) {
-      if (shouldLogError('connectionLost')) {
+      if (shouldLogDisconnectError('connectionLost')) {
         conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
       }
       await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.connectionReplaced) {
       // Ya manejado por el bloque reason == 405 con delay
     } else if (reason === DisconnectReason.loggedOut) {
-      if (shouldLogError('loggedOut')) {
+      if (shouldLogDisconnectError('loggedOut')) {
         conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
     } else if (reason === DisconnectReason.restartRequired) {
-      if (isFirstConnection) {
-        if (shouldLogError('restartRequired')) {
-          //conn.logger.info(`[ ⚠️ ] Primer inicio: Ignorando restartRequired (posible falso positivo)`);
-        }
-        isFirstConnection = false;
-      } else {
-        if (shouldLogError('restartRequired')) {
-          conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
-        }
-        await global.reloadHandler(true).catch(console.error);
+      if (shouldLogDisconnectError('restartRequired')) {
+        conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
       }
+      await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.timedOut) {
-      if (shouldLogError('timedOut')) {
+      if (shouldLogDisconnectError('timedOut')) {
         conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
       }
       await global.reloadHandler(true).catch(console.error);
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
-      if (shouldLogError(unknownError)) {
+      if (shouldLogDisconnectError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
       await global.reloadHandler(true).catch(console.error);
@@ -435,7 +430,7 @@ global.reloadHandler = async function (restatConn) {
 };
 ;
 
-const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
+const pluginFolder = global.__dirname(join(__dirname, './plugins'));
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 
@@ -451,7 +446,7 @@ async function filesInit() {
     }
   }
 }
-filesInit().then((_) => Object.keys(global.plugins)).catch(console.error);
+await filesInit();
 
 global.reload = async (_ev, filename) => {
   if (pluginFilter(filename)) {
@@ -506,14 +501,24 @@ function clockString(ms) {
   return [d, 'd ', h, 'h ', m, 'm ', s, 's '].map((v) => v.toString().padStart(2, 0)).join('');
 }
 
-process.on('SIGINT', () => {
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  gracefulShutdown();
-  process.exit(0);
-});
+let shutdownPromise;
+async function gracefulShutdown() {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    try {
+      conn?.ev?.removeAllListeners();
+      await conn?.ws?.close?.();
+    } catch (error) {
+      console.error('[ ⚠️ ] Error cerrando la conexión durante el apagado:', error);
+    }
+  })();
+  return shutdownPromise;
+}
+const shutdown = () => {
+  gracefulShutdown().finally(() => process.exit(0));
+};
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
 
 // Manejo de errores no capturadas relacionadas con LID
 process.on('unhandledRejection', (reason, promise) => {

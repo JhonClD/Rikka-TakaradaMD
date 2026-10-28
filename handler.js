@@ -51,6 +51,15 @@ export async function handler(chatUpdate) {
     if (!chatUpdate.messages.length) return;
   }
 
+  // Baileys puede agrupar varios mensajes en un mismo upsert. Procesarlos
+  // secuencialmente evita descartar todos menos el último y conserva el orden.
+  if (chatUpdate.messages?.length > 1) {
+    for (const message of chatUpdate.messages) {
+      await handler.call(this, { ...chatUpdate, messages: [message] });
+    }
+    return;
+  }
+
   this.pushMessage(chatUpdate.messages).catch(console.error);
   let m = chatUpdate.messages[chatUpdate.messages.length - 1];
   if (!m) return;
@@ -73,9 +82,10 @@ export async function handler(chatUpdate) {
     m.limit = false;
 
     try {
-      const user = global.db.data.users[m.sender];
-      if (typeof user !== 'object') {
+      let user = global.db.data.users[m.sender];
+      if (!user || typeof user !== 'object' || Array.isArray(user)) {
         global.db.data.users[m.sender] = {};
+        user = global.db.data.users[m.sender];
       }
 
       if (user && !_initializedUsers.has(m.sender)) {
@@ -168,9 +178,10 @@ export async function handler(chatUpdate) {
         Object.assign(user, { ...defaults, ...user });
       }
 
-      const chat = global.db.data.chats[m.chat];
-      if (typeof chat !== 'object') {
+      let chat = global.db.data.chats[m.chat];
+      if (!chat || typeof chat !== 'object' || Array.isArray(chat)) {
         global.db.data.chats[m.chat] = {};
+        chat = global.db.data.chats[m.chat];
       }
       if (chat) {
         const chats = {
