@@ -139,6 +139,11 @@ function detectarServidor(url, label = '') {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function zeroPad(n)  { return String(n).padStart(2, '0') }
+function formatInterval(seconds) {
+  const value = Number(seconds)
+  if (Number.isInteger(value) && value % 60 === 0) return `${value / 60} min`
+  return `${value} segundos`
+}
 function safeFile(s) { return s.replace(/[\\/\\*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
 const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
 function seasonValue(value) {
@@ -951,7 +956,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       : CHECK_INTERVAL_SECONDS
     iniciarNotificador(m.chat, conn, intervalSec, false)
     await conn.sendMessage(m.chat, {
-      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n╭━━━━━━〔 📡 〕━━━━━━\n┃ ⏱️ Intervalo: *${intervalSec} segundos*\n┃ 🇯🇵 TioAnime — Sub japonés\n┃ 🇲🇽🇪🇸 LatAnime — Latino / Castellano\n┃ 💬 Chat registrado\n╰━━━━━━━━━━━━━━━━━━\n\n_Usa ${usedPrefix}tiostop para detener._`
+      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
     }, { quoted: m })
     try {
       const tio  = await fetchLatestEpisodes()
@@ -962,7 +967,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       for (const ep of lista) { if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id) }
       if (seen[m.chat].length > 500) seen[m.chat] = seen[m.chat].slice(-500)
       saveSeen(seen)
-      await conn.sendMessage(m.chat, { text: `📋 *${tio.length}* ep TioAnime + *${lat.length}* ep LatAnime registrados como base.\n_Solo los nuevos se enviarán._` }, { quoted: m })
+      await conn.sendMessage(m.chat, { text: `📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.` }, { quoted: m })
     } catch (err) {}
     return
   }
