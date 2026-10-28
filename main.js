@@ -31,7 +31,6 @@ const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
 let stopped = 'close';
 protoType();
 serialize();
-const msgRetryCounterMap = new Map();
 const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
 // Reutiliza conexiones TLS del upload endpoint de WhatsApp entre envíos.
@@ -99,11 +98,8 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
 let opcion;
-// Variables de estado para el pairing code (sobreviven reconexiones)
+// Número usado para solicitar el código después de crear el socket.
 let pairingPhoneNumber = null;
-let pairingCodeDone = false;
-let pairingAttemptCount = 0;
-let pairingRequestTimer = null;
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -309,8 +305,6 @@ async function connectionUpdate(update) {
     isFirstConnection = true;
   }
   let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-  const lastErrors = {};
-  const errorTimers = {};
   const errorCounters = {};
   function shouldLogError(errorType) {
     if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };

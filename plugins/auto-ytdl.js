@@ -21,7 +21,6 @@
  */
 
 import {
-    YT_REGEX,
     ytInfo,
     ytDownload,
     buildInfoCard,

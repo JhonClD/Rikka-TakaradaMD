@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { exec, spawn, execSync, spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { pipeline } from 'stream/promises';
 
 // ─── Config global ───────────────────────────────────────────────────────────

@@ -85,7 +85,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
 
         // ── AUDIO MP3 ─────────────────────────────────────────────────────────
         } else {
-            const { buffer, seconds, meta, provider } =
+            const { buffer, seconds, meta } =
                 await ytDownload(video.url, 'audio');
 
             const title = meta?.title || video.title;

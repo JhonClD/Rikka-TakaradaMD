@@ -228,7 +228,7 @@ async function sendFile(conn, chat, filePath, m) {
 const handler = async (m, { conn, text, args, command }) => {
   if (command === 'tcancel') {
     let n = 0
-    for (const [taskId, task] of tasks.entries()) {
+    for (const task of tasks.values()) {
       if (task.chat === m.chat) {
         task.cancelled = true
         task.child?.kill('SIGTERM')

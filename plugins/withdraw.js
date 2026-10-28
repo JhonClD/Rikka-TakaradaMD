@@ -7,7 +7,6 @@
 const handler = async (m, { conn, command, usedPrefix, args }) => {
     const db = global.db.data
     const chatId = m.chat
-    const senderId = m.sender
     const botId = conn.user?.id.split(':')[0] + '@s.whatsapp.net'
     const botSettings = db.settings[botId]
     const chatData = db.chats[chatId]

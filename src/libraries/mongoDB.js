@@ -44,7 +44,7 @@ export class mongoDB {
     this._data = await this._model.findOne({});
     if (!this._data) {
       this.data = {};
-      const [_, _data] = await Promise.all([
+      const [, _data] = await Promise.all([
         this.write(this.data),
         this._model.findOne({}),
       ]);

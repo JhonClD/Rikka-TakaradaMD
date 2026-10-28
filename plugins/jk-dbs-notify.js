@@ -335,9 +335,6 @@ async function descargarMega(megaUrl, outputDir, fileName) {
   const destPath = path.join(outputDir, fileName)
   const fileStream = file.download()
 
-  let downloaded = 0
-  fileStream.on('data', chunk => { downloaded += chunk.length })
-
   try {
     await pipeline(fileStream, fs.createWriteStream(destPath))
   } catch (err) {

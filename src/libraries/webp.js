@@ -1106,8 +1106,6 @@ const _readChunk_ANMF2 = /* #__PURE__*/ (function() {
           _readChunkHeader_buf,
           _readChunkHeader_buf2,
       ).call(this, buf, cursor);
-      let t;
-
       cursor += 8;
 
       switch (header.fourCC) {
@@ -1280,7 +1278,7 @@ var _read2 = /* #__PURE__*/ (function() {
     const out = {};
     let keepLooping = true;
     let first = true;
-    const {fileSize} = yield _classPrivateMethodGet(
+    yield _classPrivateMethodGet(
         this,
         _readHeader,
         _readHeader2,

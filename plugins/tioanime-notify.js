@@ -6,7 +6,6 @@ import axios        from 'axios'
 import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
-import { spawn }    from 'child_process'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
@@ -968,7 +967,7 @@ function detenerNotificador(chatId) {
 
 function restaurarNotificadores(conn) {
   const state = loadState()
-  for (const [chatId, cfg] of Object.entries(state)) {
+  for (const [chatId] of Object.entries(state)) {
     if (chatId === '__config') continue
     if (!global.tioActiveChats.has(chatId)) {
       iniciarNotificador(chatId, conn, getGlobalIntervalSec())
@@ -981,7 +980,7 @@ if (!global.tioWatchdog) {
     const conn = global.tioConn
     if (!conn) return
     const state = loadState()
-    for (const [chatId, cfg] of Object.entries(state)) {
+    for (const [chatId] of Object.entries(state)) {
       if (chatId === '__config') continue
       if (!global.tioActiveChats.has(chatId)) {
         iniciarNotificador(chatId, conn, getGlobalIntervalSec())

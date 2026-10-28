@@ -101,12 +101,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const groups   = allChats.filter(([id]) => id.endsWith("@g.us"));
   const privados = allChats.length - groups.length;
 
-  const settings = global.db?.data?.settings?.[conn.user?.jid] ?? {};
-  const { restrict, antiCall, antiprivado } = settings;
-  const { autoread, gconly, pconly, self } = global.opts ?? {};
-
-  const on  = (v) => (v ? "✅ activo"   : "❌ desactivado");
-  const onP = (v) => (v ? "✅ activado" : "❌ desactivado");
+  const { self } = global.opts ?? {};
 
   const info = `𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌

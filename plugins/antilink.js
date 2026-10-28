@@ -1,5 +1,3 @@
-import { proto } from '@this-xys/baileys';
-
 const WHATSAPP_LINK_RE = /chat\.whatsapp\.com\/[A-Za-z0-9]{15,}/i;
 const SOCIAL_LINK_RE = /(?:https?:\/\/)?(?:www\.)?(t\.me|telegram\.me|tiktok\.com|instagram\.com|facebook\.com|fb\.com|twitter\.com|x\.com|youtube\.com|youtu\.be|discord\.gg|discord\.com\/invite)[\S]*/i;
 
@@ -66,8 +64,6 @@ handler.help = ['antilink <on|off>', 'antilink2 <on|off>'];
 handler.tags = ['group'];
 handler.command = ['antilink', 'antilink2'];
 handler.group = true;
-
-const _cmd = handler.command;
 
 const _realHandler = Object.assign(async (m, opts) => {
   const { args, usedPrefix, isAdmin, isOwner } = opts;

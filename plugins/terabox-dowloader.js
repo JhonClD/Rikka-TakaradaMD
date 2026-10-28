@@ -1,5 +1,3 @@
-import path from "path";
-
 const CONFIG = {
   base: "https://flowvideoplayer.com",
   ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
