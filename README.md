@@ -63,6 +63,12 @@ npm start
 
 Escanea el QR o ingresa el código de emparejamiento en WhatsApp → Dispositivos vinculados.
 
+### 5. Probar mensajes y comandos
+
+Los comandos se envían por WhatsApp al número vinculado; no se escriben en la terminal. El prefijo predeterminado acepta `!`, `#`, `/` y `.`. Para probar, envía `.menu` desde otro chat de WhatsApp. En la terminal debe aparecer una línea `[Rikka] Mensaje WhatsApp entrante`; cuando el comando coincida con un plugin, también aparecerá `[Rikka] Comando reconocido`.
+
+Si el mensaje aparece en WhatsApp pero no en la terminal, revisa que el proceso siga en ejecución y que no haya otra instancia del bot conectada con la misma sesión. Si la línea del mensaje aparece pero el comando no se reconoce, confirma el prefijo y que el nombre del comando exista en `plugins/`.
+
 ---
 
 ## ✨ Funciones disponibles

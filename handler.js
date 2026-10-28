@@ -480,7 +480,7 @@ export async function handler(chatUpdate) {
               plugin.command === command :
               false;
 
-        if (isAccept) console.log('[DEBUG] Comando aceptado:', command, 'plugin:', name);
+        if (isAccept) console.log('[Rikka] Comando reconocido:', usedPrefix + command, '| plugin:', name);
         if (!isAccept) continue;
 
 

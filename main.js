@@ -432,7 +432,24 @@ global.reloadHandler = async function (restatConn) {
     conn.ev.off('call', conn.onCall);
   }
 
-  conn.handler = handler.handler.bind(global.conn);
+  conn.handler = async (chatUpdate = {}) => {
+    const messages = Array.isArray(chatUpdate.messages) ? chatUpdate.messages : [];
+    if (chatUpdate.type === 'notify') {
+      for (const message of messages) {
+        if (!message?.message || message.key?.remoteJid === 'status@broadcast') continue;
+        const remoteJid = message.key?.remoteJid || '';
+        const direction = message.key?.fromMe ? 'saliente' : 'entrante';
+        const scope = remoteJid.endsWith('@g.us') ? 'grupo' : 'privado';
+        const messageType = Object.keys(message.message).find((key) => key !== 'messageContextInfo') || 'desconocido';
+        console.log(`[Rikka] Mensaje WhatsApp ${direction} (${scope}, ${messageType})`);
+      }
+    }
+    try {
+      await handler.handler.call(global.conn, chatUpdate);
+    } catch (error) {
+      console.error('[Rikka] Error procesando mensajes de WhatsApp:', error);
+    }
+  };
 
   conn.participantsUpdate = handler.participantsUpdate.bind(global.conn);
   conn.groupsUpdate = handler.groupsUpdate.bind(global.conn);
