@@ -144,6 +144,12 @@ function formatInterval(seconds) {
   if (Number.isInteger(value) && value % 60 === 0) return `${value / 60} min`
   return `${value} segundos`
 }
+function formatActiveTime(startedAt) {
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - Number(startedAt || Date.now())) / 60_000))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
+}
 function safeFile(s) { return s.replace(/[\\/\\*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
 const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
 function seasonValue(value) {
@@ -832,6 +838,12 @@ async function procesarCola() {
           if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
           if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
           saveSeen(seen)
+          const state = loadState()
+          const sentCount = (Number(state[chatId]?.sentCount) || 0) + 1
+          if (state[chatId]) state[chatId].sentCount = sentCount
+          const active = global.tioActiveChats.get(chatId)
+          if (active) active.sentCount = sentCount
+          saveState(state)
           quitarItemActual()
           global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
         } catch (err) {
@@ -900,9 +912,11 @@ function iniciarNotificador(chatId, conn, intervalSec = CHECK_INTERVAL_SECONDS, 
     if (!c) return
     checkNuevosEpisodios(chatId, c).catch(e => {})
   }, intervalSec * 1000)
-  global.tioActiveChats.set(chatId, { timer, intervalSec, startedAt: Date.now() })
   const state = loadState()
-  state[chatId] = { intervalSec, startedAt: Date.now() }
+  const startedAt = Date.now()
+  const sentCount = Number(state[chatId]?.sentCount) || 0
+  global.tioActiveChats.set(chatId, { timer, intervalSec, startedAt, sentCount })
+  state[chatId] = { intervalSec, startedAt, sentCount }
   saveState(state)
   // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
   if (checkNow && global.tioConn) checkNuevosEpisodios(chatId, global.tioConn).catch(() => {})
@@ -974,8 +988,11 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 
   if (command === 'tiostop') {
     if (!global.tioActiveChats.has(m.chat)) return m.reply(`ℹ️ El notificador no estaba activo.`)
+    const entry = global.tioActiveChats.get(m.chat)
+    const activeTime = formatActiveTime(entry.startedAt)
+    const sentCount = Number(entry.sentCount) || 0
     detenerNotificador(m.chat)
-    return m.reply(`🛑 *Notificador detenido.*\n_Usa ${usedPrefix}tiostart para reactivar._`)
+    return m.reply(`🛑 *Notificador detenido*\n\n ├ Activo: *${activeTime}*\n └ Avisos enviados: *${sentCount}*\n\n*Usa ${usedPrefix}tiostart para reactivarlo.*`)
   }
 
   if (command === 'tiostatus') {
