@@ -841,11 +841,21 @@ async function procesarCola() {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
       }
+      if (!global.tioActiveChats.has(chatId)) {
+        quitarItemActual()
+        global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
+        continue
+      }
       let intentos = 0
       let exito    = false
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
+        if (!global.tioActiveChats.has(chatId)) {
+          quitarItemActual()
+          global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
+          break
+        }
         const connActivo = global.tioConn
         if (!connActivo) {
           await new Promise(r => setTimeout(r, ESPERA_REINTENTO))
@@ -905,6 +915,7 @@ async function checkNuevosEpisodios(chatId, conn) {
     if (!lista.length) return
 
     const seen = loadSeen()
+    if (!global.tioActiveChats.has(chatId)) return
     if (!seen[chatId]) seen[chatId] = []
     const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.tioQueuedIds.has(`${chatId}:${e.id}`))
     if (!nuevos.length) return
@@ -947,6 +958,9 @@ function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
 function detenerNotificador(chatId) {
   const entry = global.tioActiveChats.get(chatId)
   if (entry) { clearInterval(entry.timer); global.tioActiveChats.delete(chatId) }
+  const pendientes = global.tioEpisodeQueue.filter(item => item.chatId === chatId)
+  global.tioEpisodeQueue = global.tioEpisodeQueue.filter(item => item.chatId !== chatId)
+  for (const item of pendientes) global.tioQueuedIds.delete(`${chatId}:${item.ep.id}`)
   const state = loadState()
   delete state[chatId]
   saveState(state)
