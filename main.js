@@ -42,6 +42,7 @@ const mediaUploadAgent = new https.Agent({
   scheduling: 'lifo',
 });
 let socketReloadInProgress = false;
+let pendingConnectionReload = false;
 const disconnectErrorCounters = new Map();
 function shouldLogDisconnectError(errorType) {
   const now = Date.now();
@@ -105,14 +106,17 @@ console.log(version22)
 const version = version22?.version || [2, 3000, 1033893291]; 
 let phoneNumber = global.botnumber || process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
 const methodCodeQR = process.argv.includes('--method=qr');
-const methodCode = !!phoneNumber || process.argv.includes('--method=code');
+const methodCode = !methodCodeQR && (!!phoneNumber || process.argv.includes('--method=code'));
 const MethodMobile = process.argv.includes("mobile");
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
 let opcion;
-// Número usado para solicitar el código después de crear el socket.
-let pairingPhoneNumber = null;
+// El código se solicita al recibir el primer QR, cuando Baileys ya tiene listo el WebSocket.
+let pairingPhoneNumber = methodCode && phoneNumber ? phoneNumber.replace(/\D/g, '') : null;
+let pairingQrReceived = false;
+let pairingCodeRequestInProgress = false;
+let pairingCodeRequested = false;
 if (methodCodeQR) opcion = '1';
 if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
   do {
@@ -152,7 +156,7 @@ process.on('uncaughtException', (err) => {
 
 const connectionOptions = {
   logger: pino({ level: 'silent' }),
-  // El QR se imprime manualmente en connectionUpdate para evitar duplicados.
+  // QR y pairing se atienden desde el listener registrado al crear el socket.
   printQRInTerminal: false,
   mobile: MethodMobile,
   browser: opcion === '1' ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
@@ -183,6 +187,7 @@ const connectionOptions = {
 };
 
 global.conn = makeWASocket(connectionOptions);
+attachEarlySocketListeners(global.conn);
 
 if (methodCode && !state.creds.registered) {
   withPairingGuard(global.conn, {
@@ -216,30 +221,31 @@ if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
         rl.close();
       }
 
-      // Guardar número — el código se pedirá dentro de connectionUpdate
-      // para sobrevivir reconexiones por badSession u otros errores
+      // Guardar el número; si el QR llegó mientras se solicitaba, pedir el código ahora.
       pairingPhoneNumber = numeroTelefono;
       console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
+      if (pairingQrReceived) void requestPairingCodeOnce();
     }
   }
 }
 
-// Solicitar el código una sola vez, después de crear el socket. Hacerlo desde
-// connection.update puede repetir la solicitud durante el handshake y provocar
-// que WhatsApp reemplace la conexión anterior.
-if (pairingPhoneNumber && !state.creds.registered) {
-  setTimeout(async () => {
-    try {
-      if (state.creds.registered || !global.conn?.requestPairingCode) return;
-      let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
-      codigo = String(codigo || '').replace(/[^A-Za-z0-9]/g, '');
-      if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
-      console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
-      console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
-    } catch (err) {
-      console.log(chalk.red(`[ ⚠️ ] Error al obtener código: ${err.message}`));
-    }
-  }, 3000);
+async function requestPairingCodeOnce() {
+  if (!pairingPhoneNumber || state.creds.registered || pairingCodeRequested || pairingCodeRequestInProgress) return;
+  pairingCodeRequestInProgress = true;
+  try {
+    if (!global.conn?.requestPairingCode) throw new Error('El socket todavía no ofrece requestPairingCode');
+    console.log(chalk.cyan('[ ℹ️ ] WebSocket listo; solicitando código de 8 dígitos...'));
+    let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
+    codigo = String(codigo || '').replace(/[^A-Za-z0-9]/g, '');
+    if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
+    pairingCodeRequested = true;
+    console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
+    console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
+  } catch (err) {
+    console.log(chalk.red(`[ ⚠️ ] Error al obtener código: ${err.message}`));
+  } finally {
+    pairingCodeRequestInProgress = false;
+  }
 }
 
 conn.isInit = false;
@@ -291,7 +297,33 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
   }
 });
 
+function attachEarlySocketListeners(socket) {
+  socket.earlyConnectionUpdate = (update) => {
+    if (!update.qr) return;
+    pairingQrReceived = true;
+    if (pairingPhoneNumber && !state.creds.registered) {
+      void requestPairingCodeOnce();
+    } else if ((opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
+      qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
+        console.log(qr);
+        console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));
+      });
+    }
+  };
+  socket.credsUpdate = saveCreds.bind(socket, true);
+  socket.connectionUpdate = connectionUpdate.bind(socket);
+  socket.ev.on('connection.update', socket.earlyConnectionUpdate);
+  socket.ev.on('connection.update', socket.connectionUpdate);
+  socket.ev.on('creds.update', socket.credsUpdate);
+}
 
+async function reloadConnectionWhenReady() {
+  if (typeof global.reloadHandler !== 'function') {
+    pendingConnectionReload = true;
+    return;
+  }
+  await global.reloadHandler(true).catch(console.error);
+}
 
 async function connectionUpdate(update) {
   const { connection, lastDisconnect, isNewLogin } = update;
@@ -301,16 +333,10 @@ async function connectionUpdate(update) {
   const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
   const isConnectionReplaced = code === 405 || code === 440 || code === DisconnectReason.connectionReplaced;
   if (code && !isConnectionReplaced && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
-    await global.reloadHandler(true).catch(console.error);
+    await reloadConnectionWhenReady();
     global.timestamp.connect = new Date;
   }
   if (global.db.data == null) loadDatabase();
-  if (update.qr && (opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
-    qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
-      console.log(qr);
-      console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));
-    });
-  }
   if (connection == 'open') {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
@@ -331,17 +357,17 @@ async function connectionUpdate(update) {
       if (shouldLogDisconnectError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogDisconnectError('connectionClosed')) {
         conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogDisconnectError('connectionLost')) {
         conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     } else if (reason === DisconnectReason.connectionReplaced) {
       // Ya manejado por el bloque reason == 405 con delay
     } else if (reason === DisconnectReason.loggedOut) {
@@ -352,18 +378,18 @@ async function connectionUpdate(update) {
       if (shouldLogDisconnectError('restartRequired')) {
         conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogDisconnectError('timedOut')) {
         conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogDisconnectError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      await reloadConnectionWhenReady();
     }
   }
 }
@@ -391,6 +417,7 @@ global.reloadHandler = async function (restatConn) {
     } catch { }
     try {
       global.conn = makeWASocket(connectionOptions, { chats: oldChats });
+      attachEarlySocketListeners(global.conn);
       store?.bind(global.conn);
       isInit = true;
     } finally {
@@ -403,8 +430,6 @@ global.reloadHandler = async function (restatConn) {
     conn.ev.off('groups.update', conn.groupsUpdate);
     conn.ev.off('message.delete', conn.onDelete);
     conn.ev.off('call', conn.onCall);
-    conn.ev.off('connection.update', conn.connectionUpdate);
-    conn.ev.off('creds.update', conn.credsUpdate);
   }
 
   conn.handler = handler.handler.bind(global.conn);
@@ -413,21 +438,21 @@ global.reloadHandler = async function (restatConn) {
   conn.groupsUpdate = handler.groupsUpdate.bind(global.conn);
   conn.onDelete = handler.deleteUpdate.bind(global.conn);
   conn.onCall = handler.callUpdate.bind(global.conn);
-  conn.connectionUpdate = connectionUpdate.bind(global.conn);
-  conn.credsUpdate = saveCreds.bind(global.conn, true);
 
   conn.ev.on('messages.upsert', conn.handler);
   conn.ev.on('group-participants.update', conn.participantsUpdate);
   conn.ev.on('groups.update', conn.groupsUpdate);
   conn.ev.on('message.delete', conn.onDelete);
   conn.ev.on('call', conn.onCall);
-  conn.ev.on('connection.update', conn.connectionUpdate);
-  conn.ev.on('creds.update', conn.credsUpdate);
 
 
   isInit = false;
   return true;
 };
+if (pendingConnectionReload) {
+  pendingConnectionReload = false;
+  await global.reloadHandler(true).catch(console.error);
+}
 ;
 
 const pluginFolder = global.__dirname(join(__dirname, './plugins'));
