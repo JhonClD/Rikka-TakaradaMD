@@ -1,4 +1,4 @@
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -13,16 +13,66 @@ import './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { say } = cfonts;
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const rl = cluster.isPrimary ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null;
 let isRunning = false;
 let childProcess = null;
 let shuttingDown = false;
 
 // WhatsApp devuelve 405/440 si dos procesos usan la misma sesión. El bloqueo
 // evita duplicados de esta instalación sin bloquear otras instalaciones del host.
-const lockIdentity = `${process.getuid?.() ?? 'user'}:${fs.realpathSync(__dirname)}`;
+const projectDir = fs.realpathSync(__dirname);
+const lockIdentity = `${process.getuid?.() ?? 'user'}:${projectDir}`;
 const lockHash = createHash('sha256').update(lockIdentity).digest('hex').slice(0, 16);
 const instanceLock = join(tmpdir(), `rikka-takarada-md-${lockHash}.lock`);
+function readLinuxProcessStartTime(pid) {
+  if (process.platform !== 'linux') return null;
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return fields[19] || null;
+}
+
+function readLockMetadata() {
+  const contents = fs.readFileSync(instanceLock, 'utf8').trim();
+  if (/^\d+$/.test(contents)) return { pid: Number(contents), projectDir: null, startTime: null };
+  let metadata;
+  try {
+    metadata = JSON.parse(contents);
+  } catch {
+    throw new Error(`El archivo de bloqueo ${instanceLock} tiene un formato inválido; revísalo manualmente.`);
+  }
+  if (!Number.isSafeInteger(metadata.pid) || metadata.pid < 1) {
+    throw new Error(`El archivo de bloqueo ${instanceLock} no contiene un PID válido; revísalo manualmente.`);
+  }
+  return metadata;
+}
+
+function isSameRikkaProcess(pid, metadata) {
+  if (process.platform !== 'linux') return true;
+  try {
+    const processCwd = fs.realpathSync(`/proc/${pid}/cwd`);
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    const entryPoint = join(projectDir, 'index.js');
+    const runsThisEntryPoint = args.some((arg) => {
+      if (arg.startsWith('-')) return false;
+      try {
+        return fs.realpathSync(resolve(processCwd, arg)) === entryPoint;
+      } catch {
+        return false;
+      }
+    });
+    if (!runsThisEntryPoint || processCwd !== projectDir) return false;
+    if (metadata.projectDir && metadata.projectDir !== projectDir) return false;
+    if (metadata.startTime) {
+      const actualStartTime = readLinuxProcessStartTime(pid);
+      if (actualStartTime && actualStartTime !== metadata.startTime) return false;
+    }
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return false;
+    throw new Error(`No se pudo verificar si el PID ${pid} pertenece a Rikka: ${error.message}`);
+  }
+}
+
 function acquireInstanceLock() {
   for (let attempt = 0; attempt < 3; attempt++) {
     let created = false;
@@ -30,7 +80,12 @@ function acquireInstanceLock() {
       const fd = fs.openSync(instanceLock, 'wx', 0o600);
       created = true;
       try {
-        fs.writeSync(fd, `${process.pid}\n`);
+        const metadata = {
+          pid: process.pid,
+          projectDir,
+          startTime: readLinuxProcessStartTime(process.pid),
+        };
+        fs.writeSync(fd, `${JSON.stringify(metadata)}\n`);
         fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);
@@ -44,14 +99,10 @@ function acquireInstanceLock() {
       if (error.code !== 'EEXIST') throw error;
 
       let lockStat;
-      let pid;
+      let metadata;
       try {
         lockStat = fs.statSync(instanceLock);
-        const pidText = fs.readFileSync(instanceLock, 'utf8').trim();
-        if (!/^\d+$/.test(pidText) || !Number.isSafeInteger(Number(pidText)) || Number(pidText) < 1) {
-          throw new Error(`El archivo de bloqueo ${instanceLock} no contiene un PID válido; revísalo manualmente.`);
-        }
-        pid = Number(pidText);
+        metadata = readLockMetadata();
       } catch (readError) {
         if (readError.code === 'ENOENT') continue;
         throw readError;
@@ -59,13 +110,13 @@ function acquireInstanceLock() {
 
       let processExists = true;
       try {
-        process.kill(pid, 0);
+        process.kill(metadata.pid, 0);
       } catch (probeError) {
         if (probeError.code === 'ESRCH') processExists = false;
-        else throw new Error(`No se pudo verificar el PID ${pid} del bloqueo ${instanceLock}: ${probeError.message}`);
+        else throw new Error(`No se pudo verificar el PID ${metadata.pid} del bloqueo ${instanceLock}: ${probeError.message}`);
       }
-      if (processExists) {
-        throw new Error(`Ya existe otra instancia de Rikka (PID ${pid}). Deteniendo esta instancia.`);
+      if (processExists && isSameRikkaProcess(metadata.pid, metadata)) {
+        throw new Error(`Ya existe otra instancia de Rikka (PID ${metadata.pid}). Deteniendo esta instancia.`);
       }
 
       try {
@@ -78,22 +129,25 @@ function acquireInstanceLock() {
   }
   throw new Error(`No se pudo adquirir el bloqueo de instancia tras varios intentos: ${instanceLock}`);
 }
-try {
-  acquireInstanceLock();
-} catch (error) {
-  console.error(chalk.red(`[ ERROR ] ${error.message}`));
-  process.exit(1);
-}
 const releaseInstanceLock = () => {
   try {
-    if (Number(fs.readFileSync(instanceLock, 'utf8').trim()) === process.pid) fs.unlinkSync(instanceLock);
+    const metadata = readLockMetadata();
+    if (metadata.pid === process.pid) fs.unlinkSync(instanceLock);
   } catch {}
 };
-process.once('exit', releaseInstanceLock);
+if (cluster.isPrimary) {
+  try {
+    acquireInstanceLock();
+  } catch (error) {
+    console.error(chalk.red(`[ ERROR ] ${error.message}`));
+    process.exit(1);
+  }
+  process.once('exit', releaseInstanceLock);
+}
 function handleShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  rl.close();
+  rl?.close();
 
   const child = childProcess;
   if (!child) {
@@ -112,8 +166,10 @@ function handleShutdown(signal) {
   child.once('exit', finishShutdown);
   if (!child.kill(signal) && (child.exitCode !== null || child.signalCode !== null)) finishShutdown();
 }
-process.once('SIGINT', () => handleShutdown('SIGINT'));
-process.once('SIGTERM', () => handleShutdown('SIGTERM'));
+if (cluster.isPrimary) {
+  process.once('SIGINT', () => handleShutdown('SIGINT'));
+  process.once('SIGTERM', () => handleShutdown('SIGTERM'));
+}
 
 const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
@@ -123,7 +179,7 @@ const celeste = '#8ecae6';
 const softViolet = '#dec0f1'; 
 const white = '#f8f9fa';
 
-console.log(chalk.hex(mint).bold('『 ✦ 』Iniciando sistema...'));
+if (cluster.isPrimary) console.log(chalk.hex(mint).bold('『 ✦ 』Iniciando sistema...'));
 
 function verificarOCrearCarpetaAuth() {
   const authPath = join(__dirname, global.authFile);
@@ -234,15 +290,16 @@ function forkProcess(file) {
   });
 }
 
-const opts = yargs(process.argv.slice(2)).argv;
-if (!opts.test) {
-  rl.on('line', (line) => {
-    if (!childProcess || shuttingDown) return;
-    childProcess.emit('message', line.trim());
+if (cluster.isPrimary) {
+  const opts = yargs(process.argv.slice(2)).argv;
+  if (!opts.test) {
+    rl.on('line', (line) => {
+      if (!childProcess || shuttingDown) return;
+      childProcess.emit('message', line.trim());
+    });
+  }
+  start('main.js').catch((error) => {
+    console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
+    process.exit(1);
   });
 }
-
-start('main.js').catch((error) => {
-  console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
-  process.exit(1);
-});
