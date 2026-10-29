@@ -836,12 +836,12 @@ async function procesarCola() {
     while (global.tioEpisodeQueue.length > 0) {
       const item = global.tioEpisodeQueue[0]
       if (!item) { global.tioEpisodeQueue.shift(); continue }
-      const { chatId, ep } = item
+      const { chatId, ep, manual = false } = item
       const quitarItemActual = () => {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
       }
-      if (!global.tioActiveChats.has(chatId)) {
+      if (!manual && !global.tioActiveChats.has(chatId)) {
         quitarItemActual()
         global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
         continue
@@ -851,7 +851,7 @@ async function procesarCola() {
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
-        if (!global.tioActiveChats.has(chatId)) {
+        if (!manual && !global.tioActiveChats.has(chatId)) {
           quitarItemActual()
           global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
           break
@@ -883,7 +883,7 @@ async function procesarCola() {
             await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
           } else if (esConexion) {
             quitarItemActual()
-            global.tioEpisodeQueue.push({ chatId, ep })
+            global.tioEpisodeQueue.push({ chatId, ep, manual })
             await new Promise(r => setTimeout(r, ESPERA_REQUEUEUE))
             break
           } else {
@@ -1108,7 +1108,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep })
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en tioexample: ${e.message}`))
