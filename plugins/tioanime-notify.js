@@ -12,6 +12,7 @@ import { Transform } from 'stream'
 import https        from 'https'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -217,6 +218,10 @@ function buildFileName(titulo, epNum, fuente = 'tioanime', idioma = 'latino', sl
     ? `Español ${idioma === 'castellano' ? 'Castellano 🇪🇸' : 'Latino 🇲🇽'} (1080p)`
     : 'Sub Español (720p)'
   return `${zeroPad(epNum)} ${seasonLabel}${safeFile(title)} ${details} [[𝗖𝗜𝗗]].mp4`
+}
+
+function build360FileName(fileName) {
+  return fileName.replace(/\(\d{3,4}p\)/i, '(360p)')
 }
 
 function fmtBytes(b) {
@@ -815,6 +820,30 @@ async function enviarEpisodio(chatId, ep, conn) {
     })
 
     console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
+
+    // El original queda completamente enviado antes de empezar la conversión /dw4.
+    const fileName360 = build360FileName(fileName)
+    const video360Path = path.join(tmpDir, fileName360)
+    try {
+      await compressDw4(videoPath, video360Path)
+      const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
+      await conn.sendMessage(chatId, {
+        document : { url: video360Path },
+        fileName: fileName360,
+        mimetype : 'video/mp4',
+        jpegThumbnail: jpegThumbnail360,
+      })
+      console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
+    } catch (error) {
+      console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${error.message}`)
+      try {
+        await conn.sendMessage(chatId, {
+          text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* ya fue enviado, pero no se pudo crear o enviar la versión 360p. Revisa que FFmpeg esté disponible y vuelve a intentarlo.`,
+        })
+      } catch (noticeError) {
+        console.error(`[tioanime-notify] No se pudo notificar el fallo 360p: ${noticeError.message}`)
+      }
+    }
 
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {}

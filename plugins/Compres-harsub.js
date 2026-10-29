@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { exec, spawn, execSync, spawnSync } from 'child_process';
 import { pipeline } from 'stream/promises';
+import { compressDw4 } from '../src/libraries/dw4-compress.js';
 
 // ─── Config global ───────────────────────────────────────────────────────────
 const TEMP_DIR          = './temp';
@@ -44,10 +45,6 @@ const getQuotedMessage = (m) => {
 
 // ✅ Parámetros de codificación centralizados (antes: números mágicos sueltos)
 const PRESET = {
-    // ✅ dw4 vuelve a usar CRF (el peso final varía según la complejidad del
-    // video, como antes), pero con un techo de bitrate (safetyTargetMB) que
-    // solo actúa como límite de seguridad en videos largos/pesados.
-    dw4:     { crf: 26, safetyTargetMB: 58, audioKbps: 64, preset: 'faster' },
     dw3:     { crf: 25, audioKbps: 80, preset: 'faster' },
     dw2:     { crf: 24, preset: 'faster' }, // audio copy, sin bitrate propio
     mi:      { audioKbps: 96, preset: 'fast' }
@@ -420,22 +417,10 @@ let handler = async (m, { conn, text, command, args }) => {
                 let ffmpegArgs = ['-i', input];
 
                 if (isDw4) {
-                    // ✅ DW4: CRF controla la calidad (el peso final varía según
-                    // la complejidad visual del video, igual que antes). El
-                    // -maxrate/-bufsize calculado desde la duración solo actúa
-                    // como techo de seguridad para que un video largo/complejo
-                    // no se dispare de tamaño — no fuerza un peso exacto.
-                    const ceilingK = calcVideoBitrate(durationSec, PRESET.dw4.safetyTargetMB, PRESET.dw4.audioKbps);
-                    const maxrateK = Math.floor(ceilingK * 1.4); // margen: es techo, no objetivo
-                    const bufsizeK = Math.floor(ceilingK * 2);
-                    ffmpegArgs.push(
-                        '-vf', withWM(scaleFast('360')),
-                        '-c:v', 'libx264', '-crf', String(PRESET.dw4.crf), '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
-                        '-pix_fmt', 'yuv420p',
-                        '-preset', PRESET.dw4.preset, '-tune', 'fastdecode',
-                        '-profile:v', 'baseline', '-level', '3.0',
-                        '-c:a', 'aac', '-b:a', `${PRESET.dw4.audioKbps}k`, '-ac', '2', '-movflags', '+faststart'
-                    );
+                    await compressDw4(input, output, {
+                        durationSec,
+                        onProgress: data => logFFmpegProgress(label, data, totalFrames)
+                    });
                 } else if (isDw3) {
                     // DW3: hardsub. Filtro 'subtitles' (compatible con SRT/ASS/PGS)
                     // vs el antiguo 'ass'. fast_bilinear + pad, pix_fmt yuv420p.
@@ -465,11 +450,13 @@ let handler = async (m, { conn, text, command, args }) => {
                     );
                 }
 
-                ffmpegArgs.push('-threads', '0', '-y', output);
-                await runFFmpeg(ffmpegArgs, label, totalFrames);
+                if (!isDw4) {
+                    ffmpegArgs.push('-threads', '0', '-y', output);
+                    await runFFmpeg(ffmpegArgs, label, totalFrames);
+                }
 
-                // ✅ Ya no hace falta un segundo paso: el bitrate de dw4 fue
-                // calculado de antemano para apuntar a PRESET.dw4.targetMB.
+                // La conversión /dw4 ya se ejecutó con el codificador compartido.
+                // Aquí solo se mide el archivo para preparar el caption.
                 const finalSizeMB = fs.statSync(output).size / 1024 / 1024;
                 const bitrateKbps = getBitrateKbps(output);
                 const caption = isDw4
