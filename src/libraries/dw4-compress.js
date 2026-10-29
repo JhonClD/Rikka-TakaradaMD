@@ -44,6 +44,18 @@ function readDurationSec(inputPath) {
   }
 }
 
+function writeTerminalProgress(line, label, durationSec) {
+  const frame = line.match(/frame=\s*(\d+)/)?.[1]
+  if (!frame) return
+  const fps = line.match(/fps=\s*([\d.]+)/)?.[1] || '?'
+  const time = line.match(/time=\s*([\d:.]+)/)?.[1] || '00:00:00'
+  const speed = line.match(/speed=\s*([\d.]+x)/)?.[1] || '?x'
+  const [hours = 0, minutes = 0, seconds = 0] = time.split(':').map(Number)
+  const elapsed = hours * 3600 + minutes * 60 + seconds
+  const percent = durationSec > 0 ? `${Math.min(100, Math.floor(elapsed / durationSec * 100))}%` : '--%'
+  process.stdout.write(`\r[${label}] ${percent} | frame ${frame} | ${time} | ${fps} fps | ${speed}`)
+}
+
 export function buildDw4Args(inputPath, outputPath, durationSec = 0) {
   const ceilingK = calcVideoBitrate(durationSec, SAFETY_TARGET_MB, AUDIO_KBPS)
   const maxrateK = Math.floor(ceilingK * 1.4)
@@ -64,7 +76,7 @@ export function buildDw4Args(inputPath, outputPath, durationSec = 0) {
   ]
 }
 
-export function compressDw4(inputPath, outputPath, { durationSec = 0, onProgress } = {}) {
+export function compressDw4(inputPath, outputPath, { durationSec = 0, onProgress, label = 'DW4' } = {}) {
   if (!fs.existsSync(inputPath)) return Promise.reject(new Error(`No existe el archivo de entrada: ${inputPath}`))
   const actualDurationSec = Number(durationSec) > 0 ? Number(durationSec) : readDurationSec(inputPath)
 
@@ -74,6 +86,7 @@ export function compressDw4(inputPath, outputPath, { durationSec = 0, onProgress
       stdio: ['ignore', 'ignore', 'pipe'],
     })
     let stderr = ''
+    let progressBuffer = ''
     let settled = false
     const finish = (callback, value) => {
       if (settled) return
@@ -91,10 +104,19 @@ export function compressDw4(inputPath, outputPath, { durationSec = 0, onProgress
       if (stderr.length > 12000) stderr = stderr.slice(-12000)
       if (typeof onProgress === 'function') {
         try { onProgress(chunk) } catch (_) {}
+      } else {
+        progressBuffer += chunk.toString()
+        const lines = progressBuffer.split(/\r\n|\n|\r/)
+        progressBuffer = lines.pop() || ''
+        for (const line of lines) writeTerminalProgress(line, label, actualDurationSec)
       }
     })
     proc.on('error', error => finish(reject, error))
     proc.on('close', code => {
+      if (typeof onProgress !== 'function') {
+        writeTerminalProgress(progressBuffer, label, actualDurationSec)
+        process.stdout.write('\n')
+      }
       if (settled) return
       if (code !== 0) {
         const detail = stderr.trim().split('\n').slice(-8).join('\n')

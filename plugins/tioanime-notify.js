@@ -835,7 +835,9 @@ async function enviarEpisodio(chatId, ep, conn) {
     const fileName360 = build360FileName(fileName)
     const video360Path = path.join(tmpDir, fileName360)
     try {
-      await compressDw4(videoPath, video360Path)
+      console.log(`[tioanime-notify] ⚙️ Iniciando compresión /dw4 360p: ${fileName}`)
+      await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
+      console.log(`[tioanime-notify] ✅ Compresión /dw4 360p terminada: ${fileName360}`)
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
       await conn.sendMessage(chatId, {
         document : { url: video360Path },
