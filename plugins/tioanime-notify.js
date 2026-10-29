@@ -6,7 +6,7 @@ import axios        from 'axios'
 import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
-import { spawn, spawnSync } from 'child_process'
+import { spawn }    from 'child_process'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
@@ -740,84 +740,6 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
   return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor)
 }
 
-// ─── Compresión 360p (mismos parámetros que el comando /dw4) ─────────────────
-// Si cambias el preset de dw4 en plugins/Compres-harsub.js, cámbialo también aquí.
-
-const T360_PRESET     = { crf: 26, safetyTargetMB: 58, audioKbps: 64, preset: 'faster' }
-const T360_TIMEOUT_MS = 20 * 60 * 1000
-
-const T360_FONT_FILE = [
-  process.env.WM_FONT_PATH,
-  '/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf',
-  '/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf',
-  '/data/data/com.termux/files/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf',
-  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf',
-].filter(Boolean).find(p => fs.existsSync(p)) || ''
-
-const T360_WM = T360_FONT_FILE
-  ? `drawtext=fontfile='${T360_FONT_FILE}':text='By\\:CID':fontcolor=white:fontsize=w*0.04:x=20:y=20:borderw=2:bordercolor=black:alpha='if(lt(t,4),1,if(lt(t,5),5-t,0))'`
-  : null
-const T360_VF = `scale=-2:360:flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2${T360_WM ? `,${T360_WM}` : ''}`
-
-function duracionVideo(filePath) {
-  try {
-    const proc = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', filePath], { encoding: 'utf8' })
-    return parseFloat(JSON.parse(proc.stdout).format?.duration || 0)
-  } catch (_) { return 0 }
-}
-
-function comprimir360(input, output) {
-  const durationSec = duracionVideo(input)
-  // Techo de seguridad de bitrate (no fuerza un peso exacto; el CRF manda)
-  const ceilingK = durationSec > 0
-    ? Math.max(100, Math.floor((T360_PRESET.safetyTargetMB * 8 * 1024 * 1024 - T360_PRESET.audioKbps * 1000 * durationSec) / durationSec / 1000))
-    : 1000
-  const maxrateK = Math.floor(ceilingK * 1.4)
-  const bufsizeK = Math.floor(ceilingK * 2)
-
-  const args = [
-    '-i', input,
-    '-map', '0:v:0', '-map', '0:a:0?',
-    '-vf', T360_VF,
-    '-c:v', 'libx264', '-crf', String(T360_PRESET.crf), '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
-    '-pix_fmt', 'yuv420p',
-    '-preset', T360_PRESET.preset, '-tune', 'fastdecode',
-    '-profile:v', 'baseline', '-level', '3.0',
-    '-c:a', 'aac', '-b:a', `${T360_PRESET.audioKbps}k`, '-ac', '2', '-movflags', '+faststart',
-    '-sn', '-threads', '0', '-y', output,
-  ]
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', args)
-    let errBuf = ''
-    let lastLog = 0
-    const killTimer = setTimeout(() => {
-      proc.kill('SIGKILL')
-      reject(new Error('Compresión 360p excedió 20 min'))
-    }, T360_TIMEOUT_MS)
-
-    proc.stderr.on('data', (d) => {
-      const line = d.toString()
-      errBuf = (errBuf + line).slice(-4000)
-      const t = line.match(/time=\s*(\d+):(\d+):(\d+)/)
-      if (t && durationSec > 0 && Date.now() - lastLog > 15_000) {
-        lastLog = Date.now()
-        const sec = (+t[1]) * 3600 + (+t[2]) * 60 + (+t[3])
-        console.log(`[tioanime-notify] 🗜️ 360p ${Math.min(99, Math.round((sec / durationSec) * 100))}%`)
-      }
-    })
-    proc.on('error', (err) => { clearTimeout(killTimer); reject(err) })
-    proc.on('close', (code) => {
-      clearTimeout(killTimer)
-      if (code !== 0) {
-        const last = errBuf.split('\n').filter(Boolean).slice(-5).join('\n')
-        return reject(new Error(`FFmpeg código ${code}\n${last}`))
-      }
-      resolve(output)
-    })
-  })
-}
-
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 
 async function enviarEpisodio(chatId, ep, conn) {
@@ -885,7 +807,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
 
     // [CORRECCIÓN 3] Usar { url: videoPath } para usar streaming real y no congelar el bot ni la memoria RAM
-    const msgOriginal = await conn.sendMessage(chatId, {
+    await conn.sendMessage(chatId, {
       document : { url: videoPath },
       fileName,
       mimetype : 'video/mp4',
@@ -893,34 +815,6 @@ async function enviarEpisodio(chatId, ep, conn) {
     })
 
     console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
-
-    // ── Versión 360p (misma compresión que /dw4) ────────────────────────────
-    // Se hace DESPUÉS de que la original ya se subió (el await de arriba espera
-    // a que termine el envío). Si falla, la original ya está entregada, así que
-    // solo se registra el error y no se marca el episodio como fallido.
-    try {
-      // Mismo nombre, cambiando solo la calidad: (720p) / (1080p) -> (360p)
-      const fileName360 = /\((?:720|1080)p\)/.test(fileName)
-        ? fileName.replace(/\((?:720|1080)p\)/, '(360p)')
-        : fileName.replace(/\.mp4$/i, ' (360p).mp4')
-      const path360 = path.join(tmpDir, fileName360)
-      console.log(`[tioanime-notify] 🗜️ Comprimiendo a 360p: ${fileName360}`)
-      await comprimir360(videoPath, path360)
-
-      const size360 = (fs.statSync(path360).size / 1024 / 1024).toFixed(1)
-      console.log(`[tioanime-notify] ✅ 360p listo (${size360} MB) — subiendo...`)
-      const thumb360 = await animeV1Downloader.createJpegThumbnail(path360).catch(() => jpegThumbnail)
-
-      await conn.sendMessage(chatId, {
-        document : { url: path360 },
-        fileName : fileName360,
-        mimetype : 'video/mp4',
-        jpegThumbnail: thumb360,
-      }, msgOriginal ? { quoted: msgOriginal } : {})
-      console.log(`[tioanime-notify] 🚀 Enviado 360p: ${fileName360}`)
-    } catch (err) {
-      console.error(`[tioanime-notify] ⚠️ No se pudo generar/enviar el 360p: ${err.message}`)
-    }
 
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {}
