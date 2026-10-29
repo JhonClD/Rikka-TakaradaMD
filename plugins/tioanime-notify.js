@@ -32,6 +32,7 @@ const MIN_INTERVAL_SECONDS   = 15
 const MAX_INTERVAL_SECONDS   = 3600
 const QUEUE_DELAY            = 90_000    // ms entre ítems de cola (90 seg)
 const DL_TIMEOUT             = 3 * 60 * 60 * 1000
+const MIN_EPISODE_SIZE_BYTES = 5 * 1024 * 1024
 
 // [MEJORA VELOCIDAD] megajs descarga por bloques y conexiones paralelas.
 // Se puede ajustar con MEGA_MAX_CONNECTIONS; se limita para no saturar Mega ni el bot.
@@ -453,7 +454,7 @@ function detectarServNombre(url) {
 
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_TIO = ['mega', 'voe', 'yourupload']
+const PREFS_TIO = ['yourupload', 'mega', 'voe']
 const PREFS_LAT = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 function ordenarServidores(srvs, fuente = 'tioanime') {
@@ -796,7 +797,16 @@ async function enviarEpisodio(chatId, ep, conn) {
         else if (srv.nombre === 'yourupload') videoPath = await descargarYourUpload(srv.url, tmpDir, fileName)
         else videoPath = await descargarServidorVideo(srv.url, tmpDir, fileName, srv.nombre)
 
-        if (videoPath) break // solo cortar tras una descarga exitosa
+        if (videoPath) {
+          const downloadedSize = fs.statSync(videoPath).size
+          if (fuente === 'tioanime' && downloadedSize < MIN_EPISODE_SIZE_BYTES) {
+            console.log(`[tioanime-notify] ⚠️ [ ${nombreServidor} ] archivo de ${fmtBytes(downloadedSize)} (< 5 MB); se descarta y se probará el siguiente servidor.`)
+            fs.rmSync(videoPath, { force: true })
+            videoPath = null
+            continue
+          }
+          break // solo aceptar un archivo completo y de tamaño suficiente
+        }
       } catch (err) {
         console.log(`[tioanime-notify] ⚠️ [ ${nombreServidor} ] falló: ${err.message}`)
         fs.readdirSync(tmpDir).forEach(f => {
