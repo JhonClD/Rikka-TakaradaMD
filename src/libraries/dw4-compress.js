@@ -4,9 +4,8 @@ import { spawn, spawnSync } from 'child_process'
 
 const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000
 const CRF = 26
-const SAFETY_TARGET_MB = 58
-const AUDIO_KBPS = 64
-const PRESET = 'faster'
+const AUDIO_KBPS = 96
+const PRESET = 'medium'
 
 function escapeForFilter(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
@@ -23,12 +22,6 @@ function getWatermarkFilter() {
   const fontFile = fontPaths.find(file => fs.existsSync(file))
   if (!fontFile) return null
   return `drawtext=fontfile='${escapeForFilter(fontFile)}':text='By\\:CID':fontcolor=white:fontsize=w*0.04:x=20:y=20:borderw=2:bordercolor=black:alpha='if(lt(t,4),1,if(lt(t,5),5-t,0))'`
-}
-
-function calcVideoBitrate(durationSec, targetMB, audioBitrateK) {
-  if (!durationSec || durationSec <= 0) return 1000
-  const videoBits = targetMB * 8 * 1024 * 1024 - audioBitrateK * 1000 * durationSec
-  return Math.max(100, Math.floor(videoBits / durationSec / 1000))
 }
 
 function readDurationSec(inputPath) {
@@ -56,23 +49,19 @@ function writeTerminalProgress(line, label, durationSec) {
   process.stdout.write(`\r[${label}] ${percent} | frame ${frame} | ${time} | ${fps} fps | ${speed}`)
 }
 
-export function buildDw4Args(inputPath, outputPath, durationSec = 0) {
-  const ceilingK = calcVideoBitrate(durationSec, SAFETY_TARGET_MB, AUDIO_KBPS)
-  const maxrateK = Math.floor(ceilingK * 1.4)
-  const bufsizeK = Math.floor(ceilingK * 2)
-  const scale = 'scale=-2:360:flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2'
+export function buildDw4Args(inputPath, outputPath) {
+  const scale = 'scale=-2:360:flags=lanczos'
   const watermark = getWatermarkFilter()
   const videoFilter = watermark ? `${scale},${watermark}` : scale
 
   return [
-    '-i', inputPath,
+    '-hide_banner', '-y', '-i', inputPath,
+    '-map', '0:v:0', '-map', '0:a:0?',
     '-vf', videoFilter,
-    '-c:v', 'libx264', '-crf', String(CRF), '-maxrate', `${maxrateK}k`, '-bufsize', `${bufsizeK}k`,
+    '-c:v', 'libx264', '-preset', PRESET, '-crf', String(CRF),
     '-pix_fmt', 'yuv420p',
-    '-preset', PRESET, '-tune', 'fastdecode',
-    '-profile:v', 'baseline', '-level', '3.0',
-    '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2', '-movflags', '+faststart',
-    '-threads', '0', '-y', outputPath,
+    '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-movflags', '+faststart',
+    outputPath,
   ]
 }
 
@@ -82,7 +71,7 @@ export function compressDw4(inputPath, outputPath, { durationSec = 0, onProgress
 
   return fs.promises.mkdir(path.dirname(outputPath), { recursive: true }).then(() => new Promise((resolve, reject) => {
     const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg'
-    const proc = spawn(ffmpegPath, buildDw4Args(inputPath, outputPath, actualDurationSec), {
+    const proc = spawn(ffmpegPath, buildDw4Args(inputPath, outputPath), {
       stdio: ['ignore', 'ignore', 'pipe'],
     })
     let stderr = ''

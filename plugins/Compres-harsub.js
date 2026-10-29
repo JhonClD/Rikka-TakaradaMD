@@ -417,6 +417,9 @@ let handler = async (m, { conn, text, command, args }) => {
                 let ffmpegArgs = ['-i', input];
 
                 if (isDw4) {
+                    // Perfil compartido /dw4: Lanczos a 360p, libx264 CRF 26 con
+                    // preset medium, AAC 96k y fuente opcional por WM_FONT_PATH.
+                    // Sin techo de bitrate; centralizado en dw4-compress.js para igualar TioAnime.
                     await compressDw4(input, output, {
                         durationSec,
                         onProgress: data => logFFmpegProgress(label, data, totalFrames)
