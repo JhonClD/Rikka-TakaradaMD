@@ -441,7 +441,7 @@ global.reloadHandler = async function (restatConn) {
 };
 ;
 
-const pluginFolder = global.__dirname(join(__dirname, './plugins'));
+const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 
@@ -457,7 +457,7 @@ async function filesInit() {
     }
   }
 }
-await filesInit();
+filesInit().then((_) => Object.keys(global.plugins)).catch(console.error);
 
 global.reload = async (_ev, filename) => {
   if (pluginFilter(filename)) {

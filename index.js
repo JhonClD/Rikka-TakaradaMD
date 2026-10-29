@@ -1,7 +1,7 @@
 import { join, dirname } from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import cluster from 'node:cluster';
+import { setupMaster, fork } from 'cluster';
 import cfonts from 'cfonts';
 import readline from 'readline';
 import yargs from 'yargs';
@@ -114,7 +114,7 @@ async function start(file) {
 
   if (verificarCredsJson()) {
     const args = [join(__dirname, file), ...process.argv.slice(2)];
-    cluster.setupPrimary({ exec: args[0], args: args.slice(1) });
+    setupMaster({ exec: args[0], args: args.slice(1) });
     forkProcess(file);
     return;
   }
@@ -147,12 +147,12 @@ async function start(file) {
   }
   
   const args = [join(__dirname, file), ...process.argv.slice(2)];
-  cluster.setupPrimary({ exec: args[0], args: args.slice(1) });
+  setupMaster({ exec: args[0], args: args.slice(1) });
   forkProcess(file);
 }
 
 function forkProcess(file) {
-  childProcess = cluster.fork();
+  childProcess = fork();
 
   childProcess.on('message', (data) => {
     console.log(chalk.hex(celeste).bold('『 INFO 』'), data);
