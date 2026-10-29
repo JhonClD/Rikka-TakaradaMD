@@ -457,7 +457,7 @@ async function filesInit() {
     }
   }
 }
-filesInit().then((_) => Object.keys(global.plugins)).catch(console.error);
+await filesInit();
 
 global.reload = async (_ev, filename) => {
   if (pluginFilter(filename)) {
@@ -512,14 +512,28 @@ function clockString(ms) {
   return [d, 'd ', h, 'h ', m, 'm ', s, 's '].map((v) => v.toString().padStart(2, 0)).join('');
 }
 
-process.on('SIGINT', () => {
+let shutdownStarted = false;
+async function gracefulShutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  stopped = 'close';
+  console.log(`[ SHUTDOWN ] ${signal}: guardando datos y cerrando WhatsApp...`);
+  try {
+    await global.db?.write?.();
+  } catch (error) {
+    console.error('[ SHUTDOWN ] No se pudo guardar la base local:', error);
+  }
+  try {
+    global.conn?.ev?.removeAllListeners?.();
+    global.conn?.ws?.close?.();
+  } catch (error) {
+    console.error('[ SHUTDOWN ] No se pudo cerrar el socket:', error);
+  }
   process.exit(0);
-});
+}
 
-process.on('SIGTERM', () => {
-  gracefulShutdown();
-  process.exit(0);
-});
+process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 
 // Manejo de errores no capturadas relacionadas con LID
 process.on('unhandledRejection', (reason, promise) => {
