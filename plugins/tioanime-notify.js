@@ -1174,7 +1174,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep })
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en latexample: ${e.message}`))
