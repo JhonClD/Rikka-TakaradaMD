@@ -1,10 +1,8 @@
 import { join, dirname } from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import cluster from 'node:cluster';
 import cfonts from 'cfonts';
 import readline from 'readline';
-import yargs from 'yargs';
 import chalk from 'chalk'; 
 import fs from 'fs'; 
 import './config.js';
@@ -13,8 +11,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(__dirname);
 const { say } = cfonts;
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-let isRunning = false;
-let childProcess = null;
 
 // WhatsApp devuelve 405/440 si dos procesos usan la misma sesión. El bloqueo
 // evita que un reinicio rápido de Pterodactyl deje dos instancias conectadas.
@@ -87,10 +83,7 @@ function esNumeroValido(numeroTelefono) {
   return regex.test(numeroTelefono);
 }
 
-async function start(file) {
-  if (isRunning) return;
-  isRunning = true;
-
+async function start() {
   // Título Completo: RIKKA TAKARADA
   say('RIKKA\nTAKARADA', {
     font: 'block',
@@ -113,9 +106,8 @@ async function start(file) {
   verificarOCrearCarpetaAuth();
 
   if (verificarCredsJson()) {
-    const args = [join(__dirname, file), ...process.argv.slice(2)];
-    cluster.setupPrimary({ exec: args[0], args: args.slice(1) });
-    forkProcess(file);
+    rl.close();
+    await launchMain();
     return;
   }
 
@@ -146,52 +138,20 @@ async function start(file) {
     process.argv.push('--method=qr');
   }
   
-  const args = [join(__dirname, file), ...process.argv.slice(2)];
-  cluster.setupPrimary({ exec: args[0], args: args.slice(1) });
-  forkProcess(file);
+  rl.close();
+  await launchMain();
 }
 
-function forkProcess(file) {
-  childProcess = cluster.fork();
-
-  childProcess.on('message', (data) => {
-    console.log(chalk.hex(celeste).bold('『 INFO 』'), data);
-    switch (data) {
-      case 'reset':
-        console.log(chalk.hex(mint).bold('『 ✦ 』Reinicio en curso...'));
-        childProcess.removeAllListeners();
-        childProcess.kill('SIGTERM');
-        isRunning = false;
-        setTimeout(() => start(file), 1000);
-        break;
-      case 'uptime':
-        childProcess.send(process.uptime());
-        break;
-    }
-  });
-
-  childProcess.on('exit', (code, signal) => {
-    console.log(chalk.hex(softViolet).bold(`『 ! 』Proceso finalizado (${code || signal})`));
-    isRunning = false;
-    childProcess = null;
-    
-    if (code !== 0 || signal === 'SIGTERM') {
-      console.log(chalk.hex(mint).bold('『 ✦ 』Reiniciando...'));
-      setTimeout(() => start(file), 1000);
-    }
-  });
-
-  const opts = yargs(process.argv.slice(2)).argv;
-  if (!opts.test) {
-    rl.on('line', (line) => {
-      childProcess.emit('message', line.trim());
-    });
+async function launchMain() {
+  try {
+    await import('./main.js');
+  } catch (error) {
+    console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
+    process.exitCode = 1;
   }
 }
 
-try {
-  start('main.js');
-} catch (error) {
+start().catch((error) => {
   console.error(chalk.hex('#e63946').bold('❌ [ FATAL ERROR ]:'), error);
-  process.exit(1);
-}
+  process.exitCode = 1;
+});
