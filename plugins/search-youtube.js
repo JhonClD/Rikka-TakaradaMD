@@ -1,4 +1,4 @@
-import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from '@this-xys/baileys';
+import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from 'baileys';
 import { formatViews } from '../src/libraries/youtube-scraper.js';
 
 const handler = async (m, { conn, text, usedPrefix: px }) => {

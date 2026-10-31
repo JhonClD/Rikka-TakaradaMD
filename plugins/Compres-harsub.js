@@ -73,7 +73,7 @@ let handler = async (m, { conn, text, command, args }) => {
 
     const downloadMediaStream = async (quoted, outputPath) => {
         try {
-            const { downloadContentFromMessage } = await import('@this-xys/baileys');
+            const { downloadContentFromMessage } = await import('baileys');
             const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
             const type = Object.keys(message)[0];
             const media = message[type];
@@ -260,7 +260,7 @@ let handler = async (m, { conn, text, command, args }) => {
         if (command === 'dw') {
             if (!quoted) return reply('No detecté la cita. Responde directamente al archivo de video o documento.');
             try {
-                const { downloadContentFromMessage } = await import('@this-xys/baileys');
+                const { downloadContentFromMessage } = await import('baileys');
                 const message = quoted.fakeObj ? quoted.fakeObj.message : (quoted.vM ? quoted.vM.message : quoted);
                 const type    = Object.keys(message)[0];
                 const media   = message[type];

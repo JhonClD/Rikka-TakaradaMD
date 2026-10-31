@@ -1,4 +1,4 @@
-const { getDevice } = await import('@this-xys/baileys')
+const { getDevice } = await import('baileys')
 
 
 const IMG_URL = 'https://files.evogb.win/j3nZpp.jpg'

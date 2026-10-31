@@ -21,7 +21,7 @@ import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
 
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("@this-xys/baileys");
+const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
 const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
 import readline from 'readline';
@@ -44,6 +44,9 @@ const mediaUploadAgent = new https.Agent({
   scheduling: 'lifo',
 });
 let socketReloadInProgress = false;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+const maxReconnectDelayMs = 30_000;
 const qrGuard = createQRGuard({
   ttlMs: 60_000,
   onBlocked: () => console.log(chalk.gray('[ ℹ️ ] QR repetido ignorado; usa el último QR mostrado.')),
@@ -285,17 +288,10 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
 
 
 async function connectionUpdate(update) {
-  let isFirstConnection = '';
   const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
 
-  const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
-  const isConnectionReplaced = code === 405 || code === 440 || code === DisconnectReason.connectionReplaced;
-  if (code && !isConnectionReplaced && code !== DisconnectReason.loggedOut && conn?.ws.socket == null) {
-    await global.reloadHandler(true).catch(console.error);
-    global.timestamp.connect = new Date;
-  }
   if (global.db.data == null) loadDatabase();
   if (update.qr && (opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
@@ -304,6 +300,11 @@ async function connectionUpdate(update) {
     });
   }
   if (connection == 'open') {
+    reconnectAttempt = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
@@ -336,17 +337,16 @@ async function connectionUpdate(update) {
       if (shouldLogError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
-      await global.reloadHandler(true).catch(console.error);
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogError('connectionClosed')) {
         conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      scheduleSocketReconnect('connectionClosed');
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogError('connectionLost')) {
         conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      scheduleSocketReconnect('connectionLost');
     } else if (reason === DisconnectReason.connectionReplaced) {
       // Ya manejado por el bloque reason == 405 con delay
     } else if (reason === DisconnectReason.loggedOut) {
@@ -354,30 +354,39 @@ async function connectionUpdate(update) {
         conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
     } else if (reason === DisconnectReason.restartRequired) {
-      if (isFirstConnection) {
-        if (shouldLogError('restartRequired')) {
-          //conn.logger.info(`[ ⚠️ ] Primer inicio: Ignorando restartRequired (posible falso positivo)`);
-        }
-        isFirstConnection = false;
-      } else {
-        if (shouldLogError('restartRequired')) {
-          conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
-        }
-        await global.reloadHandler(true).catch(console.error);
+      if (shouldLogError('restartRequired')) {
+        conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
       }
+      scheduleSocketReconnect('restartRequired');
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogError('timedOut')) {
         conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      scheduleSocketReconnect('timedOut');
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
-      await global.reloadHandler(true).catch(console.error);
+      scheduleSocketReconnect(`unknown_${reason || 'none'}`);
     }
   }
+}
+
+function scheduleSocketReconnect(reason) {
+  if (reconnectTimer || socketReloadInProgress) return;
+  const delay = Math.min(maxReconnectDelayMs, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
+  reconnectAttempt += 1;
+  console.log(chalk.gray(`[ ℹ️ ] Reconexión programada en ${Math.ceil(delay / 1000)}s (${reason}).`));
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await global.reloadHandler(true);
+    } catch (error) {
+      console.error('[Socket] Falló la reconexión:', error);
+      scheduleSocketReconnect('retry');
+    }
+  }, delay);
 }
 
 process.on('uncaughtException', console.error);
