@@ -326,8 +326,57 @@ async function fetchLatestEpisodesDBS() {
     console.error(`[dbs-notify] Catálogo Audio Latino no disponible: ${err.message}`)
   }
 
+  const gruposPorEpisodio = new Map()
+  for (const ep of lista) {
+    const key = `${ep.epUrl}:${ep.epNum}`
+    if (!gruposPorEpisodio.has(key)) gruposPorEpisodio.set(key, [])
+    gruposPorEpisodio.get(key).push(ep)
+  }
+  const priorizados = [...gruposPorEpisodio.values()].flatMap(grupo =>
+    grupo.sort((a, b) => (a.idioma === 'latino' ? 0 : 1) - (b.idioma === 'latino' ? 0 : 1)),
+  )
+  lista.splice(0, lista.length, ...priorizados)
+
   console.log(`[dbs-notify] ${lista.length} episodios recientes detectados (SUB + LAT)`)
   return lista
+}
+
+async function seleccionarVersionPreferidaDBS(lista, { seen = null, chatId = '', skipQueued = false, limit = Infinity } = {}) {
+  const grupos = new Map()
+  for (const ep of lista) {
+    const key = `${ep.epUrl}:${ep.epNum}`
+    if (!grupos.has(key)) grupos.set(key, [])
+    grupos.get(key).push(ep)
+  }
+  const seleccionados = []
+  for (const grupo of grupos.values()) {
+    if (skipQueued && grupo.some(ep => global.dbsQueuedIds.has(`${chatId}:${ep.id}`))) continue
+    const latino = grupo.find(ep => ep.idioma === 'latino')
+    const sub = grupo.find(ep => ep.idioma === 'sub')
+    if (latino && seen?.includes(latino.id)) {
+      if (sub && seen && !seen.includes(sub.id)) seen.push(sub.id)
+      continue
+    }
+    if (seen && grupo.every(ep => seen.includes(ep.id))) continue
+
+    let servidoresLatinos = []
+    if (latino) {
+      try { servidoresLatinos = await scrapeServidoresDBS(latino.epUrl, 'latino') }
+      catch (err) { console.error(`[dbs-notify] No se pudo comprobar LAT de "${latino.titulo}" ep ${latino.epNum}: ${err.message}`) }
+    }
+    if (servidoresLatinos.length) {
+      seleccionados.push({ ...latino, servidores: servidoresLatinos, variantSeenIds: grupo.map(ep => ep.id) })
+    } else if (sub && (!seen || !seen.includes(sub.id))) {
+      try {
+        const servidoresSub = await scrapeServidoresDBS(sub.epUrl, 'sub')
+        if (servidoresSub.length) seleccionados.push({ ...sub, servidores: servidoresSub, variantSeenIds: [sub.id] })
+      } catch (err) {
+        console.error(`[dbs-notify] No se pudo comprobar SUB de "${sub.titulo}" ep ${sub.epNum}: ${err.message}`)
+      }
+    }
+    if (seleccionados.length >= limit) break
+  }
+  return seleccionados
 }
 
 async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
@@ -698,7 +747,9 @@ async function enviarEpisodio(chatId, ep, conn) {
   const esLatino = ep.fuente === 'latino' || ep.idioma === 'latino'
   const fileName = buildFileName(titulo, epNum, esLatino ? 'latino' : 'dbs')
   console.log(`[dbs-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
-  const srvs = await scrapeServidoresDBS(epUrl, esLatino ? 'latino' : 'sub')
+  const srvs = Array.isArray(ep.servidores)
+    ? ep.servidores
+    : await scrapeServidoresDBS(epUrl, esLatino ? 'latino' : 'sub')
   if (!srvs.length) {
     console.log(`[dbs-notify] Sin servidores para "${titulo}" ep ${epNum}; se omite sin enviar mensajes.`)
     return false
@@ -811,7 +862,9 @@ async function procesarCola() {
           exito = true
           const seen = loadSeen()
           if (!seen[chatId]) seen[chatId] = []
-          if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
+          for (const seenId of ep.variantSeenIds || [ep.id]) {
+            if (!seen[chatId].includes(seenId)) seen[chatId].push(seenId)
+          }
           if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
           saveSeen(seen)
           const state = loadState()
@@ -862,7 +915,12 @@ async function checkNuevosEpisodios(chatId, conn) {
     const seen = loadSeen()
     if (!global.dbsActiveChats.has(chatId)) return
     if (!seen[chatId]) seen[chatId] = []
-    const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.dbsQueuedIds.has(`${chatId}:${e.id}`))
+    const nuevos = await seleccionarVersionPreferidaDBS(lista, {
+      seen: seen[chatId],
+      chatId,
+      skipQueued: true,
+    })
+    saveSeen(seen)
     if (!nuevos.length) return
 
     for (const ep of nuevos) {
@@ -964,7 +1022,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
   if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
   if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }
-  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (SUB + LAT 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
+  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.'); lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad }); if (!lista.length) return m.reply('❌ No hay enlaces LAT ni SUB disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (LAT preferido; SUB de respaldo 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
 }
 handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime','notificaciones']
