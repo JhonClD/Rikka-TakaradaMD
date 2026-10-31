@@ -5,9 +5,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "NO_COLOR=1 FORCE_COLOR=0 node --expose-gc index.js",
-    "qr": "NO_COLOR=1 FORCE_COLOR=0 node index.js qr",
-    "code": "NO_COLOR=1 FORCE_COLOR=0 node index.js code",
+    "start": "FORCE_COLOR=2 node --expose-gc index.js",
+    "qr": "FORCE_COLOR=2 node index.js qr",
+    "code": "FORCE_COLOR=2 node index.js code",
     "eslint": "eslint .",
     "eslintfix": "eslint --fix ."
   },
