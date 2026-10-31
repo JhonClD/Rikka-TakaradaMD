@@ -13,7 +13,6 @@ import https        from 'https'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
-import { fetchTeraBox } from './terabox-dowloader.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -42,7 +41,7 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'directo', 'terabox'])
+const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'directo'])
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -146,7 +145,6 @@ function detectarServidor(url, label = '') {
   } catch (_) {}
   if (/(?:^|\.)mega\.(?:nz|co\.nz)$/.test(host)) return 'mega'
   if (/(?:^|\.)mediafire\.com$/.test(host)) return 'mediafire'
-  if (/(?:^|\.)(?:terabox\.com|teraboxapp\.com|1024terabox\.com|terabox\.app|teraboxshare\.com|teraboxlink\.com)$/.test(host)) return 'terabox'
   const text = String(label || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   if (/\bmega\b/.test(text)) return 'mega'
   if (/media\s*fire/.test(text)) return 'mediafire'
@@ -362,12 +360,13 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
     let parsed
     try { parsed = new URL(url) } catch (_) { return }
     if (parsed.username || parsed.password) return
+    if (/(?:^|\.)(?:terabox\.com|teraboxapp\.com|1024terabox\.com|terabox\.app|teraboxshare\.com|teraboxlink\.com)$/i.test(parsed.hostname)) return
     const siteHost = new URL(ANIMEDBS_URL).hostname.toLowerCase()
     if ((parsed.hostname.toLowerCase() === siteHost || parsed.hostname.toLowerCase().endsWith(`.${siteHost}`)) && !/\.mp4(?:$|[?#])/i.test(url)) return
     const nombre = detectarServidor(url, label) || (allowDirect && /\.mp4(?:$|[?#])/i.test(url) ? 'directo' : '')
     if (!nombre || !DBS_SERVIDORES.has(nombre)) return
     const directDownload = ['mega', 'mediafire', 'directo'].includes(nombre)
-    srvs.push({ nombre, url, calidad: calidadDesde(calidad, label, parsed.pathname) || (nombre === 'terabox' ? '1080p' : '720p'), directo: directDownload })
+    srvs.push({ nombre, url, calidad: calidadDesde(calidad, label, parsed.pathname) || '720p', directo: directDownload })
   }
   $('.soraddlx').each((_, serverBlock) => {
     if (!bloqueCoincide(serverBlock)) return
@@ -378,7 +377,7 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
       $qualityBlock.find('a[href]').each((___, el) => add($(el).attr('href') || '', $(el).text().trim(), quality))
     })
   })
-  // El sitio puede omitir las clases del bloque; aun así sólo se aceptan los cuatro tipos esperados.
+  // El sitio puede omitir las clases del bloque; aun así sólo se aceptan los tres tipos esperados.
   $('a[href]').each((_, el) => {
     const $el = $(el)
     const $languageBlock = $el.closest('.soraddlx')
@@ -404,7 +403,7 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
 
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_DBS = ['directo', 'mediafire', 'mega', 'terabox']
+const PREFS_DBS = ['directo', 'mediafire', 'mega']
 
 function ordenarServidores(srvs) {
   const preferencias = PREFS_DBS
@@ -647,14 +646,6 @@ async function descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, s
   }
 }
 
-async function descargarTeraBox(serverUrl, outputDir, fileName) {
-  const files = await fetchTeraBox(serverUrl)
-  const item = files.find(file => /\.(?:mp4|mkv|mov|avi|webm)$/i.test(file.file_name || '')) || files[0]
-  const directUrl = item?.stream_final_url || item?.stream_url || item?.download_url
-  if (!directUrl) throw new Error('TeraBox: la API no devolvió un enlace de descarga')
-  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'TeraBox')
-}
-
 async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
   const extraerCandidatos = (html) => {
     const encontrados = []
@@ -722,7 +713,6 @@ async function enviarEpisodio(chatId, ep, conn) {
         const serverFileName = fileName.replace(/\(\d{3,4}p\)/i, `(${srv.calidad || '720p'})`)
         if (nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, serverFileName)
         else if (nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, serverFileName)
-        else if (nombre === 'terabox') videoPath = await descargarTeraBox(srv.url, tmpDir, serverFileName)
         else videoPath = await descargarServidorVideo(srv.url, tmpDir, serverFileName, nombre)
         if (videoPath) downloadedFileName = serverFileName
         if (videoPath) {
