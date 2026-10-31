@@ -13,10 +13,12 @@ import https        from 'https'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
+import { fetchTeraBox } from './terabox-dowloader.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const ANIMEDBS_URL          = 'https://www.animedbs.online'
+const DBS_LATINO_CATALOG_URL = `${ANIMEDBS_URL}/anime/?sub=lat&order=update`
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
 const DB_DIR = path.join(process.cwd(), 'database')
@@ -40,7 +42,7 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'voe', 'filemoon', 'mp4upload', 'streamwish', 'streamtape', 'doodstream', 'okru', 'vidhide', 'mixdrop', 'iframe'])
+const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'directo', 'terabox'])
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -135,16 +137,20 @@ async function getPage(url, options = {}, attempts = 3) {
 }
 
 function detectarServidor(url, label = '') {
-  const u = `${url} ${label}`.toLowerCase()
-  if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
-  if (u.includes('mediafire')) return 'mediafire'
-  if (u.includes('voe')) return 'voe'
-  if (u.includes('yourupload')) return 'yourupload'
-  if (u.includes('savefiles')) return 'savefiles'
-  if (u.includes('hexload')) return 'hexload'
-  if (u.includes('dsvplay')) return 'dsvplay'
-  if (u.includes('byse')) return 'byse'
-  if (u.includes('cloud')) return 'cloud'
+  let host = ''
+  let pathname = ''
+  try {
+    const parsed = new URL(url)
+    host = parsed.hostname.toLowerCase().replace(/^www\./, '')
+    pathname = parsed.pathname.toLowerCase()
+  } catch (_) {}
+  if (/(?:^|\.)mega\.(?:nz|co\.nz)$/.test(host)) return 'mega'
+  if (/(?:^|\.)mediafire\.com$/.test(host)) return 'mediafire'
+  if (/(?:^|\.)(?:terabox\.com|teraboxapp\.com|1024terabox\.com|terabox\.app|teraboxshare\.com|teraboxlink\.com)$/.test(host)) return 'terabox'
+  const text = String(label || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (/\bmega\b/.test(text)) return 'mega'
+  if (/media\s*fire/.test(text)) return 'mediafire'
+  if (/\bdirect(?:o)?\b/.test(text) || /\.mp4$/i.test(pathname)) return 'directo'
   return ''
 }
 
@@ -213,7 +219,9 @@ function buildFileName(titulo, epNum, fuente = 'dbs', idioma = 'latino', slug = 
   const season = getSeasonNumber(titulo, slug)
   const seasonLabel = season > 1 ? `T${season} ` : ''
   const title = cleanTitle(titulo, epNum)
-  const details = fuente === 'latanime'
+  const details = fuente === 'latino'
+    ? 'Español Latino (720p)'
+    : fuente === 'latanime'
     ? `Español ${idioma === 'castellano' ? 'Castellano 🇪🇸' : 'Latino 🇲🇽'} (1080p)`
     : 'Sub Español (720p)'
   return `${zeroPad(epNum)} ${seasonLabel}${safeFile(title)} ${details} [[𝗖𝗜𝗗]].mp4`
@@ -238,52 +246,153 @@ async function fetchLatestEpisodesDBS() {
   const { data } = await getPage(ANIMEDBS_URL, { headers: HEADERS })
   const $ = cheerio.load(data)
   const lista = []
+  const ids = new Set()
+  const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false }) => {
+    const epUrl = absoluteUrl(href, ANIMEDBS_URL)
+    const number = Number.parseInt(epNum, 10)
+    if (!epUrl || !Number.isInteger(number) || number < 0) return
+    const titulo = String(title || '').replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').trim() || 'Anime desconocido'
+    const slug = titulo.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const id = `${latino ? 'dbs-lat' : 'dbs'}-${slug}-${number}`
+    if (ids.has(id)) return
+    ids.add(id)
+    lista.push({ id, slug, titulo, epNum: number, epUrl, imgUrl, fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub' })
+  }
+
   $('.listupd .bs').each((_, el) => {
     const $el = $(el)
     const aTag = $el.find('a').first()
     const href = aTag.attr('href') || ''
     if (!href) return
     const epUrl = absoluteUrl(href, ANIMEDBS_URL)
-    if (!epUrl) return
     const epxText = $el.find('.epx').text().trim()
-    const epNumStr = epxText.match(/\d+/)?.[0] || epUrl.match(/episodio[- _]?(\d+)/i)?.[1] || '0'
-    const epNum = Number.parseInt(epNumStr, 10)
-    if (!Number.isInteger(epNum)) return
+    const epNumStr = epxText.match(/\d+/)?.[0] || epUrl.match(/episodio[- _]?(\d+)/i)?.[1]
+    if (!epNumStr) return
     const anime = $el.find('.tite1').text().trim()
-    const h2 = $el.find('h2').text().trim()
-    const titulo = anime || h2.replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').trim() || 'Anime desconocido'
+    const h2 = $el.find('h2').text().trim() || $el.find('.tt').text().trim()
+    const titulo = anime || h2.replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').replace(/hace\s+.*$/i, '').trim()
     const imgEl = $el.find('img').first()
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
     const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, ANIMEDBS_URL)
-    const slug = titulo.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const id = `dbs-${slug}-${epNum}`
-    if (!lista.some(e => e.id === id)) lista.push({ id, slug, titulo, epNum, epUrl, imgUrl, fuente: 'animedbs' })
+    const latino = /latino/i.test(`${href} ${titulo} ${$el.find('.lg').text()}`)
+    addEpisode({ href, title: titulo, epNum: epNumStr, imgUrl, latino })
   })
-  console.log(`[dbs-notify] ${lista.length} episodios en portada`)
+
+  // "Audio Latino" es un catálogo de series: cada tarjeta lleva a una página
+  // con el listado de episodios, cuyo más reciente aparece primero en .eplister.
+  try {
+    const { data: catalogHtml } = await getPage(DBS_LATINO_CATALOG_URL, { headers: HEADERS })
+    const $catalog = cheerio.load(catalogHtml)
+    const series = []
+    $catalog('.listupd .bs').each((_, el) => {
+      const $el = $catalog(el)
+      if (!/emisi[oó]n/i.test($el.find('.epx').text())) return
+      const href = $el.find('a[href]').first().attr('href') || ''
+      if (href) series.push({ href, title: $el.find('.tt').text().trim() || $el.find('h2').text().trim() })
+    })
+
+    const concurrency = 5
+    for (let i = 0; i < series.length; i += concurrency) {
+      await Promise.all(series.slice(i, i + concurrency).map(async item => {
+        try {
+          const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
+          const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_LATINO_CATALOG_URL } })
+          const $series = cheerio.load(seriesHtml)
+          const $episode = $series('.eplister a[href]').first()
+          const episodeHref = $episode.attr('href') || ''
+          const epNum = episodeHref.match(/episodio[- _]?(\d+)/i)?.[1] || $episode.text().match(/\d+/)?.[0]
+          const title = $series('h1').first().text().trim() || item.title
+          const imgEl = $series('.thumb img, .thumbook img').first()
+          const imgSrc = imgEl.attr('data-src') || imgEl.attr('src') || ''
+          const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, seriesUrl)
+          if (episodeHref && epNum) addEpisode({ href: episodeHref, title, epNum, imgUrl, latino: true })
+        } catch (err) {
+          console.error(`[dbs-notify] No se pudo revisar una serie del catálogo LAT (${item.href}): ${err.message}`)
+        }
+      }))
+    }
+  } catch (err) {
+    console.error(`[dbs-notify] Catálogo Audio Latino no disponible: ${err.message}`)
+  }
+
+  console.log(`[dbs-notify] ${lista.length} episodios recientes detectados (SUB + LAT)`)
   return lista
 }
 
-async function scrapeServidoresDBS(epUrl) {
+async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
   const { data } = await getPage(epUrl, { headers: { ...HEADERS, Referer: ANIMEDBS_URL } })
   const $ = cheerio.load(data)
   const srvs = []
-  const add = (url, label = '', calidad = '') => {
-    if (!url || !/^https?:\/\//i.test(url) || srvs.some(s => s.url === url)) return
-    if (/hqq\.tv|netu\.(?:tv|ac)/i.test(url)) return
-    const nombre = detectarServidor(url, label) || 'iframe'
-    const directo = nombre === 'mega' || nombre === 'mediafire'
-    srvs.push({ nombre, url, calidad: calidad || '720p', directo })
+  const idiomaObjetivo = /lat/i.test(idioma) ? 'latino' : 'sub'
+  const idiomaPagina = $('.ts-language-label').text().replace(/\s+/g, ' ').trim()
+  const paginaTieneLat = /\bLAT\b/i.test(idiomaPagina)
+  const paginaTieneSub = /\bSUB\b/i.test(idiomaPagina)
+  const bloquesIdioma = $('.soraddlx').toArray().map(el => ({
+    el,
+  }))
+  const idiomaBloque = el => {
+    const $block = $(el)
+    const heading = $block.find('.sorattlx h3').text().trim()
+    const hrefs = $block.find('a[href]').map((_, a) => $(a).attr('href') || '').get().join(' ')
+    if (/latino/i.test(heading) || (/latino/i.test(hrefs) && !/subtitulado|sub\+espa/i.test(hrefs))) return 'latino'
+    if (/sub(?:titulado| español)?/i.test(heading) || /subtitulado|sub\+espa/i.test(hrefs)) return 'sub'
+    if (paginaTieneLat !== paginaTieneSub) return paginaTieneLat ? 'latino' : 'sub'
+    if (paginaTieneLat && paginaTieneSub) return ''
+    if (/-latino(?:\/|$)/i.test(epUrl)) return 'latino'
+    return idiomaObjetivo
   }
-  $('.soraddlx .soraurlx').each((_, urlBlk) => {
-    const calidad = $(urlBlk).find('strong').text().trim()
-    $(urlBlk).find('a[href]').each((_, el) => add($(el).attr('href') || '', $(el).text().trim(), calidad))
+  const bloqueCoincide = el => {
+    return idiomaBloque(el) === idiomaObjetivo
+  }
+  const calidadDesde = (...values) => {
+    const text = values.filter(Boolean).join(' ')
+    return /1080\s*p?/i.test(text) ? '1080p' : /720\s*p?/i.test(text) ? '720p' : ''
+  }
+  const add = (value, label = '', calidad = '', allowDirect = false) => {
+    if (!value || typeof value !== 'string') return
+    const raw = value.trim().replace(/&amp;/g, '&').replace(/\\\//g, '/')
+    let url = absoluteUrl(raw, epUrl)
+    if (!url) {
+      try {
+        const decoded = Buffer.from(raw, 'base64').toString('utf8').trim()
+        if (/^https?:\/\//i.test(decoded)) url = absoluteUrl(decoded, epUrl)
+      } catch (_) {}
+    }
+    if (!url || !/^https?:\/\//i.test(url) || srvs.some(s => s.url === url)) return
+    let parsed
+    try { parsed = new URL(url) } catch (_) { return }
+    if (parsed.username || parsed.password) return
+    const siteHost = new URL(ANIMEDBS_URL).hostname.toLowerCase()
+    if ((parsed.hostname.toLowerCase() === siteHost || parsed.hostname.toLowerCase().endsWith(`.${siteHost}`)) && !/\.mp4(?:$|[?#])/i.test(url)) return
+    const nombre = detectarServidor(url, label) || (allowDirect && /\.mp4(?:$|[?#])/i.test(url) ? 'directo' : '')
+    if (!nombre || !DBS_SERVIDORES.has(nombre)) return
+    const directDownload = ['mega', 'mediafire', 'directo'].includes(nombre)
+    srvs.push({ nombre, url, calidad: calidadDesde(calidad, label, parsed.pathname) || (nombre === 'terabox' ? '1080p' : '720p'), directo: directDownload })
+  }
+  $('.soraddlx').each((_, serverBlock) => {
+    if (!bloqueCoincide(serverBlock)) return
+    const $block = $(serverBlock)
+    $block.find('.soraurlx').each((__, urlBlk) => {
+      const $qualityBlock = $(urlBlk)
+      const quality = calidadDesde($qualityBlock.find('strong').text(), $qualityBlock.text())
+      $qualityBlock.find('a[href]').each((___, el) => add($(el).attr('href') || '', $(el).text().trim(), quality))
+    })
   })
-  $('a[href]').each((_, el) => add($(el).attr('href') || '', $(el).text().trim(), '720p'))
+  // El sitio puede omitir las clases del bloque; aun así sólo se aceptan los cuatro tipos esperados.
+  $('a[href]').each((_, el) => {
+    const $el = $(el)
+    const $languageBlock = $el.closest('.soraddlx')
+    if (bloquesIdioma.length && !$languageBlock.length) return
+    if ($languageBlock.length && !bloqueCoincide($languageBlock[0])) return
+    const label = `${$el.text().trim()} ${$el.attr('title') || ''}`
+    const context = $el.closest('.soraddlx, .soraurlx, .download, .downloads, .links').text()
+    add($el.attr('href') || '', label, calidadDesde(context, label))
+  })
   $('[data-src], [data-player], [data-url], iframe[src]').each((_, el) => {
-    const raw = $(el).attr('data-src') || $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('src') || ''
-    let url = raw
-    try { const decoded = Buffer.from(raw, 'base64').toString('utf8'); if (/^https?:\/\//i.test(decoded)) url = decoded } catch (_) {}
-    add(url, 'iframe', '')
+    const $el = $(el)
+    const raw = $el.attr('data-src') || $el.attr('data-player') || $el.attr('data-url') || $el.attr('src') || ''
+    const context = $el.closest('.soraddlx, .soraurlx, .download, .downloads, .links').text()
+    add(raw, `${$el.attr('title') || ''} ${context}`, calidadDesde(context), true)
   })
   srvs.sort((a, b) => {
     if (a.directo !== b.directo) return a.directo ? -1 : 1
@@ -293,13 +402,9 @@ async function scrapeServidoresDBS(epUrl) {
   return srvs
 }
 
-function detectarServNombre(url) {
-  return detectarServidor(url) || 'embed'
-}
-
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_DBS = ['mediafire', 'mega', 'voe', 'filemoon', 'mp4upload', 'streamwish', 'streamtape', 'doodstream', 'okru', 'vidhide', 'mixdrop', 'iframe']
+const PREFS_DBS = ['directo', 'mediafire', 'mega', 'terabox']
 
 function ordenarServidores(srvs) {
   const preferencias = PREFS_DBS
@@ -510,51 +615,44 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
 
 async function descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor) {
   if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace de vídeo`)
+  let parsed
+  try { parsed = new URL(directUrl) } catch (_) { throw new Error(`${servidor}: URL directa no válida`) }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error(`${servidor}: protocolo o credenciales de URL no permitidos`)
+  }
   const destPath = path.join(outputDir, fileName)
-  const res = await axios.get(directUrl, {
-    responseType: 'stream',
-    headers: { ...HEADERS, Referer: serverUrl },
-    httpsAgent,
-    timeout: DL_TIMEOUT,
-    maxRedirects: 8,
-    validateStatus: status => status >= 200 && status < 400,
-  })
-  const contentType = String(res.headers['content-type'] || '').toLowerCase()
-  if (contentType.includes('text/html') || contentType.includes('application/json')) {
-    throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
+  const partPath = `${destPath}.part`
+  try {
+    const res = await axios.get(parsed.href, {
+      responseType: 'stream',
+      headers: { ...HEADERS, Referer: serverUrl },
+      httpsAgent,
+      timeout: DL_TIMEOUT,
+      maxRedirects: 8,
+      validateStatus: status => status >= 200 && status < 300,
+    })
+    const contentType = String(res.headers['content-type'] || '').toLowerCase()
+    if (contentType.includes('text/html') || contentType.includes('application/json')) {
+      res.data.destroy()
+      throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
+    }
+    await pipeline(res.data, fs.createWriteStream(partPath))
+    const size = fs.statSync(partPath).size
+    if (!size) throw new Error(`${servidor}: archivo vacío`)
+    fs.renameSync(partPath, destPath)
+    return destPath
+  } catch (err) {
+    try { fs.rmSync(partPath, { force: true }) } catch (_) {}
+    throw err
   }
-  await pipeline(res.data, fs.createWriteStream(destPath))
-  const size = fs.statSync(destPath).size
-  if (!size) {
-    try { fs.rmSync(destPath, { force: true }) } catch (_) {}
-    throw new Error(`${servidor}: archivo vacío`)
-  }
-  return destPath
 }
 
-async function extraerUrlServidor(serverUrl, servidor, patrones) {
-  const page = await axios.get(serverUrl, {
-    headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
-    timeout: 15000,
-    maxRedirects: 8,
-    responseType: 'text',
-  })
-  const html = String(page.data || '').replace(/\\u0026/g, '&').replace(/\\\//g, '/')
-  for (const patron of patrones) {
-    const match = html.match(patron)
-    if (match?.[1]?.startsWith('http')) return match[1].replace(/&amp;/g, '&')
-  }
-  throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
-}
-
-async function descargarYourUpload(serverUrl, outputDir, fileName) {
-  const directUrl = await extraerUrlServidor(serverUrl, 'yourupload', [
-    /file["']?\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
-    /sources?\s*:\s*\[\s*\{[^}]*src\s*:\s*["'](https?:\/\/[^"']+)["']/i,
-    /video\[[^\]]+\]\s*=\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
-    /(https?:\/\/[^"'\s<>]+\.mp4(?:\?[^"'\s<>]*)?)/i,
-  ])
-  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'YourUpload')
+async function descargarTeraBox(serverUrl, outputDir, fileName) {
+  const files = await fetchTeraBox(serverUrl)
+  const item = files.find(file => /\.(?:mp4|mkv|mov|avi|webm)$/i.test(file.file_name || '')) || files[0]
+  const directUrl = item?.stream_final_url || item?.stream_url || item?.download_url
+  if (!directUrl) throw new Error('TeraBox: la API no devolvió un enlace de descarga')
+  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'TeraBox')
 }
 
 async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
@@ -577,7 +675,7 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
   let directUrl = /\.mp4(?:[?#]|$)/i.test(serverUrl) ? serverUrl : ''
   if (!directUrl) {
     const page = await axios.get(serverUrl, {
-      headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
+      headers: { ...HEADERS, Referer: serverUrl },
       timeout: 15000,
       maxRedirects: 5,
       responseType: 'text',
@@ -593,32 +691,40 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 async function enviarEpisodio(chatId, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl } = ep
-  const fileName = buildFileName(titulo, epNum)
+  const esLatino = ep.fuente === 'latino' || ep.idioma === 'latino'
+  const fileName = buildFileName(titulo, epNum, esLatino ? 'latino' : 'dbs')
+  console.log(`[dbs-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
+  const srvs = await scrapeServidoresDBS(epUrl, esLatino ? 'latino' : 'sub')
+  if (!srvs.length) {
+    console.log(`[dbs-notify] Sin servidores para "${titulo}" ep ${epNum}; se omite sin enviar mensajes.`)
+    return false
+  }
   const localTmp = path.join(process.cwd(), 'temp_videos')
   if (!fs.existsSync(localTmp)) fs.mkdirSync(localTmp, { recursive: true })
   const tmpDir = path.join(localTmp, `dbs_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   const bandera = '🌐'
-  const etiqueta = 'AnimeDBS 🌐'
+  const etiqueta = esLatino ? 'AnimeDBS Audio Latino 🌐' : 'AnimeDBS Sub Español 🌐'
   try {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
-    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
+    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🎙️ Audio: *${esLatino ? 'Latino' : 'Sub Español'}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
     if (imgUrl) {
       try { const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption }) }
       catch (_) { await conn.sendMessage(chatId, { text: caption }) }
     } else await conn.sendMessage(chatId, { text: caption })
-    console.log(`[dbs-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
-    const srvs = await scrapeServidoresDBS(epUrl)
-    if (!srvs.length) throw new Error('No se encontraron servidores')
     await new Promise(r => setTimeout(r, 15_000))
     let videoPath = null
+    let downloadedFileName = fileName
     for (const srv of ordenarServidores(srvs).slice(0, 10)) {
       const nombre = (srv.nombre || 'servidor').toLowerCase()
       try {
         console.log(`[dbs-notify] 🔄 Conectando con [ ${nombre.toUpperCase()} ]...`)
-        if (nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
-        else if (nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
-        else videoPath = await descargarServidorVideo(srv.url, tmpDir, fileName, nombre)
+        const serverFileName = fileName.replace(/\(\d{3,4}p\)/i, `(${srv.calidad || '720p'})`)
+        if (nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, serverFileName)
+        else if (nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, serverFileName)
+        else if (nombre === 'terabox') videoPath = await descargarTeraBox(srv.url, tmpDir, serverFileName)
+        else videoPath = await descargarServidorVideo(srv.url, tmpDir, serverFileName, nombre)
+        if (videoPath) downloadedFileName = serverFileName
         if (videoPath) {
           const size = fs.statSync(videoPath).size
           if (size < MIN_EPISODE_SIZE_BYTES) { console.log(`[dbs-notify] ⚠️ Archivo demasiado pequeño (${fmtBytes(size)}); probando otro servidor.`); fs.rmSync(videoPath, { force: true }); videoPath = null; continue }
@@ -632,9 +738,9 @@ async function enviarEpisodio(chatId, ep, conn) {
     if (!videoPath) throw new Error('Todos los servidores fallaron')
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
     const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
-    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName, mimetype: 'video/mp4', jpegThumbnail })
+    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName: downloadedFileName, mimetype: 'video/mp4', jpegThumbnail })
     console.log(`[dbs-notify] 🚀 Enviado: ${fileName} (${sizeMB} MB)`)
-    const fileName360 = build360FileName(fileName)
+    const fileName360 = build360FileName(downloadedFileName)
     const video360Path = path.join(tmpDir, fileName360)
     try {
       await compressDw4(videoPath, video360Path, { label: 'DW4 AnimeDBS' })
@@ -645,6 +751,7 @@ async function enviarEpisodio(chatId, ep, conn) {
       console.error(`[dbs-notify] No se pudo crear o enviar 360p: ${error.message}`)
       try { await conn.sendMessage(chatId, { text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* fue enviado, pero falló la versión 360p.` }) } catch (_) {}
     }
+    return true
   } finally { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {} }
 }
 
@@ -675,6 +782,7 @@ async function procesarCola() {
       }
       let intentos = 0
       let exito    = false
+      let omitidoSinServidores = false
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
@@ -689,7 +797,14 @@ async function procesarCola() {
           continue
         }
         try {
-          await enviarEpisodio(chatId, ep, connActivo)
+          const enviado = await enviarEpisodio(chatId, ep, connActivo)
+          if (enviado === false) {
+            quitarItemActual()
+            global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
+            omitidoSinServidores = true
+            exito = true
+            break
+          }
           exito = true
           const seen = loadSeen()
           if (!seen[chatId]) seen[chatId] = []
@@ -723,6 +838,7 @@ async function procesarCola() {
           }
         }
       }
+      if (omitidoSinServidores) continue
       if (global.dbsEpisodeQueue.length > 0) await new Promise(r => setTimeout(r, QUEUE_DELAY))
     }
   } catch (fatalErr) {
@@ -745,12 +861,6 @@ async function checkNuevosEpisodios(chatId, conn) {
     if (!seen[chatId]) seen[chatId] = []
     const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.dbsQueuedIds.has(`${chatId}:${e.id}`))
     if (!nuevos.length) return
-
-    if (nuevos.length > 1) {
-      try {
-        await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._` })
-      } catch (err) { console.error(`[dbs-notify] No se pudo enviar el resumen: ${err.message}`) }
-    }
 
     for (const ep of nuevos) {
       global.dbsEpisodeQueue.push({ chatId, ep })
@@ -831,7 +941,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       for (const ep of lista) if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id)
       seen[m.chat] = seen[m.chat].slice(-500); saveSeen(seen)
     } catch (_) {}
-    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🌐 *AnimeDBS* — \`Sub español\`\n┃ 💬 *Chat Activo*\n📋 *${lista.length}* episodios registrados como base.\n> Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}dbsstop\` para detener*\n*Usa \`${usedPrefix}dbsstatus\` para ver el estado*` }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🌐 *AnimeDBS* — \`SUB + Audio Latino\`\n┃ 💬 *Chat Activo*\n📋 *${lista.length}* episodios registrados como base.\n> Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}dbsstop\` para detener*\n*Usa \`${usedPrefix}dbsstatus\` para ver el estado*` }, { quoted: m })
     return
   }
   if (command === 'dbsstop') {

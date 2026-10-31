@@ -232,3 +232,6 @@ handler.tags = ["downloader"];
 handler.command = /^terabox$/i;
 
 export default handler;
+
+// Reutilizable desde otros plugins que necesitan resolver enlaces de TeraBox.
+export { fetchTeraBox }
