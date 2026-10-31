@@ -1,6 +1,6 @@
 // plugins/dbs-notify.js — v3.2
 //
-// Notificador automático de nuevos episodios — AnimeDBS (SUB ESPAÑOL)
+// Notificador automático de nuevos episodios — AnimeDBS (SUB + AUDIO LATINO)
 
 import axios        from 'axios'
 import * as cheerio from 'cheerio'
@@ -245,6 +245,7 @@ async function fetchLatestEpisodesDBS() {
   const $ = cheerio.load(data)
   const lista = []
   const ids = new Set()
+  const episodiosPortada = new Map()
   const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false }) => {
     const epUrl = absoluteUrl(href, ANIMEDBS_URL)
     const number = Number.parseInt(epNum, 10)
@@ -273,11 +274,14 @@ async function fetchLatestEpisodesDBS() {
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
     const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, ANIMEDBS_URL)
     const latino = /latino/i.test(`${href} ${titulo} ${$el.find('.lg').text()}`)
-    addEpisode({ href, title: titulo, epNum: epNumStr, imgUrl, latino })
+    episodiosPortada.set(epUrl, { href: epUrl, title: titulo, epNum: epNumStr, imgUrl })
+    addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: false })
+    if (latino) addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: true })
   })
 
-  // "Audio Latino" es un catálogo de series: cada tarjeta lleva a una página
-  // con el listado de episodios, cuyo más reciente aparece primero en .eplister.
+  // El catálogo "Audio Latino" aporta los episodios más recientes y los enlaces
+  // de portada de esas series. Se crean IDs para ambos idiomas y el preflight
+  // confirma si cada episodio tiene bloque SUB/LAT antes de descargarlo.
   try {
     const { data: catalogHtml } = await getPage(DBS_LATINO_CATALOG_URL, { headers: HEADERS })
     const $catalog = cheerio.load(catalogHtml)
@@ -296,14 +300,23 @@ async function fetchLatestEpisodesDBS() {
           const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
           const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_LATINO_CATALOG_URL } })
           const $series = cheerio.load(seriesHtml)
-          const $episode = $series('.eplister a[href]').first()
-          const episodeHref = $episode.attr('href') || ''
-          const epNum = episodeHref.match(/episodio[- _]?(\d+)/i)?.[1] || $episode.text().match(/\d+/)?.[0]
           const title = $series('h1').first().text().trim() || item.title
           const imgEl = $series('.thumb img, .thumbook img').first()
           const imgSrc = imgEl.attr('data-src') || imgEl.attr('src') || ''
           const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, seriesUrl)
-          if (episodeHref && epNum) addEpisode({ href: episodeHref, title, epNum, imgUrl, latino: true })
+          $series('.eplister a[href]').each((index, el) => {
+            const $episode = $series(el)
+            const episodeHref = $episode.attr('href') || ''
+            const episodeUrl = absoluteUrl(episodeHref, seriesUrl)
+            const homeEpisode = episodiosPortada.get(episodeUrl)
+            if (index !== 0 && !homeEpisode) return
+            const epNum = homeEpisode?.epNum || episodeUrl.match(/episodio[- _]?(\d+)/i)?.[1] || $episode.text().match(/\d+/)?.[0]
+            if (episodeHref && epNum) {
+              const episodeData = { href: episodeHref, title: homeEpisode?.title || title, epNum, imgUrl: homeEpisode?.imgUrl || imgUrl }
+              addEpisode({ ...episodeData, latino: false })
+              addEpisode({ ...episodeData, latino: true })
+            }
+          })
         } catch (err) {
           console.error(`[dbs-notify] No se pudo revisar una serie del catálogo LAT (${item.href}): ${err.message}`)
         }
@@ -931,7 +944,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       for (const ep of lista) if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id)
       seen[m.chat] = seen[m.chat].slice(-500); saveSeen(seen)
     } catch (_) {}
-    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🌐 *AnimeDBS* — \`SUB + Audio Latino\`\n┃ 💬 *Chat Activo*\n📋 *${lista.length}* episodios registrados como base.\n> Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}dbsstop\` para detener*\n*Usa \`${usedPrefix}dbsstatus\` para ver el estado*` }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🌐 *AnimeDBS* — \`SUB + Audio Latino (LAT)\`\n┃ 💬 *Chat Activo*\n📋 *${lista.length}* episodios registrados como base.\n> Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}dbsstop\` para detener*\n*Usa \`${usedPrefix}dbsstatus\` para ver el estado*` }, { quoted: m })
     return
   }
   if (command === 'dbsstop') {
@@ -942,16 +955,16 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
   if (command === 'dbsstatus') {
     const active = global.dbsActiveChats.has(m.chat); const entry = global.dbsActiveChats.get(m.chat); const cola = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); const vistos = (loadSeen()[m.chat] || []).length
-    let txt = `📡 *Estado AnimeDBS*\n\n${active ? `✅ *Activo* — cada ${formatInterval(entry.intervalSec)}` : '🔴 *Inactivo*'}\n📋 Cola: *${cola.length}* pendiente(s)\n🔵 Procesando: *${global.dbsQueueRunning ? 'Sí' : 'No'}*\n👁️ Vistos: *${vistos}*`
+    let txt = `📡 *Estado AnimeDBS (SUB + LAT)*\n\n${active ? `✅ *Activo* — cada ${formatInterval(entry.intervalSec)}` : '🔴 *Inactivo*'}\n📋 Cola: *${cola.length}* pendiente(s)\n🔵 Procesando: *${global.dbsQueueRunning ? 'Sí' : 'No'}*\n👁️ Vistos: *${vistos}*`
     if (cola.length) txt += `\n\n*En cola:*\n` + cola.slice(0,5).map((i,n) => `  ${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)}`).join('\n')
     return m.reply(txt)
   }
   if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} [${i.chatId === m.chat ? 'este chat' : 'otro chat'}]`).join('\n') : '✅ Cola vacía.')
   if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; const removed = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(i => i.chatId !== m.chat); for (const item of removed) global.dbsQueuedIds.delete(`${item.chatId}:${item.ep.id}`); return m.reply(`🗑️ *${antes - global.dbsEpisodeQueue.length}* episodio(s) eliminado(s).`) }
   if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
-  if (command === 'dbscheck') { await m.reply('🔍 Chequeando AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
+  if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
   if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }
-  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (AnimeDBS 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
+  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (SUB + LAT 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
 }
 handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime','notificaciones']
