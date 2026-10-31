@@ -1,400 +1,602 @@
-import * as cheerio from 'cheerio'
-import fs from 'fs'
-import path from 'path'
-import axios from 'axios'
-import { spawn } from 'child_process'
-import { pipeline } from 'stream/promises'
-import { File as MegaFile } from 'megajs'
-import { fetchText } from './Hentai-DL.js'
+// plugins/dbs-notify.js — v3.2
+//
+// Notificador automático de nuevos episodios — AnimeDBS (SUB ESPAÑOL)
 
+import axios        from 'axios'
+import * as cheerio from 'cheerio'
+import fs           from 'fs'
+import path         from 'path'
+import { spawn }    from 'child_process'
+import { pipeline } from 'stream/promises'
+import { Transform } from 'stream'
+import https        from 'https'
+import { File as MegaFile } from 'megajs'
+import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import { compressDw4 } from '../src/libraries/dw4-compress.js'
+
+// ─── Constantes ───────────────────────────────────────────────────────────────
+
+const ANIMEDBS_URL          = 'https://www.animedbs.online'
+
+// [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
+const DB_DIR = path.join(process.cwd(), 'database')
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
+
+const SEEN_FILE              = path.join(DB_DIR, 'dbs_seen.json')
+const STATE_FILE             = path.join(DB_DIR, 'dbs_state.json')
+
+const CHECK_INTERVAL_DEFAULT = 10        // minutos históricos
+const CHECK_INTERVAL_SECONDS = CHECK_INTERVAL_DEFAULT * 60
+const MIN_INTERVAL_SECONDS   = 15
+const MAX_INTERVAL_SECONDS   = 3600
+const QUEUE_DELAY            = 90_000    // ms entre ítems de cola (90 seg)
+const DL_TIMEOUT             = 3 * 60 * 60 * 1000
+const MIN_EPISODE_SIZE_BYTES = 5 * 1024 * 1024
+
+// [MEJORA VELOCIDAD] megajs descarga por bloques y conexiones paralelas.
+// Se puede ajustar con MEGA_MAX_CONNECTIONS; se limita para no saturar Mega ni el bot.
+const MEGA_MAX_CONNECTIONS   = Math.min(Math.max(Number(process.env.MEGA_MAX_CONNECTIONS) || 16, 4), 32)
+const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 MB
+const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
+const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
+
+const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'voe', 'filemoon', 'mp4upload', 'streamwish', 'streamtape', 'doodstream', 'okru', 'vidhide', 'mixdrop', 'iframe'])
+
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const HEADERS = {
-  'User-Agent': UA,
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'User-Agent'     : UA,
+  'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
 }
 
-const isJKAnimeUrl = url => {
-  try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
-}
+// ─── Estado global ────────────────────────────────────────────────────────────
 
-
-async function request(url, options = {}) {
-  if (isJKAnimeUrl(url)) {
-    try {
-      if (/\/ajax\//i.test(new URL(url).pathname)) {
-        try {
-          return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers }, timeout: options.timeout || 15000 })
-        } catch (_) { /* Si JKAnime bloquea el acceso directo, probar la cadena de Hentai-DL. */ }
-      }
-      let data = await fetchText(url)
-      if (/\/ajax\//i.test(new URL(url).pathname)) {
-        try { data = JSON.parse(data) } catch (_) {}
-      }
-      return { data, status: 200 }
-    } catch (err) {
-      const blocked = new Error(`No se pudo acceder a JKAnime ni con la cadena de solicitudes de Hentai-DL: ${err.message}`)
-      blocked.code = 'JKANIME_FETCH_FAILED'
-      throw blocked
-    }
-  }
-
-  let retries = 3
-  while (retries > 0) {
-    try {
-      return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
-    } catch (err) {
-      retries--
-      if (retries === 0) throw err
-      await new Promise(r => setTimeout(r, 2000))
-    }
-  }
-}
-function zeroPad(n) { return String(n).padStart(2, '0') }
-function safeFile(s) { return s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
-function buildFileName(titulo, epNum) { return `${zeroPad(epNum)} ${safeFile(titulo)}.mp4` }
-function detectarServNombre(url) {
-  const u = url.toLowerCase()
-  if (u.includes('mediafire')) return 'mediafire'
-  if (u.includes('mega.nz')) return 'mega'
-  if (u.includes('voe')) return 'voe'
-  if (u.includes('filemoon')) return 'filemoon'
-  if (u.includes('mp4upload')) return 'mp4upload'
-  if (u.includes('streamwish')) return 'streamwish'
-  if (u.includes('streamtape')) return 'streamtape'
-  if (u.includes('dood')) return 'doodstream'
-  if (u.includes('ok.ru')) return 'okru'
-  if (u.includes('vidhide')) return 'vidhide'
-  if (u.includes('mixdrop')) return 'mixdrop'
-  return 'embed'
-}
-
-const PREFS_EMBED = ['mp4upload', 'filemoon', 'streamwish', 'streamtape', 'doodstream', 'voe', 'vidhide', 'okru', 'mixdrop']
-
-function ordenarServidores(srvs) {
-  const mega = srvs.filter(s => s.nombre === 'mega')
-  const mediafire = srvs.filter(s => s.nombre === 'mediafire')
-  const otros = srvs.filter(s => s.directo && s.nombre !== 'mega' && s.nombre !== 'mediafire')
-  const embeds = [...srvs.filter(s => !s.directo)].sort((a, b) => {
-    const ia = PREFS_EMBED.findIndex(p => a.nombre.includes(p) || a.url.includes(p))
-    const ib = PREFS_EMBED.findIndex(p => b.nombre.includes(p) || b.url.includes(p))
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
-  })
-  return [...mega, ...mediafire, ...otros, ...embeds]
-}
-async function descargarMega(megaUrl, outputDir, fileName) {
-  let url = megaUrl
-  const m1 = megaUrl.match(/mega\.nz\/(?:embed\/)?[#!]*([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{40,})/)
-  if (m1) url = `https://mega.nz/file/${m1[1]}#${m1[2]}`
-  const m2 = megaUrl.match(/mega\.nz\/file\/([A-Za-z0-9_-]+)!([A-Za-z0-9_-]+)/)
-  if (m2) url = `https://mega.nz/file/${m2[1]}#${m2[2]}`
-
-  const file = MegaFile.fromURL(url)
-  await file.loadAttributes()
-
-  const destPath = path.join(outputDir, fileName)
-  const fileStream = file.download()
-
-  let downloaded = 0
-  fileStream.on('data', chunk => { downloaded += chunk.length })
-
-  try {
-    await pipeline(fileStream, fs.createWriteStream(destPath))
-  } catch (err) {
-    throw new Error(`Mega: fallo durante la escritura — ${err.message}`)
-  }
-  return destPath
-}
-
-async function descargarMediaFire(mfUrl, outputDir, fileName) {
-  let mfPage
-  try {
-    const res = await request(mfUrl, { timeout: 12000 })
-    mfPage = res.data
-  } catch (err) {
-    throw new Error(`MediaFire: error al obtener página — ${err.message}`)
-  }
-
-  const mfLink =
-    mfPage.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/)?.[1] ||
-    mfPage.match(/id="downloadButton"[^>]+href=["']([^"']+)["']/)?.[1] ||
-    mfPage.match(/"(https?:\/\/download\d*\.mediafire\.com\/[^"]+)"/)?.[1]
-
-  if (!mfLink) throw new Error('MediaFire: no encontré link de descarga directa')
-
-  let mfRes
-  try {
-    mfRes = await axios.get(mfLink, {
-      responseType: 'stream',
-      headers: { ...HEADERS, Referer: 'https://www.mediafire.com/' },
-      timeout: DL_TIMEOUT,
-    })
-  } catch (err) {
-    throw new Error(`MediaFire: error al iniciar stream — ${err.message}`)
-  }
-
-  const destPath = path.join(outputDir, fileName)
-  try {
-    await pipeline(mfRes.data, fs.createWriteStream(destPath))
-  } catch (err) {
-    throw new Error(`MediaFire: fallo durante la escritura — ${err.message}`)
-  }
-  return destPath
-}
-
-function jsUnpack(packed) {
-  try {
-    const m = packed.match(/}\s*\('(.*)',\s*(.*?),\s*(\d+),\s*'(.*?)'\.split\('\|'\)/)
-    if (!m) return null
-    const payload = m[1].replace(/\\'/g, "'")
-    const radix = parseInt(m[2]) || 36
-    const symtab = m[4].split('|')
-    return payload.replace(/\b[a-zA-Z0-9_]+\b/g, word => {
-      const idx = parseInt(word, radix)
-      return (symtab[idx] && symtab[idx] !== '') ? symtab[idx] : word
-    })
-  } catch (_) { return null }
-}
-
-function extraerUrlVideo(code) {
-  const patrones = [
-    /sources\s*:\s*\[{[^}]*file\s*:\s*["']([^"']+)["']/,
-    /file\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/i,
-    /src\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/i,
-    /["']([^"']+\.m3u8[^"']*)["']/i,
-  ]
-  for (const re of patrones) {
-    const m = code.match(re)
-    if (m?.[1]?.startsWith('http')) return m[1]
-  }
-  return null
-}
-
-async function resolverEmbed(embedUrl) {
-  const u = embedUrl.toLowerCase()
-  if (u.includes('voe.sx') || u.match(/voe\d*\.sx/)) {
-    try {
-      const { data } = await request(embedUrl.replace(/\/e\//, '/'), { headers: { Referer: embedUrl }, timeout: 15000 })
-      const mHls = data.match(/["']hls["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']/)
-      if (mHls?.[1]) return mHls[1]
-      const mAny = data.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/)
-      if (mAny?.[1]) return mAny[1]
-    } catch (_) {}
-    return null
-  }
-  if (u.includes('filemoon') || u.includes('moonplayer')) {
-    try {
-      const { data } = await request(embedUrl, { headers: { Referer: embedUrl }, timeout: 15000 })
-      const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
-      const unpacked = packed ? jsUnpack(packed[0]) : null
-      return extraerUrlVideo(unpacked || data)
-    } catch (_) {}
-    return null
-  }
-  if (u.includes('mp4upload')) {
-    try {
-      const idMatch = embedUrl.match(/mp4upload\.com\/(?:embed-)?([A-Za-z0-9]+)/)
-      const url = idMatch ? `https://www.mp4upload.com/embed-${idMatch[1]}.html` : embedUrl
-      const { data } = await request(url, { headers: { Referer: 'https://www.mp4upload.com/' }, timeout: 15000 })
-      const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
-      const code = packed ? jsUnpack(packed[0]) : data
-      const m1 = (code || data).match(/player\.src\("([^"]+)"/)
-      if (m1?.[1]) return m1[1]
-      return extraerUrlVideo(code || data)
-    } catch (_) {}
-    return null
-  }
-  if (u.includes('dood') || u.includes('ds2play')) {
-    try {
-      const url = embedUrl.replace(/\/(d|watch)\//, '/e/')
-      const res = await request(url, { headers: { Referer: 'https://dood.wf/' }, timeout: 15000 })
-      const text = res.data
-      const host = new URL(res.request?.res?.responseUrl || url).origin
-      const pass = text.match(/\/pass_md5\/[^'"<\s]*/)?.[0]
-      if (!pass) return null
-      const token = pass.split('/').pop()
-      const r2 = await request(host + pass, { headers: { Referer: url }, timeout: 15000 })
-      const rand = Array.from({ length: 10 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 62)]).join('')
-      return `${r2.data}${rand}?token=${token}&expiry=${Date.now()}`
-    } catch (_) {}
-    return null
-  }
-  if (u.includes('streamwish') || u.includes('wishembed') || u.includes('vidhide') || u.includes('filelions')) {
-    try {
-      const { data } = await request(embedUrl, { headers: { 'Sec-Fetch-Dest': 'document' }, timeout: 15000 })
-      const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
-      if (packed) {
-        const code = jsUnpack(packed[0])
-        const src = code ? extraerUrlVideo(code) : null
-        if (src) return src
-      }
-      return extraerUrlVideo(data)
-    } catch (_) {}
-    return null
-  }
-  return null
-}
-
-async function descargarEmbed(embedUrl, outputDir, fileName, referer = 'https://jkanime.net') {
-  const u = embedUrl.toLowerCase()
-  if (u.includes('hqq.tv') || u.includes('netu.tv') || u.includes('netu.ac') || u.includes('biribup.com'))
-    throw new Error(`Servidor sin soporte: ${embedUrl.split('/')[2]}`)
-
-  let videoUrl = embedUrl
-  const resuelto = await resolverEmbed(embedUrl)
-  if (resuelto) {
-    videoUrl = resuelto
-  } else {
-    try {
-      const { data } = await request(embedUrl, { headers: { Referer: referer }, timeout: 12000 })
-      const dm = data.match(/file\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
-        data.match(/"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/)
-      if (dm?.[1]) videoUrl = dm[1]
-    } catch (_) {}
-  }
-
-  const outTemplate = path.join(outputDir, 'video.%(ext)s')
-  const cmdArgs = [
-    '--no-check-certificate', '--no-warnings',
-    '-f', 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best',
-    '--merge-output-format', 'mp4',
-    '--add-header', `User-Agent: ${UA}`,
-    '--add-header', `Referer: ${referer}/`,
-    '-o', outTemplate,
-    videoUrl,
-  ]
-
-  await new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let errBuf = ''
-    proc.stderr.on('data', d => { errBuf += d.toString() })
-    const timer = setTimeout(() => { proc.kill(); reject(new Error('yt-dlp timeout')) }, DL_TIMEOUT)
-    proc.on('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(errBuf.trim() || `código ${code}`)) })
-    proc.on('error', err => { clearTimeout(timer); reject(err) })
-  })
-
-  const archivos = fs.readdirSync(outputDir).filter(f => /\.(mp4|mkv|webm)$/i.test(f))
-  if (!archivos.length) throw new Error('yt-dlp no generó ningún archivo')
-
-  const srcPath = path.join(outputDir, archivos[0])
-  const destPath = path.join(outputDir, fileName)
-  fs.renameSync(srcPath, destPath)
-  return destPath
-}
-
-const ANIMEDBS_URL = 'https://www.animedbs.online'
-const SEEN_FILE = path.join(process.env.TMPDIR || '/tmp', 'dbs_seen.json')
-const STATE_FILE = path.join(process.env.TMPDIR || '/tmp', 'dbs_state.json')
-const CHECK_INTERVAL_DEFAULT = 10
-const QUEUE_DELAY = 90_000
-const DL_TIMEOUT = 3 * 60 * 60 * 1000
-
-global.dbsActiveChats = global.dbsActiveChats || new Map()
+global.dbsActiveChats  = global.dbsActiveChats  || new Map()
 global.dbsEpisodeQueue = global.dbsEpisodeQueue || []
 global.dbsQueueRunning = global.dbsQueueRunning || false
-global.dbsConn = global.dbsConn || null
+global.dbsConn         = global.dbsConn         || null
+global.dbsQueuedIds    = global.dbsQueuedIds    || new Set()
+global.dbsCheckingChats = global.dbsCheckingChats || new Set()
+
+// ─── Persistencia ─────────────────────────────────────────────────────────────
+
+function loadJson(file, fallback = {}) {
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    return value && typeof value === 'object' ? value : fallback
+  } catch (err) {
+    if (fs.existsSync(file)) console.error(`[dbs-notify] No se pudo leer ${file}: ${err.message}`)
+    return fallback
+  }
+}
+
+function saveJsonAtomic(file, data) {
+  const tempFile = `${file}.tmp-${process.pid}`
+  try {
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2))
+    fs.renameSync(tempFile, file)
+  } catch (err) {
+    try { fs.unlinkSync(tempFile) } catch (_) {}
+    console.error(`[dbs-notify] No se pudo guardar ${file}: ${err.message}`)
+  }
+}
+
+function loadSeen()   { return loadJson(SEEN_FILE) }
+function saveSeen(d)  { saveJsonAtomic(SEEN_FILE, d) }
+function loadState()  { return loadJson(STATE_FILE) }
+function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+function getGlobalIntervalSec() {
+  const state = loadState()
+  const configured = Number(state.__config?.intervalSec)
+  return Number.isFinite(configured)
+    ? Math.min(Math.max(configured, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS)
+    : CHECK_INTERVAL_SECONDS
+}
+function setGlobalIntervalSec(intervalSec) {
+  const state = loadState()
+  state.__config = { ...(state.__config || {}), intervalSec }
+  saveState(state)
+}
+
+function absoluteUrl(value, base) {
+  try { return new URL(value, base).href } catch (_) { return '' }
+}
+
+function parseEpisodeHref(href, baseUrl) {
+  const epUrl = absoluteUrl(href, baseUrl)
+  if (!epUrl) return null
+  let pathname
+  try { pathname = decodeURIComponent(new URL(epUrl).pathname) } catch (_) { return null }
+  const match = pathname.match(/\/ver\/([^/]+?)(?:[-_](?:episode|episodio|ep)[-_]?)?(?:[-_])?(\d+)(?:[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p))?\/?$/i)
+    || pathname.match(/\/ver\/([^/]+?)[-_](\d+)\/?$/i)
+  if (!match) return null
+  const epNum = Number.parseInt(match[2], 10)
+  if (!Number.isInteger(epNum) || epNum < 0) return null
+  const slug = match[1].replace(/[-_](?:episode|episodio|ep)$/i, '')
+  const normSlug = slug
+    .replace(/[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p)$/i, '')
+    .toLowerCase()
+  return { slug, normSlug, epNum, epUrl }
+}
+
+async function getPage(url, options = {}, attempts = 3) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await axios.get(url, { ...options, timeout: options.timeout || 15000 })
+    } catch (err) {
+      lastError = err
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+    }
+  }
+  throw lastError
+}
+
+function detectarServidor(url, label = '') {
+  const u = `${url} ${label}`.toLowerCase()
+  if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
+  if (u.includes('mediafire')) return 'mediafire'
+  if (u.includes('voe')) return 'voe'
+  if (u.includes('yourupload')) return 'yourupload'
+  if (u.includes('savefiles')) return 'savefiles'
+  if (u.includes('hexload')) return 'hexload'
+  if (u.includes('dsvplay')) return 'dsvplay'
+  if (u.includes('byse')) return 'byse'
+  if (u.includes('cloud')) return 'cloud'
+  return ''
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function zeroPad(n)  { return String(n).padStart(2, '0') }
+function formatInterval(seconds) {
+  const value = Number(seconds)
+  if (Number.isInteger(value) && value % 60 === 0) return `${value / 60} min`
+  return `${value} segundos`
+}
+function parseIntervalInput(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(',', '.')
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(s|seg|segs|segundo|segundos|m|min|mins|minuto|minutos)?$/i)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const seconds = /^m/i.test(match[2] || '') ? amount * 60 : amount
+  return Number.isInteger(seconds) ? seconds : Math.round(seconds)
+}
+function formatActiveTime(startedAt) {
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - Number(startedAt || Date.now())) / 60_000))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
+}
+function safeFile(s) { return s.replace(/[\\/\\*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
+const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
+function seasonValue(value) {
+  const token = String(value || '').toUpperCase()
+  return /^\d+$/.test(token) ? Number(token) : ROMAN_SEASONS[token] || 1
+}
+function getSeasonNumber(...values) {
+  const text = values.filter(Boolean).join(' ')
+  const token = '(\\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)'
+  const patterns = [
+    new RegExp(`${token}\\s*(?:st|nd|rd|th|ª|º)?\\s*(?:temporada|season|saison)`, 'i'),
+    new RegExp(`(?:temporada|season|saison)\\s*[-_: ]?\\s*${token}`, 'i'),
+    new RegExp(`\\b(?:S|T)\\s*${token}\\b`, 'i'),
+    /\b(?:VIII|VII|VI|IX|IV|V|III|II|X)\b/i,
+    /\b(?:first|second|third|fourth|fifth)\s+season\b/i,
+  ]
+  let match
+  for (const pattern of patterns) {
+    match = text.match(pattern)
+    if (match) break
+  }
+  const wordSeasons = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5 }
+  const season = match?.[1] ? seasonValue(match[1]) : wordSeasons[match?.[0]?.split(/\s+/)[0]?.toLowerCase()] || 1
+  return season > 1 ? season : 1
+}
+function cleanTitle(titulo, epNum) {
+  return titulo
+    .replace(new RegExp(`\\s*[-–—:]?\\s*${Number(epNum)}\\s*$`), '')
+    .replace(/\s*(?:first|second|third|fourth|fifth)\s+season/ig, '')
+    .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
+    .replace(/\s*\b(?:S|T)\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)\b/ig, '')
+    .replace(/(^|[\s()[\]{}\-_:])(?:VIII|VII|VI|IX|IV|V|III|II|X)(?=$|[\s()[\]{}\-_:])/ig, '$1')
+    .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s*(?:latino|castellano)\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s*\(\s*(?:720p|1080p)\s*\)/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function buildFileName(titulo, epNum, fuente = 'dbs', idioma = 'latino', slug = '') {
+  const season = getSeasonNumber(titulo, slug)
+  const seasonLabel = season > 1 ? `T${season} ` : ''
+  const title = cleanTitle(titulo, epNum)
+  const details = fuente === 'latanime'
+    ? `Español ${idioma === 'castellano' ? 'Castellano 🇪🇸' : 'Latino 🇲🇽'} (1080p)`
+    : 'Sub Español (720p)'
+  return `${zeroPad(epNum)} ${seasonLabel}${safeFile(title)} ${details} [[𝗖𝗜𝗗]].mp4`
+}
+
+function build360FileName(fileName) {
+  return fileName.replace(/\(\d{3,4}p\)/i, '(360p)')
+}
+
+function fmtBytes(b) {
+  if (!b || b <= 0) return '0 KB'
+  if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
+  if (b >= 1048576)    return (b / 1048576).toFixed(2) + ' MB'
+  return (b / 1024).toFixed(2) + ' KB'
+}
+
+
+
+// ─── Scraping ─────────────────────────────────────────────────────────────────
 
 async function fetchLatestEpisodesDBS() {
-  const { data } = await request(ANIMEDBS_URL, { timeout: 15000 })
+  const { data } = await getPage(ANIMEDBS_URL, { headers: HEADERS })
   const $ = cheerio.load(data)
   const lista = []
-
   $('.listupd .bs').each((_, el) => {
     const $el = $(el)
     const aTag = $el.find('a').first()
     const href = aTag.attr('href') || ''
     if (!href) return
-
-    const epUrl = href.startsWith('http') ? href : ANIMEDBS_URL + href
+    const epUrl = absoluteUrl(href, ANIMEDBS_URL)
+    if (!epUrl) return
     const epxText = $el.find('.epx').text().trim()
     const epNumStr = epxText.match(/\d+/)?.[0] || epUrl.match(/episodio[- _]?(\d+)/i)?.[1] || '0'
-    const epNum = parseInt(epNumStr)
-
+    const epNum = Number.parseInt(epNumStr, 10)
+    if (!Number.isInteger(epNum)) return
     const anime = $el.find('.tite1').text().trim()
     const h2 = $el.find('h2').text().trim()
     const titulo = anime || h2.replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').trim() || 'Anime desconocido'
-
     const imgEl = $el.find('img').first()
-    const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || ''
-    const imgUrl = imgSrc.startsWith('http') ? imgSrc : imgSrc.startsWith('//') ? 'https:' + imgSrc : imgSrc ? ANIMEDBS_URL + imgSrc : ''
-
-    const slugBase = titulo.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const id = `dbs-${slugBase}-${epNum}`
-
-    if (!lista.find(e => e.id === id))
-      lista.push({ id, slug: slugBase, titulo, epNum, epUrl, imgUrl, fuente: 'animedbs' })
+    const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
+    const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, ANIMEDBS_URL)
+    const slug = titulo.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const id = `dbs-${slug}-${epNum}`
+    if (!lista.some(e => e.id === id)) lista.push({ id, slug, titulo, epNum, epUrl, imgUrl, fuente: 'animedbs' })
   })
-
+  console.log(`[dbs-notify] ${lista.length} episodios en portada`)
   return lista
 }
 
 async function scrapeServidoresDBS(epUrl) {
-  const { data } = await request(epUrl, { headers: { Referer: ANIMEDBS_URL }, timeout: 15000 })
+  const { data } = await getPage(epUrl, { headers: { ...HEADERS, Referer: ANIMEDBS_URL } })
   const $ = cheerio.load(data)
   const srvs = []
-
-  $('.soraddlx').each((_, bloque) => {
-    const $bloque = $(bloque)
-    $bloque.find('.soraurlx').each((_, urlBlk) => {
-      const calidad = $(urlBlk).find('strong').text().trim()
-      $(urlBlk).find('a[href]').each((_, el) => {
-        const href = $(el).attr('href') || ''
-        const label = $(el).text().trim().toLowerCase()
-        if (!href.startsWith('http')) return
-        if (srvs.find(s => s.url === href)) return
-        const esMega = href.includes('mega.nz') || href.includes('mega.co.nz')
-        const esMediafire = href.includes('mediafire.com')
-        if (href.includes('hqq.tv') || href.includes('netu.tv') || href.includes('netu.ac')) return
-        srvs.push({
-          nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : label || detectarServNombre(href),
-          url: href,
-          calidad: calidad || '720p',
-          directo: esMega || esMediafire,
-        })
-      })
-    })
+  const add = (url, label = '', calidad = '') => {
+    if (!url || !/^https?:\/\//i.test(url) || srvs.some(s => s.url === url)) return
+    if (/hqq\.tv|netu\.(?:tv|ac)/i.test(url)) return
+    const nombre = detectarServidor(url, label) || 'iframe'
+    const directo = nombre === 'mega' || nombre === 'mediafire'
+    srvs.push({ nombre, url, calidad: calidad || '720p', directo })
+  }
+  $('.soraddlx .soraurlx').each((_, urlBlk) => {
+    const calidad = $(urlBlk).find('strong').text().trim()
+    $(urlBlk).find('a[href]').each((_, el) => add($(el).attr('href') || '', $(el).text().trim(), calidad))
   })
-
-  if (srvs.length === 0) {
-    $('a[href]').each((_, el) => {
-      const href = $(el).attr('href') || ''
-      if (!href.startsWith('http')) return
-      const esMega = href.includes('mega.nz') || href.includes('mega.co.nz')
-      const esMediafire = href.includes('mediafire.com')
-      if (!esMega && !esMediafire) return
-      if (srvs.find(s => s.url === href)) return
-      srvs.push({ nombre: esMega ? 'mega' : 'mediafire', url: href, calidad: '720p', directo: true })
-    })
-  }
-
-  if (srvs.length === 0) {
-    $('iframe[src]').each((_, el) => {
-      const src = $(el).attr('src') || ''
-      if (src.startsWith('http')) srvs.push({ nombre: 'iframe', url: src, calidad: '', directo: false })
-    })
-  }
-
+  $('a[href]').each((_, el) => add($(el).attr('href') || '', $(el).text().trim(), '720p'))
+  $('[data-src], [data-player], [data-url], iframe[src]').each((_, el) => {
+    const raw = $(el).attr('data-src') || $(el).attr('data-player') || $(el).attr('data-url') || $(el).attr('src') || ''
+    let url = raw
+    try { const decoded = Buffer.from(raw, 'base64').toString('utf8'); if (/^https?:\/\//i.test(decoded)) url = decoded } catch (_) {}
+    add(url, 'iframe', '')
+  })
   srvs.sort((a, b) => {
-    if (!a.directo && b.directo) return 1
-    if (a.directo && !b.directo) return -1
-    const aP = a.calidad.includes('720') ? 0 : a.calidad.includes('1080') ? 1 : 2
-    const bP = b.calidad.includes('720') ? 0 : b.calidad.includes('1080') ? 1 : 2
-    return aP - bP
+    if (a.directo !== b.directo) return a.directo ? -1 : 1
+    const rank = v => /720/i.test(v) ? 0 : /1080/i.test(v) ? 1 : 2
+    return rank(a.calidad) - rank(b.calidad)
   })
-
   return srvs
 }
 
-function loadSeen() { try { return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf-8')) } catch (_) { return {} } }
-function saveSeen(d) { try { fs.writeFileSync(SEEN_FILE, JSON.stringify(d, null, 2)) } catch (_) {} }
-function loadState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) } catch (_) { return {} } }
-function saveState(d) { try { fs.writeFileSync(STATE_FILE, JSON.stringify(d, null, 2)) } catch (_) {} }
+function detectarServNombre(url) {
+  return detectarServidor(url) || 'embed'
+}
 
+// ─── Descarga ─────────────────────────────────────────────────────────────────
+
+const PREFS_DBS = ['mediafire', 'mega', 'voe', 'filemoon', 'mp4upload', 'streamwish', 'streamtape', 'doodstream', 'okru', 'vidhide', 'mixdrop', 'iframe']
+
+function ordenarServidores(srvs) {
+  const preferencias = PREFS_DBS
+  return [...srvs].sort((a, b) => {
+    const ia = preferencias.indexOf(a.nombre)
+    const ib = preferencias.indexOf(b.nombre)
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+  })
+}
+
+async function descargarMega(megaUrl, outputDir, fileName) {
+  if (!megaUrl || typeof megaUrl !== 'string') throw new Error('Mega: URL vacía')
+
+  const normalizarMegaUrl = (value) => {
+    const raw = value.trim()
+    if (!/^https?:\/\/(?:www\.)?mega\.(?:nz|co\.nz)\//i.test(raw)) {
+      throw new Error('Mega: dominio o URL no válidos')
+    }
+    if (/\/folder\//i.test(raw) || /#F!/i.test(raw)) {
+      throw new Error('Mega: los enlaces de carpetas no están soportados')
+    }
+
+    const match = raw.match(/\/\/(?:www\.)?mega\.(?:nz|co\.nz)\/(?:file|embed)\/([A-Za-z0-9_-]{8,})[#!]([A-Za-z0-9_-]{20,})/i) ||
+      raw.match(/#!?([A-Za-z0-9_-]{8,})!([A-Za-z0-9_-]{20,})/i)
+    if (!match) throw new Error('Mega: enlace sin ID o clave de archivo')
+    return `https://mega.nz/file/${match[1]}#${match[2]}`
+  }
+
+  const url      = normalizarMegaUrl(megaUrl)
+  const destPath = path.join(outputDir, fileName)
+  const partPath = `${destPath}.part`
+  const maxIntentos = 2
+  let ultimoError
+
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    try {
+      try { fs.rmSync(partPath, { force: true }) } catch (_) {}
+
+      const file = MegaFile.fromURL(url)
+      await file.loadAttributes()
+      const total = Number(file.size || 0)
+      const fileStream = file.download({
+        maxConnections: MEGA_MAX_CONNECTIONS,
+        initialChunkSize: MEGA_CHUNK_SIZE,
+        chunkSizeIncrement: 0,
+        maxChunkSize: MEGA_CHUNK_SIZE,
+        forceHttps: true,
+      })
+      let done = 0
+      const start = Date.now()
+      let lastLog = 0
+      const tracker = new Transform({
+        transform(chunk, _enc, cb) {
+          done += chunk.length
+          const secs  = (Date.now() - start) / 1000 || 0.001
+          const speed = done / secs
+          const now   = Date.now()
+          if (now - lastLog > 1000) {
+            lastLog = now
+            const pct = total > 0 ? (done / total) * 100 : 0
+            process.stdout.write(`\r[MEGA] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s | intento ${intento}/${maxIntentos}   `)
+          }
+          cb(null, chunk)
+        },
+      })
+
+      await pipeline(fileStream, tracker, fs.createWriteStream(partPath))
+      const downloadedSize = fs.statSync(partPath).size
+      if (total > 0 && downloadedSize !== total) {
+        throw new Error(`Mega: tamaño incompleto (${downloadedSize} de ${total} bytes)`)
+      }
+      fs.renameSync(partPath, destPath)
+      process.stdout.write('\n')
+      return destPath
+    } catch (err) {
+      ultimoError = err
+      process.stdout.write('\n')
+      try { fs.rmSync(partPath, { force: true }) } catch (_) {}
+      if (intento < maxIntentos) {
+        console.log(`[dbs-notify] ⚠️ Mega falló; reintentando (${intento}/${maxIntentos}): ${err.message}`)
+        await new Promise(resolve => setTimeout(resolve, 3000))
+      }
+    }
+  }
+
+  throw new Error(`Mega error: ${ultimoError?.message || 'descarga fallida'}`)
+}
+
+async function descargarMediaFire(mfUrl, outputDir, fileName) {
+  let mfPage
+  try {
+    const res = await axios.get(mfUrl, { headers: HEADERS, httpsAgent, timeout: 12000 })
+    mfPage = res.data
+  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+
+  const mfLink = mfPage.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/)?.[1] ||
+                 mfPage.match(/id="downloadButton"[^>]+href=["']([^"']+)["']/)?.[1] ||
+                 mfPage.match(/"(https?:\/\/download\d*\.mediafire\.com\/[^"]+)"/)?.[1]
+
+  if (!mfLink) throw new Error('MediaFire: sin link directo')
+
+  const destPath = path.join(outputDir, fileName)
+
+  // [MEJORA VELOCIDAD] Averiguar tamaño y soporte de rangos con un HEAD
+  let total = 0
+  let soportaRangos = false
+  try {
+    const head = await axios.head(mfLink, { headers: HEADERS, httpsAgent, timeout: 10000 })
+    total = parseInt(head.headers['content-length'] || '0')
+    soportaRangos = /bytes/i.test(head.headers['accept-ranges'] || '')
+  } catch (_) {}
+
+  let done = 0
+  const start = Date.now()
+  let lastLog = 0
+  const reportar = (bytes) => {
+    done += bytes
+    const now = Date.now()
+    if (now - lastLog > 1000) {
+      lastLog = now
+      const secs  = (now - start) / 1000 || 0.001
+      const speed = done / secs
+      const pct   = total > 0 ? (done / total) * 100 : 0
+      process.stdout.write(`\r[MEDIAFIRE] 📥 ${pct.toFixed(1)}% | ${fmtBytes(done)}${total ? ' / ' + fmtBytes(total) : ''} | ${fmtBytes(speed)}/s   `)
+    }
+  }
+
+  // ── Descarga paralela por rangos (si el servidor lo permite) ────────────────
+  if (soportaRangos && total >= MF_MIN_SIZE_PARALELO) {
+    const hilos     = MF_HILOS
+    const chunkSize = Math.ceil(total / hilos)
+    const partes    = []
+    for (let i = 0; i < hilos; i++) {
+      const bStart = i * chunkSize
+      const bEnd   = Math.min(bStart + chunkSize - 1, total - 1)
+      if (bStart > bEnd) break
+      partes.push({ start: bStart, end: bEnd, path: `${destPath}.part${i}` })
+    }
+
+    try {
+      await Promise.all(partes.map(async p => {
+        const res = await axios.get(mfLink, {
+          responseType: 'stream',
+          headers : { ...HEADERS, Referer: 'https://www.mediafire.com/', Range: `bytes=${p.start}-${p.end}` },
+          httpsAgent,
+          timeout : DL_TIMEOUT,
+        })
+        if (res.status !== 206) throw new Error(`MediaFire ignoró el rango solicitado (HTTP ${res.status})`)
+        const contentRange = res.headers['content-range'] || ''
+        if (!contentRange.startsWith(`bytes ${p.start}-${p.end}/`)) {
+          throw new Error(`MediaFire devolvió un rango inesperado: ${contentRange || 'sin Content-Range'}`)
+        }
+        res.data.on('data', chunk => reportar(chunk.length))
+        await pipeline(res.data, fs.createWriteStream(p.path))
+      }))
+
+      // Unir las partes en orden
+      const out = fs.createWriteStream(destPath)
+      for (const p of partes) {
+        const expected = p.end - p.start + 1
+        if (fs.statSync(p.path).size !== expected) throw new Error(`Parte incompleta: ${path.basename(p.path)}`)
+        await new Promise((resolve, reject) => {
+          const rs = fs.createReadStream(p.path)
+          rs.pipe(out, { end: false })
+          rs.on('end', resolve)
+          rs.on('error', reject)
+        })
+      }
+      await new Promise(resolve => out.end(resolve))
+      for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
+
+      process.stdout.write('\n')
+      console.log(`[dbs-notify] ⚡ MediaFire descargado en ${partes.length} hilos paralelos`)
+      return destPath
+    } catch (err) {
+      process.stdout.write('\n')
+      for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
+      console.log(`[dbs-notify] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
+      done = 0 // reiniciar contador para el fallback
+      // sigue abajo al modo de un solo stream
+    }
+  }
+
+  // ── Descarga simple (fallback o cuando no hay soporte de rangos) ────────────
+  let mfRes
+  try {
+    mfRes = await axios.get(mfLink, { responseType: 'stream', headers: { ...HEADERS, Referer: 'https://www.mediafire.com/' }, httpsAgent, timeout: DL_TIMEOUT })
+  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+
+  if (!total) total = parseInt(mfRes.headers['content-length'] || '0')
+
+  const tracker = new Transform({
+    transform(chunk, _enc, cb) {
+      reportar(chunk.length)
+      cb(null, chunk)
+    },
+  })
+
+  try {
+    await pipeline(mfRes.data, tracker, fs.createWriteStream(destPath))
+    process.stdout.write('\n')
+  } catch (err) {
+    process.stdout.write('\n')
+    throw new Error(`MediaFire: ${err.message}`)
+  }
+  return destPath
+}
+
+async function descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor) {
+  if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace de vídeo`)
+  const destPath = path.join(outputDir, fileName)
+  const res = await axios.get(directUrl, {
+    responseType: 'stream',
+    headers: { ...HEADERS, Referer: serverUrl },
+    httpsAgent,
+    timeout: DL_TIMEOUT,
+    maxRedirects: 8,
+    validateStatus: status => status >= 200 && status < 400,
+  })
+  const contentType = String(res.headers['content-type'] || '').toLowerCase()
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`${servidor}: el enlace no devolvió un vídeo`)
+  }
+  await pipeline(res.data, fs.createWriteStream(destPath))
+  const size = fs.statSync(destPath).size
+  if (!size) {
+    try { fs.rmSync(destPath, { force: true }) } catch (_) {}
+    throw new Error(`${servidor}: archivo vacío`)
+  }
+  return destPath
+}
+
+async function extraerUrlServidor(serverUrl, servidor, patrones) {
+  const page = await axios.get(serverUrl, {
+    headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
+    timeout: 15000,
+    maxRedirects: 8,
+    responseType: 'text',
+  })
+  const html = String(page.data || '').replace(/\\u0026/g, '&').replace(/\\\//g, '/')
+  for (const patron of patrones) {
+    const match = html.match(patron)
+    if (match?.[1]?.startsWith('http')) return match[1].replace(/&amp;/g, '&')
+  }
+  throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
+}
+
+async function descargarYourUpload(serverUrl, outputDir, fileName) {
+  const directUrl = await extraerUrlServidor(serverUrl, 'yourupload', [
+    /file["']?\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+    /sources?\s*:\s*\[\s*\{[^}]*src\s*:\s*["'](https?:\/\/[^"']+)["']/i,
+    /video\[[^\]]+\]\s*=\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+    /(https?:\/\/[^"'\s<>]+\.mp4(?:\?[^"'\s<>]*)?)/i,
+  ])
+  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'YourUpload')
+}
+
+async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
+  const extraerCandidatos = (html) => {
+    const encontrados = []
+    const patrones = [
+      /https?:\/\/[^"'\s<>]+\.mp4(?:\?[^"'\s<>]*)?/gi,
+      /(?:file|src|source|url|video_url)\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi,
+    ]
+    for (const patron of patrones) {
+      for (const match of html.matchAll(patron)) {
+        const raw = match[1] || match[0]
+        const url = raw.replace(/\\\//g, '/').replace(/&amp;/g, '&')
+        if (url.startsWith('http') && !encontrados.includes(url)) encontrados.push(url)
+      }
+    }
+    return encontrados
+  }
+
+  let directUrl = /\.mp4(?:[?#]|$)/i.test(serverUrl) ? serverUrl : ''
+  if (!directUrl) {
+    const page = await axios.get(serverUrl, {
+      headers: { ...HEADERS, Referer: servidor === 'voe' ? 'https://voe.sx/' : serverUrl },
+      timeout: 15000,
+      maxRedirects: 5,
+      responseType: 'text',
+    })
+    const candidatos = extraerCandidatos(String(page.data || ''))
+    directUrl = candidatos[0] || ''
+  }
+  if (!directUrl) throw new Error(`${servidor}: no se encontró un enlace MP4 directo`)
+
+  return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, servidor)
+}
+
+// ─── Enviar episodio ──────────────────────────────────────────────────────────
 async function enviarEpisodio(chatId, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl } = ep
   const fileName = buildFileName(titulo, epNum)
-  const tmpDir = path.join(process.env.TMPDIR || '/tmp', `dbs_${Date.now()}`)
+  const localTmp = path.join(process.cwd(), 'temp_videos')
+  if (!fs.existsSync(localTmp)) fs.mkdirSync(localTmp, { recursive: true })
+  const tmpDir = path.join(localTmp, `dbs_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   const bandera = '🌐'
   const etiqueta = 'AnimeDBS 🌐'
@@ -402,102 +604,258 @@ async function enviarEpisodio(chatId, ep, conn) {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
     if (imgUrl) {
-      try { const imgRes = await request(imgUrl, { responseType: 'arraybuffer', timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption }) }
+      try { const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption }) }
       catch (_) { await conn.sendMessage(chatId, { text: caption }) }
     } else await conn.sendMessage(chatId, { text: caption })
+    console.log(`[dbs-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
     const srvs = await scrapeServidoresDBS(epUrl)
-    if (!srvs.length) throw new Error('No se encontraron servidores de video')
+    if (!srvs.length) throw new Error('No se encontraron servidores')
     await new Promise(r => setTimeout(r, 15_000))
     let videoPath = null
-    for (const srv of ordenarServidores(srvs).slice(0, 5)) {
+    for (const srv of ordenarServidores(srvs).slice(0, 10)) {
+      const nombre = (srv.nombre || 'servidor').toLowerCase()
       try {
-        if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
-        else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
-        else videoPath = await descargarEmbed(srv.url, tmpDir, fileName, ANIMEDBS_URL)
-        break
-      } catch (_) {
+        console.log(`[dbs-notify] 🔄 Conectando con [ ${nombre.toUpperCase()} ]...`)
+        if (nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
+        else if (nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
+        else videoPath = await descargarServidorVideo(srv.url, tmpDir, fileName, nombre)
+        if (videoPath) {
+          const size = fs.statSync(videoPath).size
+          if (size < MIN_EPISODE_SIZE_BYTES) { console.log(`[dbs-notify] ⚠️ Archivo demasiado pequeño (${fmtBytes(size)}); probando otro servidor.`); fs.rmSync(videoPath, { force: true }); videoPath = null; continue }
+          break
+        }
+      } catch (err) {
+        console.log(`[dbs-notify] ⚠️ [ ${nombre} ] falló: ${err.message}`)
         for (const f of fs.readdirSync(tmpDir)) { try { if (f !== 'cover.jpg') fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {} }
       }
     }
     if (!videoPath) throw new Error('Todos los servidores fallaron')
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
-    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName, mimetype: 'video/mp4', caption: `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}` })
+    const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
+    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName, mimetype: 'video/mp4', jpegThumbnail })
+    console.log(`[dbs-notify] 🚀 Enviado: ${fileName} (${sizeMB} MB)`)
+    const fileName360 = build360FileName(fileName)
+    const video360Path = path.join(tmpDir, fileName360)
+    try {
+      await compressDw4(videoPath, video360Path, { label: 'DW4 AnimeDBS' })
+      const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
+      await conn.sendMessage(chatId, { document: { url: video360Path }, fileName: fileName360, mimetype: 'video/mp4', jpegThumbnail: jpegThumbnail360 })
+      console.log(`[dbs-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
+    } catch (error) {
+      console.error(`[dbs-notify] No se pudo crear o enviar 360p: ${error.message}`)
+      try { await conn.sendMessage(chatId, { text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* fue enviado, pero falló la versión 360p.` }) } catch (_) {}
+    }
   } finally { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {} }
 }
 
+// ─── Cola ─────────────────────────────────────────────────────────────────────
+
 async function procesarCola() {
-  if (global.dbsQueueRunning || !global.dbsEpisodeQueue.length) return
+  if (global.dbsQueueRunning) return
+  if (!global.dbsEpisodeQueue.length) return
   global.dbsQueueRunning = true
+
+  const MAX_REINTENTOS   = 3
+  const ESPERA_REINTENTO = 3 * 60_000
+  const ESPERA_REQUEUEUE = 5 * 60_000
+
   try {
-    while (global.dbsEpisodeQueue.length) {
+    while (global.dbsEpisodeQueue.length > 0) {
       const item = global.dbsEpisodeQueue[0]
       if (!item) { global.dbsEpisodeQueue.shift(); continue }
-      const { chatId, ep } = item
-      let ok = false
-      for (let intento = 1; intento <= 3 && !ok; intento++) {
-        const conn = global.dbsConn
-        if (!conn) { await new Promise(r => setTimeout(r, 180_000)); continue }
-        try { await enviarEpisodio(chatId, ep, conn); ok = true; global.dbsEpisodeQueue.shift() }
-        catch (err) {
-          if (intento < 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) await new Promise(r => setTimeout(r, intento * 180_000))
-          else if (intento === 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) { global.dbsEpisodeQueue.shift(); global.dbsEpisodeQueue.push(item); await new Promise(r => setTimeout(r, 300_000)) }
-          else { global.dbsEpisodeQueue.shift(); try { await global.dbsConn?.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` }) } catch (_) {} }
+      const { chatId, ep, manual = false } = item
+      const quitarItemActual = () => {
+        const index = global.dbsEpisodeQueue.indexOf(item)
+        if (index !== -1) global.dbsEpisodeQueue.splice(index, 1)
+      }
+      if (!manual && !global.dbsActiveChats.has(chatId)) {
+        quitarItemActual()
+        global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
+        continue
+      }
+      let intentos = 0
+      let exito    = false
+
+      while (intentos < MAX_REINTENTOS && !exito) {
+        intentos++
+        if (!manual && !global.dbsActiveChats.has(chatId)) {
+          quitarItemActual()
+          global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
+          break
+        }
+        const connActivo = global.dbsConn
+        if (!connActivo) {
+          await new Promise(r => setTimeout(r, ESPERA_REINTENTO))
+          continue
+        }
+        try {
+          await enviarEpisodio(chatId, ep, connActivo)
+          exito = true
+          const seen = loadSeen()
+          if (!seen[chatId]) seen[chatId] = []
+          if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
+          if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
+          saveSeen(seen)
+          const state = loadState()
+          const sentCount = (Number(state[chatId]?.sentCount) || 0) + 1
+          if (state[chatId]) state[chatId].sentCount = sentCount
+          const active = global.dbsActiveChats.get(chatId)
+          if (active) active.sentCount = sentCount
+          saveState(state)
+          quitarItemActual()
+          global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
+        } catch (err) {
+          const esConexion = /connection closed|stream errored|timed out|econnreset|econnrefused|socket hang up|precondition required/i.test(err.message)
+          if (esConexion && intentos < MAX_REINTENTOS) {
+            await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
+          } else if (esConexion) {
+            quitarItemActual()
+            global.dbsEpisodeQueue.push({ chatId, ep, manual })
+            await new Promise(r => setTimeout(r, ESPERA_REQUEUEUE))
+            break
+          } else {
+            quitarItemActual()
+            global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
+            try {
+              const connErr = global.dbsConn
+              if (connErr) await connErr.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
+            } catch (_) {}
+          }
         }
       }
-      if (global.dbsEpisodeQueue.length) await new Promise(r => setTimeout(r, QUEUE_DELAY))
+      if (global.dbsEpisodeQueue.length > 0) await new Promise(r => setTimeout(r, QUEUE_DELAY))
     }
-  } finally { global.dbsQueueRunning = false }
+  } catch (fatalErr) {
+    console.error(`[dbs-notify] Error fatal en la cola: ${fatalErr.message}`)
+  } finally {
+    global.dbsQueueRunning = false
+  }
 }
 
 async function checkNuevosEpisodios(chatId, conn) {
+  if (global.dbsCheckingChats.has(chatId)) return
+  global.dbsCheckingChats.add(chatId)
   let lista = []
-  try { lista = await fetchLatestEpisodesDBS() } catch (_) { return }
-  if (!lista.length) return
-  const seen = loadSeen(); if (!seen[chatId]) seen[chatId] = []
-  const nuevos = lista.filter(e => !seen[chatId].includes(e.id))
-  if (!nuevos.length) return
-  for (const ep of nuevos) seen[chatId].push(ep.id)
-  if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
-  saveSeen(seen)
-  if (nuevos.length > 1) try { await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} [🌐 AnimeDBS]`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._' }) } catch (_) {}
-  for (const ep of nuevos) global.dbsEpisodeQueue.push({ chatId, ep })
-  procesarCola().catch(() => {})
+  try {
+    try { lista = await fetchLatestEpisodesDBS() } catch (err) { console.error(`[dbs-notify] AnimeDBS: ${err.message}`) }
+    if (!lista.length) return
+
+    const seen = loadSeen()
+    if (!global.dbsActiveChats.has(chatId)) return
+    if (!seen[chatId]) seen[chatId] = []
+    const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.dbsQueuedIds.has(`${chatId}:${e.id}`))
+    if (!nuevos.length) return
+
+    if (nuevos.length > 1) {
+      try {
+        await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._` })
+      } catch (err) { console.error(`[dbs-notify] No se pudo enviar el resumen: ${err.message}`) }
+    }
+
+    for (const ep of nuevos) {
+      global.dbsEpisodeQueue.push({ chatId, ep })
+      global.dbsQueuedIds.add(`${chatId}:${ep.id}`)
+    }
+    procesarCola().catch(err => console.error(`[dbs-notify] Error procesando cola: ${err.message}`))
+  } finally {
+    global.dbsCheckingChats.delete(chatId)
+  }
 }
-function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT) {
+
+function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
   if (conn) global.dbsConn = conn
   if (global.dbsActiveChats.has(chatId)) clearInterval(global.dbsActiveChats.get(chatId).timer)
-  const timer = setInterval(() => { const c = global.dbsConn; if (c) checkNuevosEpisodios(chatId, c).catch(() => {}) }, intervalMin * 60 * 1000)
-  global.dbsActiveChats.set(chatId, { timer, intervalMin, startedAt: Date.now() })
-  const state = loadState(); state[chatId] = { intervalMin, startedAt: Date.now() }; saveState(state)
+  intervalSec = Number(intervalSec) || getGlobalIntervalSec()
+  const timer = setInterval(() => {
+    const c = global.dbsConn
+    if (!c) return
+    checkNuevosEpisodios(chatId, c).catch(e => {})
+  }, intervalSec * 1000)
+  const state = loadState()
+  const startedAt = Date.now()
+  const sentCount = Number(state[chatId]?.sentCount) || 0
+  global.dbsActiveChats.set(chatId, { timer, intervalSec, startedAt, sentCount })
+  state[chatId] = { intervalSec, startedAt, sentCount }
+  saveState(state)
+  // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
+  if (checkNow && global.dbsConn) checkNuevosEpisodios(chatId, global.dbsConn).catch(() => {})
 }
-function detenerNotificador(chatId) { const entry = global.dbsActiveChats.get(chatId); if (entry) { clearInterval(entry.timer); global.dbsActiveChats.delete(chatId) } const state = loadState(); delete state[chatId]; saveState(state) }
-function restaurarNotificadores(conn) { for (const [chatId, cfg] of Object.entries(loadState())) if (!global.dbsActiveChats.has(chatId)) iniciarNotificador(chatId, conn, cfg.intervalMin || CHECK_INTERVAL_DEFAULT) }
-if (!global.dbsWatchdog) global.dbsWatchdog = setInterval(() => restaurarNotificadores(global.dbsConn), 2 * 60 * 1000)
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+function detenerNotificador(chatId) {
+  const entry = global.dbsActiveChats.get(chatId)
+  if (entry) { clearInterval(entry.timer); global.dbsActiveChats.delete(chatId) }
+  const pendientes = global.dbsEpisodeQueue.filter(item => item.chatId === chatId)
+  global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.chatId !== chatId)
+  for (const item of pendientes) global.dbsQueuedIds.delete(`${chatId}:${item.ep.id}`)
+  const state = loadState()
+  delete state[chatId]
+  saveState(state)
+}
+
+function restaurarNotificadores(conn) {
+  const state = loadState()
+  for (const [chatId, cfg] of Object.entries(state)) {
+    if (chatId === '__config') continue
+    if (!global.dbsActiveChats.has(chatId)) {
+      iniciarNotificador(chatId, conn, getGlobalIntervalSec())
+    }
+  }
+}
+
+if (!global.dbsWatchdog) {
+  global.dbsWatchdog = setInterval(() => {
+    const conn = global.dbsConn
+    if (!conn) return
+    const state = loadState()
+    for (const [chatId, cfg] of Object.entries(state)) {
+      if (chatId === '__config') continue
+      if (!global.dbsActiveChats.has(chatId)) {
+        iniciarNotificador(chatId, conn, getGlobalIntervalSec())
+      }
+    }
+  }, 2 * 60 * 1000)
+}
+let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.dbsConn = conn
   restaurarNotificadores(conn)
+  const OWNER_COMMANDS = ['dbsstart','dbsstop','dbsinterval','dbsflush','dbsunblock','dbsexample']
+  if (OWNER_COMMANDS.includes(command) && !isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el *owner* puede usar este comando.' }, { quoted: m })
   if (command === 'dbsstart') {
-    const min = parseInt(text?.trim()); const intervalMin = (!isNaN(min) && min >= 5 && min <= 60) ? min : CHECK_INTERVAL_DEFAULT
-    iniciarNotificador(m.chat, conn, intervalMin)
-    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n╭━━━━━━〔 📡 〕━━━━━━\n┃ ⏱️ Intervalo: *${intervalMin} min*\n┃ 🌐 AnimeDBS\n┃ 💬 Chat registrado\n╰━━━━━━━━━━━━━━━━━━\n\n_Usa ${usedPrefix}dbsstop para detener._` }, { quoted: m })
-    try { const lista = await fetchLatestEpisodesDBS(); const seen = loadSeen(); if (!seen[m.chat]) seen[m.chat] = []; for (const ep of lista) if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id); seen[m.chat] = seen[m.chat].slice(-500); saveSeen(seen); await conn.sendMessage(m.chat, { text: `📋 *${lista.length}* episodios de AnimeDBS registrados como base.\n_Solo los nuevos se enviarán._` }, { quoted: m }) } catch (err) { await conn.sendMessage(m.chat, { text: `⚠️ Chequeo inicial falló: ${err.message}` }, { quoted: m }) }
+    const value = Number.parseInt(text?.trim(), 10)
+    const intervalSec = Number.isInteger(value) && value >= MIN_INTERVAL_SECONDS && value <= MAX_INTERVAL_SECONDS ? value : CHECK_INTERVAL_SECONDS
+    iniciarNotificador(m.chat, conn, intervalSec, false)
+    let lista = []
+    try {
+      lista = await fetchLatestEpisodesDBS()
+      const seen = loadSeen(); if (!seen[m.chat]) seen[m.chat] = []
+      for (const ep of lista) if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id)
+      seen[m.chat] = seen[m.chat].slice(-500); saveSeen(seen)
+    } catch (_) {}
+    await conn.sendMessage(m.chat, { text: `✅ *Notificador AnimeDBS activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🌐 *AnimeDBS* — \`Sub español\`\n┃ 💬 *Chat Activo*\n📋 *${lista.length}* episodios registrados como base.\n> Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}dbsstop\` para detener*\n*Usa \`${usedPrefix}dbsstatus\` para ver el estado*` }, { quoted: m })
     return
   }
-  if (command === 'dbsstop') { if (!global.dbsActiveChats.has(m.chat)) return m.reply('ℹ️ El notificador no estaba activo.'); detenerNotificador(m.chat); return m.reply(`🛑 *Notificador detenido.*\n_Usa ${usedPrefix}dbsstart para reactivar._`) }
-  if (command === 'dbsstatus') { const active = global.dbsActiveChats.has(m.chat); const entry = global.dbsActiveChats.get(m.chat); const cola = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); const vistos = (loadSeen()[m.chat] || []).length; return m.reply(`📡 *Estado AnimeDBS*\n\n${active ? `✅ *Activo* — cada ${entry.intervalMin} min` : '🔴 *Inactivo*'}\n📋 Cola: *${cola.length}* pendiente(s)\n🔵 Procesando: *${global.dbsQueueRunning ? 'Sí' : 'No'}*\n👁️ Vistos: *${vistos}*`) }
-  if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} ${i.chatId === m.chat ? '← este chat' : ''}`).join('\n') : '✅ Cola vacía.')
-  if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(i => i.chatId !== m.chat); return m.reply(`🗑️ *${antes - global.dbsEpisodeQueue.length}* episodio(s) eliminado(s).`) }
-  if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; global.dbsQueueRunning = false; procesarCola().catch(() => {}); return m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.`) }
-  if (command === 'dbscheck') { await m.reply('🔍 Chequeando AnimeDBS...'); const antes = global.dbsEpisodeQueue.length; await checkNuevosEpisodios(m.chat, conn); if (global.dbsEpisodeQueue.length === antes) await m.reply('✅ Sin episodios nuevos.'); return }
-  if (command === 'dbsinterval') { const min = parseInt(text?.trim()); if (isNaN(min) || min < 5 || min > 60) return m.reply(`❌ Número entre *5* y *60*.\nEj: ${usedPrefix}dbsinterval 15`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); iniciarNotificador(m.chat, conn, min); return m.reply(`⏱️ Intervalo actualizado a *${min} minutos*.`) }
-  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS() } catch (err) { return m.reply(`❌ Error: ${err.message}`) } if (!lista.length) return m.reply('❌ Sin episodios disponibles.'); const seleccion = lista.slice(0, cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (AnimeDBS 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) global.dbsEpisodeQueue.push({ chatId: m.chat, ep }); procesarCola().catch(() => {}); return }
+  if (command === 'dbsstop') {
+    if (!global.dbsActiveChats.has(m.chat)) return m.reply('ℹ️ El notificador no estaba activo.')
+    const entry = global.dbsActiveChats.get(m.chat); const activeTime = formatActiveTime(entry.startedAt); const sentCount = Number(entry.sentCount) || 0
+    detenerNotificador(m.chat)
+    return m.reply(`🛑 *Notificador detenido*\n\n├ Activo: *${activeTime}*\n└ Avisos enviados: *${sentCount}*\n\n*Usa ${usedPrefix}dbsstart para reactivarlo.*`)
+  }
+  if (command === 'dbsstatus') {
+    const active = global.dbsActiveChats.has(m.chat); const entry = global.dbsActiveChats.get(m.chat); const cola = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); const vistos = (loadSeen()[m.chat] || []).length
+    let txt = `📡 *Estado AnimeDBS*\n\n${active ? `✅ *Activo* — cada ${formatInterval(entry.intervalSec)}` : '🔴 *Inactivo*'}\n📋 Cola: *${cola.length}* pendiente(s)\n🔵 Procesando: *${global.dbsQueueRunning ? 'Sí' : 'No'}*\n👁️ Vistos: *${vistos}*`
+    if (cola.length) txt += `\n\n*En cola:*\n` + cola.slice(0,5).map((i,n) => `  ${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)}`).join('\n')
+    return m.reply(txt)
+  }
+  if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} [${i.chatId === m.chat ? 'este chat' : 'otro chat'}]`).join('\n') : '✅ Cola vacía.')
+  if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; const removed = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(i => i.chatId !== m.chat); for (const item of removed) global.dbsQueuedIds.delete(`${item.chatId}:${item.ep.id}`); return m.reply(`🗑️ *${antes - global.dbsEpisodeQueue.length}* episodio(s) eliminado(s).`) }
+  if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
+  if (command === 'dbscheck') { await m.reply('🔍 Chequeando AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
+  if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }
+  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (AnimeDBS 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
 }
-handler.command = /^(?:dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
-handler.tags = ['anime', 'notificaciones']
-handler.help = ["'dbsstart'", "'dbsstop'", "'dbsstatus'", "'dbscheck'", "'dbsqueue'", "'dbsflush'", "'dbsunblock'", "'dbsinterval <min>'", "'dbsexample [N]'"]
-handler.exp = 0
-handler.level = 0
-handler.limit = false
+handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
+handler.tags = ['anime','notificaciones']
+handler.help = ['dbsstart [segundos]','dbsstop','dbsstatus','dbscheck','dbsqueue','dbsflush','dbsunblock','dbsinterval <segundos>','dbsexample [N]']
+handler.exp = 0; handler.level = 0; handler.limit = false
 handler.before = async (m, { conn }) => { if (conn) global.dbsConn = conn; restaurarNotificadores(conn) }
 export default handler
