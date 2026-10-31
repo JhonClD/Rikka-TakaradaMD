@@ -441,7 +441,10 @@ global.reloadHandler = async function (restatConn) {
 };
 ;
 
-const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
+const pluginFolderPath = existsSync(join(__dirname, './plugins/index'))
+  ? './plugins/index'
+  : './plugins';
+const pluginFolder = global.__dirname(join(__dirname, pluginFolderPath));
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 
