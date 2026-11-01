@@ -173,6 +173,30 @@ async function discoverCatalogSubscriptions() {
   return subscriptions
 }
 
+async function discoverLatestFeedEpisode() {
+  const response = await axios.get(`https://${DOMAIN}/`, {
+    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
+    timeout: 20_000,
+  })
+  const $ = cheerio.load(response.data)
+  const heading = $('h2').filter((_, element) => $(element).text().trim().toLowerCase() === 'episodios').first()
+  const section = heading.length ? heading.parent().parent().parent() : $()
+  let latest = null
+  section.find('a[href^="/media/"]').each((_, element) => {
+    if (latest) return
+    const href = $(element).attr('href') || ''
+    const match = href.match(/^\/media\/([^/]+)\/(\d+)$/i)
+    if (!match) return
+    latest = {
+      seriesUrl: new URL(`/media/${match[1]}`, `https://${DOMAIN}`).href,
+      episodeUrl: new URL(href, `https://${DOMAIN}`).href,
+      episodeNumber: Number(match[2]),
+    }
+  })
+  if (!latest) throw new Error('No encontré episodios recientes en el feed global de AnimeAV1.')
+  return latest
+}
+
 async function initializeCatalogForChat(chatId) {
   const { state, chat } = getChatState(chatId)
   if (chat.subscriptions.length) return chat.subscriptions.length
@@ -445,15 +469,21 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
 
   if (command === 'animev1example') {
     const { chat } = getChatState(m.chat)
-    if (!chat.subscriptions.length) {
-      await m.reply('🔎 Cargando el catálogo de AnimeV1...')
-      await initializeCatalogForChat(m.chat)
-    }
-    if (!chat.subscriptions.length) return m.reply('❌ No hay series disponibles en el catálogo de AnimeV1.')
-    const subscription = chat.subscriptions[0]
-    const response = await animeV1.getAnimeInfo(subscription.url)
-    const ep = [...(response?.data?.episodes || [])].sort((a, b) => episodeNumber(b) - episodeNumber(a))[0]
+    await m.reply('🔎 Buscando el episodio más reciente del feed global de AnimeAV1...')
+    const latest = await discoverLatestFeedEpisode()
+    const response = await animeV1.getAnimeInfo(latest.seriesUrl)
+    const anime = response?.data
+    const ep = (anime?.episodes || []).find(item => item.url === latest.episodeUrl) ||
+      [...(anime?.episodes || [])].sort((a, b) => episodeNumber(b) - episodeNumber(a))[0]
     if (!ep) return m.reply('❌ No encontré episodios para esa serie.')
+    const stored = chat.subscriptions.find(item => item.url === latest.seriesUrl && item.variant === 'SUB')
+    const subscription = stored || {
+      key: subscriptionKey(latest.seriesUrl, 'SUB'),
+      url: latest.seriesUrl,
+      title: clean(anime.title || latest.seriesUrl, 120),
+      image: anime.image || '',
+      variant: 'SUB',
+    }
     const id = episodeKey(subscription.key, ep)
     if (!global.animeV1NotifyQueuedIds.has(`${m.chat}:${id}`)) {
       global.animeV1NotifyQueue.push({ chatId: m.chat, id, subscriptionKey: subscription.key, title: subscription.title, image: subscription.image, variant: subscription.variant, ep, manual: true })
