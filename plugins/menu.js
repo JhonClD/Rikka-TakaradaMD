@@ -61,6 +61,7 @@ const handler = async (m, { conn, usedPrefix }) => {
   ୨୧     ꒰ \`Comandos\`  :  ${totalCommands}
 
 ❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼
+╰─➤ _Toca «ver más» para ver todos los comandos._
 ${readMore}
 ╭━━━〔 🎐 *ANIME & MONITORES* 〕━━━⬣
 ┃ ⟡ *${command('animev1')}* _<título>_
