@@ -73,9 +73,9 @@ function parseIntervalInput(value) {
 function normalizeVariant(value) { return /^dub$/i.test(value) ? 'DUB' : 'SUB' }
 function getChatState(chatId) {
   const state = loadState()
-  state[chatId] ||= { intervalSec: getGlobalIntervalSec(), startedAt: Date.now(), sentCount: 0, subscriptions: [], seen: [] }
-  state[chatId].subscriptions ||= []
-  state[chatId].seen ||= []
+  if (!state[chatId]) state[chatId] = { intervalSec: getGlobalIntervalSec(), startedAt: Date.now(), sentCount: 0, subscriptions: [], seen: [] }
+  if (!Array.isArray(state[chatId].subscriptions)) state[chatId].subscriptions = []
+  if (!Array.isArray(state[chatId].seen)) state[chatId].seen = []
   return { state, chat: state[chatId] }
 }
 
@@ -255,7 +255,7 @@ function startChat(chatId, conn, intervalSec = null, checkNow = true) {
   const interval = Number(intervalSec) || Number(chat.intervalSec) || getGlobalIntervalSec()
   const entry = { timer: setInterval(() => checkChat(chatId, global.animeV1NotifyConn).catch(() => {}), interval * 1000), intervalSec: interval, startedAt: chat.startedAt || Date.now(), sentCount: Number(chat.sentCount) || 0 }
   chat.intervalSec = interval
-  chat.startedAt ||= Date.now()
+  if (!chat.startedAt) chat.startedAt = Date.now()
   state[chatId] = chat
   saveState(state)
   global.animeV1NotifyActiveChats.set(chatId, entry)
@@ -285,12 +285,12 @@ function restoreChats(conn) {
   }
 }
 
-global.animeV1NotifyActiveChats ||= new Map()
-global.animeV1NotifyQueue ||= []
-global.animeV1NotifyQueuedIds ||= new Set()
-global.animeV1NotifyChecking ||= new Set()
-global.animeV1NotifyQueueRunning ||= false
-global.animeV1NotifyConn ||= null
+if (!global.animeV1NotifyActiveChats) global.animeV1NotifyActiveChats = new Map()
+if (!global.animeV1NotifyQueue) global.animeV1NotifyQueue = []
+if (!global.animeV1NotifyQueuedIds) global.animeV1NotifyQueuedIds = new Set()
+if (!global.animeV1NotifyChecking) global.animeV1NotifyChecking = new Set()
+if (typeof global.animeV1NotifyQueueRunning !== 'boolean') global.animeV1NotifyQueueRunning = false
+if (!global.animeV1NotifyConn) global.animeV1NotifyConn = null
 
 if (!global.animeV1NotifyWatchdog) {
   global.animeV1NotifyWatchdog = setInterval(() => restoreChats(global.animeV1NotifyConn), 2 * 60 * 1000)
