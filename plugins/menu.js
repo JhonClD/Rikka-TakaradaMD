@@ -90,59 +90,93 @@ ${readMore}
 ┃ ⟡ *${command('animev1')}* _<título>_
 ┃ ⟡ *${command('animev1info')}* _<núm | URL>_
 ┃ ⟡ *${command('animev1ep')}* | *${command('animev1dl')}* _<ep> [sub|dub]_
+┃ ⟡ *${command('animev1help')}* | *${command('latexample')}* _[N]_
 ┃ ⟡ *${command('nidl')}* _<nombre> [ep] [SUB|DUB] [T2]_
 ┃ ⟡ *${command('crlogin')}* _<email> <pass>_ | *${command('crlogout')}*
-┃ ⟡ *${command('cr')}* _<set | rem | status | list | notify>_
-┃ ⟡ *Monitores (animev1 / dbs / jk / tio):*
-┃   ╰› _start • stop • status • check • queue_
-┃   ╰› _flush • unblock • interval • example_
-┃ ⟡ *${command('latexample')}* _[N]_ | *${command('animev1help')}*
+┃ ⟡ *${command('crset')}* | *${command('crrem')}* | *${command('crstatus')}*
+┃ ⟡ *${command('crlist')}* | *${command('crnotify')}*
+┃ ⟡ *AnimeV1:* _animev1start • animev1stop • animev1status • animev1check • animev1list_
+┃   ╰› _animev1queue • animev1flush • animev1unblock • animev1interval • animev1example_
+┃ ⟡ *AnimeDBS:* _dbsstart • dbsstop • dbsstatus • dbscheck • dbsqueue_
+┃   ╰› _dbsflush • dbsunblock • dbsinterval • dbsexample_
+┃ ⟡ *JKAnime:* _jkstart • jkstop • jkstatus • jkcheck • jkqueue_
+┃   ╰› _jkflush • jkunblock • jkinterval • jkexample_
+┃ ⟡ *TioAnime:* _tiostart • tiostop • tiostatus • tiocheck • tioqueue_
+┃   ╰› _tioflush • tiounblock • tiointerval • tioexample_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 📥 *DESCARGAS* 〕━━━⬣
 ┃ ⟡ *${command('play')}* | *${command('play2')}* | *${command('playaudio')}*
 ┃ ⟡ *${command('ytmp3')}* | *${command('yta')}* | *${command('ytmp3doc')}*
 ┃ ⟡ *${command('ytmp4')}* | *${command('ytmp4doc')}* | *${command('autoyt')}* _<on|off>_
+┃ ⟡ _autoytdl • autoyoutube_
 ┃ ⟡ *${command('mp3')}* | *${command('mp4')}* | *${command('video')}*
-┃ ⟡ *${command('tiktok')}* | *${command('fb')}* _<url>_
-┃ ⟡ *${command('x')}* | *${command('twitter')}* _<url>_
-┃ ⟡ *${command('mediafire')}* (*${command('mf')}*) _<url>_
-┃ ⟡ *${command('mega')}* (*${command('mg')}*) | *${command('gdrive')}* _<url>_
-┃ ⟡ *${command('torrent')}*
+┃ ⟡ *${command('tiktok')}* _<url>_ | _ttdl • tiktokdl • tiktoknowm • tt • ttnowm • tiktokaudio_
+┃ ⟡ *${command('fb')}* (*facebook* | *fbdl*) _<url>_
+┃ ⟡ *${command('x')}* | *${command('twitter')}* _<url>_ | _xdl • dlx • twdl • twt • twitterdl_
+┃ ⟡ *${command('mediafire')}* (*${command('mf')}*) _<url>_ | _cancelar • stop_
+┃ ⟡ *${command('mega')}* (*${command('mg')}*) | *${command('gdrive')}* (*gd • drive*) _<url>_
+┃ ⟡ *${command('torrent')}* (*bt*) | *tcancel*
+┃ ⟡ *${command('dw')}* | *dw2* | *dw3* | *dw4* | *mi* _<url>_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 🔍 *BUSCADORES* 〕━━━⬣
-┃ ⟡ *${command('anime')}* _<nombre>_
-┃ ⟡ *${command('yts')}* _<texto>_
-┃ ⟡ *${command('pinterest')}* _<búsqueda | enlace>_
+┃ ⟡ *${command('anime')}* | *animeinfo* _<nombre>_
+┃ ⟡ *${command('yts')}* _<texto>_ | _ytsearch • searchyt • buscaryt_
+┃ ⟡ _videosearch • audiosearch_
+┃ ⟡ *${command('pinterest')}* (*pin*) _<búsqueda | enlace>_
+┃ ⟡ *${command('tts')}* _<texto>_
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
+
+╭━━━〔 🎭 *INTERACCIONES* 〕━━━⬣
+┃ ⟡ _peek • comfort • thinkhard • curious • sniff • stare_
+┃ ⟡ _trip • blowkiss • snuggle • sleep • cold • sing_
+┃ ⟡ _tickle • scream • push • nope • jump • heat_
+┃ ⟡ _gaming • draw • call • seduce • shy • slap_
+┃ ⟡ _bath • angry • bored • bite • bleh • bonk_
+┃ ⟡ _blush • bully • cry • happy • coffee • clap_
+┃ ⟡ _cringe • dance • cuddle • drunk • dramatic • eat_
+┃ ⟡ _highfive • hug • kill • kiss • kisscheek • lick_
+┃ ⟡ _laugh • pat • love • pout • punch • run_
+┃ ⟡ _scared • sad • smoke • smile • spit • smug_
+┃ ⟡ _think • step • wave • walk • wink_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 🛠️ *HERRAMIENTAS & CONVERTIDORES* 〕━━━⬣
 ┃ ⟡ *${command('s')}* | *${command('sticker')}* | *${command('st')}*
 ┃ ⟡ *${command('tourl')}* | *${prefix}tourl[1-13]* | *${command('tourllist')}*
-┃ ⟡ *${command('translate')}* _<idioma> <texto>_ | *${command('tts')}*
+┃ ⟡ *${command('translate')}* _<idioma> <texto>_ | _traducir • trad_
 ┃ ⟡ *${command('ss')}* | *${command('ssweb')}* _<url>_
 ┃ ⟡ *${command('fetch')}* | *${command('get')}* _<url>_
-┃ ⟡ *${command('speedtest')}*
+┃ ⟡ *upload* | *uploader* | *urllist*
+┃ ⟡ *${command('speedtest')}* (*speed* | *stest*)
+┃ ⟡ *${command('ping')}* | *p* | *status* | *estado* | *infobot*
+┃ ⟡ *${command('deps')}* | *dependencias* | *checkdeps*
 ┃ ⟡ *RSS:* *${command('rssadd')}* _<url>_ | *${command('rssdel')}* _<n>_
 ┃   ╰› _rsslist • rssrecientes • rsscheck_
 ┃   ╰› _rsspause <n> • rssresume <n>_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 🏯 *GRUPOS* 〕━━━⬣
-┃ ⟡ *${command('welcome')}* _<on|off|msg|bye|reset|ver>_
+┃ ⟡ *${command('welcome')}* (*bienvenida*) _<on|off|msg|bye|reset|ver>_
+┃ ⟡ *${command('setwelcome')}* | *${command('setgoodbye')}*
 ┃ ⟡ *${command('antilink')}* | *${command('antilink2')}* _<on|off>_
-┃ ⟡ *${command('kickall')}*
+┃ ⟡ *${command('promote')}* | *${command('promover')}*
+┃ ⟡ *${command('demote')}* | *${command('degradar')}*
+┃ ⟡ *${command('kickall')}* (*purge*)
+┃ ⟡ *${command('join')}* | *unir* _<link>_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 💫 *PERFIL & INFO* 〕━━━⬣
 ┃ ⟡ *${command('profile')}* | *${command('setbirth')}* | *${command('setgender')}*
-┃ ⟡ *${command('menu')}* | *${command('owner')}* | *${command('sysinfo')}* | *${command('host')}*
-┃ ⟡ *${command('jid')}* | *${command('lid')}* | *${command('myjid')}*
+┃ ⟡ *${command('menu')}* | *${command('owner')}* (*creator* | *creador* | *propietario*)
+┃ ⟡ *${command('sysinfo')}* | *${command('host')}*
+┃ ⟡ *${command('jid')}* | *${command('lid')}* | *${command('myjid')}* | *miid* | *infojid*
+┃ ⟡ *perfil* | *pf*
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 🔞 *NSFW* 〕━━━⬣
-┃ ⟡ *${command('hdl')}* _<nombre> <episodio>_
+┃ ⟡ *${command('hdl')}* _<nombre> <episodio>_ | _hentaidl • hlatest • hentailatest_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 💎 *OWNER* 〕━━━⬣
@@ -150,11 +184,13 @@ ${readMore}
 ┃ ⟡ *${command('bash')}* | *${command('sh')}* | *${command('sudo')}* _<cmd>_
 ┃ ⟡ *${command('npm')}* | *${command('pip')}* | *${command('pip3')}* | *${command('pkg')}* | *${command('apt')}* _<pkg>_
 ┃ ⟡ *${command('dep')}* _<cmd>_ | *${command('deps')}*
-┃ ⟡ *${command('addprem')}* | *${command('delprem')}* | *${command('checkprem')}* _@user_
-┃ ⟡ *${command('update')}* _[--force]_ | *${command('soloowner')}* _<on|off>_
-┃ ⟡ *${command('setname')}* | *${command('resetname')}* | *${command('setbanner')}*
-┃ ⟡ *${command('setprefix')}* _<prefijo|noprefix|reset>_
-┃ ⟡ *${command('join')}* _<link>_ | *${command('testbtn')}* _<sub>_
+┃ ⟡ *${command('addprem')}* | *${command('delprem')}* | *${command('removeprem')}* | *${command('checkprem')}* _@user_
+┃ ⟡ *${command('update')}* | *actualizar* | *gitpull* _[--force]_
+┃ ⟡ *${command('soloowner')}* _<on|off>_
+┃ ⟡ *${command('setname')}* | *${command('setbotname')}* | *${command('resetname')}*
+┃ ⟡ *${command('setbanner')}* | *${command('setbotbanner')}*
+┃ ⟡ *${command('setprefix')}* | *${command('setbotprefix')}* _<prefijo|noprefix|reset>_
+┃ ⟡ *${command('testbtn')}* _<sub>_
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣`;
 
   if (thumbBuffer) {
