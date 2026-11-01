@@ -17,6 +17,7 @@ const MAX_INTERVAL_SECONDS = 3600
 const QUEUE_DELAY = 90_000
 const MAX_TRACKED = 20
 const MAX_SEEN = 500
+const AUTO_CATALOG_PAGES = 2
 const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DOMAIN || 'animeav1.com')
   .replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase()
 
@@ -114,6 +115,52 @@ async function resolveSubscription(input, variant = 'SUB') {
     lastEpisodeNumber: episodeNumber(latest),
     latestEpisode: latest,
   }
+}
+
+async function discoverCatalogSubscriptions() {
+  const results = []
+  const seenUrls = new Set()
+  for (let page = 1; page <= AUTO_CATALOG_PAGES; page++) {
+    try {
+      const response = await animeV1.getCatalog(page)
+      for (const item of response?.data?.results || []) {
+        if (!item?.url || seenUrls.has(item.url)) continue
+        seenUrls.add(item.url)
+        results.push(item)
+      }
+    } catch (error) {
+      console.error(`[animev1-notify] No se pudo leer el catálogo página ${page}: ${error.message}`)
+    }
+  }
+  const subscriptions = []
+  for (const item of results.slice(0, MAX_TRACKED)) {
+    try {
+      const response = await animeV1.getAnimeInfo(item.url)
+      const anime = response?.data
+      const episodes = [...(anime?.episodes || [])].sort((a, b) => episodeNumber(a) - episodeNumber(b))
+      const latest = episodes[episodes.length - 1]
+      if (!latest) continue
+      subscriptions.push({
+        key: subscriptionKey(item.url, 'SUB'),
+        url: item.url,
+        title: clean(anime.title || item.title || 'Anime', 120),
+        image: anime.image || item.image || '',
+        variant: 'SUB',
+        lastEpisodeNumber: episodeNumber(latest),
+      })
+    } catch (error) {
+      console.error(`[animev1-notify] No se pudo cargar ${item.title || item.url}: ${error.message}`)
+    }
+  }
+  return subscriptions
+}
+
+async function initializeCatalogForChat(chatId) {
+  const { state, chat } = getChatState(chatId)
+  if (chat.subscriptions.length) return chat.subscriptions.length
+  chat.subscriptions = await discoverCatalogSubscriptions()
+  saveState(state)
+  return chat.subscriptions.length
 }
 
 async function fetchNewEpisodes(chatId) {
@@ -296,42 +343,20 @@ if (!global.animeV1NotifyWatchdog) {
   global.animeV1NotifyWatchdog = setInterval(() => restoreChats(global.animeV1NotifyConn), 2 * 60 * 1000)
 }
 
-const ownerCommands = new Set(['animev1start', 'animev1stop', 'animev1follow', 'animev1unfollow', 'animev1interval', 'animev1flush', 'animev1unblock'])
+const ownerCommands = new Set(['animev1start', 'animev1stop', 'animev1interval', 'animev1flush', 'animev1unblock'])
 
 const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.animeV1NotifyConn = conn
   restoreChats(conn)
   if (ownerCommands.has(command) && !isOwner) return m.reply('⛔ Solo el *owner* puede usar este comando.')
 
-  if (command === 'animev1follow') {
-    const parts = String(text || '').trim().split(/\s+/)
-    const variant = normalizeVariant(parts.at(-1))
-    const input = /^\w+$/.test(parts.at(-1) || '') && /^(sub|dub)$/i.test(parts.at(-1)) ? parts.slice(0, -1).join(' ') : String(text || '').trim()
-    const subscription = await resolveSubscription(input, variant)
-    const { state, chat } = getChatState(m.chat)
-    if (!chat.subscriptions.some(item => item.key === subscription.key)) {
-      if (chat.subscriptions.length >= MAX_TRACKED) return m.reply(`⚠️ Máximo ${MAX_TRACKED} series por chat.`)
-      chat.subscriptions.push({ key: subscription.key, url: subscription.url, title: subscription.title, image: subscription.image, variant: subscription.variant, lastEpisodeNumber: subscription.lastEpisodeNumber })
-    }
-    startChat(m.chat, conn, chat.intervalSec, false)
-    saveState(state)
-    return m.reply(`✅ *AnimeV1 añadido al notificador*\n\n🎬 *${subscription.title}*\n🎙️ Variante: *${subscription.variant}*\n📌 Episodio actual registrado: *${subscription.lastEpisodeNumber}*\n\nSolo se enviarán episodios posteriores. Usa *${usedPrefix}animev1list* para ver tus series.`)
-  }
-
-  if (command === 'animev1unfollow') {
-    const query = clean(text, 100).toLowerCase()
-    const { state, chat } = getChatState(m.chat)
-    const index = chat.subscriptions.findIndex(item => item.title.toLowerCase() === query || item.key === text.trim())
-    if (index < 0) return m.reply(`❌ No encontré esa serie. Usa *${usedPrefix}animev1list*.`)
-    const [removed] = chat.subscriptions.splice(index, 1)
-    saveState(state)
-    if (!chat.subscriptions.length) stopChat(m.chat)
-    return m.reply(`🛑 Dejaste de seguir *${removed.title}* (${removed.variant}).`)
-  }
-
   if (command === 'animev1start') {
     const { chat } = getChatState(m.chat)
-    if (!chat.subscriptions.length) return m.reply(`⚠️ Primero añade una serie: *${usedPrefix}animev1follow <título> [SUB|DUB]*`)
+    if (!chat.subscriptions.length) {
+      await m.reply('🔎 Cargando el catálogo de AnimeV1 y registrando la base inicial...')
+      const total = await initializeCatalogForChat(m.chat)
+      if (!total) return m.reply('❌ No pude obtener series del catálogo de AnimeV1. Intenta de nuevo más tarde.')
+    }
     const input = parseIntervalInput(text)
     const interval = input && input >= MIN_INTERVAL_SECONDS && input <= MAX_INTERVAL_SECONDS ? input : chat.intervalSec || getGlobalIntervalSec()
     startChat(m.chat, conn, interval, false)
@@ -360,6 +385,10 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
   }
 
   if (command === 'animev1check') {
+    if (!getChatState(m.chat).chat.subscriptions.length) {
+      await m.reply('🔎 Cargando el catálogo de AnimeV1...')
+      await initializeCatalogForChat(m.chat)
+    }
     await m.reply('🔍 Revisando episodios nuevos en AnimeV1...')
     const count = await checkChat(m.chat, conn)
     return m.reply(count ? `✅ Detecté *${count}* episodio(s), añadidos a la cola.` : '✅ No hay episodios nuevos.')
@@ -398,7 +427,11 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
 
   if (command === 'animev1example') {
     const { chat } = getChatState(m.chat)
-    if (!chat.subscriptions.length) return m.reply(`⚠️ Primero usa *${usedPrefix}animev1follow <título>*.`)
+    if (!chat.subscriptions.length) {
+      await m.reply('🔎 Cargando el catálogo de AnimeV1...')
+      await initializeCatalogForChat(m.chat)
+    }
+    if (!chat.subscriptions.length) return m.reply('❌ No hay series disponibles en el catálogo de AnimeV1.')
     const subscription = chat.subscriptions[0]
     const response = await animeV1.getAnimeInfo(subscription.url)
     const ep = [...(response?.data?.episodes || [])].sort((a, b) => episodeNumber(b) - episodeNumber(a))[0]
@@ -413,9 +446,9 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
   }
 }
 
-handler.command = /^(animev1follow|animev1unfollow|animev1start|animev1stop|animev1list|animev1status|animev1check|animev1interval|animev1queue|animev1flush|animev1unblock|animev1example)$/i
+handler.command = /^(animev1start|animev1stop|animev1list|animev1status|animev1check|animev1interval|animev1queue|animev1flush|animev1unblock|animev1example)$/i
 handler.tags = ['anime', 'notificaciones']
-handler.help = ['animev1follow <título> [SUB|DUB]', 'animev1unfollow <título>', 'animev1start [intervalo]', 'animev1stop', 'animev1list', 'animev1status', 'animev1check', 'animev1interval <tiempo>', 'animev1queue', 'animev1flush', 'animev1unblock', 'animev1example']
+handler.help = ['animev1start [intervalo]', 'animev1stop', 'animev1list', 'animev1status', 'animev1check', 'animev1interval <tiempo>', 'animev1queue', 'animev1flush', 'animev1unblock', 'animev1example']
 handler.exp = 0
 handler.limit = false
 
