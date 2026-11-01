@@ -52,14 +52,14 @@ const convertLocally = async (mediaBuffer, isAnimated, packname, author) => {
   throw lastError || new Error('No hay un conversor local disponible.');
 };
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+const handler = async (m, { conn, text }) => {
   const quoted = m?.quoted || m;
   const media = getMediaMessage(quoted);
   const mime = String(media.mimetype || '').toLowerCase();
 
   if (!mime) {
     return m.reply(
-      `❌ Cita o adjunta una imagen, video o GIF.\n_Uso: *${usedPrefix}${command}* [pack | autor]_`,
+      '✖ *Error:* Adjunta o cita una imagen/video/GIF.\n▸ *Sintaxis:* `/s [pack | autor]`',
     );
   }
 
