@@ -19,7 +19,6 @@ const MAX_INTERVAL_SECONDS = 3600
 const QUEUE_DELAY = 90_000
 const MAX_TRACKED = 20
 const MAX_SEEN = 500
-const AUTO_CATALOG_PAGES = 2
 const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DOMAIN || 'animeav1.com')
   .replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase()
 
@@ -120,55 +119,49 @@ async function resolveSubscription(input, variant = 'SUB') {
 }
 
 async function discoverCatalogSubscriptions() {
-  const results = []
-  const seenUrls = new Set()
-  for (let page = 1; page <= AUTO_CATALOG_PAGES; page++) {
-    try {
-      const response = await axios.get(`https://${DOMAIN}/catalogo?page=${page}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
-        timeout: 20_000,
-      })
-      const $ = cheerio.load(response.data)
-      const pageResults = []
-      $('a[href^="/media/"]').each((_, element) => {
-        const href = $(element).attr('href') || ''
-        if (!/^\/media\/[^/]+$/i.test(href)) return
-        const card = $(element).closest('article').length ? $(element).closest('article') : $(element).parent()
-        const title = card.find('h3, h2').first().text().trim() ||
-          $(element).find('.sr-only').first().text().trim() ||
-          card.find('img').first().attr('alt') || ''
-        if (!title) return
-        const image = card.find('img').first().attr('src') || ''
-        pageResults.push({
-          title,
-          url: new URL(href, `https://${DOMAIN}`).href,
+  const results = new Map()
+  try {
+    const response = await axios.get(`https://${DOMAIN}/`, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
+      timeout: 20_000,
+    })
+    const $ = cheerio.load(response.data)
+    const heading = $('h2').filter((_, element) => $(element).text().trim().toLowerCase() === 'episodios').first()
+    const section = heading.length ? heading.parent().parent().parent() : $()
+    section.find('a[href^="/media/"]').each((_, element) => {
+      const href = $(element).attr('href') || ''
+      const match = href.match(/^\/media\/([^/]+)\/(\d+)$/i)
+      if (!match) return
+      const seriesUrl = new URL(`/media/${match[1]}`, `https://${DOMAIN}`).href
+      const epNum = Number(match[2])
+      const card = $(element).closest('article').length ? $(element).closest('article') : $(element).parent()
+      const title = card.find('header').first().text().trim() || $(element).find('.sr-only').first().text().trim() || match[1].replace(/-/g, ' ')
+      const image = card.find('img').first().attr('src') || ''
+      const current = results.get(seriesUrl)
+      if (!current || epNum > current.lastEpisodeNumber) {
+        results.set(seriesUrl, {
+          url: seriesUrl,
+          title: clean(title, 120),
           image: image ? new URL(image, `https://${DOMAIN}`).href : '',
+          latestEpisodeNumber: epNum,
         })
-      })
-      for (const item of pageResults) {
-        if (!item?.url || seenUrls.has(item.url)) continue
-        seenUrls.add(item.url)
-        results.push(item)
       }
-    } catch (error) {
-      console.error(`[animev1-notify] No se pudo leer el catálogo página ${page}: ${error.message}`)
-    }
+    })
+  } catch (error) {
+    console.error(`[animev1-notify] No se pudo leer episodios recientes: ${error.message}`)
   }
   const subscriptions = []
-  for (const item of results.slice(0, MAX_TRACKED)) {
+  for (const item of Array.from(results.values()).slice(0, MAX_TRACKED)) {
     try {
       const response = await animeV1.getAnimeInfo(item.url)
       const anime = response?.data
-      const episodes = [...(anime?.episodes || [])].sort((a, b) => episodeNumber(a) - episodeNumber(b))
-      const latest = episodes[episodes.length - 1]
-      if (!latest) continue
       subscriptions.push({
         key: subscriptionKey(item.url, 'SUB'),
         url: item.url,
         title: clean(anime.title || item.title || 'Anime', 120),
         image: anime.image || item.image || '',
         variant: 'SUB',
-        lastEpisodeNumber: episodeNumber(latest),
+        lastEpisodeNumber: item.latestEpisodeNumber,
       })
     } catch (error) {
       console.error(`[animev1-notify] No se pudo cargar ${item.title || item.url}: ${error.message}`)
