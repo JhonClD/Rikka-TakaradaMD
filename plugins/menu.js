@@ -7,11 +7,37 @@ const BANNER_PATH = join(__dirname, '../src/banner.jpg');
 const more = String.fromCharCode(8206);
 const readMore = more.repeat(4001);
 
+const clockString = (milliseconds) => {
+  const days = Math.floor(milliseconds / 86400000);
+  const hours = Math.floor(milliseconds / 3600000) % 24;
+  const minutes = Math.floor(milliseconds / 60000) % 60;
+  const seconds = Math.floor(milliseconds / 1000) % 60;
+  return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+};
+
 const handler = async (m, { conn, usedPrefix }) => {
   const settings = global.db?.data?.settings?.[conn.user.jid] || {};
   const bannerUrl = settings.banner?.startsWith('http') ? settings.banner : null;
   const prefix = usedPrefix || '/';
   const command = (name) => `${prefix}${name}`;
+  const botName = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
+  const pushname = m.pushName || 'Usuario';
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Lima',
+  }).format(new Date());
+  const uptime = clockString(process.uptime() * 1000);
+  const userData = global.db?.data?.users?.[m.sender] || {};
+  const isOwner = m.fromMe || (global.owner || []).some(([number]) =>
+    String(number).replace(/[^0-9]/g, '') === String(m.sender).replace(/[^0-9]/g, ''),
+  );
+  const isPremium = isOwner
+    ? '👑 Owner'
+    : userData.premiumTime > Date.now() ? '✅' : '❌';
+  const totalCommands = Object.values(global.plugins || {}).reduce((total, plugin) => {
+    if (!plugin?.command) return total;
+    const help = Array.isArray(plugin.help) ? plugin.help : [plugin.help];
+    return total + help.filter(Boolean).length;
+  }, 0);
 
   let thumbBuffer;
   try {
@@ -25,7 +51,17 @@ const handler = async (m, { conn, usedPrefix }) => {
     if (existsSync(BANNER_PATH)) thumbBuffer = readFileSync(BANNER_PATH);
   }
 
-  const menuTexto = `${readMore}
+  const menuTexto = `━━━━━❒「 \`${botName}\` 」⋆｡ﾟ🎐
+
+ ୨୧     ꒰ \`Usuario\`   :  ${pushname}
+ ୨୧     ꒰ \`Premium\`   :  ${isPremium}
+  ୨୧     ꒰ \`Uptime\`    :  ${uptime}
+  ୨୧     ꒰ \`Fecha\`     :  ${date}
+  ୨୧     ꒰ \`Prefix\`    :  ${prefix}
+  ୨୧     ꒰ \`Comandos\`  :  ${totalCommands}
+
+❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼
+${readMore}
 ╭━━━〔 🎐 *ANIME & MONITORES* 〕━━━⬣
 ┃ ⟡ *${command('animev1')}* _<título>_
 ┃ ⟡ *${command('animev1info')}* _<núm | URL>_
