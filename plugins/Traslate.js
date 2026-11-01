@@ -1,5 +1,12 @@
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import ffmpegPath from 'ffmpeg-static';
+
 const OCR_ENDPOINT = 'https://api.ocr.space/parse/image';
 const OCR_MAX_BYTES = 10 * 1024 * 1024;
+const IMAGE_RENDER_MAX_TEXT = 1400;
 
 const OCR_LANGUAGES = {
   en: 'eng', es: 'spa', pt: 'por', fr: 'fre', de: 'ger', it: 'ita',
@@ -112,7 +119,87 @@ async function extractTextFromImage(buffer, mime, sourceLanguage) {
   return text;
 }
 
-const handler = async (m, { args, usedPrefix, command }) => {
+function wrapText(text, maxChars = 52) {
+  const lines = [];
+  for (const originalLine of String(text).replace(/\r/g, '').split('\n')) {
+    let line = originalLine.trim();
+    if (!line) {
+      lines.push('');
+      continue;
+    }
+    while (line.length > maxChars) {
+      let cut = line.lastIndexOf(' ', maxChars);
+      if (cut < Math.floor(maxChars * 0.55)) cut = maxChars;
+      lines.push(line.slice(0, cut).trim());
+      line = line.slice(cut).trim();
+    }
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+function escapeFfmpegValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
+}
+
+function selectFont(lang) {
+  if (/^(ar|fa|ur)(?:-|$)/i.test(lang)) return '/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf';
+  if (/^(ja|ko|zh)(?:-|$)/i.test(lang)) return '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+  return '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf';
+}
+
+function runFfmpeg(args, input) {
+  return new Promise((resolve, reject) => {
+    const process = spawn(ffmpegPath || 'ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const output = [];
+    const errors = [];
+    const timer = setTimeout(() => process.kill('SIGKILL'), 30_000);
+    process.stdout.on('data', (chunk) => output.push(chunk));
+    process.stderr.on('data', (chunk) => errors.push(chunk));
+    process.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    process.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(Buffer.concat(output));
+      else reject(new Error(Buffer.concat(errors).toString().slice(-500) || `ffmpeg terminó con código ${code}`));
+    });
+    process.stdin.end(input);
+  });
+}
+
+async function renderTranslatedImage(buffer, translated, lang) {
+  const text = String(translated).slice(0, IMAGE_RENDER_MAX_TEXT);
+  const lines = wrapText(text);
+  const fontSize = 32;
+  const panelHeight = Math.min(720, Math.max(150, 58 + lines.length * 42));
+  const workDir = join(tmpdir(), `rikka-translate-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  await mkdir(workDir, { recursive: true });
+  const textPath = join(workDir, 'translation.txt');
+
+  try {
+    await writeFile(textPath, lines.join('\n'), 'utf8');
+    const filter = [
+      `pad=iw:ih+${panelHeight}:0:0:color=black@0.82`,
+      `drawtext=fontfile='${escapeFfmpegValue(selectFont(lang))}':textfile='${escapeFfmpegValue(textPath)}':fontcolor=white:fontsize=${fontSize}:line_spacing=8:x=32:y=h-${panelHeight}+24`,
+    ].join(',');
+    return await runFfmpeg([
+      '-hide_banner', '-loglevel', 'error',
+      '-i', 'pipe:0',
+      '-vf', filter,
+      '-frames:v', '1',
+      '-f', 'image2',
+      '-vcodec', 'mjpeg',
+      '-q:v', '3',
+      'pipe:1',
+    ], buffer);
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const handler = async (m, { args, usedPrefix, command, conn }) => {
   const usage = `📖 Uso: _${usedPrefix + command} (idioma) (texto)_\n` +
     `También responde a una imagen: _${usedPrefix + command} es_\n` +
     `Para OCR japonés, por ejemplo: _${usedPrefix + command} es ja_`;
@@ -121,6 +208,8 @@ const handler = async (m, { args, usedPrefix, command }) => {
   let lang = normalizeLanguage(args?.[0], 'es');
   let text = '';
   let sourceLanguage = '';
+  let imageBuffer = null;
+  let imageMime = 'image/jpeg';
 
   if (image) {
     if (args?.[0] && !/^[a-z]{2,3}(?:-[a-z]{2})?$/i.test(args[0])) return m.reply(usage);
@@ -128,9 +217,9 @@ const handler = async (m, { args, usedPrefix, command }) => {
 
     try {
       await m.reply('🔎 Leyendo el texto de la imagen...');
-      const mime = String(image.mimetype || image.msg?.mimetype || 'image/jpeg').split(';')[0];
-      const buffer = await image.download();
-      text = await extractTextFromImage(buffer, mime, sourceLanguage);
+      imageMime = String(image.mimetype || image.msg?.mimetype || 'image/jpeg').split(';')[0];
+      imageBuffer = await image.download();
+      text = await extractTextFromImage(imageBuffer, imageMime, sourceLanguage);
     } catch (error) {
       console.error('[Translate OCR Error]', error);
       return m.reply(`❌ No pude leer la imagen.\n_${error?.message || 'Error de OCR'}_`);
@@ -148,6 +237,20 @@ const handler = async (m, { args, usedPrefix, command }) => {
 
   const translated = await translateText(text, lang);
   if (!translated) return m.reply('❌ No se pudo traducir el texto. Inténtalo de nuevo.');
+
+  if (image && imageBuffer) {
+    try {
+      const editedImage = await renderTranslatedImage(imageBuffer, translated, lang);
+      return await conn.sendMessage(m.chat, {
+        image: editedImage,
+        caption: `✅ Traducción integrada en la imagen (${lang})`,
+        mimetype: 'image/jpeg',
+      }, { quoted: m });
+    } catch (error) {
+      console.error('[Translate Render Error]', error);
+      return m.reply(`📝 *Traducción (${lang}):*\n${translated}\n\n⚠️ No pude integrarla en la imagen, así que te envío el texto.`);
+    }
+  }
 
   const header = image ? `🖼️ *Texto traducido (${lang}):*` : `🌐 *Traducción (${lang}):*`;
   await m.reply(`${header}\n${translated}`);
