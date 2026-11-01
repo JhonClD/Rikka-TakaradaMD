@@ -1,56 +1,23 @@
-import moment from 'moment-timezone';
 import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BANNER_PATH = join(__dirname, '../src/banner.jpg');
-
-const CONFIG = {
-  timezone: 'America/Lima',
-  headerEmoji: '🎐',
-  lineSeparator: '❐✼❑✼❐✼❑✼❒✼❑✼❐✼❑✼❐✼❑✼❐✼❑✼',
-  catBox: {
-    top: '┌─────── " *{title}* {icon} „ ━━━━━━━┓',
-    mid: '└➤ ✎~',
-    bottom: '┗━━━━━━━━━━━━━━━━━━━━━━━┛',
-    cmdPrefix: '── ⟡ ˙ '
-  }
-};
-
-const CAT_ICONS = {
-  anime: '🎐', downloader: '📥', search: '🔍', tools: '🛠️', ai: '🤖',
-  sticker: '🎭', game: '🎮', group: '🏯', owner: '💎', info: '💫', otros: '📌'
-};
-
 const more = String.fromCharCode(8206);
 const readMore = more.repeat(4001);
 
-function clockString(ms) {
-  const d  = Math.floor(ms / 86400000);
-  const h  = Math.floor(ms / 3600000) % 24;
-  const mm = Math.floor(ms / 60000) % 60;
-  const s  = Math.floor(ms / 1000) % 60;
-  return `${d}d ${h}h ${mm}m ${s}s`.replace(/\b(\d)\b/g, '0$1');
-}
-
 const handler = async (m, { conn, usedPrefix }) => {
-  const settings = global.db.data.settings[conn.user.jid] || {};
+  const settings = global.db?.data?.settings?.[conn.user.jid] || {};
+  const bannerUrl = settings.banner?.startsWith('http') ? settings.banner : null;
+  const prefix = usedPrefix || '/';
+  const command = (name) => `${prefix}${name}`;
 
-  const botNameLong  = settings.botname || 'ᖇɩƙƙᥲ Ʈᥲƙᥲɾᥲᑯᥲ°ᙖOƮ';
-  const botNameShort = settings.namebot || '܁ᴍ፝֟ıηͨσ‍ͥяͩυ';
-  const botLink      = settings.link    || 'https://github.com/JhonCID';
-  // URL de ImgBB guardada por .setbanner (o vacío si no hay)
-  const bannerUrl    = (settings.banner && settings.banner.startsWith('http'))
-    ? settings.banner : null;
-
-  // WhatsApp normal necesita el buffer del thumbnail, no solo la URL.
-  // Si hay banner personalizado (URL) lo descargamos; si no, usamos el banner local.
   let thumbBuffer;
   try {
     if (bannerUrl) {
-      const res = await fetch(bannerUrl);
-      thumbBuffer = Buffer.from(await res.arrayBuffer());
+      const response = await fetch(bannerUrl);
+      if (response.ok) thumbBuffer = Buffer.from(await response.arrayBuffer());
     } else if (existsSync(BANNER_PATH)) {
       thumbBuffer = readFileSync(BANNER_PATH);
     }
@@ -58,93 +25,94 @@ const handler = async (m, { conn, usedPrefix }) => {
     if (existsSync(BANNER_PATH)) thumbBuffer = readFileSync(BANNER_PATH);
   }
 
-  const pushname  = m.pushName || 'Usuario';
-  const date      = moment.tz(CONFIG.timezone).format('YYYY-MM-DD');
-  const uptime    = clockString(process.uptime() * 1000);
-  // Detectar nivel del usuario — con resolución de LID igual que handler.js
-  const _phoneOnly = (jid) => (jid || '').replace(/[^0-9]/g, '');
-  const _resolveLid = (jid) => {
-    if (!jid?.endsWith('@lid')) return jid;
-    const lidKey = jid.split('@')[0];
-    const pnUser = conn?.signalRepository?.lidMapping?.mappingCache?.get(`lid:${lidKey}`);
-    if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
-    return jid;
-  };
-  const _senderJid   = _resolveLid(m.sender);
-  const _senderPhone = _phoneOnly(_senderJid);
-  const _ownerList   = (global.owner || []).map(([n]) => n.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-  const _modsList    = (global.mods  || []).map(v  => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+  const menuTexto = `${readMore}
+╭━━━〔 🎐 *ANIME & MONITORES* 〕━━━⬣
+┃ ⟡ *${command('animev1')}* _<título>_
+┃ ⟡ *${command('animev1info')}* _<núm | URL>_
+┃ ⟡ *${command('animev1ep')}* | *${command('animev1dl')}* _<ep> [sub|dub]_
+┃ ⟡ *${command('nidl')}* _<nombre> [ep] [SUB|DUB] [T2]_
+┃ ⟡ *${command('crlogin')}* _<email> <pass>_ | *${command('crlogout')}*
+┃ ⟡ *${command('cr')}* _<set | rem | status | list | notify>_
+┃ ⟡ *Monitores (animev1 / dbs / jk / tio):*
+┃   ╰› _start • stop • status • check • queue_
+┃   ╰› _flush • unblock • interval • example_
+┃ ⟡ *${command('latexample')}* _[N]_ | *${command('animev1help')}*
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  const _isROwner = m.fromMe || _ownerList.some(o => o === _senderJid || _phoneOnly(o) === _senderPhone);
-  const _isMod    = !_isROwner && _modsList.some(o => o === _senderJid || _phoneOnly(o) === _senderPhone);
+╭━━━〔 📥 *DESCARGAS* 〕━━━⬣
+┃ ⟡ *${command('play')}* | *${command('play2')}* | *${command('playaudio')}*
+┃ ⟡ *${command('ytmp3')}* | *${command('yta')}* | *${command('ytmp3doc')}*
+┃ ⟡ *${command('ytmp4')}* | *${command('ytmp4doc')}* | *${command('autoyt')}* _<on|off>_
+┃ ⟡ *${command('mp3')}* | *${command('mp4')}* | *${command('video')}*
+┃ ⟡ *${command('tiktok')}* | *${command('fb')}* _<url>_
+┃ ⟡ *${command('x')}* | *${command('twitter')}* _<url>_
+┃ ⟡ *${command('mediafire')}* (*${command('mf')}*) _<url>_
+┃ ⟡ *${command('mega')}* (*${command('mg')}*) | *${command('gdrive')}* _<url>_
+┃ ⟡ *${command('torrent')}*
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  const _userData   = global.db?.data?.users?.[m.sender] || global.db?.data?.users?.[_senderJid] || {};
-  const _premActive = typeof _userData.premiumTime === 'number' && _userData.premiumTime > Date.now();
+╭━━━〔 🔍 *BUSCADORES* 〕━━━⬣
+┃ ⟡ *${command('anime')}* _<nombre>_
+┃ ⟡ *${command('yts')}* _<texto>_
+┃ ⟡ *${command('pinterest')}* _<búsqueda | enlace>_
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  let isPremium;
-  if (_isROwner) {
-    isPremium = '👑 Owner';
-  } else if (_isMod) {
-    isPremium = '🛡️ Mod';
-  } else if (_premActive) {
-    const _msLeft = _userData.premiumTime - Date.now();
-    const _dLeft  = Math.floor(_msLeft / 86400000);
-    const _hLeft  = Math.floor((_msLeft % 86400000) / 3600000);
-    isPremium = _dLeft > 0 ? `✅ (${_dLeft}d ${_hLeft}h)` : `✅ (<1d)`;
-  } else {
-    isPremium = '❌';
-  }
+╭━━━〔 🛠️ *HERRAMIENTAS & CONVERTIDORES* 〕━━━⬣
+┃ ⟡ *${command('s')}* | *${command('sticker')}* | *${command('st')}*
+┃ ⟡ *${command('tourl')}* | *${prefix}tourl[1-13]* | *${command('tourllist')}*
+┃ ⟡ *${command('translate')}* _<idioma> <texto>_ | *${command('tts')}*
+┃ ⟡ *${command('ss')}* | *${command('ssweb')}* _<url>_
+┃ ⟡ *${command('fetch')}* | *${command('get')}* _<url>_
+┃ ⟡ *${command('speedtest')}*
+┃ ⟡ *RSS:* *${command('rssadd')}* _<url>_ | *${command('rssdel')}* _<n>_
+┃   ╰› _rsslist • rssrecientes • rsscheck_
+┃   ╰› _rsspause <n> • rssresume <n>_
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  const categories = {};
-  Object.values(global.plugins || {}).forEach(plugin => {
-    if (!plugin?.command) return;
-    const tag  = (Array.isArray(plugin.tags) ? plugin.tags[0] : plugin.tags) || 'otros';
-    const help = Array.isArray(plugin.help) ? plugin.help : [plugin.help];
-    if (!categories[tag]) categories[tag] = [];
-    categories[tag].push(...help.filter(Boolean));
-  });
+╭━━━〔 🏯 *GRUPOS* 〕━━━⬣
+┃ ⟡ *${command('welcome')}* _<on|off|msg|bye|reset|ver>_
+┃ ⟡ *${command('antilink')}* | *${command('antilink2')}* _<on|off>_
+┃ ⟡ *${command('kickall')}*
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  const totalCmds = Object.values(categories).flat().length;
+╭━━━〔 💫 *PERFIL & INFO* 〕━━━⬣
+┃ ⟡ *${command('profile')}* | *${command('setbirth')}* | *${command('setgender')}*
+┃ ⟡ *${command('menu')}* | *${command('owner')}* | *${command('sysinfo')}* | *${command('host')}*
+┃ ⟡ *${command('jid')}* | *${command('lid')}* | *${command('myjid')}*
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  let menuTexto = `━━━━━❒「 \`${botNameLong}\` 」⋆｡ﾟ${CONFIG.headerEmoji}\n\n`;
-  menuTexto += ` ୨୧     ꒰ \`Usuario\`   :  ${pushname}\n`;
-  menuTexto += ` ୨୧     ꒰ \`Premium\`   :  ${isPremium}\n`;
-  menuTexto += ` ୨୧     ꒰ \`Uptime\`    :  ${uptime}\n`;
-  menuTexto += ` ୨୧     ꒰ \`Fecha\`     :  ${date}\n`;
-  menuTexto += ` ୨୧     ꒰ \`Prefix\`    :  ${usedPrefix}\n`;
-  menuTexto += ` ୨୧     ꒰ \`Comandos\`  :  ${totalCmds}\n\n`;
-  menuTexto += `${CONFIG.lineSeparator}\n${readMore}\n`;
+╭━━━〔 🔞 *NSFW* 〕━━━⬣
+┃ ⟡ *${command('hdl')}* _<nombre> <episodio>_
+╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
-  const sortedCats = Object.keys(categories).sort();
-  sortedCats.forEach(cat => {
-    const icon = CAT_ICONS[cat.toLowerCase()] || '📌';
-    const cmds = [...new Set(categories[cat])]
-      .map(c => `${CONFIG.catBox.cmdPrefix}${usedPrefix}${c}`)
-      .join('\n');
-    menuTexto += `${CONFIG.catBox.top.replace('{title}', cat.toUpperCase()).replace('{icon}', icon)}\n`;
-    menuTexto += `${CONFIG.catBox.mid}\n\n${cmds}\n`;
-    menuTexto += `${CONFIG.catBox.bottom}\n\n`;
-  });
-
-  menuTexto += `𝘙𝘪𝘬𝘬𝘢, 🅟ᴏᴡᴇʀᴇᴅ 𝘉𝘺 | — ${botNameShort}\n${botLink}`;
+╭━━━〔 💎 *OWNER* 〕━━━⬣
+┃ ⟡ *${command('ex')}* _<código>_ | *${command('e')}* _<expresión>_
+┃ ⟡ *${command('bash')}* | *${command('sh')}* | *${command('sudo')}* _<cmd>_
+┃ ⟡ *${command('npm')}* | *${command('pip')}* | *${command('pip3')}* | *${command('pkg')}* | *${command('apt')}* _<pkg>_
+┃ ⟡ *${command('dep')}* _<cmd>_ | *${command('deps')}*
+┃ ⟡ *${command('addprem')}* | *${command('delprem')}* | *${command('checkprem')}* _@user_
+┃ ⟡ *${command('update')}* _[--force]_ | *${command('soloowner')}* _<on|off>_
+┃ ⟡ *${command('setname')}* | *${command('resetname')}* | *${command('setbanner')}*
+┃ ⟡ *${command('setprefix')}* _<prefijo|noprefix|reset>_
+┃ ⟡ *${command('join')}* _<link>_ | *${command('testbtn')}* _<sub>_
+╰━━━━━━━━━━━━━━━━━━━━━━⬣`;
 
   if (thumbBuffer) {
     try {
       return await conn.sendMessage(m.chat, {
         image: thumbBuffer,
-        caption: menuTexto
+        caption: menuTexto,
       }, { quoted: m });
-    } catch (e) {
-      console.error('menu.js image send error:', e?.message || e);
+    } catch (error) {
+      console.error('menu.js image send error:', error?.message || error);
     }
   }
 
   await conn.sendMessage(m.chat, { text: menuTexto }, { quoted: m });
 };
 
-handler.help    = ['menu'];
-handler.tags    = ['info'];
+handler.help = ['menu'];
+handler.tags = ['info'];
 handler.command = /^(menu|ayuda|help)$/i;
 
 export default handler;
-  
