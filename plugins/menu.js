@@ -27,8 +27,32 @@ const handler = async (m, { conn, usedPrefix }) => {
   }).format(new Date());
   const uptime = clockString(process.uptime() * 1000);
   const userData = global.db?.data?.users?.[m.sender] || {};
-  const isOwner = m.fromMe || (global.owner || []).some(([number]) =>
-    String(number).replace(/[^0-9]/g, '') === String(m.sender).replace(/[^0-9]/g, ''),
+  const resolveLid = (jid) => {
+    if (typeof jid !== 'string' || !jid.endsWith('@lid')) return jid;
+    const lidKey = jid.split('@')[0];
+    const phone = conn?.signalRepository?.lidMapping?.mappingCache?.get(`lid:${lidKey}`);
+    return phone ? `${phone}@s.whatsapp.net` : jid;
+  };
+  const normalizeLid = (jid) => typeof jid === 'string' && jid.endsWith('@lid')
+    ? jid.replace(/:\d+@lid$/, '@lid')
+    : jid;
+  const phoneOnly = (jid) => typeof jid === 'string'
+    ? jid.split('@')[0].replace(/:\d+$/, '').replace(/\D/g, '')
+    : '';
+  const senderJid = resolveLid(m.sender);
+  const senderLid = [m.sender, m.key?.participant, m.key?.remoteJid]
+    .map(normalizeLid)
+    .find((jid) => typeof jid === 'string' && jid.endsWith('@lid'));
+  const ownerJids = (global.owner || [])
+    .map(([number]) => `${String(number).replace(/\D/g, '')}@s.whatsapp.net`);
+  const ownerLids = (global.owner || [])
+    .map(([, , , lid]) => normalizeLid(lid))
+    .filter((lid) => typeof lid === 'string' && lid.endsWith('@lid'));
+  const senderPhone = phoneOnly(senderJid);
+  const isOwner = m.fromMe || ownerLids.includes(senderLid) || ownerJids.some((ownerJid) =>
+    ownerJid === senderJid || (
+      phoneOnly(ownerJid) && senderPhone && phoneOnly(ownerJid) === senderPhone
+    ),
   );
   const isPremium = isOwner
     ? '👑 Owner'
