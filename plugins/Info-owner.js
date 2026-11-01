@@ -1,4 +1,6 @@
-const handler = async (m, { conn, usedPrefix }) => {
+import { createJpegPreview } from '../src/libraries/preview.js';
+
+const handler = async (m, { conn }) => {
   const text = `
 𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
@@ -10,43 +12,30 @@ const handler = async (m, { conn, usedPrefix }) => {
   ˖ *WA:* wa.me/51997149670
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
-  const mimeTypes = [
-    "pdf",
-    "zip",
-    "vnd.openxmlformats-officedocument.presentationml.presentation",
-    "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ];
-  const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
-  const menuImage = global.imagen1 ?? Buffer.alloc(0);
-  const linkUrl   = "https://wa.me/51925092348";
+  const sourceUrl = 'https://wa.me/51925092348';
+  const sourceImage = global.imagen1;
+  const thumbnail = await createJpegPreview(sourceImage);
+  const contextInfo = thumbnail ? {
+    externalAdReply: {
+      title: 'Rikka Takarada - MD',
+      body: 'Información del propietario',
+      mediaType: 1,
+      thumbnail,
+      mediaUrl: sourceUrl,
+      sourceUrl,
+      renderLargerThumbnail: false,
+      showAdAttribution: false,
+    },
+  } : undefined;
 
   await conn.sendMessage(m.chat, {
-    document: menuImage,
-    mimetype: `application/${randomMime}`,
-    fileName: "Rikka Takarada-MD",
-    fileLength: 99999999999999,
-    pageCount: 200,
-    caption: text,
-    contextInfo: {
-      forwardingScore: 200,
-      isForwarded: true,
-      externalAdReply: {
-        mediaUrl: linkUrl,
-        mediaType: 2,
-        previewType: "pdf",
-        title: "Rikka Takarada - MD",
-        body: "Rikka Takarada Bot",
-        thumbnail: menuImage,
-        sourceUrl: linkUrl,
-      },
-    },
+    text,
+    ...(contextInfo ? { contextInfo } : {}),
   }, { quoted: m });
 };
 
-handler.help = ["owner"];
-handler.tags = ["info"];
+handler.help = ['owner'];
+handler.tags = ['info'];
 handler.command = /^(owner|creator|creador|propietario)$/i;
 
 export default handler;
-

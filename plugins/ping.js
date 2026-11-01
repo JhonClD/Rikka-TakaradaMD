@@ -1,6 +1,7 @@
 import os from "os";
 import { execSync } from "child_process";
 import { performance } from "perf_hooks";
+import { createJpegPreview } from "../src/libraries/preview.js";
 
 function formatBytes(bytes) {
   if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(2) + " GB";
@@ -141,38 +142,24 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
-  const mimeTypes = [
-    "pdf",
-    "zip",
-    "vnd.openxmlformats-officedocument.presentationml.presentation",
-    "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ];
-  const randomMime = mimeTypes[Math.floor(Math.random() * mimeTypes.length)];
+  const thumbnail = await createJpegPreview(menuImage);
   const linkUrl = "https://wa.me/51925092348";
+  const contextInfo = thumbnail ? {
+    externalAdReply: {
+      title: "Rikka Takarada - MD",
+      body: "Estado y rendimiento del bot",
+      mediaType: 1,
+      thumbnail,
+      mediaUrl: linkUrl,
+      sourceUrl: linkUrl,
+      renderLargerThumbnail: false,
+      showAdAttribution: false,
+    },
+  } : undefined;
 
   await conn.sendMessage(m.chat, {
-    document: menuImage,
-    mimetype: `application/${randomMime}`,
-    fileName: "Documento",
-    fileLength: 99999999999999,
-    pageCount: 200,
-    contextInfo: {
-      forwardingScore: 200,
-      isForwarded: true,
-      externalAdReply: {
-        mediaUrl: linkUrl,
-        mediaType: 2,
-        previewType: "pdf",
-        title: "Rikka Takarada - MD",
-        body: "Rikka Takarada Bot",
-        thumbnail: menuImage,
-        sourceUrl: linkUrl,
-      },
-    },
-    caption: info,
-    footer: "Rikka Takarada-MD",
-    headerType: 6,
+    text: info,
+    ...(contextInfo ? { contextInfo } : {}),
   }, { quoted: m });
 };
 
