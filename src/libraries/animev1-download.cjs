@@ -10,13 +10,14 @@ const { Transform } = require('node:stream')
 const { pipeline } = require('node:stream/promises')
 const axios = require('axios')
 const cheerio = require('cheerio')
+const { File: MegaFile } = require('megajs')
 const animeV1 = require('./animev1.cjs')
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ANIMEV1_DOWNLOAD_TIMEOUT_MS) || 15 * 60_000)
 const MIN_VALID_BYTES = 256 * 1024
-const PRIORITY = ['yourupload', 'pixeldrain', 'pdrain', '1fichier', 'mp4upload', 'upnshare', 'hls', 'zilla']
+const PRIORITY = ['yourupload', 'pixeldrain', 'pdrain', '1fichier', 'mega', 'mp4upload', 'upnshare', 'hls', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
 function downloadLog(event, details = {}) {
@@ -100,6 +101,38 @@ function normalizeCandidateUrl(rawUrl, server) {
 
 function isHlsUrl(url, contentType = '') {
   return /\.m3u8(?:[?#]|$)|\/m3u8\//i.test(url) || /mpegurl|vnd\.apple\.mpegurl/i.test(contentType)
+}
+
+function isMegaCandidate(candidate, url) {
+  return /mega(?:\.nz|\.co\.nz)/i.test(String(url || candidate?.url || '')) || /mega/i.test(String(candidate?.server || ''))
+}
+
+async function downloadMega(url, filePath, onStatus) {
+  onStatus?.('Descargando desde Mega…')
+  downloadLog('descarga Mega iniciada', { host: hostOf(url), salida: path.basename(filePath) })
+  const file = MegaFile.fromURL(url)
+  const stream = file.download()
+  let downloadedBytes = 0
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      downloadedBytes += chunk.length
+      if (downloadedBytes > MAX_DOWNLOAD_BYTES) {
+        callback(new Error(`El archivo de Mega supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`))
+      } else {
+        callback(null, chunk)
+      }
+    },
+  })
+  try {
+    await pipeline(stream, limiter, fs.createWriteStream(filePath))
+    const stat = await fs.promises.stat(filePath)
+    downloadLog('descarga Mega completada', { archivo: path.basename(filePath), tamaño: formatBytes(stat.size) })
+    return filePath
+  } catch (error) {
+    await fs.promises.rm(filePath, { force: true })
+    downloadLog('descarga Mega fallida', { host: hostOf(url), error: error.message })
+    throw error
+  }
 }
 
 function extensionFor(url, contentType) {
@@ -325,6 +358,10 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   const referer = `${origin}/`
   let filePath = `${basePath}.mp4`
 
+  if (isMegaCandidate(candidate, url)) {
+    return { filePath: await downloadMega(url, filePath, onStatus), extension: '.mp4', mimetype: 'video/mp4' }
+  }
+
   if (isHlsUrl(url)) {
     downloadLog('candidato detectado como HLS', { servidor: candidate.server || 'servidor' })
     onStatus?.(`Convirtiendo stream HLS de ${candidate.server}…`)
@@ -432,7 +469,7 @@ function listCandidates(data, variant, preferredQuality = null) {
     ...stream.map(item => ({ ...item, kind: 'stream' })),
     ...downloads.map(item => ({ ...item, kind: 'descarga' })),
   ]
-    .filter(item => item?.url && !/mega/i.test(`${item.server || ''} ${item.url}`))
+    .filter(item => item?.url)
   const seen = new Set()
   return candidates
     .filter(item => {
@@ -471,7 +508,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     tiempoLímiteMin: Math.round(DOWNLOAD_TIMEOUT_MS / 60_000),
     apiConfiguradas: Object.entries(apiKeys).filter(([, value]) => Boolean(value)).map(([name]) => name),
   })
-  const response = await animeV1.getEpisodeLinks(normalizedEpisodeUrl, false)
+  const response = await animeV1.getEpisodeLinks(normalizedEpisodeUrl, true)
   const candidates = listCandidates(response?.data, variant, options.quality)
   downloadLog('enlaces de episodio recibidos', {
     variante: variant,
