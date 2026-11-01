@@ -145,7 +145,7 @@ ${readMore}
 ╭━━━〔 🛠️ *HERRAMIENTAS & CONVERTIDORES* 〕━━━⬣
 ┃ ⟡ *${command('s')}* | *${command('sticker')}* | *${command('st')}*
 ┃ ⟡ *${command('tourl')}* | *${prefix}tourl[1-13]* | *${command('tourllist')}*
-┃ ⟡ *${command('translate')}* _<idioma> <texto>_ | _traducir • trad_
+┃ ⟡ *${command('translate')}* _<idioma> <texto/imagen>_ | _traducir • trad_
 ┃ ⟡ *${command('ss')}* | *${command('ssweb')}* _<url>_
 ┃ ⟡ *${command('fetch')}* | *${command('get')}* _<url>_
 ┃ ⟡ *upload* | *uploader* | *urllist*
