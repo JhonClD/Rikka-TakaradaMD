@@ -1,7 +1,32 @@
 import os from "os";
 import { execSync } from "child_process";
 import { performance } from "perf_hooks";
-import { createLinkPreview, createJpegPreview } from "../src/libraries/preview.js";
+import { prepareWAMessageMedia } from "baileys";
+import { createJpegPreview } from "../src/libraries/preview.js";
+
+async function createPingLinkPreview(conn, input, metadata) {
+  if (!conn?.waUploadToServer || !Buffer.isBuffer(input) || input.length === 0) return null;
+  try {
+    const { imageMessage } = await prepareWAMessageMedia(
+      { image: input },
+      { upload: conn.waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+    );
+    if (!imageMessage) return null;
+    return {
+      'canonical-url': metadata.url,
+      'matched-text': metadata.url,
+      title: metadata.title,
+      description: metadata.description,
+      jpegThumbnail: imageMessage.jpegThumbnail
+        ? Buffer.from(imageMessage.jpegThumbnail)
+        : undefined,
+      highQualityThumbnail: imageMessage,
+    };
+  } catch (error) {
+    console.warn('[ping-preview] no se pudo preparar thumbnail-link:', error?.message || error);
+    return null;
+  }
+}
 
 function formatBytes(bytes) {
   if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(2) + " GB";
@@ -143,7 +168,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
   const linkUrl = "https://wa.me/51925092348";
-  const linkPreview = await createLinkPreview(conn, menuImage, {
+  const linkPreview = await createPingLinkPreview(conn, menuImage, {
     url: linkUrl,
     title: "Rikka Takarada - MD",
     description: "Estado y rendimiento del bot",

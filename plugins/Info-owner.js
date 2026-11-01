@@ -1,4 +1,29 @@
-import { createLinkPreview, createJpegPreview } from '../src/libraries/preview.js';
+import { prepareWAMessageMedia } from 'baileys';
+import { createJpegPreview } from '../src/libraries/preview.js';
+
+async function createOwnerLinkPreview(conn, input, metadata) {
+  if (!conn?.waUploadToServer || !Buffer.isBuffer(input) || input.length === 0) return null;
+  try {
+    const { imageMessage } = await prepareWAMessageMedia(
+      { image: input },
+      { upload: conn.waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+    );
+    if (!imageMessage) return null;
+    return {
+      'canonical-url': metadata.url,
+      'matched-text': metadata.url,
+      title: metadata.title,
+      description: metadata.description,
+      jpegThumbnail: imageMessage.jpegThumbnail
+        ? Buffer.from(imageMessage.jpegThumbnail)
+        : undefined,
+      highQualityThumbnail: imageMessage,
+    };
+  } catch (error) {
+    console.warn('[owner-preview] no se pudo preparar thumbnail-link:', error?.message || error);
+    return null;
+  }
+}
 
 const handler = async (m, { conn }) => {
   const text = `
@@ -14,7 +39,7 @@ const handler = async (m, { conn }) => {
 
   const sourceUrl = 'https://wa.me/51925092348';
   const sourceImage = global.imagen1;
-  const linkPreview = await createLinkPreview(conn, sourceImage, {
+  const linkPreview = await createOwnerLinkPreview(conn, sourceImage, {
     url: sourceUrl,
     title: 'Rikka Takarada - MD',
     description: 'Información del propietario',
