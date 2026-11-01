@@ -151,13 +151,13 @@ function sticker6(img, url) {
         })
         .addOutputOptions([
           '-vcodec', 'libwebp',
+          '-loop', '0',
+          '-an',
           '-vf', [
-            "scale='min(320,iw)':min'(320,ih)':force_original_aspect_ratio=decrease",
             'fps=15',
-            'pad=320:320:-1:-1:color=white@0.0',
-            'split [a][b]',
-            '[a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]',
-            '[b][p] paletteuse'
+            'scale=320:320:flags=lanczos:force_original_aspect_ratio=decrease',
+            'pad=320:320:(ow-iw)/2:(oh-ih)/2:color=white@0.0',
+            'format=yuva420p'
           ].join(', ')
         ])
         .toFormat('webp')
