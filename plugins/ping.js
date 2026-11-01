@@ -134,12 +134,14 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const on  = (v) => (v ? "✅ activo"   : "❌ desactivado");
   const onP = (v) => (v ? "✅ activado" : "❌ desactivado");
 
+  const linkUrl = "https://wa.me/51925092348";
   const info = `𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
 𓂃 ࣪˖ *Propietario*
   ˖ *Nombre:* ᭄🅜֟፝ıηͨσ‍ͥяͩυ🧸⃝꙰ཻུ⸙͎
   ˖ *WA:* +51925092348
+  ˖ *Enlace:* ${linkUrl}
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
 𓂃 ࣪˖ *Sistema*
@@ -167,7 +169,6 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
-  const linkUrl = "https://wa.me/51925092348";
   const linkPreview = await createPingLinkPreview(conn, menuImage, {
     url: linkUrl,
     title: "Rikka Takarada - MD",

@@ -26,18 +26,19 @@ async function createOwnerLinkPreview(conn, input, metadata) {
 }
 
 const handler = async (m, { conn }) => {
+  const sourceUrl = 'https://wa.me/51925092348';
   const text = `
 𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
 
 𓂃 ࣪˖ *Propietario*
   ˖ *WA:* wa.me/51925092348
+  ˖ *Enlace:* ${sourceUrl}
 
 𓂃 ࣪˖ *Colaborador*
   ˖ *WA:* wa.me/51997149670
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
-  const sourceUrl = 'https://wa.me/51925092348';
   const sourceImage = global.imagen1;
   const linkPreview = await createOwnerLinkPreview(conn, sourceImage, {
     url: sourceUrl,
