@@ -1,7 +1,7 @@
 import os from "os";
 import { execSync } from "child_process";
 import { performance } from "perf_hooks";
-import { createJpegPreview } from "../src/libraries/preview.js";
+import { createLinkPreview, createJpegPreview } from "../src/libraries/preview.js";
 
 function formatBytes(bytes) {
   if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(2) + " GB";
@@ -142,24 +142,31 @@ const handler = async (m, { conn, usedPrefix, command }) => {
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
-  const thumbnail = await createJpegPreview(menuImage);
   const linkUrl = "https://wa.me/51925092348";
-  const contextInfo = thumbnail ? {
-    externalAdReply: {
-      title: "Rikka Takarada - MD",
-      body: "Estado y rendimiento del bot",
-      mediaType: 1,
-      thumbnail,
-      mediaUrl: linkUrl,
-      sourceUrl: linkUrl,
-      renderLargerThumbnail: false,
-      showAdAttribution: false,
-    },
-  } : undefined;
+  const linkPreview = await createLinkPreview(conn, menuImage, {
+    url: linkUrl,
+    title: "Rikka Takarada - MD",
+    description: "Estado y rendimiento del bot",
+  });
+  const thumbnail = linkPreview ? null : await createJpegPreview(menuImage);
 
   await conn.sendMessage(m.chat, {
     text: info,
-    ...(contextInfo ? { contextInfo } : {}),
+    ...(linkPreview ? { linkPreview } : {}),
+    ...(!linkPreview && thumbnail ? {
+      contextInfo: {
+        externalAdReply: {
+          title: "Rikka Takarada - MD",
+          body: "Estado y rendimiento del bot",
+          mediaType: 1,
+          thumbnail,
+          mediaUrl: linkUrl,
+          sourceUrl: linkUrl,
+          renderLargerThumbnail: false,
+          showAdAttribution: false,
+        },
+      },
+    } : {}),
   }, { quoted: m });
 };
 

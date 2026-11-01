@@ -1,4 +1,4 @@
-import { createJpegPreview } from '../src/libraries/preview.js';
+import { createLinkPreview, createJpegPreview } from '../src/libraries/preview.js';
 
 const handler = async (m, { conn }) => {
   const text = `
@@ -14,23 +14,30 @@ const handler = async (m, { conn }) => {
 
   const sourceUrl = 'https://wa.me/51925092348';
   const sourceImage = global.imagen1;
-  const thumbnail = await createJpegPreview(sourceImage);
-  const contextInfo = thumbnail ? {
-    externalAdReply: {
-      title: 'Rikka Takarada - MD',
-      body: 'Información del propietario',
-      mediaType: 1,
-      thumbnail,
-      mediaUrl: sourceUrl,
-      sourceUrl,
-      renderLargerThumbnail: false,
-      showAdAttribution: false,
-    },
-  } : undefined;
+  const linkPreview = await createLinkPreview(conn, sourceImage, {
+    url: sourceUrl,
+    title: 'Rikka Takarada - MD',
+    description: 'Información del propietario',
+  });
+  const thumbnail = linkPreview ? null : await createJpegPreview(sourceImage);
 
   await conn.sendMessage(m.chat, {
     text,
-    ...(contextInfo ? { contextInfo } : {}),
+    ...(linkPreview ? { linkPreview } : {}),
+    ...(!linkPreview && thumbnail ? {
+      contextInfo: {
+        externalAdReply: {
+          title: 'Rikka Takarada - MD',
+          body: 'Información del propietario',
+          mediaType: 1,
+          thumbnail,
+          mediaUrl: sourceUrl,
+          sourceUrl,
+          renderLargerThumbnail: false,
+          showAdAttribution: false,
+        },
+      },
+    } : {}),
   }, { quoted: m });
 };
 

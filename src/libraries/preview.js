@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
+import { prepareWAMessageMedia } from 'baileys';
 
 const PREVIEW_SIZE = 96;
 const PREVIEW_TIMEOUT = 5000;
@@ -21,7 +22,7 @@ export function createJpegPreview(input) {
       'pipe:1',
     ];
 
-    let output = [];
+    const output = [];
     let settled = false;
     let timer;
     const finish = (value) => {
@@ -54,4 +55,38 @@ export function createJpegPreview(input) {
     process.stdin.on('error', () => finish(null));
     process.stdin.end(input);
   });
+}
+
+/**
+ * Prepara la imagen con el flujo thumbnail-link de Baileys.
+ * Es más fiable que externalAdReply.thumbnail en forks recientes.
+ */
+export async function createLinkPreview(conn, input, metadata = {}) {
+  if (!conn?.waUploadToServer || !Buffer.isBuffer(input) || input.length === 0) return null;
+
+  try {
+    const { imageMessage } = await prepareWAMessageMedia(
+      { image: input },
+      {
+        upload: conn.waUploadToServer,
+        mediaTypeOverride: 'thumbnail-link',
+      },
+    );
+
+    if (!imageMessage) return null;
+
+    return {
+      'canonical-url': metadata.url,
+      'matched-text': metadata.url,
+      title: metadata.title || '',
+      description: metadata.description || '',
+      jpegThumbnail: imageMessage.jpegThumbnail
+        ? Buffer.from(imageMessage.jpegThumbnail)
+        : undefined,
+      highQualityThumbnail: imageMessage,
+    };
+  } catch (error) {
+    console.warn('[preview] no se pudo preparar thumbnail-link:', error?.message || error);
+    return null;
+  }
 }
