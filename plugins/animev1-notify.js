@@ -19,6 +19,7 @@ const MAX_INTERVAL_SECONDS = 3600
 const QUEUE_DELAY = 90_000
 const MAX_TRACKED = 20
 const MAX_SEEN = 500
+const INITIAL_RECENT_EPISODES = 1
 const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DOMAIN || 'animeav1.com')
   .replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase()
 
@@ -161,7 +162,9 @@ async function discoverCatalogSubscriptions() {
         title: clean(anime.title || item.title || 'Anime', 120),
         image: anime.image || item.image || '',
         variant: 'SUB',
-        lastEpisodeNumber: item.latestEpisodeNumber,
+        // En el primer inicio se conserva solo el último episodio reciente
+        // para que la comprobación inicial lo muestre sin reenviar el historial.
+        lastEpisodeNumber: Math.max(0, item.latestEpisodeNumber - INITIAL_RECENT_EPISODES),
       })
     } catch (error) {
       console.error(`[animev1-notify] No se pudo cargar ${item.title || item.url}: ${error.message}`)
@@ -374,7 +377,7 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     }
     const input = parseIntervalInput(text)
     const interval = input && input >= MIN_INTERVAL_SECONDS && input <= MAX_INTERVAL_SECONDS ? input : chat.intervalSec || getGlobalIntervalSec()
-    startChat(m.chat, conn, interval, false)
+    startChat(m.chat, conn, interval, true)
     return m.reply(`✅ *Notificador AnimeV1 activado*\n\n⏱️ Intervalo: *${formatInterval(interval)}*\n🎬 Series seguidas: *${chat.subscriptions.length}*\n
 Usa *${usedPrefix}animev1stop* para detenerlo.`)
   }
