@@ -3,6 +3,8 @@
 
 import fs from 'fs'
 import path from 'path'
+import axios from 'axios'
+import * as cheerio from 'cheerio'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
@@ -122,8 +124,28 @@ async function discoverCatalogSubscriptions() {
   const seenUrls = new Set()
   for (let page = 1; page <= AUTO_CATALOG_PAGES; page++) {
     try {
-      const response = await animeV1.getCatalog(page)
-      for (const item of response?.data?.results || []) {
+      const response = await axios.get(`https://${DOMAIN}/catalogo?page=${page}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
+        timeout: 20_000,
+      })
+      const $ = cheerio.load(response.data)
+      const pageResults = []
+      $('a[href^="/media/"]').each((_, element) => {
+        const href = $(element).attr('href') || ''
+        if (!/^\/media\/[^/]+$/i.test(href)) return
+        const card = $(element).closest('article').length ? $(element).closest('article') : $(element).parent()
+        const title = card.find('h3, h2').first().text().trim() ||
+          $(element).find('.sr-only').first().text().trim() ||
+          card.find('img').first().attr('alt') || ''
+        if (!title) return
+        const image = card.find('img').first().attr('src') || ''
+        pageResults.push({
+          title,
+          url: new URL(href, `https://${DOMAIN}`).href,
+          image: image ? new URL(image, `https://${DOMAIN}`).href : '',
+        })
+      })
+      for (const item of pageResults) {
         if (!item?.url || seenUrls.has(item.url)) continue
         seenUrls.add(item.url)
         results.push(item)

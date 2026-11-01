@@ -800,12 +800,9 @@ function parseSearchResultsFromHtml(html, domain) {
       return;
     }
 
-    const card = $(element).closest("article").length
-      ? $(element).closest("article")
-      : ($(element).parent().length ? $(element).parent() : $(element));
+    const card = $(element).closest("article").length ? $(element).closest("article") : $(element);
     const title =
       $(card).find("h3, h2, [title]").first().text().trim() ||
-      $(element).find(".sr-only").first().text().trim() ||
       $(card).find("img").first().attr("alt") ||
       $(element).attr("title") ||
       null;
@@ -815,7 +812,7 @@ function parseSearchResultsFromHtml(html, domain) {
     }
 
     const slug = href.replace(/^\/media\//, "").trim();
-    const image = resolveAbsoluteUrl($(card).find("img").first().attr("src") || $(element).parent().find("img").first().attr("src"), domain);
+    const image = resolveAbsoluteUrl($(card).find("img").first().attr("src"), domain);
 
     results.push({
       id: null,
