@@ -823,6 +823,21 @@ async function enviarEpisodio(chatIds, ep, conn) {
   try {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _ARCHIVOS LISTOS: original + 360p_`
+    let coverBuffer = null
+
+    // El grupo central recibe el aviso de progreso; los demás esperan a que existan ambos archivos.
+    try {
+      const anilistCover = await getAniListCover(titulo, slug, epNum)
+      const coverUrl = anilistCover || imgUrl
+      if (coverUrl) {
+        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+        coverBuffer = Buffer.from(imgRes.data)
+      }
+      if (coverBuffer) await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer, caption: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+      else await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+    } catch (error) {
+      console.error(`[tioanime-notify] No se pudo enviar el aviso central: ${error.message}`)
+    }
 
     console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
     const srvs = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
@@ -877,12 +892,9 @@ async function enviarEpisodio(chatIds, ep, conn) {
       const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
 
-      let coverBuffer = null
-      const anilistCover = await getAniListCover(titulo, slug, epNum)
-      const coverUrl = anilistCover || imgUrl
-      if (coverUrl) {
+      if (!coverBuffer && imgUrl) {
         try {
-          const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+          const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
           coverBuffer = Buffer.from(imgRes.data)
         } catch (_) {}
       }
