@@ -853,15 +853,10 @@ async function enviarEpisodio(chatIds, ep, conn) {
   const tmpDir = path.join(localTmp, `tio_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
-  const bandera  = fuente === 'latanime' ? (idioma === 'castellano' ? '🇪🇸' : '🇲🇽') : '🇯🇵'
-  const etiqueta = fuente === 'latanime' ? `LatAnime ${bandera}` : 'TioAnime 🇯🇵'
-
   try {
-    const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
-    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _ARCHIVOS LISTOS: original + 360p_`
     let coverBuffer = null
 
-    // El grupo central recibe aviso de progreso solo si forma parte de los destinatarios.
+    // Recuperar la portada para enviarla una sola vez, sin caption, cuando termine la descarga.
     try {
       const anilistCover = await getAniListCover(titulo, slug, epNum)
       const coverUrl = anilistCover || imgUrl
@@ -869,12 +864,9 @@ async function enviarEpisodio(chatIds, ep, conn) {
         const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
         coverBuffer = Buffer.from(imgRes.data)
       }
-      if (recipients.includes(CENTRAL_CHAT_ID)) {
-        await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
-      }
     } catch (error) {
-      console.error(`[tioanime-notify] No se pudo enviar el aviso central: ${error.message}`)
-      void reportTioError(conn, `Aviso central de descarga — ${titulo} ep. ${epNum}`, error)
+      console.error(`[tioanime-notify] No se pudo obtener la portada de ${titulo}: ${error.message}`)
+      void reportTioError(conn, `Portada — ${titulo} ep. ${epNum}`, error)
     }
 
     console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
@@ -938,10 +930,9 @@ async function enviarEpisodio(chatIds, ep, conn) {
         } catch (_) {}
       }
 
-      // El aviso y los dos archivos se envían solo después de completar la compresión.
+      // Enviar una sola portada sin texto y luego los dos archivos.
       for (const chatId of recipients) {
-        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
-        else await conn.sendMessage(chatId, { text: caption })
+        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer })
         await conn.sendMessage(chatId, {
           document : { url: videoPath },
           fileName,
