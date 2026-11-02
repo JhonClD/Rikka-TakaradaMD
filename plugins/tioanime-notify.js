@@ -1003,21 +1003,11 @@ async function procesarCola() {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
       }
-      if (!manual && !Object.keys(loadState()).some(id => id !== '__config' && id.endsWith('@g.us'))) {
-        quitarItemActual()
-        global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
-        continue
-      }
       let intentos = 0
       let exito    = false
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
-        if (!manual && !Object.keys(loadState()).some(id => id !== '__config' && id.endsWith('@g.us'))) {
-          quitarItemActual()
-          global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
-          break
-        }
         const connActivo = global.tioConn
         if (!connActivo) {
           await new Promise(r => setTimeout(r, ESPERA_REINTENTO))
@@ -1076,24 +1066,30 @@ async function procesarCola() {
 
 async function checkNuevosEpisodios(_chatId, conn) {
   const recipients = getRecipientChatIds()
-  const configuredRecipients = recipients.filter(chatId => chatId !== CENTRAL_CHAT_ID)
-  if (!configuredRecipients.length) return
   if (global.tioCheckingChats.has(CENTRAL_CHAT_ID)) return
   global.tioCheckingChats.add(CENTRAL_CHAT_ID)
   let lista = []
+  let consultasCompletas = true
   try {
     try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) {
+      consultasCompletas = false
       console.error(`[tioanime-notify] TioAnime: ${err.message}`)
       void reportTioError(conn, 'Consulta de episodios TioAnime', err)
     }
     try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) {
+      consultasCompletas = false
       console.error(`[tioanime-notify] LatAnime: ${err.message}`)
       void reportTioError(conn, 'Consulta de episodios LatAnime', err)
     }
     if (!lista.length) return
 
     const seen = loadSeen()
-    if (!seen[CENTRAL_CHAT_ID]) seen[CENTRAL_CHAT_ID] = []
+    if (!seen[CENTRAL_CHAT_ID]) {
+      if (!consultasCompletas) return
+      seen[CENTRAL_CHAT_ID] = lista.map(ep => ep.id).slice(-500)
+      saveSeen(seen)
+      return
+    }
     const nuevos = lista.filter(e => !seen[CENTRAL_CHAT_ID].includes(e.id) && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${e.id}`))
     if (!nuevos.length) return
 
@@ -1151,11 +1147,6 @@ function detenerNotificador(chatId) {
   const state = loadState()
   delete state[chatId]
   saveState(state)
-  const hayReceptores = Object.keys(state).some(id => id !== '__config' && id.endsWith('@g.us'))
-  if (!hayReceptores && global.tioCentralTimer) {
-    clearInterval(global.tioCentralTimer)
-    global.tioCentralTimer = null
-  }
 }
 
 function restaurarNotificadores(conn) {
@@ -1217,6 +1208,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiostop') {
+    if (m.chat === CENTRAL_CHAT_ID) return m.reply(`ℹ️ El grupo central es receptor permanente; su sondeo no se detiene con este comando.`)
     if (!global.tioActiveChats.has(m.chat)) return m.reply(`ℹ️ El notificador no estaba activo.`)
     const entry = global.tioActiveChats.get(m.chat)
     const activeTime = formatActiveTime(entry.startedAt)
@@ -1235,7 +1227,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     txt += global.tioCentralTimer
       ? `✅ *Sondeo central activo* — cada ${entry?.intervalSec || getGlobalIntervalSec()} segundos\n`
       : `🔴 *Sondeo central inactivo*\n`
-    txt += activo ? `👤 Este grupo: *receptor activo*\n` : `👤 Este grupo: *no registrado*\n`
+    txt += m.chat === CENTRAL_CHAT_ID
+      ? `👤 Este grupo: *receptor central permanente*\n`
+      : activo ? `👤 Este grupo: *receptor activo*\n` : `👤 Este grupo: *no registrado*\n`
     txt += `📋 Cola: *${cola.length}* pendiente(s)\n`
     txt += `🔵 Procesando: *${global.tioQueueRunning ? 'Sí' : 'No'}*\n`
     txt += `👁️ Vistos: *${vistos}*\n`
@@ -1355,6 +1349,14 @@ handler.limit   = false
 handler.before = async (m, { conn }) => {
   if (conn) global.tioConn = conn
   restaurarNotificadores(conn)
+  if (conn && !global.tioCentralTimer) iniciarSondeoCentral(conn, getGlobalIntervalSec())
+}
+
+// El grupo central activa el sondeo automáticamente, aunque no haya otros grupos suscritos.
+if (global.conn) {
+  global.tioConn = global.conn
+  restaurarNotificadores(global.conn)
+  if (!global.tioCentralTimer) iniciarSondeoCentral(global.conn, getGlobalIntervalSec())
 }
 
 export default handler
