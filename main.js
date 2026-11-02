@@ -61,6 +61,8 @@ global.__filename = function filename(pathURL = import.meta.url, rmPrefix = plat
 };
 global.timestamp = { start: new Date };
 const __dirname = global.__dirname(import.meta.url);
+const tmpDir = join(__dirname, './src/tmp');
+fs.mkdirSync(tmpDir, { recursive: true });
 global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
 global.prefix = new RegExp('^[#!/.]')
 global.db = new Low(/https?:\/\//.test(opts['db'] || '') ? new cloudDBAdapter(opts['db']) : new JSONFile(`${opts._[0] ? opts._[0] + '_' : ''}database.json`), null);
@@ -256,9 +258,12 @@ if (!opts['test']) {
 if (opts['server']) (await import('./server.js')).default(global.conn, PORT);
 
 function clearTmp() {
-  const tmp = [join(__dirname, './src/tmp')];
+  const tmp = [tmpDir];
   const filename = [];
-  tmp.forEach((dirname) => readdirSync(dirname).forEach((file) => filename.push(join(dirname, file))));
+  tmp.forEach((dirname) => {
+    if (!existsSync(dirname)) return;
+    readdirSync(dirname).forEach((file) => filename.push(join(dirname, file)));
+  });
   return filename.map((file) => {
     const stats = statSync(file);
     if (stats.isFile() && (Date.now() - stats.mtimeMs >= 1000 * 60 * 3)) return unlinkSync(file);
@@ -451,7 +456,8 @@ global.reloadHandler = async function (restatConn) {
 };
 ;
 
-const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
+// Los plugins viven directamente en ./plugins; no existe una subcarpeta index.
+const pluginFolder = global.__dirname(join(__dirname, './plugins'));
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 

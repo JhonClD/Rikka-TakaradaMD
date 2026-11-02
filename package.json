@@ -1,7 +1,7 @@
 {
-  "name": "KanaArima-MD",
+  "name": "rikka-takarada-md",
   "version": "2.0.0",
-  "description": "KanaArima-MD WhatsApp Bot - Baileys actualizado, LID fix, no double messages",
+  "description": "Rikka Takarada WhatsApp Bot - Baileys actualizado con soporte LID",
   "main": "index.js",
   "type": "module",
   "scripts": {

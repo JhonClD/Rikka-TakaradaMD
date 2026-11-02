@@ -17,9 +17,10 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const TIOANIME_URL           = 'https://tioanime.com'
-const LATANIME_URL           = 'https://latanime.org'
+const LATANIME_URL            = 'https://latanime.org'
 const ANILIST_URL             = 'https://graphql.anilist.co'
 const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
+const ERROR_OWNER_JID         = process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
 const DB_DIR = path.join(process.cwd(), 'database')
@@ -65,6 +66,30 @@ global.tioQueuedIds    = global.tioQueuedIds    || new Set()
 global.tioCheckingChats = global.tioCheckingChats || new Set()
 global.tioCentralTimer  = global.tioCentralTimer  || null
 global.tioAnimeCoverCache = global.tioAnimeCoverCache || new Map()
+
+async function reportTioError(conn, context, error) {
+  const message = error instanceof Error ? error.message : String(error || 'Error desconocido')
+  const stack = error instanceof Error && error.stack
+    ? error.stack.split('\n').slice(0, 4).join('\n')
+    : ''
+  const text = [
+    '🚨 *Error en TioAnime Notify*',
+    `📍 *Contexto:* ${context}`,
+    `💬 *Mensaje:* ${message}`,
+    stack && `\n\`\`\`\n${stack}\n\`\`\``,
+  ].filter(Boolean).join('\n')
+  const target = conn || global.tioConn
+  if (!target?.sendMessage) {
+    console.error(`[tioanime-notify] ${context}: ${message}`)
+    return
+  }
+  try {
+    await target.sendMessage(ERROR_OWNER_JID, { text: text.slice(0, 4000) })
+  } catch (notifyError) {
+    console.error(`[tioanime-notify] No se pudo avisar el error al owner: ${notifyError.message}`)
+    console.error(`[tioanime-notify] ${context}: ${message}`)
+  }
+}
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
 
@@ -139,6 +164,7 @@ async function getAniListCover(titulo, slug = '', epNum = 0) {
     return cover
   } catch (error) {
     console.error(`[tioanime-notify] AniList no disponible para "${title}": ${error.message}`)
+    void reportTioError(global.tioConn, `AniList — ${title}`, error)
     global.tioAnimeCoverCache.set(key, null)
     return null
   }
@@ -361,7 +387,9 @@ async function scrapeServidores(epUrl) {
         if (!servidor || !TIO_SERVIDORES.includes(servidor)) continue
         srvs.push({ nombre: servidor, url, directo: servidor === 'mega' })
       }
-    } catch (err) {}
+    } catch (err) {
+      void reportTioError(global.tioConn, `API de servidores TioAnime — ${epUrl}`, err)
+    }
   }
 
   $('a[href]').each((_, el) => {
@@ -488,7 +516,8 @@ async function scrapeServidoresLatAnime(epUrl) {
         const idx = srvs.findIndex(s => s.url === r.url)
         if (idx !== -1) srvs.splice(idx, 1)
       }
-    } catch (_) {
+    } catch (err) {
+      void reportTioError(global.tioConn, `Redirector LatAnime — ${r.url}`, err)
       const idx = srvs.findIndex(s => s.url === r.url)
       if (idx !== -1) srvs.splice(idx, 1)
     }
@@ -500,7 +529,9 @@ async function scrapeServidoresLatAnime(epUrl) {
     try {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8')
       if (decoded.startsWith('http')) embedUrl = decoded
-    } catch (_) {}
+    } catch (err) {
+      void reportTioError(global.tioConn, `Embed LatAnime — ${epUrl}`, err)
+    }
     const servidor = detectarServidor(embedUrl)
     if (embedUrl.startsWith('http') && servidor && LAT_SERVIDORES.includes(servidor) && !srvs.find(s => s.url === embedUrl)) {
       srvs.push({ nombre: servidor, url: embedUrl, directo: servidor === 'mega' || servidor === 'mediafire' })
@@ -842,6 +873,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       else await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo enviar el aviso central: ${error.message}`)
+      void reportTioError(conn, `Aviso central de descarga — ${titulo} ep. ${epNum}`, error)
     }
 
     console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
@@ -878,6 +910,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
         }
       } catch (err) {
         console.log(`[tioanime-notify] ⚠️ [ ${nombreServidor} ] falló: ${err.message}`)
+        void reportTioError(conn, `Descarga desde ${nombreServidor} — ${titulo} ep. ${epNum}`, err)
         fs.readdirSync(tmpDir).forEach(f => {
           try { if (f !== 'cover.jpg') fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {}
         })
@@ -927,6 +960,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${error.message}`)
+      void reportTioError(conn, `Compresión o entrega 360p — ${titulo} ep. ${epNum}`, error)
       try {
         for (const chatId of recipients) {
           await conn.sendMessage(chatId, {
@@ -935,6 +969,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
         }
       } catch (noticeError) {
         console.error(`[tioanime-notify] No se pudo notificar el fallo 360p: ${noticeError.message}`)
+        void reportTioError(conn, `Aviso de fallo 360p — ${titulo} ep. ${epNum}`, noticeError)
       }
     }
 
@@ -1003,6 +1038,7 @@ async function procesarCola() {
           quitarItemActual()
           global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
         } catch (err) {
+          void reportTioError(connActivo, `Cola de episodios — ${ep.titulo} ep. ${ep.epNum}`, err)
           const esConexion = /connection closed|stream errored|timed out|econnreset|econnrefused|socket hang up|precondition required/i.test(err.message)
           if (esConexion && intentos < MAX_REINTENTOS) {
             await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
@@ -1027,6 +1063,7 @@ async function procesarCola() {
     }
   } catch (fatalErr) {
     console.error(`[tioanime-notify] Error fatal en la cola: ${fatalErr.message}`)
+    void reportTioError(global.tioConn, 'Error fatal en la cola', fatalErr)
   } finally {
     global.tioQueueRunning = false
   }
@@ -1040,8 +1077,14 @@ async function checkNuevosEpisodios(_chatId, conn) {
   global.tioCheckingChats.add(CENTRAL_CHAT_ID)
   let lista = []
   try {
-    try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) { console.error(`[tioanime-notify] TioAnime: ${err.message}`) }
-    try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) { console.error(`[tioanime-notify] LatAnime: ${err.message}`) }
+    try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) {
+      console.error(`[tioanime-notify] TioAnime: ${err.message}`)
+      void reportTioError(conn, 'Consulta de episodios TioAnime', err)
+    }
+    try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) {
+      console.error(`[tioanime-notify] LatAnime: ${err.message}`)
+      void reportTioError(conn, 'Consulta de episodios LatAnime', err)
+    }
     if (!lista.length) return
 
     const seen = loadSeen()
@@ -1071,9 +1114,13 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
   if (conn) global.tioConn = conn
   if (global.tioCentralTimer) clearInterval(global.tioCentralTimer)
   global.tioCentralTimer = setInterval(() => {
-    if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(() => {})
+    if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
+      void reportTioError(global.tioConn, 'Sondeo automático central', err)
+    })
   }, intervalSec * 1000)
-  if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(() => {})
+  if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
+    void reportTioError(global.tioConn, 'Sondeo inicial central', err)
+  })
 }
 
 function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
@@ -1155,7 +1202,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         seen[CENTRAL_CHAT_ID] = lista.map(ep => ep.id).slice(-500)
       }
       saveSeen(seen)
-    } catch (err) {}
+    } catch (err) {
+      void reportTioError(conn, `Activación del notificador en ${m.chat}`, err)
+    }
     await conn.sendMessage(m.chat, {
       text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
     }, { quoted: m })
@@ -1219,7 +1268,10 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     try {
       await checkNuevosEpisodios(m.chat, conn)
       if (!global.tioEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply(`✅ Sin episodios nuevos.`)
-    } catch (err) { await m.reply(`❌ Error: ${err.message}`) }
+    } catch (err) {
+      void reportTioError(conn, `Chequeo manual solicitado en ${m.chat}`, err)
+      await m.reply(`❌ Error: ${err.message}`)
+    }
     return
   }
 

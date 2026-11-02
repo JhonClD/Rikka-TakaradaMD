@@ -18,7 +18,7 @@ Bot multifunción para WhatsApp basado en Node.js y Baileys.
 ### 1. Extraer el proyecto
 Descomprime el ZIP y entra a la carpeta:
 ```bash
-cd KanaArima-MD-clean
+cd Rikka-TakaradaMD
 ```
 
 ### 2. Instalar dependencias
@@ -163,14 +163,14 @@ Escanea el QR o ingresa el código de emparejamiento en WhatsApp → Dispositivo
 ## 📁 Estructura del proyecto
 
 ```
-KanaArima-MD-clean/
+Rikka-TakaradaMD/
 ├── index.js          # Entrada principal
 ├── main.js           # Lógica de conexión
 ├── handler.js        # Manejador de mensajes
 ├── api.js            # API REST
 ├── config.js         # Configuración global
 ├── install.sh        # Script de instalación
-├── .env              # Variables de entorno (APIs)
+├── .env              # Variables de entorno (APIs; no subirlo a Git)
 ├── plugins/          # Comandos del bot
 └── src/
     ├── libraries/    # Librerías internas
@@ -183,6 +183,6 @@ KanaArima-MD-clean/
 
 ## 📝 Notas
 
-- La sesión se guarda en la carpeta `KanaSession/` (se crea automáticamente).
-- Los archivos temporales se generan en `src/tmp/` durante el uso.
+- La sesión se guarda en la carpeta `RikkaSession/` (se crea automáticamente).
+- Los archivos temporales se generan en `src/tmp/` durante el uso y la carpeta se crea al arrancar.
 - El prefijo por defecto es `.` — se puede cambiar con el comando `setprefix`.
