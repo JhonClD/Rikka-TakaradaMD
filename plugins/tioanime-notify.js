@@ -120,8 +120,8 @@ function normalizeAnimeTitle(value) {
     .trim()
 }
 
-async function getAniListCover(titulo, slug = '') {
-  const title = cleanTitle(titulo, 0) || slug.replace(/[-_]/g, ' ')
+async function getAniListCover(titulo, slug = '', epNum = 0) {
+  const title = cleanTitle(titulo, epNum) || slug.replace(/[-_]/g, ' ')
   const key = normalizeAnimeTitle(title)
   if (!key) return null
   if (global.tioAnimeCoverCache.has(key)) return global.tioAnimeCoverCache.get(key)
@@ -878,7 +878,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
 
       let coverBuffer = null
-      const anilistCover = await getAniListCover(titulo, slug)
+      const anilistCover = await getAniListCover(titulo, slug, epNum)
       const coverUrl = anilistCover || imgUrl
       if (coverUrl) {
         try {
