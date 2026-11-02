@@ -457,7 +457,7 @@ global.reloadHandler = async function (restatConn) {
 ;
 
 // Los plugins viven directamente en ./plugins; no existe una subcarpeta index.
-const pluginFolder = global.__dirname(join(__dirname, './plugins'));
+const pluginFolder = join(__dirname, './plugins');
 const pluginFilter = (filename) => /\.js$/.test(filename);
 global.plugins = {};
 
