@@ -822,25 +822,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
   try {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
-    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _DESCARGA CENTRALIZADA EN PROCESO..._`
-
-    let coverBuffer = null
-    const anilistCover = await getAniListCover(titulo, slug)
-    const coverUrl = anilistCover || imgUrl
-    if (coverUrl) {
-      try {
-        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
-        coverBuffer = Buffer.from(imgRes.data)
-      } catch (_) {}
-    }
-    for (const chatId of recipients) {
-      try {
-        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
-        else await conn.sendMessage(chatId, { text: caption })
-      } catch (error) {
-        console.error(`[tioanime-notify] No se pudo enviar aviso a ${chatId}: ${error.message}`)
-      }
-    }
+    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _ARCHIVOS LISTOS: original + 360p_`
 
     console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
     const srvs = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
@@ -885,29 +867,38 @@ async function enviarEpisodio(chatIds, ep, conn) {
     if (!videoPath) throw new Error('Todos los servidores fallaron')
 
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
-    console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — subiendo a WhatsApp...`)
-    const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
-
-    // [CORRECCIÓN 3] Usar { url: videoPath } para usar streaming real y no congelar el bot ni la memoria RAM
-    for (const chatId of recipients) {
-      await conn.sendMessage(chatId, {
-        document : { url: videoPath },
-        fileName,
-        mimetype : 'video/mp4',
-        jpegThumbnail,
-      })
-    }
-
-    console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
-
-    // El original queda completamente enviado antes de empezar la conversión /dw4.
+    console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — preparando 360p antes de avisar...`)
     const fileName360 = build360FileName(fileName)
     const video360Path = path.join(tmpDir, fileName360)
     try {
       console.log(`[tioanime-notify] ⚙️ Iniciando compresión /dw4 360p: ${fileName}`)
       await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
       console.log(`[tioanime-notify] ✅ Compresión /dw4 360p terminada: ${fileName360}`)
+      const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
+
+      let coverBuffer = null
+      const anilistCover = await getAniListCover(titulo, slug)
+      const coverUrl = anilistCover || imgUrl
+      if (coverUrl) {
+        try {
+          const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+          coverBuffer = Buffer.from(imgRes.data)
+        } catch (_) {}
+      }
+
+      // El aviso y los dos archivos se envían solo después de completar la compresión.
+      for (const chatId of recipients) {
+        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
+        else await conn.sendMessage(chatId, { text: caption })
+        await conn.sendMessage(chatId, {
+          document : { url: videoPath },
+          fileName,
+          mimetype : 'video/mp4',
+          jpegThumbnail,
+        })
+      }
+      console.log(`[tioanime-notify] 🚀 Enviado original: ${fileName}`)
       for (const chatId of recipients) {
         await conn.sendMessage(chatId, {
           document : { url: video360Path },
@@ -922,7 +913,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       try {
         for (const chatId of recipients) {
           await conn.sendMessage(chatId, {
-            text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* ya fue enviado, pero no se pudo crear o enviar la versión 360p. Revisa que FFmpeg esté disponible y vuelve a intentarlo.`,
+            text: `⚠️ No se pudieron preparar los dos archivos de *${titulo}* ep. *${zeroPad(epNum)}*. No se envió el aviso ni los vídeos para evitar una entrega incompleta.`,
           })
         }
       } catch (noticeError) {
