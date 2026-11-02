@@ -861,7 +861,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _ARCHIVOS LISTOS: original + 360p_`
     let coverBuffer = null
 
-    // El grupo central recibe el aviso de progreso; los demás esperan a que existan ambos archivos.
+    // El grupo central recibe aviso de progreso solo si forma parte de los destinatarios.
     try {
       const anilistCover = await getAniListCover(titulo, slug, epNum)
       const coverUrl = anilistCover || imgUrl
@@ -869,8 +869,10 @@ async function enviarEpisodio(chatIds, ep, conn) {
         const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
         coverBuffer = Buffer.from(imgRes.data)
       }
-      if (coverBuffer) await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer, caption: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
-      else await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+      if (recipients.includes(CENTRAL_CHAT_ID)) {
+        if (coverBuffer) await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer, caption: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+        else await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+      }
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo enviar el aviso central: ${error.message}`)
       void reportTioError(conn, `Aviso central de descarga — ${titulo} ep. ${epNum}`, error)
@@ -993,7 +995,8 @@ async function procesarCola() {
     while (global.tioEpisodeQueue.length > 0) {
       const item = global.tioEpisodeQueue[0]
       if (!item) { global.tioEpisodeQueue.shift(); continue }
-      const { chatId, ep, manual = false, recipients = getRecipientChatIds() } = item
+      const { chatId, ep, manual = false } = item
+      const recipients = item.recipients ?? (manual ? [chatId] : getRecipientChatIds())
       const quitarItemActual = () => {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
@@ -1305,7 +1308,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true })
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients: [m.chat] })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en tioexample: ${e.message}`))
