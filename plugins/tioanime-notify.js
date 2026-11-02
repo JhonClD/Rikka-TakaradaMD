@@ -855,14 +855,24 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
   try {
     let coverBuffer = null
+    let centralCoverSent = false
 
-    // Recuperar la portada para enviarla una sola vez, sin caption, cuando termine la descarga.
+    // Enviar la portada al central al iniciar para indicar que comenzó el proceso.
     try {
       const anilistCover = await getAniListCover(titulo, slug, epNum)
       const coverUrl = anilistCover || imgUrl
       if (coverUrl) {
         const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
         coverBuffer = Buffer.from(imgRes.data)
+      }
+      if (coverBuffer && recipients.includes(CENTRAL_CHAT_ID)) {
+        try {
+          await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer })
+          centralCoverSent = true
+        } catch (error) {
+          console.error(`[tioanime-notify] No se pudo enviar la portada inicial al grupo central: ${error.message}`)
+          void reportTioError(conn, `Portada inicial central — ${titulo} ep. ${epNum}`, error)
+        }
       }
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo obtener la portada de ${titulo}: ${error.message}`)
@@ -930,9 +940,11 @@ async function enviarEpisodio(chatIds, ep, conn) {
         } catch (_) {}
       }
 
-      // Enviar una sola portada sin texto y luego los dos archivos.
+      // El central ya recibió la portada al inicio; los demás la reciben solo cuando ambos videos están listos.
       for (const chatId of recipients) {
-        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer })
+        if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
+          await conn.sendMessage(chatId, { image: coverBuffer })
+        }
         await conn.sendMessage(chatId, {
           document : { url: videoPath },
           fileName,
