@@ -144,6 +144,20 @@ async function getAniListCover(titulo, slug = '') {
   }
 }
 
+async function describeRecipientGroups(conn) {
+  const groups = getRecipientChatIds()
+  const descriptions = await Promise.all(groups.map(async jid => {
+    if (jid === CENTRAL_CHAT_ID) return `🎯 *${jid === CENTRAL_CHAT_ID ? 'Central' : 'Receptor'}* — \`${jid}\``
+    try {
+      const metadata = await conn?.groupMetadata?.(jid)
+      return `📣 *${metadata?.subject || 'Grupo sin nombre'}* — \`${jid}\``
+    } catch (_) {
+      return `📣 *Grupo receptor* — \`${jid}\``
+    }
+  }))
+  return descriptions
+}
+
 function absoluteUrl(value, base) {
   try { return new URL(value, base).href } catch (_) { return '' }
 }
@@ -1153,12 +1167,17 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     const activo = global.tioActiveChats.has(m.chat)
     const entry  = global.tioActiveChats.get(m.chat)
     const cola   = global.tioEpisodeQueue.filter(i => i.chatId === m.chat)
-    const vistos = (loadSeen()[m.chat] || []).length
+    const vistos = (loadSeen()[CENTRAL_CHAT_ID] || []).length
+    const gruposActivos = await describeRecipientGroups(conn)
     let txt = `📡 *Estado TioAnime*\n\n`
-    txt += activo ? `✅ *Activo* — cada ${entry.intervalSec} segundos\n` : `🔴 *Inactivo*\n`
+    txt += global.tioCentralTimer
+      ? `✅ *Sondeo central activo* — cada ${entry?.intervalSec || getGlobalIntervalSec()} segundos\n`
+      : `🔴 *Sondeo central inactivo*\n`
+    txt += activo ? `👤 Este grupo: *receptor activo*\n` : `👤 Este grupo: *no registrado*\n`
     txt += `📋 Cola: *${cola.length}* pendiente(s)\n`
     txt += `🔵 Procesando: *${global.tioQueueRunning ? 'Sí' : 'No'}*\n`
-    txt += `👁️ Vistos: *${vistos}*`
+    txt += `👁️ Vistos: *${vistos}*\n`
+    txt += `\n🎯 *Grupos activos (${gruposActivos.length}):*\n${gruposActivos.join('\n')}`
     if (cola.length > 0) txt += `\n\n*En cola:*\n` + cola.slice(0, 5).map((i, n) => `  ${n + 1}. ${i.ep.titulo} ep ${zeroPad(i.ep.epNum)}`).join('\n')
     return m.reply(txt)
   }
