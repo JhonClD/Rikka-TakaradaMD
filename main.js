@@ -142,6 +142,69 @@ console.debug = () => { };
   };
 });
 
+const consoleErrorForOwnerAlerts = console.error.bind(console);
+const pendingOwnerErrorAlerts = [];
+const recentOwnerErrorAlerts = new Map();
+let ownerErrorAlertFlushRunning = false;
+let sendingOwnerErrorAlert = false;
+function getOwnerErrorJid() {
+  const configured = process.env.ERROR_REPORT_JID || process.env.TIO_ERROR_OWNER_JID;
+  if (configured && configured.includes('@')) return configured;
+  const owner = global.owner?.find(entry => entry?.[2]) || global.owner?.[0];
+  const digits = String(owner?.[0] || '').replace(/\D/g, '');
+  return digits ? `${digits}@s.whatsapp.net` : null;
+}
+async function flushOwnerErrorAlerts() {
+  if (ownerErrorAlertFlushRunning) return;
+  const target = global.conn;
+  const ownerJid = getOwnerErrorJid();
+  if (!target?.sendMessage || !target?.user || !ownerJid) return;
+  ownerErrorAlertFlushRunning = true;
+  try {
+    while (pendingOwnerErrorAlerts.length) {
+      const text = pendingOwnerErrorAlerts[0];
+      try {
+        sendingOwnerErrorAlert = true;
+        await target.sendMessage(ownerJid, { text });
+        pendingOwnerErrorAlerts.shift();
+      } catch (error) {
+        consoleErrorForOwnerAlerts('[Error alert] No se pudo enviar el aviso al owner:', error);
+        break;
+      } finally {
+        sendingOwnerErrorAlert = false;
+      }
+    }
+  } finally {
+    ownerErrorAlertFlushRunning = false;
+  }
+}
+global.notifyOwnerError = (...args) => {
+  const details = format(...args).trim();
+  if (!details || sendingOwnerErrorAlert) return;
+  const now = Date.now();
+  const fingerprint = (details.split(/\r?\n/, 1)[0] || details).slice(0, 2000);
+  const previous = recentOwnerErrorAlerts.get(fingerprint);
+  if (previous && now - previous < 60_000) return;
+  recentOwnerErrorAlerts.set(fingerprint, now);
+  for (const [key, timestamp] of recentOwnerErrorAlerts) {
+    if (now - timestamp > 10 * 60_000) recentOwnerErrorAlerts.delete(key);
+  }
+  pendingOwnerErrorAlerts.push(`🚨 *Error del bot (consola/plugin)*\n\n${details}`.slice(0, 3500));
+  void flushOwnerErrorAlerts();
+};
+console.error = function (...args) {
+  consoleErrorForOwnerAlerts.apply(console, args);
+  if (!sendingOwnerErrorAlert) global.notifyOwnerError(...args);
+};
+const consoleWarnForOwnerAlerts = console.warn.bind(console);
+console.warn = function (...args) {
+  consoleWarnForOwnerAlerts.apply(console, args);
+  const warning = format(...args);
+  if (!sendingOwnerErrorAlert && (args.some(value => value instanceof Error) || /error|failed|failure|falló|fallo|no se pudo|exception|timed out|timeout/i.test(warning))) {
+    global.notifyOwnerError('[Aviso de fallo]', ...args);
+  }
+};
+
 process.on('uncaughtException', (err) => {
   if (filterStrings.includes(Buffer.from(err.message).toString('base64'))) return;
   console.error('Uncaught Exception:', err);
@@ -314,6 +377,7 @@ async function connectionUpdate(update) {
     global.timestamp.connect = new Date();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
     isFirstConnection = true;
+    void flushOwnerErrorAlerts();
   }
   let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
   const lastErrors = {};
@@ -469,6 +533,7 @@ async function filesInit() {
       global.plugins[filename] = module.default || module;
     } catch (e) {
       conn.logger.error(e);
+      global.notifyOwnerError?.(`No se pudo importar el plugin ${filename}:`, e);
       delete global.plugins[filename];
     }
   }
@@ -489,13 +554,17 @@ global.reload = async (_ev, filename) => {
       sourceType: 'module',
       allowAwaitOutsideFunction: true,
     });
-    if (err) conn.logger.error(`syntax error while loading '${filename}'\n${format(err)}`);
+    if (err) {
+      conn.logger.error(`syntax error while loading '${filename}'\n${format(err)}`);
+      global.notifyOwnerError?.(`Error de sintaxis en el plugin ${filename}:`, err);
+    }
     else {
       try {
         const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
         global.plugins[filename] = module.default || module;
       } catch (e) {
         conn.logger.error(`error require plugin '${filename}\n${format(e)}'`);
+        global.notifyOwnerError?.(`No se pudo recargar el plugin ${filename}:`, e);
       } finally {
         global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
       }
