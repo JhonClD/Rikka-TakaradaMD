@@ -870,8 +870,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
         coverBuffer = Buffer.from(imgRes.data)
       }
       if (recipients.includes(CENTRAL_CHAT_ID)) {
-        if (coverBuffer) await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer, caption: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
-        else await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
+        await conn.sendMessage(CENTRAL_CHAT_ID, { text: caption.replace('✅ _ARCHIVOS LISTOS: original + 360p_', '✅ _DESCARGA CENTRALIZADA EN PROCESO..._') })
       }
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo enviar el aviso central: ${error.message}`)
@@ -1308,7 +1307,8 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients: [m.chat] })
+      const recipients = m.chat === CENTRAL_CHAT_ID ? getRecipientChatIds() : [m.chat]
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en tioexample: ${e.message}`))
@@ -1333,7 +1333,8 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients: [m.chat] })
+      const recipients = m.chat === CENTRAL_CHAT_ID ? getRecipientChatIds() : [m.chat]
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en latexample: ${e.message}`))
