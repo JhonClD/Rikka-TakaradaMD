@@ -60,6 +60,8 @@ export function buildDw4Args(inputPath, outputPath) {
     '-vf', videoFilter,
     '-c:v', 'libx264', '-preset', PRESET, '-crf', String(CRF),
     '-pix_fmt', 'yuv420p',
+    // Normalizar a estéreo para que AAC acepte pistas 5.1 con layout desconocido.
+    '-ac', '2',
     '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-movflags', '+faststart',
     outputPath,
   ]
