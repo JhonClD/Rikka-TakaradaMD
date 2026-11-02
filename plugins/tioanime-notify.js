@@ -1,4 +1,4 @@
-// plugins/tioanime-notify.js — v3.2
+// plugins/tioanime-notify.js — v4.0 centralizado
 //
 // Notificador automático de nuevos episodios — TioAnime (SUB) + LatAnime (LAT/ESP)
 
@@ -18,6 +18,8 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 const TIOANIME_URL           = 'https://tioanime.com'
 const LATANIME_URL           = 'https://latanime.org'
+const ANILIST_URL             = 'https://graphql.anilist.co'
+const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
 const DB_DIR = path.join(process.cwd(), 'database')
@@ -61,6 +63,8 @@ global.tioQueueRunning = global.tioQueueRunning || false
 global.tioConn         = global.tioConn         || null
 global.tioQueuedIds    = global.tioQueuedIds    || new Set()
 global.tioCheckingChats = global.tioCheckingChats || new Set()
+global.tioCentralTimer  = global.tioCentralTimer  || null
+global.tioAnimeCoverCache = global.tioAnimeCoverCache || new Map()
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
 
@@ -100,6 +104,44 @@ function setGlobalIntervalSec(intervalSec) {
   const state = loadState()
   state.__config = { ...(state.__config || {}), intervalSec }
   saveState(state)
+}
+
+function getRecipientChatIds(extra = []) {
+  const state = loadState()
+  const configured = Object.keys(state).filter(chatId => chatId !== '__config' && chatId.endsWith('@g.us'))
+  return [...new Set([CENTRAL_CHAT_ID, ...configured, ...extra].filter(Boolean))]
+}
+
+function normalizeAnimeTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+async function getAniListCover(titulo, slug = '') {
+  const title = cleanTitle(titulo, 0) || slug.replace(/[-_]/g, ' ')
+  const key = normalizeAnimeTitle(title)
+  if (!key) return null
+  if (global.tioAnimeCoverCache.has(key)) return global.tioAnimeCoverCache.get(key)
+  const query = `query ($search: String) { Media(search: $search, type: ANIME) { coverImage { extraLarge large medium } } }`
+  try {
+    const response = await axios.post(ANILIST_URL, { query, variables: { search: title } }, {
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      timeout: 10000,
+    })
+    const cover = response.data?.data?.Media?.coverImage?.extraLarge
+      || response.data?.data?.Media?.coverImage?.large
+      || response.data?.data?.Media?.coverImage?.medium
+      || null
+    global.tioAnimeCoverCache.set(key, cover)
+    return cover
+  } catch (error) {
+    console.error(`[tioanime-notify] AniList no disponible para "${title}": ${error.message}`)
+    global.tioAnimeCoverCache.set(key, null)
+    return null
+  }
 }
 
 function absoluteUrl(value, base) {
@@ -748,8 +790,10 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 
-async function enviarEpisodio(chatId, ep, conn) {
+async function enviarEpisodio(chatIds, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl, slug = '', fuente = 'tioanime', idioma = 'latino' } = ep
+  const recipients = [...new Set((Array.isArray(chatIds) ? chatIds : [chatIds]).filter(Boolean))]
+  if (!recipients.length) throw new Error('No hay grupos receptores configurados')
   const fileName = buildFileName(titulo, epNum, fuente, idioma, slug)
   
   // [CORRECCIÓN 2] Usar carpeta local segura para descargar y evitar ENOSPC
@@ -764,15 +808,24 @@ async function enviarEpisodio(chatId, ep, conn) {
 
   try {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
-    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
+    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _DESCARGA CENTRALIZADA EN PROCESO..._`
 
-    if (imgUrl) {
+    let coverBuffer = null
+    const anilistCover = await getAniListCover(titulo, slug)
+    const coverUrl = anilistCover || imgUrl
+    if (coverUrl) {
       try {
-        const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
-        await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption })
-      } catch (_) { await conn.sendMessage(chatId, { text: caption }) }
-    } else {
-      await conn.sendMessage(chatId, { text: caption })
+        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+        coverBuffer = Buffer.from(imgRes.data)
+      } catch (_) {}
+    }
+    for (const chatId of recipients) {
+      try {
+        if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
+        else await conn.sendMessage(chatId, { text: caption })
+      } catch (error) {
+        console.error(`[tioanime-notify] No se pudo enviar aviso a ${chatId}: ${error.message}`)
+      }
     }
 
     console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
@@ -822,12 +875,14 @@ async function enviarEpisodio(chatId, ep, conn) {
     const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
 
     // [CORRECCIÓN 3] Usar { url: videoPath } para usar streaming real y no congelar el bot ni la memoria RAM
-    await conn.sendMessage(chatId, {
-      document : { url: videoPath },
-      fileName,
-      mimetype : 'video/mp4',
-      jpegThumbnail,
-    })
+    for (const chatId of recipients) {
+      await conn.sendMessage(chatId, {
+        document : { url: videoPath },
+        fileName,
+        mimetype : 'video/mp4',
+        jpegThumbnail,
+      })
+    }
 
     console.log(`[tioanime-notify] 🚀 Enviado: ${fileName}`)
 
@@ -839,19 +894,23 @@ async function enviarEpisodio(chatId, ep, conn) {
       await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
       console.log(`[tioanime-notify] ✅ Compresión /dw4 360p terminada: ${fileName360}`)
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
-      await conn.sendMessage(chatId, {
-        document : { url: video360Path },
-        fileName: fileName360,
-        mimetype : 'video/mp4',
-        jpegThumbnail: jpegThumbnail360,
-      })
+      for (const chatId of recipients) {
+        await conn.sendMessage(chatId, {
+          document : { url: video360Path },
+          fileName: fileName360,
+          mimetype : 'video/mp4',
+          jpegThumbnail: jpegThumbnail360,
+        })
+      }
       console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
     } catch (error) {
       console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${error.message}`)
       try {
-        await conn.sendMessage(chatId, {
-          text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* ya fue enviado, pero no se pudo crear o enviar la versión 360p. Revisa que FFmpeg esté disponible y vuelve a intentarlo.`,
-        })
+        for (const chatId of recipients) {
+          await conn.sendMessage(chatId, {
+            text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* ya fue enviado, pero no se pudo crear o enviar la versión 360p. Revisa que FFmpeg esté disponible y vuelve a intentarlo.`,
+          })
+        }
       } catch (noticeError) {
         console.error(`[tioanime-notify] No se pudo notificar el fallo 360p: ${noticeError.message}`)
       }
@@ -877,12 +936,12 @@ async function procesarCola() {
     while (global.tioEpisodeQueue.length > 0) {
       const item = global.tioEpisodeQueue[0]
       if (!item) { global.tioEpisodeQueue.shift(); continue }
-      const { chatId, ep, manual = false } = item
+      const { chatId, ep, manual = false, recipients = getRecipientChatIds() } = item
       const quitarItemActual = () => {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
       }
-      if (!manual && !global.tioActiveChats.has(chatId)) {
+      if (!manual && !Object.keys(loadState()).some(id => id !== '__config' && id.endsWith('@g.us'))) {
         quitarItemActual()
         global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
         continue
@@ -892,7 +951,7 @@ async function procesarCola() {
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
-        if (!manual && !global.tioActiveChats.has(chatId)) {
+        if (!manual && !Object.keys(loadState()).some(id => id !== '__config' && id.endsWith('@g.us'))) {
           quitarItemActual()
           global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
           break
@@ -903,18 +962,21 @@ async function procesarCola() {
           continue
         }
         try {
-          await enviarEpisodio(chatId, ep, connActivo)
+          await enviarEpisodio(recipients, ep, connActivo)
           exito = true
-          const seen = loadSeen()
-          if (!seen[chatId]) seen[chatId] = []
-          if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
-          if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
-          saveSeen(seen)
+          if (!manual) {
+            const seen = loadSeen()
+            if (!seen[CENTRAL_CHAT_ID]) seen[CENTRAL_CHAT_ID] = []
+            if (!seen[CENTRAL_CHAT_ID].includes(ep.id)) seen[CENTRAL_CHAT_ID].push(ep.id)
+            if (seen[CENTRAL_CHAT_ID].length > 500) seen[CENTRAL_CHAT_ID] = seen[CENTRAL_CHAT_ID].slice(-500)
+            saveSeen(seen)
+          }
           const state = loadState()
-          const sentCount = (Number(state[chatId]?.sentCount) || 0) + 1
-          if (state[chatId]) state[chatId].sentCount = sentCount
-          const active = global.tioActiveChats.get(chatId)
-          if (active) active.sentCount = sentCount
+          for (const recipient of recipients) {
+            if (state[recipient]) state[recipient].sentCount = (Number(state[recipient].sentCount) || 0) + 1
+            const active = global.tioActiveChats.get(recipient)
+            if (active) active.sentCount = state[recipient]?.sentCount || active.sentCount
+          }
           saveState(state)
           quitarItemActual()
           global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
@@ -924,7 +986,7 @@ async function procesarCola() {
             await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
           } else if (esConexion) {
             quitarItemActual()
-            global.tioEpisodeQueue.push({ chatId, ep, manual })
+            global.tioEpisodeQueue.push({ chatId, ep, manual, recipients })
             await new Promise(r => setTimeout(r, ESPERA_REQUEUEUE))
             break
           } else {
@@ -932,7 +994,9 @@ async function procesarCola() {
             global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
             try {
               const connErr = global.tioConn
-              if (connErr) await connErr.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
+              for (const recipient of recipients) {
+                if (connErr) await connErr.sendMessage(recipient, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
+              }
             } catch (_) {}
           }
         }
@@ -946,9 +1010,12 @@ async function procesarCola() {
   }
 }
 
-async function checkNuevosEpisodios(chatId, conn) {
-  if (global.tioCheckingChats.has(chatId)) return
-  global.tioCheckingChats.add(chatId)
+async function checkNuevosEpisodios(_chatId, conn) {
+  const recipients = getRecipientChatIds()
+  const configuredRecipients = recipients.filter(chatId => chatId !== CENTRAL_CHAT_ID)
+  if (!configuredRecipients.length) return
+  if (global.tioCheckingChats.has(CENTRAL_CHAT_ID)) return
+  global.tioCheckingChats.add(CENTRAL_CHAT_ID)
   let lista = []
   try {
     try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) { console.error(`[tioanime-notify] TioAnime: ${err.message}`) }
@@ -956,44 +1023,49 @@ async function checkNuevosEpisodios(chatId, conn) {
     if (!lista.length) return
 
     const seen = loadSeen()
-    if (!global.tioActiveChats.has(chatId)) return
-    if (!seen[chatId]) seen[chatId] = []
-    const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.tioQueuedIds.has(`${chatId}:${e.id}`))
+    if (!seen[CENTRAL_CHAT_ID]) seen[CENTRAL_CHAT_ID] = []
+    const nuevos = lista.filter(e => !seen[CENTRAL_CHAT_ID].includes(e.id) && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${e.id}`))
     if (!nuevos.length) return
 
     if (nuevos.length > 1) {
       try {
-        await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se enviarán de uno en uno..._` })
+        for (const recipient of recipients) {
+          await conn.sendMessage(recipient, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se descargarán una sola vez desde el grupo central..._` })
+        }
       } catch (err) { console.error(`[tioanime-notify] No se pudo enviar el resumen: ${err.message}`) }
     }
 
     for (const ep of nuevos) {
-      global.tioEpisodeQueue.push({ chatId, ep })
-      global.tioQueuedIds.add(`${chatId}:${ep.id}`)
+      global.tioEpisodeQueue.push({ chatId: CENTRAL_CHAT_ID, ep, recipients })
+      global.tioQueuedIds.add(`${CENTRAL_CHAT_ID}:${ep.id}`)
     }
     procesarCola().catch(err => console.error(`[tioanime-notify] Error procesando cola: ${err.message}`))
   } finally {
-    global.tioCheckingChats.delete(chatId)
+    global.tioCheckingChats.delete(CENTRAL_CHAT_ID)
   }
+}
+
+function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
+  if (conn) global.tioConn = conn
+  if (global.tioCentralTimer) clearInterval(global.tioCentralTimer)
+  global.tioCentralTimer = setInterval(() => {
+    if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(() => {})
+  }, intervalSec * 1000)
+  if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(() => {})
 }
 
 function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
   if (conn) global.tioConn = conn
-  if (global.tioActiveChats.has(chatId)) clearInterval(global.tioActiveChats.get(chatId).timer)
   intervalSec = Number(intervalSec) || getGlobalIntervalSec()
-  const timer = setInterval(() => {
-    const c = global.tioConn
-    if (!c) return
-    checkNuevosEpisodios(chatId, c).catch(e => {})
-  }, intervalSec * 1000)
+  const previous = global.tioActiveChats.get(chatId)
+  if (previous?.timer) clearInterval(previous.timer)
   const state = loadState()
   const startedAt = Date.now()
   const sentCount = Number(state[chatId]?.sentCount) || 0
-  global.tioActiveChats.set(chatId, { timer, intervalSec, startedAt, sentCount })
+  global.tioActiveChats.set(chatId, { timer: null, intervalSec, startedAt, sentCount })
   state[chatId] = { intervalSec, startedAt, sentCount }
   saveState(state)
-  // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
-  if (checkNow && global.tioConn) checkNuevosEpisodios(chatId, global.tioConn).catch(() => {})
+  iniciarSondeoCentral(conn, intervalSec, checkNow)
 }
 
 function detenerNotificador(chatId) {
@@ -1005,6 +1077,11 @@ function detenerNotificador(chatId) {
   const state = loadState()
   delete state[chatId]
   saveState(state)
+  const hayReceptores = Object.keys(state).some(id => id !== '__config' && id.endsWith('@g.us'))
+  if (!hayReceptores && global.tioCentralTimer) {
+    clearInterval(global.tioCentralTimer)
+    global.tioCentralTimer = null
+  }
 }
 
 function restaurarNotificadores(conn) {
@@ -1052,9 +1129,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       lat = await fetchLatestEpisodesLatAnime()
       const lista = [...tio, ...lat]
       const seen  = loadSeen()
-      if (!seen[m.chat]) seen[m.chat] = []
-      for (const ep of lista) { if (!seen[m.chat].includes(ep.id)) seen[m.chat].push(ep.id) }
-      if (seen[m.chat].length > 500) seen[m.chat] = seen[m.chat].slice(-500)
+      if (!seen[CENTRAL_CHAT_ID]) {
+        seen[CENTRAL_CHAT_ID] = lista.map(ep => ep.id).slice(-500)
+      }
       saveSeen(seen)
     } catch (err) {}
     await conn.sendMessage(m.chat, {
@@ -1174,7 +1251,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     for (const ep of seleccion) {
       const queueId = `${m.chat}:${ep.id}`
       if (global.tioQueuedIds.has(queueId)) continue
-      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true })
+      global.tioEpisodeQueue.push({ chatId: m.chat, ep, manual: true, recipients: [m.chat] })
       global.tioQueuedIds.add(queueId)
     }
     procesarCola().catch(e => console.error(`[tioanime-notify] Error en latexample: ${e.message}`))
