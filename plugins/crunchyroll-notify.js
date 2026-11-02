@@ -20,7 +20,7 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+const BASIC_ANON = process.env.CR_BASIC_ANON || 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
 const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
 const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
@@ -69,8 +69,16 @@ async function preLogin() {
 
 // ─── Tokens ───────────────────────────────────────────────────────────────────
 let _token = null, _tokenExp = 0
+let anonClientInactive = false
+
+function makeAnonClientInactiveError() {
+  const error = new Error('El cliente OAuth anónimo de Crunchyroll está inactivo. Configura CR_BASIC_ANON con credenciales vigentes o autentica una cuenta con .crlogin.')
+  error.code = 'CR_ANON_CLIENT_INACTIVE'
+  return error
+}
 
 async function getAnonToken() {
+  if (anonClientInactive) throw makeAnonClientInactiveError()
   if (_token && Date.now() < _tokenExp - 30_000) return _token
   if (!_cookies) await preLogin()
   const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
@@ -79,7 +87,19 @@ async function getAnonToken() {
     headers: { 'Authorization': BASIC_ANON, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': DEVICE_ID, 'Cookie': _cookies },
     body: body.toString(), signal: AbortSignal.timeout(15_000),
   })
-  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`Auth anónima HTTP ${res.status}: ${t.slice(0,80)}`) }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let details = {}
+    try { details = JSON.parse(text) } catch {}
+    const apiCode = details.code || details.error || ''
+    if (res.status === 401 && apiCode === 'auth.obtain_access_token.client_inactive') {
+      anonClientInactive = true
+      _token = null
+      _tokenExp = 0
+      throw makeAnonClientInactiveError()
+    }
+    throw new Error(`Auth anónima HTTP ${res.status}: ${(details.error_description || apiCode || text).slice(0,120)}`)
+  }
   const data = await res.json()
   _token = data.access_token; _tokenExp = Date.now() + (data.expires_in || 300) * 1000
   return _token
@@ -97,7 +117,7 @@ async function loginWithAccount(email, password) {
   const data = await res.json()
   const cfg  = loadCfg()
   Object.assign(cfg, { accessToken: data.access_token, refreshToken: data.refresh_token || null, tokenExp: Date.now() + (data.expires_in || 300) * 1000, accountId: data.account_id || null, loggedIn: true })
-  saveCfg(cfg); _token = data.access_token; _tokenExp = cfg.tokenExp
+  saveCfg(cfg); _token = data.access_token; _tokenExp = cfg.tokenExp; anonClientInactive = false
   return data
 }
 
@@ -294,6 +314,7 @@ function startCron(conn) {
   stopCron()
 
   const cfg     = loadCfg()
+  if (!cfg.loggedIn && anonClientInactive) return
   const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 1)
   const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 1
 
@@ -328,7 +349,14 @@ function startCron(conn) {
         await delay(3000)
       }
       console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
-    } catch (err) { console.error('[CR-Notify] Cron:', err.message) }
+    } catch (err) {
+      if (err.code === 'CR_ANON_CLIENT_INACTIVE') {
+        stopCron()
+        console.error('[CR-Notify] Cron pausado: Crunchyroll desactivó el cliente OAuth anónimo.', err.message)
+      } else {
+        console.error('[CR-Notify] Cron:', err.message)
+      }
+    }
     finally { cronRunning = false }
   }, minutes * 60_000)
 
@@ -368,7 +396,9 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     saveCfg(cfg)
     _token = null; _tokenExp = 0
     return conn.sendMessage(m.chat, {
-      text: `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
+      text: anonClientInactive
+        ? `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\n⚠️ El cliente anónimo está inactivo; el cron queda pausado hasta configurar credenciales vigentes o iniciar sesión de nuevo.`
+        : `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
     }, { quoted: m })
   }
 
@@ -412,6 +442,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     return conn.sendMessage(m.chat, {
       text: `📊 *CR-Notify Status*\n\n` +
             `🔑 Modo: *${cfg.loggedIn ? '👤 Cuenta real ✅' : '👻 Anónimo'}*\n` +
+            (anonClientInactive ? `⚠️ Cliente anónimo: *inactivo; cron pausado*\n` : '') +
             `⏳ Token expira: *${exp}*\n` +
             `🔁 Refresh token: *${cfg.refreshToken ? 'Sí ✅' : 'No ❌'}*\n` +
             `⏱ Cron: cada *${mins} min*\n` +

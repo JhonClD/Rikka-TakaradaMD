@@ -388,7 +388,11 @@ async function scrapeServidores(epUrl) {
         srvs.push({ nombre: servidor, url, directo: servidor === 'mega' })
       }
     } catch (err) {
-      void reportTioError(global.tioConn, `API de servidores TioAnime — ${epUrl}`, err)
+      if (err.response?.status === 404) {
+        console.warn(`[tioanime-notify] API de descargas TioAnime devolvió 404 para ${epUrl}; se probará la extracción desde la página del episodio.`)
+      } else {
+        void reportTioError(global.tioConn, `API de servidores TioAnime — ${epUrl}`, err)
+      }
     }
   }
 
