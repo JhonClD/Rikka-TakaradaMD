@@ -239,11 +239,11 @@ function getSeasonNumber(...values) {
   const text = values.filter(Boolean).join(' ')
   const token = '(\\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)'
   const patterns = [
+    /\b(first|second|third|fourth|fifth)\s+season\b/i,
     new RegExp(`${token}\\s*(?:st|nd|rd|th|ª|º)?\\s*(?:temporada|season|saison)`, 'i'),
     new RegExp(`(?:temporada|season|saison)\\s*[-_: ]?\\s*${token}`, 'i'),
     new RegExp(`\\b(?:S|T)\\s*${token}\\b`, 'i'),
     /\b(?:VIII|VII|VI|IX|IV|V|III|II|X)\b/i,
-    /\b(?:first|second|third|fourth|fifth)\s+season\b/i,
   ]
   let match
   for (const pattern of patterns) {
@@ -251,7 +251,9 @@ function getSeasonNumber(...values) {
     if (match) break
   }
   const wordSeasons = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5 }
-  const season = match?.[1] ? seasonValue(match[1]) : wordSeasons[match?.[0]?.split(/\s+/)[0]?.toLowerCase()] || 1
+  const season = match?.[1]
+    ? (wordSeasons[match[1].toLowerCase()] || seasonValue(match[1]))
+    : wordSeasons[match?.[0]?.split(/\s+/)[0]?.toLowerCase()] || 1
   return season > 1 ? season : 1
 }
 function cleanTitle(titulo, epNum) {
@@ -260,7 +262,10 @@ function cleanTitle(titulo, epNum) {
     .replace(/\s*(?:first|second|third|fourth|fifth)\s+season/ig, '')
     .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
     .replace(/\s*\b(?:S|T)\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)\b/ig, '')
-    .replace(/(^|[\s()[\]{}\-_:])(?:VIII|VII|VI|IX|IV|V|III|II|X)(?=$|[\s()[\]{}\-_:])/ig, '$1')
+    .replace(/(^|[\s()[\]{}\-_:])(?:VIII|VII|VI|IX|IV|V|III|II|X)(?=$|[\s()[\]{}\-_:])/ig, (match, prefix, offset, full) => {
+      // "Act II" es parte del título de Diamond no Ace, no una marca de temporada.
+      return /\bAct\s*$/i.test(full.slice(0, offset)) ? match : prefix
+    })
     .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
     .replace(/\s*(?:latino|castellano)\s*(?:🇲🇽|🇪🇸)?/ig, '')
     .replace(/\s*\(\s*(?:720p|1080p)\s*\)/ig, '')
