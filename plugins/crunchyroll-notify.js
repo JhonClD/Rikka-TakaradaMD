@@ -12,7 +12,7 @@ const LOCAL_CREDENTIALS_PATH = join(__dirname, 'credentials.tv.json')
 
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 try { chmodSync(TMP_DIR, 0o700) } catch {}
-for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
+for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH, LOCAL_CREDENTIALS_PATH]) {
   if (existsSync(sensitivePath)) {
     try { chmodSync(sensitivePath, 0o600) } catch {}
   }
@@ -22,17 +22,17 @@ for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
+const CR_RSS     = 'https://feeds.feedburner.com/crunchyroll/rss/anime'
 
 // Fuente 1: crextractor (se actualiza semanalmente)
 const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
 // Fuente 2 (respaldo): artifacts de crunchyroll-rs
 const CRUNCHYROLL_RS_ARTIFACTS = 'https://raw.githubusercontent.com/crunchy-labs/artifacts/main/credentials.json'
 
-// Token de respaldo final (verificado y actualizado)
+// Fallback final (verificado y actualizado)
 const BASIC_ANON_FALLBACK = 'Basic bmR0aTZicXlqcm9wNXZnZjF0dnU6elpIcS00SEJJVDlDb2FMcnBPREJjRVRCTUNHai1QNlg='
+const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
-
-const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 
 let DEVICE_ID = (() => {
   try {
@@ -47,20 +47,26 @@ let DEVICE_ID = (() => {
   }
 })()
 
+// ID anónimo efímero por sesión (ETP-Anonymous-ID). Semánticamente distinto del device_id persistente.
+const ANON_ETP_ID = randomUUID()
+
 const DEVICE_TYPE = 'ANDROIDTV'
 const MAX_SEEN    = 500
 const MAX_JA_CACHE = 2000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
+const COOKIE_TTL = 6 * 60 * 60_000
+const HEALTH_INTERVAL_MS = 30 * 60_000
 
 let BASIC_ANON = BASIC_ANON_FALLBACK
+let BASIC_AUTH = BASIC_AUTH_FALLBACK
 let CR_UA = CR_UA_FALLBACK
 let _credCache = { exp: 0, source: 'fallback', lastError: null }
 let _credRefresh = null
 
 // ─── Utilidades ──────────────────────────────────────────────────────────────
 function writeJsonAtomic(path, value) {
-  const tmp = `${path}.tmp-${process.pid}`
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
   try { chmodSync(tmp, 0o600) } catch {}
   renameSync(tmp, path)
@@ -85,7 +91,25 @@ function buildUserAgent(version, build) {
   return `Crunchyroll/ANDROIDTV/${version}_${build} (Android 16; en-US; sdk_gphone64_x86_64)`
 }
 
-// ─── Credenciales (triple fuente) ────────────────────────────────────────────
+function buildBasicAuth(clientId, clientSecret) {
+  if (typeof clientId !== 'string' || typeof clientSecret !== 'string') return null
+  if (!clientId || !clientSecret || clientId.length > 128 || clientSecret.length > 128) return null
+  if (/[\u0000-\u001f\u007f]/.test(clientId + clientSecret)) return null
+  const b64 = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+  return isValidBasicCredential(b64) ? b64 : null
+}
+
+// ─── Mutex simple (promesa encadenada, sin polling) ─────────────────────────
+let _lockChain = Promise.resolve()
+async function withGlobalLock(fn) {
+  const prev = _lockChain
+  let release
+  _lockChain = new Promise(r => { release = r })
+  await prev
+  try { return await fn() } finally { release() }
+}
+
+// ─── Credenciales (triple fuente + rotación de BASIC_AUTH) ──────────────────
 async function fetchCredentialsFrom(url) {
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
@@ -100,7 +124,14 @@ async function fetchCredentialsFrom(url) {
   const client = parseClientVersion(credentials?.version)
   if (!isValidBasicCredential(authorization)) throw new Error('authorization inválida')
   if (!client) throw new Error('versión inválida')
-  return { authorization, client }
+  const basicAuth = buildBasicAuth(credentials?.client_id, credentials?.client_secret)
+  return { authorization, client, basicAuth }
+}
+
+function applyCredentials(authorization, client, basicAuth) {
+  BASIC_ANON = authorization
+  if (basicAuth) BASIC_AUTH = basicAuth
+  CR_UA = buildUserAgent(client.version, client.build)
 }
 
 async function refreshCredentials() {
@@ -110,9 +141,8 @@ async function refreshCredentials() {
   _credRefresh = (async () => {
     // Fuente 1: crextractor
     try {
-      const { authorization, client } = await fetchCredentialsFrom(CREDENTIALS_URL)
-      BASIC_ANON = authorization
-      CR_UA = buildUserAgent(client.version, client.build)
+      const { authorization, client, basicAuth } = await fetchCredentialsFrom(CREDENTIALS_URL)
+      applyCredentials(authorization, client, basicAuth)
       _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'crextractor', lastError: null }
       console.log(`[CR-Notify] Credenciales desde crextractor (v${client.version}, build ${client.build}).`)
       return
@@ -123,9 +153,8 @@ async function refreshCredentials() {
 
     // Fuente 2: artifacts de crunchyroll-rs
     try {
-      const { authorization, client } = await fetchCredentialsFrom(CRUNCHYROLL_RS_ARTIFACTS)
-      BASIC_ANON = authorization
-      CR_UA = buildUserAgent(client.version, client.build)
+      const { authorization, client, basicAuth } = await fetchCredentialsFrom(CRUNCHYROLL_RS_ARTIFACTS)
+      applyCredentials(authorization, client, basicAuth)
       _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'crunchyroll-rs', lastError: null }
       console.log(`[CR-Notify] Credenciales desde crunchyroll-rs (v${client.version}, build ${client.build}).`)
       return
@@ -141,9 +170,9 @@ async function refreshCredentials() {
         const credentials = JSON.parse(raw)
         const authorization = credentials?.authorization
         const client = parseClientVersion(credentials?.version)
+        const basicAuth = buildBasicAuth(credentials?.client_id, credentials?.client_secret)
         if (isValidBasicCredential(authorization) && client) {
-          BASIC_ANON = authorization
-          CR_UA = buildUserAgent(client.version, client.build)
+          applyCredentials(authorization, client, basicAuth)
           _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'local', lastError: null }
           console.log(`[CR-Notify] Credenciales locales cargadas (v${client.version}).`)
           return
@@ -154,15 +183,22 @@ async function refreshCredentials() {
       _credCache.lastError = `local: ${localErr.message}`
     }
 
-    // Fallback final (hardcodeado)
-    if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
+    // Fallback final (hardcodeado) — sólo si no tenemos una credencial buena previa
+    const sourceIsFallback = _credCache.source === 'fallback' || _credCache.source === 'stale'
+    if (sourceIsFallback || !isValidBasicCredential(BASIC_ANON)) {
       BASIC_ANON = BASIC_ANON_FALLBACK
       CR_UA = CR_UA_FALLBACK
-      _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback', lastError: _credCache.lastError }
+      _credCache = {
+        exp: Date.now() + CREDENTIAL_RETRY_MS,
+        source: 'fallback',
+        lastError: _credCache.lastError,
+      }
+      console.warn('[CR-Notify] Usando credenciales de respaldo final (fallback).')
     } else {
+      // Conservamos la última credencial buena y reintentamos pronto
       _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
+      console.warn('[CR-Notify] Fuentes remotas fallaron; conservando credencial previa y reintentando pronto.')
     }
-    console.warn('[CR-Notify] Usando credenciales de respaldo final (fallback).')
   })().finally(() => {
     _credRefresh = null
   })
@@ -184,7 +220,7 @@ function loadCfg() {
     return cfg
   } catch { return { targetJids: [] } }
 }
-function saveCfg(d)    { writeJsonAtomic(CFG_PATH, d) }
+function saveCfg(d) { writeJsonAtomic(CFG_PATH, d) }
 
 function loadSeen() {
   try {
@@ -224,16 +260,19 @@ function extractSeriesTitle(data) {
 
 async function getJapaneseTitle(seriesId) {
   if (!seriesId) return ''
-  if (typeof _seriesCache[seriesId] === 'string') return _seriesCache[seriesId]
+  if (typeof _seriesCache[seriesId] === 'string' && _seriesCache[seriesId]) return _seriesCache[seriesId]
   if (_seriesFetching.has(seriesId)) return _seriesFetching.get(seriesId)
 
   const promise = (async () => {
     try {
       const data = await crFetch(`/content/v1/series/${seriesId}`, { locale: 'ja-JP' }, CR_BETA)
       const title = extractSeriesTitle(data)
-      _seriesCache[seriesId] = title || ''
-      saveSeriesCache()
-      return _seriesCache[seriesId]
+      // No cachear títulos vacíos (permite reintentar si es transitorio)
+      if (title) {
+        _seriesCache[seriesId] = title
+        saveSeriesCache()
+      }
+      return title
     } catch {
       return ''
     } finally {
@@ -244,14 +283,17 @@ async function getJapaneseTitle(seriesId) {
   return promise
 }
 
-// ─── Cookies ─────────────────────────────────────────────────────────────────
+// ─── Cookies (con TTL) ───────────────────────────────────────────────────────
 let _cookies = ''
-async function preLogin() {
+let _cookiesExp = 0
+async function preLogin(force = false) {
+  if (!force && _cookies && Date.now() < _cookiesExp) return
   await refreshCredentials()
   try {
     const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
-    _cookies  = raw.map(c => c.split(';')[0]).join('; ')
+    _cookies = raw.map(c => c.split(';')[0]).join('; ')
+    _cookiesExp = Date.now() + COOKIE_TTL
   } catch {}
 }
 
@@ -261,7 +303,7 @@ let _token = null, _tokenExp = 0
 async function getAnonToken() {
   if (_token && Date.now() < _tokenExp - 30_000) return _token
   await refreshCredentials()
-  if (!_cookies) await preLogin()
+  await preLogin()
 
   const doRequest = () => fetch(CR_AUTH, {
     method: 'POST',
@@ -269,7 +311,7 @@ async function getAnonToken() {
       'Authorization': BASIC_ANON,
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': CR_UA,
-      'ETP-Anonymous-ID': DEVICE_ID,
+      'ETP-Anonymous-ID': ANON_ETP_ID,
       'Cookie': _cookies,
     },
     body: new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE }).toString(),
@@ -286,8 +328,10 @@ async function getAnonToken() {
       console.warn('[CR-Notify] Credenciales inactivas. Forzando refresh de todas las fuentes...')
       _credCache.exp = 0
       _credCache.source = 'stale'
+      _cookiesExp = 0
       try {
         await refreshCredentials()
+        await preLogin(true)
         res = await doRequest()
       } catch (refreshErr) {
         console.error('[CR-Notify] Refresh de emergencia falló:', refreshErr.message)
@@ -307,11 +351,11 @@ async function getAnonToken() {
 }
 
 async function loginWithAccount(email, password) {
-  if (!_cookies) await preLogin()
+  await preLogin()
   const body = new URLSearchParams({ grant_type: 'password', username: email, password, scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': DEVICE_ID, 'Cookie': _cookies },
+    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': ANON_ETP_ID, 'Cookie': _cookies },
     body: body.toString(), signal: AbortSignal.timeout(20_000),
   })
   if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error_description || e.error || `HTTP ${res.status}`) }
@@ -325,11 +369,11 @@ async function loginWithAccount(email, password) {
 async function refreshAccountToken() {
   const cfg = loadCfg()
   if (!cfg.refreshToken) throw new Error('Sin refresh_token — usa .crlogin de nuevo')
-  if (!_cookies) await preLogin()
+  await preLogin()
   const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: cfg.refreshToken, scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'Cookie': _cookies },
+    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': ANON_ETP_ID, 'Cookie': _cookies },
     body: body.toString(), signal: AbortSignal.timeout(15_000),
   })
   if (!res.ok) throw new Error(`Refresh HTTP ${res.status}`)
@@ -364,6 +408,7 @@ async function crFetch(path, params = {}, base = CR_BASE) {
     if (res.ok) return res.json()
     if (res.status === 401 && attempt === 0) {
       _token = null; _tokenExp = 0
+      _cookiesExp = 0
       const cfg = loadCfg()
       if (cfg.loggedIn) { delete cfg.accessToken; delete cfg.tokenExp; saveCfg(cfg) }
       continue
@@ -436,6 +481,74 @@ function sortNewest(episodes) {
   })
 }
 
+// ─── Parser RSS (fallback de emergencia) ─────────────────────────────────────
+function stripCdata(s) {
+  return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim()
+}
+
+function parseRssItems(xml) {
+  const items = []
+  const re = /<item\b[^>]*>([\s\S]*?)<\/item>/gi
+  let m
+  while ((m = re.exec(xml)) !== null) {
+    const block = m[1]
+    const tag = (name) => {
+      const r = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i')
+      const mm = block.match(r)
+      return mm ? stripCdata(mm[1]) : ''
+    }
+    const title   = tag('title')
+    const link    = tag('link') || (block.match(/<link\b[^>]*href="([^"]+)"/i)?.[1] || '')
+    const pubDate = tag('pubDate')
+    const guid    = tag('guid')
+
+    const idMatch = link.match(/\/watch\/([^\/\s?#]+)/)
+    const id = idMatch ? idMatch[1] : (guid || '')
+
+    // Heurística para extraer número de episodio del título
+    const epMatch = title.match(/(?:^|\s)(?:Episode|Ep\.?|E)\s*(\d+)(?:\s|$)/i)
+    const epNum = epMatch ? Number(epMatch[1]) : null
+
+    // Series = título sin el sufijo "Episode N ..."
+    const series = title
+      .replace(/\s*(?:Episode|Ep\.?|E)\s*\d+.*$/i, '')
+      .trim() || title
+
+    // Intentar thumbnail de media:thumbnail o enclosure
+    let image = ''
+    const thumbMatch = block.match(/<media:thumbnail\b[^>]*url="([^"]+)"/i)
+    if (thumbMatch) image = thumbMatch[1]
+    if (!image) {
+      const encMatch = block.match(/<enclosure\b[^>]*url="([^"]+)"[^>]*type="image\/[^"]*"/i)
+      if (encMatch) image = encMatch[1]
+    }
+
+    items.push({
+      id,
+      seriesId: '',
+      series,
+      epTitle: '',
+      epNum: epNum !== null ? epNum : 'Especial',
+      link,
+      audioLocale: 'ja-JP',
+      image,
+      airTime: pubDate ? (new Date(pubDate).getTime() || 0) : 0,
+    })
+  }
+  return items.filter(i => i.id && i.series && i.link)
+}
+
+async function fetchRssEpisodes() {
+  const res = await fetch(CR_RSS, {
+    headers: { Accept: 'application/rss+xml, application/xml;q=0.9, */*;q=0.5', 'User-Agent': CR_UA },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!res.ok) throw new Error(`RSS HTTP ${res.status}`)
+  const xml = await res.text()
+  if (xml.length > 2 * 1024 * 1024) throw new Error('RSS demasiado grande')
+  return parseRssItems(xml)
+}
+
 // ─── Formato y locales ───────────────────────────────────────────────────────
 const FLAG = {
   'ja-JP':'🇯🇵','en-US':'🇺🇸','es-419':'🇲🇽','es-LA':'🇲🇽','es-ES':'🇪🇸','pt-BR':'🇧🇷',
@@ -456,7 +569,7 @@ async function formatCaption(ep) {
     } catch {}
   }
   const audioFlag  = FLAG[ep.audioLocale] || '🌐'
-  const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale
+  const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale || 'Desconocido'
   const epLabel    = `Ep. ${ep.epNum}`
   const epLine     = ep.epTitle ? `${epLabel} - ${ep.epTitle}` : epLabel
   return (
@@ -504,7 +617,20 @@ async function fetchBrowseEpisodes(pageCount = getPageCount()) {
 }
 
 async function fetchNewEpisodes() {
-  const valid = await fetchBrowseEpisodes()
+  let valid
+  try {
+    valid = await fetchBrowseEpisodes()
+  } catch (err) {
+    console.warn(`[CR-Notify] API browse falló (${err.message}). Intentando RSS de emergencia...`)
+    try {
+      valid = await fetchRssEpisodes()
+      console.log(`[CR-Notify] RSS devolvió ${valid.length} ítem(s).`)
+    } catch (rssErr) {
+      console.error(`[CR-Notify] RSS también falló: ${rssErr.message}`)
+      return []
+    }
+  }
+
   if (!valid.length) return []
 
   const seen = loadSeen()
@@ -533,7 +659,12 @@ async function sendItem(conn, jid, ep, quoted = null) {
   const caption = await formatCaption(ep)
   const opts    = quoted ? { quoted } : {}
   if (ep.image) {
-    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch {}
+    try {
+      await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts)
+      return
+    } catch {
+      await delay(500)
+    }
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
@@ -541,21 +672,50 @@ const delay = ms => new Promise(r => setTimeout(r, ms))
 
 // ─── Cron ─────────────────────────────────────────────────────────────────────
 let cronTimer = null
+let healthTimer = null
 let storedConn = null
 let cronRunning = false
-let cronStopped = false
 
-function stopCron() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null } }
+function stopCron() {
+  if (cronTimer) { clearInterval(cronTimer); cronTimer = null }
+}
 function getConn() { return storedConn || global.conn || null }
+
+function startHealthCheck() {
+  if (healthTimer) return
+  healthTimer = setInterval(async () => {
+    try {
+      await crFetch('/content/v2/discover/browse', { count: '1', type: 'episode', locale: 'es-419' }, CR_BETA)
+    } catch (err) {
+      console.warn(`[CR-Notify] Health-check falló (${err.message}). Refrescando credenciales y cookies...`)
+      _credCache.exp = 0
+      _cookiesExp = 0
+      try {
+        await refreshCredentials()
+        await preLogin(true)
+      } catch (e) {
+        console.error('[CR-Notify] Refresh en health-check falló:', e.message)
+      }
+    }
+  }, HEALTH_INTERVAL_MS)
+}
+function stopHealthCheck() {
+  if (healthTimer) { clearInterval(healthTimer); healthTimer = null }
+}
 
 function startCron(conn) {
   if (conn) storedConn = conn
-  cronStopped = false
   stopCron()
 
-  const cfg     = loadCfg()
-  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 5)
-  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 5
+  const cfg = loadCfg()
+  if (cfg.cronDisabled) {
+    console.log('[CR-Notify] Cron deshabilitado por configuración (usa .crstart para reactivar).')
+    return
+  }
+
+  const rawMinutes = process.env.CR_MINUTES || cfg.minutes || 5
+  const parsedMinutes = Number(rawMinutes)
+  const minutes = Number.isFinite(parsedMinutes) && parsedMinutes > 0 ? Math.max(1, Math.floor(parsedMinutes)) : 5
 
   cronTimer = setInterval(async () => {
     if (cronRunning) return
@@ -566,36 +726,44 @@ function startCron(conn) {
 
     cronRunning = true
     try {
-      const items = await fetchNewEpisodes()
-      if (!items.length) return
+      await withGlobalLock(async () => {
+        const items = await fetchNewEpisodes()
+        if (!items.length) return
 
-      for (const ep of items) {
-        let algunExito = false
-        for (const jid of jids) {
-          try {
-            await sendItem(activeConn, jid, ep)
-            algunExito = true
-            await delay(1500)
-          } catch (err) {
-            console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
+        for (const ep of items) {
+          let algunExito = false
+          for (const jid of jids) {
+            try {
+              await sendItem(activeConn, jid, ep)
+              algunExito = true
+              await delay(1500)
+            } catch (err) {
+              console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
+            }
           }
+          if (algunExito) markSeen(ep.id)
+          await delay(3000)
         }
-        if (algunExito) markSeen(ep.id)
-        await delay(3000)
-      }
-      console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
-    } catch (err) { console.error('[CR-Notify] Cron:', err.message) }
-    finally { cronRunning = false }
+        console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
+      })
+    } catch (err) {
+      console.error('[CR-Notify] Cron:', err.message)
+    } finally {
+      cronRunning = false
+    }
   }, minutes * 60_000)
 
-  const jids = loadCfg().targetJids || []
+  const jids = cfg.targetJids || []
   console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${jids.length} grupo(s) configurado(s)`)
 }
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
 let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
   if (conn) storedConn = conn
-  if (!cronTimer && !cronStopped) startCron(conn)
+  if (!cronTimer) {
+    const cfg0 = loadCfg()
+    if (!cfg0.cronDisabled) startCron(conn)
+  }
   const canManageGroup = isOwner || isAdmin
 
   if (command === 'crlogin') {
@@ -609,8 +777,10 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     await conn.sendMessage(m.chat, { text: '🔐 Conectando con Crunchyroll...' }, { quoted: m })
     try {
       await loginWithAccount(email, pass)
-      startCron(conn)
       const cfg = loadCfg()
+      cfg.cronDisabled = false
+      saveCfg(cfg)
+      startCron(conn)
       return conn.sendMessage(m.chat, {
         text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 5} min\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
@@ -664,16 +834,18 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
       ? cfg.targetJids.map((j, i) => `  ${i + 1}. \`${j}\``).join('\n')
       : '  _Ninguno — usa .crset_'
     const jaCached = Object.keys(_seriesCache).length
+    const authRotated = BASIC_AUTH !== BASIC_AUTH_FALLBACK ? '✅ rotada' : '⚠️ fallback'
     return conn.sendMessage(m.chat, {
       text: `📊 *CR-Notify Status*\n\n` +
             `🔑 Modo: *${cfg.loggedIn ? '👤 Cuenta real ✅' : '👻 Anónimo'}*\n` +
             `⏳ Token expira: *${exp}*\n` +
             `🔁 Refresh token: *${cfg.refreshToken ? 'Sí ✅' : 'No ❌'}*\n` +
             `⏱ Cron: cada *${mins} min*\n` +
-            `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
+            `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : (cfg.cronDisabled ? 'Detenido ⏸️' : 'No ❌')}*\n` +
             `💾 IDs caché: *${seen.length}*\n` +
             `🇯🇵 Títulos JA en caché: *${jaCached}*\n` +
-            `🔐 Credenciales: *${_credCache.source}* (exp ${_credCache.exp ? new Date(_credCache.exp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'})*\n` +
+            `🔐 Basic Auth (login): *${authRotated}*\n` +
+            `🔐 Credenciales anón.: *${_credCache.source}* (exp ${_credCache.exp ? new Date(_credCache.exp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'})*\n` +
             `⚠️ Último error: *${_credCache.lastError || 'Ninguno'}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
     }, { quoted: m })
@@ -681,13 +853,18 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
 
   if (command === 'crstop') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
-    cronStopped = true
+    const cfg = loadCfg()
+    cfg.cronDisabled = true
+    saveCfg(cfg)
     stopCron()
-    return conn.sendMessage(m.chat, { text: '🛑 Cron detenido.' }, { quoted: m })
+    return conn.sendMessage(m.chat, { text: '🛑 Cron detenido (persistente). Usa *.crstart* para reanudar.' }, { quoted: m })
   }
 
   if (command === 'crstart') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    const cfg = loadCfg()
+    cfg.cronDisabled = false
+    saveCfg(cfg)
     startCron(conn)
     return conn.sendMessage(m.chat, { text: '▶️ Cron reiniciado.' }, { quoted: m })
   }
@@ -696,10 +873,20 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     await conn.sendMessage(m.chat, { text: '🔍 Obteniendo los 10 lanzamientos más recientes...' }, { quoted: m })
     try {
-      const episodes = await getLatestEpisodes(10)
-      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios recientes.' }, { quoted: m })
-      for (const ep of episodes) { await sendItem(conn, m.chat, ep, m); await delay(2000) }
-    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
+      await withGlobalLock(async () => {
+        const episodes = await getLatestEpisodes(10)
+        if (!episodes.length) {
+          await conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios recientes.' }, { quoted: m })
+          return
+        }
+        for (const ep of episodes) {
+          await sendItem(conn, m.chat, ep, m)
+          await delay(2000)
+        }
+      })
+    } catch (err) {
+      await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m })
+    }
     return
   }
 
@@ -709,20 +896,27 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     const jids = cfg.targetJids.length ? cfg.targetJids : [m.chat]
     await conn.sendMessage(m.chat, { text: `🔍 Enviando los 10 estrenos recientes a ${jids.length} grupo(s)...` }, { quoted: m })
     try {
-      const episodes = await getLatestEpisodes(10)
-      if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
-      for (const ep of episodes) {
-        for (const jid of jids) {
-          try {
-            await sendItem(conn, jid, ep)
-            await delay(1500)
-          } catch (err) {
-            console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
-          }
+      await withGlobalLock(async () => {
+        const episodes = await getLatestEpisodes(10)
+        if (!episodes.length) {
+          await conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
+          return
         }
-        await delay(3000)
-      }
-    } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
+        for (const ep of episodes) {
+          for (const jid of jids) {
+            try {
+              await sendItem(conn, jid, ep)
+              await delay(1500)
+            } catch (err) {
+              console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
+            }
+          }
+          await delay(3000)
+        }
+      })
+    } catch (err) {
+      await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m })
+    }
     return
   }
 
@@ -735,15 +929,23 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
       lines.push(`📡 Fuente activa: *${_credCache.source}*`)
       lines.push(`🕒 Expira: *${_credCache.exp ? new Date(_credCache.exp).toLocaleString('es-MX') : '—'}*`)
       if (_credCache.lastError) lines.push(`⚠️ Último error de fuente: _${_credCache.lastError}_`)
-      lines.push(`🔑 Basic Auth (primeros 20): \`${BASIC_ANON.slice(0, 20)}...\``)
+      lines.push(`🔑 Basic Anon (primeros 20): \`${BASIC_ANON.slice(0, 20)}...\``)
+      lines.push(`🔐 Basic Auth (login): *${BASIC_AUTH === BASIC_AUTH_FALLBACK ? 'fallback ⚠️' : 'rotada ✅'}*`)
       lines.push(`👤 User-Agent: \`${CR_UA.slice(0, 40)}...\``)
       lines.push(`🆔 Device ID: \`${DEVICE_ID}\``)
-      // Prueba de autenticación real
+      lines.push(`🆔 ETP-Anon ID: \`${ANON_ETP_ID.slice(0, 8)}...\``)
+      lines.push(`🍪 Cookies: ${_cookies ? '✅' : '❌'} (TTL ${_cookiesExp ? new Date(_cookiesExp).toLocaleTimeString('es-MX') : '—'})`)
       try {
         const token = await getAnonToken()
-        lines.push(`✅ Auth test: *OK* (token: \`${token.slice(0, 15)}...\`)`)
+        lines.push(`✅ Auth anónima: *OK* (token: \`${token.slice(0, 15)}...\`)`)
       } catch (authErr) {
-        lines.push(`❌ Auth test: *FALLÓ* → ${authErr.message}`)
+        lines.push(`❌ Auth anónima: *FALLÓ* → ${authErr.message}`)
+      }
+      try {
+        const rssItems = await fetchRssEpisodes()
+        lines.push(`📰 RSS test: *OK* (${rssItems.length} ítems)`)
+      } catch (rssErr) {
+        lines.push(`📰 RSS test: *FALLÓ* → ${rssErr.message}`)
       }
     } catch (e) {
       lines.push(`❌ Error general: ${e.message}`)
@@ -763,8 +965,9 @@ handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crsto
     _token    = cfg.accessToken
     _tokenExp = cfg.tokenExp || 0
   }
-  startCron(null)
-  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'} | Títulos JA cacheados: ${Object.keys(_seriesCache).length}`)
+  if (!cfg.cronDisabled) startCron(null)
+  startHealthCheck()
+  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'} | Cron: ${cfg.cronDisabled ? 'OFF' : 'ON'} | Títulos JA cacheados: ${Object.keys(_seriesCache).length}`)
 })()
 
 export default handler
