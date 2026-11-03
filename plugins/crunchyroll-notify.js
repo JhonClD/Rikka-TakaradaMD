@@ -286,6 +286,14 @@ function normalizeEpisode(p) {
   }
 }
 
+function sortNewest(episodes) {
+  return [...episodes].sort((a, b) => {
+    const dateDiff = (Number(b.airTime) || 0) - (Number(a.airTime) || 0)
+    if (dateDiff !== 0) return dateDiff
+    return String(b.id).localeCompare(String(a.id))
+  })
+}
+
 // ─── Formato Limpio y Corto ───────────────────────────────────────────────────
 const FLAG = {
   'ja-JP':'🇯🇵','en-US':'🇺🇸','es-419':'🇲🇽','es-LA':'🇲🇽','es-ES':'🇪🇸','pt-BR':'🇧🇷',
@@ -328,7 +336,7 @@ async function fetchNewEpisodes() {
     return []
   }
 
-  return valid.filter(i => !seen.includes(i.id))
+  return sortNewest(valid.filter(i => !seen.includes(i.id)))
 }
 
 function markSeen(id) {
@@ -339,9 +347,10 @@ function markSeen(id) {
 async function getLatestEpisodes(limit = 10) {
   const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
   const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  return [...new Map(rows.map(normalizeEpisode)
+  const episodes = [...new Map(rows.map(normalizeEpisode)
     .filter(i => i.id && ALLOWED_LOCALES.has(i.audioLocale))
-    .map(i => [i.id, i])).values()].slice(0, limit)
+    .map(i => [i.id, i])).values()]
+  return sortNewest(episodes).slice(0, limit)
 }
 
 // ─── Envío ────────────────────────────────────────────────────────────────────
