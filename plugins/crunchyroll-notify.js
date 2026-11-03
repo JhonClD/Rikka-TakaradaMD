@@ -20,7 +20,7 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 // ─── Constantes ──────────────────────────────────────────────────────────────
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
-const CR_AUTH    = `${CR_BASE}/auth/v1/token`
+const CR_AUTH    = `${CR_BETA}/auth/v1/token`
 // multi-downloader-nx envía el client_id/client_secret en el formulario y usa
 // un UUID real por instalación. Se permite sobrescribir el cliente sin editar
 // el plugin porque Crunchyroll puede rotarlo.
@@ -126,7 +126,7 @@ async function getAnonToken() {
   if (!_cookies) await preLogin()
   const cfg = loadCfg()
   const deviceId = getDeviceId(cfg)
-  const body = new URLSearchParams({ ...getClientCredentials(BASIC_ANON), grant_type: 'client_id', scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
+  const body = new URLSearchParams({ ...getClientCredentials(BASIC_ANON), grant_type: 'client_id', scope: 'offline_access', device_id: deviceId, device_name: 'emu64xa', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
     headers: { ...authHeaders(_cookies), 'ETP-Anonymous-ID': deviceId },
@@ -154,7 +154,7 @@ async function loginWithAccount(email, password) {
   const cfg = loadCfg()
   const deviceId = randomUUID()
   cfg.deviceId = deviceId
-  const body = new URLSearchParams({ ...getClientCredentials(), grant_type: 'password', username: email, password, scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
+  const body = new URLSearchParams({ ...getClientCredentials(), grant_type: 'password', username: email, password, scope: 'offline_access', device_id: deviceId, device_name: 'emu64xa', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
     headers: { ...authHeaders(_cookies), 'ETP-Anonymous-ID': deviceId },
@@ -173,7 +173,7 @@ async function refreshAccountToken() {
   if (!cfg.refreshToken) throw new Error('Sin refresh_token — usa .crlogin de nuevo')
   if (!_cookies) await preLogin()
   const deviceId = getDeviceId(cfg)
-  const body = new URLSearchParams({ ...getClientCredentials(), grant_type: 'refresh_token', refresh_token: cfg.refreshToken, scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
+  const body = new URLSearchParams({ ...getClientCredentials(), grant_type: 'refresh_token', refresh_token: cfg.refreshToken, scope: 'offline_access', device_id: deviceId, device_name: 'emu64xa', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
     headers: authHeaders(_cookies),
