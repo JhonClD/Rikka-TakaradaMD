@@ -1,12 +1,15 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { randomUUID } from 'crypto'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const TMP_DIR   = join(__dirname, '../tmp/cr-notify')
 const DB_PATH   = join(TMP_DIR, 'crunchyroll-seen.json')
 const CFG_PATH  = join(TMP_DIR, 'crunchyroll-cfg.json')
 const JA_CACHE_PATH = join(TMP_DIR, 'crunchyroll-series-ja.json')
+const LOCAL_CREDENTIALS_PATH = join(__dirname, 'credentials.tv.json')
+
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 try { chmodSync(TMP_DIR, 0o700) } catch {}
 for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
@@ -15,24 +18,44 @@ for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
   }
 }
 
+// ─── Constantes (actualizadas) ──────────────────────────────────────────────
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
 const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
-const BASIC_ANON_FALLBACK = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+
+// Credenciales vigentes (obtenidas de crextractor el 03/11/2026)
+const BASIC_ANON_FALLBACK = 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
+const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
+
 const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
-const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
-const DEVICE_TYPE= 'ANDROIDTV'
-const MAX_SEEN   = 500
+
+// Device ID persistente y aleatorio
+let DEVICE_ID = (() => {
+  try {
+    const cfg = loadCfg()
+    if (cfg.deviceId) return cfg.deviceId
+    const uuid = randomUUID()
+    cfg.deviceId = uuid
+    saveCfg(cfg)
+    return uuid
+  } catch {
+    return randomUUID()
+  }
+})()
+
+const DEVICE_TYPE = 'ANDROIDTV'
+const MAX_SEEN    = 500
 const MAX_JA_CACHE = 2000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
+
 let BASIC_ANON = BASIC_ANON_FALLBACK
 let CR_UA = CR_UA_FALLBACK
 let _credCache = { exp: 0, source: 'fallback' }
 let _credRefresh = null
 
+// ─── Utilidades de archivo ──────────────────────────────────────────────────
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
@@ -59,11 +82,13 @@ function buildUserAgent(version, build) {
   return `Crunchyroll/ANDROIDTV/${version}_${build} (Android 16; en-US; sdk_gphone64_x86_64)`
 }
 
+// ─── Credenciales ────────────────────────────────────────────────────────────
 async function refreshCredentials() {
   if (_credRefresh) return _credRefresh
   if (_credCache.exp && Date.now() < _credCache.exp) return
 
   _credRefresh = (async () => {
+    // 1. Intentar descarga remota
     try {
       const res = await fetch(CREDENTIALS_URL, {
         headers: { Accept: 'application/json' },
@@ -83,22 +108,47 @@ async function refreshCredentials() {
       CR_UA = buildUserAgent(client.version, client.build)
       _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'remote' }
       console.log(`[CR-Notify] Credenciales actualizadas (v${client.version}, build ${client.build}).`)
+      return
     } catch (err) {
-      if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
-        BASIC_ANON = BASIC_ANON_FALLBACK
-        CR_UA = CR_UA_FALLBACK
-        _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback' }
-      } else {
-        _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
-      }
-      console.warn(`[CR-Notify] No se pudieron actualizar credenciales; se conserva el valor válido actual: ${err.message}`)
-    } finally {
-      _credRefresh = null
+      console.warn(`[CR-Notify] Fallo remoto: ${err.message}. Probando fallback local...`)
     }
-  })()
+
+    // 2. Fallback local (archivo credentials.tv.json en la carpeta del plugin)
+    try {
+      if (existsSync(LOCAL_CREDENTIALS_PATH)) {
+        const raw = readFileSync(LOCAL_CREDENTIALS_PATH, 'utf-8')
+        const credentials = JSON.parse(raw)
+        const authorization = credentials?.authorization
+        const client = parseClientVersion(credentials?.version)
+        if (isValidBasicCredential(authorization) && client) {
+          BASIC_ANON = authorization
+          CR_UA = buildUserAgent(client.version, client.build)
+          _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'local' }
+          console.log(`[CR-Notify] Credenciales locales cargadas (v${client.version}).`)
+          return
+        }
+      }
+    } catch (localErr) {
+      console.warn(`[CR-Notify] Fallback local falló: ${localErr.message}`)
+    }
+
+    // 3. Fallback hardcodeado final
+    if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
+      BASIC_ANON = BASIC_ANON_FALLBACK
+      CR_UA = CR_UA_FALLBACK
+      _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback' }
+    } else {
+      _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
+    }
+    console.warn(`[CR-Notify] Usando credenciales de reserva (fallback).`)
+  })().finally(() => {
+    _credRefresh = null
+  })
+
   return _credRefresh
 }
 
+// ─── Persistencia ─────────────────────────────────────────────────────────────
 function loadCfg() {
   try {
     const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf-8'))
@@ -113,6 +163,7 @@ function loadCfg() {
   } catch { return { targetJids: [] } }
 }
 function saveCfg(d)    { writeJsonAtomic(CFG_PATH, d) }
+
 function loadSeen() {
   try {
     const ids = JSON.parse(readFileSync(DB_PATH, 'utf-8'))
@@ -121,15 +172,12 @@ function loadSeen() {
 }
 function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN)) }
 
+// ─── Caché de títulos japoneses ──────────────────────────────────────────────
 let _seriesCache = {}
 function loadSeriesCache() {
   try {
     const raw = JSON.parse(readFileSync(JA_CACHE_PATH, 'utf-8'))
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      _seriesCache = raw
-    } else {
-      _seriesCache = {}
-    }
+    _seriesCache = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
   } catch { _seriesCache = {} }
 }
 function saveSeriesCache() {
@@ -174,6 +222,7 @@ async function getJapaneseTitle(seriesId) {
   return promise
 }
 
+// ─── Cookies ─────────────────────────────────────────────────────────────────
 let _cookies = ''
 async function preLogin() {
   await refreshCredentials()
@@ -181,9 +230,10 @@ async function preLogin() {
     const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
     _cookies  = raw.map(c => c.split(';')[0]).join('; ')
-  } catch {}
+  } catch { /* no crítico */ }
 }
 
+// ─── Tokens ───────────────────────────────────────────────────────────────────
 let _token = null, _tokenExp = 0
 
 async function getAnonToken() {
@@ -259,14 +309,9 @@ async function crFetch(path, params = {}, base = CR_BASE) {
     })
     if (res.ok) return res.json()
     if (res.status === 401 && attempt === 0) {
-      _token = null
-      _tokenExp = 0
+      _token = null; _tokenExp = 0
       const cfg = loadCfg()
-      if (cfg.loggedIn) {
-        delete cfg.accessToken
-        delete cfg.tokenExp
-        saveCfg(cfg)
-      }
+      if (cfg.loggedIn) { delete cfg.accessToken; delete cfg.tokenExp; saveCfg(cfg) }
       continue
     }
     const detail = (await res.text().catch(() => '')).slice(0, 120)
@@ -275,6 +320,7 @@ async function crFetch(path, params = {}, base = CR_BASE) {
   throw new Error(`CR API no pudo renovar el token → ${path}`)
 }
 
+// ─── Normalización de episodios ──────────────────────────────────────────────
 function extractImage(images = {}) {
   const candidates = Object.values(images)
     .flat(Infinity)
@@ -310,7 +356,6 @@ function normalizeEpisode(p) {
 
   let seriesName = p.series_title || meta.series_title || ''
   const seasonTitle = p.season_title || meta.season_title || ''
-
   if (seasonTitle && seriesName && !seriesName.includes(seasonTitle) && !seasonTitle.startsWith(seriesName)) {
     seriesName += ` ${seasonTitle}`
   }
@@ -337,6 +382,7 @@ function sortNewest(episodes) {
   })
 }
 
+// ─── Formato y locales ───────────────────────────────────────────────────────
 const FLAG = {
   'ja-JP':'🇯🇵','en-US':'🇺🇸','es-419':'🇲🇽','es-LA':'🇲🇽','es-ES':'🇪🇸','pt-BR':'🇧🇷',
   'fr-FR':'🇫🇷','de-DE':'🇩🇪','it-IT':'🇮🇹','ru-RU':'🇷🇺','ar-SA':'🇸🇦',
@@ -353,7 +399,7 @@ async function formatCaption(ep) {
     try {
       const jaTitle = await getJapaneseTitle(ep.seriesId)
       if (jaTitle) displayTitle = jaTitle
-    } catch {}
+    } catch { /* ignorar */ }
   }
   const audioFlag  = FLAG[ep.audioLocale] || '🌐'
   const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale
@@ -367,6 +413,7 @@ async function formatCaption(ep) {
   )
 }
 
+// ─── Fetch de episodios ──────────────────────────────────────────────────────
 function getPageCount() {
   const pages = Number(process.env.CR_PAGES ?? 1)
   return Number.isFinite(pages) && pages > 0 ? Math.floor(pages) : 1
@@ -427,23 +474,24 @@ async function getLatestEpisodes(limit = 10) {
   return sortNewest(episodes).slice(0, limit)
 }
 
+// ─── Envío ────────────────────────────────────────────────────────────────────
 async function sendItem(conn, jid, ep, quoted = null) {
   const caption = await formatCaption(ep)
   const opts    = quoted ? { quoted } : {}
   if (ep.image) {
-    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch {}
+    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch { /* fallback texto */ }
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
 const delay = ms => new Promise(r => setTimeout(r, ms))
 
+// ─── Cron ─────────────────────────────────────────────────────────────────────
 let cronTimer = null
 let storedConn = null
 let cronRunning = false
 let cronStopped = false
 
 function stopCron() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null } }
-
 function getConn() { return storedConn || global.conn || null }
 
 function startCron(conn) {
@@ -459,7 +507,6 @@ function startCron(conn) {
     if (cronRunning) return
     const activeConn = getConn()
     if (!activeConn) return
-
     const jids = loadCfg().targetJids || []
     if (!jids.length) return
 
@@ -491,6 +538,7 @@ function startCron(conn) {
   console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${jids.length} grupo(s) configurado(s)`)
 }
 
+// ─── Handler de comandos ──────────────────────────────────────────────────────
 let handler = async (m, { conn, command, args, isOwner }) => {
   if (conn) storedConn = conn
   if (!cronTimer && !cronStopped) startCron(conn)
@@ -626,6 +674,7 @@ handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crset', 'crrem', 'crst
 handler.tags    = ['anime']
 handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crstop|crstart)$/i
 
+// ─── Auto-arranque ───────────────────────────────────────────────────────────
 ;(async () => {
   const cfg = loadCfg()
   if (cfg.loggedIn && cfg.accessToken) {
