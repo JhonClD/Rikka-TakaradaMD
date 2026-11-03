@@ -2,9 +2,10 @@ import fs            from 'fs';
 import yts           from 'yt-search';
 import { exec }      from 'child_process';
 import { promisify } from 'util';
-import os            from 'os';
-import path          from 'path';
+import os             from 'os';
+import path           from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'crypto';
 
 const execPromise    = promisify(exec);
 const FFMPEG_TIMEOUT = 120_000;
@@ -204,7 +205,9 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // ── Provider: loader.to / Video Download API ─────────────────────────────────
 
 const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
-const LOADER_API_KEY = '57d9ef35d68a349222bb370f8df4332bbb1da542';
+// Clave pública que el cliente web de loaderr.to usa; no es la clave privada
+// de la cuenta del usuario ni depende de su saldo.
+const LOADERR_PUBLIC_KEY = 'dfcb6d76f2f2a12c83a82a4de3bc75e8';
 const LOADER_PAGE    = 'https://en.loader.to/4/';
 const LOADER_HEADERS = {
     'User-Agent': UA,
@@ -219,9 +222,9 @@ const loaderApiUrl = (domain, pathname, params = {}) => {
     return url;
 };
 
-const fetchLoaderJson = async (url, timeout = 30_000) => {
+const fetchLoaderJson = async (url, timeout = 30_000, token = '') => {
     const response = await fetch(url, {
-        headers: LOADER_HEADERS,
+        headers: token ? { ...LOADER_HEADERS, Authorization: `Bearer ${token}` } : LOADER_HEADERS,
         signal: AbortSignal.timeout(timeout),
     });
     const body = await response.text();
@@ -242,6 +245,40 @@ const fetchLoaderJson = async (url, timeout = 30_000) => {
     }
 };
 
+const solveLoaderrPow = (salt, difficulty, budgetMs = 1_000) => {
+    const prefix = '0'.repeat(Number(difficulty));
+    const deadline = Date.now() + budgetMs;
+    for (let nonce = 0; Date.now() < deadline; nonce++) {
+        const digest = createHash('sha256').update(`${salt}:${nonce}`).digest('hex');
+        if (digest.startsWith(prefix)) return nonce;
+    }
+    return null;
+};
+
+const mintLoaderrToken = async () => {
+    const host = `https://${LOADER_DOMAINS[0]}`;
+    const challenge = await fetchLoaderJson(`${host}/api/pow/challenge`, 15_000);
+    const nonce = solveLoaderrPow(challenge.salt, challenge.difficulty);
+    if (nonce === null) throw new Error('no se pudo resolver el desafío PoW');
+    const response = await fetch(`${host}/api/pow/verify`, {
+        method: 'POST',
+        headers: { ...LOADER_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            salt: challenge.salt,
+            difficulty: challenge.difficulty,
+            expires_at: challenge.expires_at,
+            signature: challenge.signature,
+            nonce,
+        }),
+        signal: AbortSignal.timeout(15_000),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success || !data.token) {
+        throw new Error(data.message || data.error || `HTTP ${response.status}`);
+    }
+    return data.token;
+};
+
 const alternateLoaderUrl = (url) => {
     const next = new URL(url);
     const index = LOADER_DOMAINS.indexOf(next.hostname);
@@ -251,46 +288,43 @@ const alternateLoaderUrl = (url) => {
 };
 
 const providerLoaderTo = async (ytUrl, fmt) => {
-    if (!LOADER_API_KEY) {
-        throw new Error('loader.to requiere LOADER_TO_API_KEY en el archivo .env');
-    }
-
     let start;
     let startError;
-    let startDomain = LOADER_DOMAINS[0];
+    let token;
+
+    try {
+        token = await mintLoaderrToken();
+    } catch (error) {
+        throw new Error(`loaderr.to: autenticación web falló — ${error.message}`);
+    }
 
     for (const domain of LOADER_DOMAINS) {
         try {
-            const startUrl = loaderApiUrl(domain, '/ajax/download.php', {
+            const startUrl = loaderApiUrl(domain, '/api/v2/download', {
                 format: fmt,
-                ...(fmt === 'mp3' ? { audio_quality: '320' } : {}),
                 url: ytUrl,
-                apikey: LOADER_API_KEY,
+                apikey: LOADERR_PUBLIC_KEY,
             });
-            start = await fetchLoaderJson(startUrl, 30_000);
-            if (start?.success && start.id) {
-                startDomain = domain;
+            start = await fetchLoaderJson(startUrl, 30_000, token);
+            if (start?.success && start.id && start.progress_url) {
                 break;
             }
-            throw new Error(start?.message || start?.text || `respuesta sin id: ${JSON.stringify(start).slice(0, 160)}`);
+            throw new Error(start?.message || start?.text || `respuesta sin progress_url: ${JSON.stringify(start).slice(0, 160)}`);
         } catch (error) {
             startError = error;
             console.warn(`[loader.to] inicio falló en ${domain}: ${error.message}`);
         }
     }
 
-    if (!start?.id) {
+    if (!start?.id || !start.progress_url) {
         throw new Error(`loader.to: no se pudo iniciar la conversión (${startError?.message || 'sin respuesta'})`);
     }
 
     console.log(`[loader.to] id=${start.id} fmt=${fmt}`);
 
-    // La API compatible puede devolver progress_url o solo el id.
     const MAX_MS = 3 * 60 * 1_000;
     const t0 = Date.now();
-    let progressUrl = new URL(
-        start.progress_url || loaderApiUrl(startDomain, '/ajax/progress.php', { id: start.id })
-    );
+    let progressUrl = new URL(start.progress_url);
     let lastPct = -1;
     let hostFailures = 0;
 
@@ -299,7 +333,7 @@ const providerLoaderTo = async (ytUrl, fmt) => {
 
         let prog;
         try {
-            prog = await fetchLoaderJson(progressUrl, 20_000);
+            prog = await fetchLoaderJson(progressUrl, 20_000, token);
             hostFailures = 0;
         } catch (error) {
             hostFailures++;
