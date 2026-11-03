@@ -7,6 +7,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -20,10 +21,14 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
-const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
-const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
+// multi-downloader-nx envía el client_id/client_secret en el formulario y usa
+// un UUID real por instalación. Se permite sobrescribir el cliente sin editar
+// el plugin porque Crunchyroll puede rotarlo.
+const BASIC_AUTH = process.env.CR_BASIC_AUTH || 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
+const BASIC_ANON = process.env.CR_BASIC_ANON || BASIC_AUTH
+const CR_UA      = process.env.CR_USER_AGENT || 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 12; en-US; SHIELD Android TV Build/SR1A.220624.014)'
+const CREDS_URL  = process.env.CR_CREDENTIALS_URL || 'https://raw.githubusercontent.com/vitalygashkov/crextractor/main/credentials.tv.json'
+const CREDS_TTL  = 6 * 60 * 60 * 1000
 const DEVICE_TYPE= 'ANDROIDTV'
 const MAX_SEEN   = 500
 
@@ -61,7 +66,7 @@ function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_S
 let _cookies = ''
 async function preLogin() {
   try {
-    const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
+    const res = await fetch(CR_BASE, { headers: { 'User-Agent': runtimeUserAgent }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
     _cookies  = raw.map(c => c.split(';')[0]).join('; ')
   } catch { /* no crítico */ }
@@ -69,17 +74,123 @@ async function preLogin() {
 
 // ─── Tokens ───────────────────────────────────────────────────────────────────
 let _token = null, _tokenExp = 0
+let anonClientInactive = false
+let runtimeBasicAuth = BASIC_AUTH
+let runtimeAnonBasic = BASIC_ANON
+let runtimeUserAgent = CR_UA
+let credentialsLoadedAt = 0
 
-async function getAnonToken() {
+async function getFreshBasicAuth(force = false) {
+  // Los overrides explícitos tienen prioridad y permiten operar sin depender
+  // de un repositorio externo en instalaciones restringidas.
+  if (process.env.CR_BASIC_AUTH || process.env.CR_BASIC_ANON || process.env.CR_USER_AGENT) {
+    runtimeBasicAuth = process.env.CR_BASIC_AUTH || BASIC_AUTH
+    runtimeAnonBasic = process.env.CR_BASIC_ANON || runtimeBasicAuth
+    runtimeUserAgent = process.env.CR_USER_AGENT || CR_UA
+    return false
+  }
+  if (!force && Date.now() - credentialsLoadedAt < CREDS_TTL) return true
+
+  try {
+    const res = await fetch(CREDS_URL, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const creds = await res.json()
+    const authorization = typeof creds.authorization === 'string' ? creds.authorization.trim() : ''
+    const version = String(creds.version || '').match(/^(\d+\.\d+\.\d+)\s*\((\d+)\)/)
+    if (!/^Basic\s+\S+$/i.test(authorization) || !version) throw new Error('formato de credenciales no reconocido')
+
+    runtimeBasicAuth = authorization
+    runtimeAnonBasic = authorization
+    runtimeUserAgent = `Crunchyroll/ANDROIDTV/${version[1]}_${version[2]} (Android 16; en-US; sdk_gphone64_x86_64)`
+    credentialsLoadedAt = Date.now()
+    console.log(`[CR-Notify] Credenciales OAuth actualizadas desde crextractor (${creds.version}).`)
+    return true
+  } catch (err) {
+    // Mantener el último valor válido evita romper el bot si GitHub no responde.
+    credentialsLoadedAt = Date.now()
+    console.warn(`[CR-Notify] No se pudieron actualizar credenciales OAuth: ${err.message}. Se usará el fallback local.`)
+    return false
+  }
+}
+
+function getClientCredentials(basic = BASIC_AUTH) {
+  const encoded = basic.replace(/^Basic\s+/i, '')
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8')
+  const separator = decoded.indexOf(':')
+  if (separator < 1) throw new Error('Las credenciales Basic de Crunchyroll no son válidas')
+  return { client_id: decoded.slice(0, separator), client_secret: decoded.slice(separator + 1) }
+}
+
+function getDeviceId(cfg = loadCfg()) {
+  if (cfg.deviceId) return cfg.deviceId
+  const deviceId = randomUUID()
+  cfg.deviceId = deviceId
+  saveCfg(cfg)
+  return deviceId
+}
+
+function authHeaders(cookie = '') {
+  return {
+    Accept: 'application/json',
+    'Accept-Charset': 'UTF-8',
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    'Request-Type': 'SignIn',
+    'User-Agent': runtimeUserAgent,
+    ...(cookie ? { Cookie: cookie } : {}),
+  }
+}
+
+function updateCookies(res) {
+  const cookies = res.headers.getSetCookie?.() || []
+  if (cookies.length) _cookies = cookies.map(c => c.split(';')[0]).join('; ')
+}
+
+async function parseAuthError(res) {
+  const text = await res.text().catch(() => '')
+  let details = {}
+  try { details = JSON.parse(text) } catch {}
+  const reason = details.error_description || details.message || details.error || details.code || text
+  return String(reason || `HTTP ${res.status}`).slice(0, 180)
+}
+
+function makeAnonClientInactiveError() {
+  const error = new Error('El cliente OAuth anónimo de Crunchyroll está inactivo. Configura CR_BASIC_ANON con credenciales vigentes o autentica una cuenta con .crlogin.')
+  error.code = 'CR_ANON_CLIENT_INACTIVE'
+  return error
+}
+
+async function getAnonToken(retryWithFreshCredentials = true) {
+  if (anonClientInactive) {
+    if (!retryWithFreshCredentials || !(await getFreshBasicAuth(true))) throw makeAnonClientInactiveError()
+    anonClientInactive = false
+  }
   if (_token && Date.now() < _tokenExp - 30_000) return _token
   if (!_cookies) await preLogin()
-  const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
+  await getFreshBasicAuth()
+  const cfg = loadCfg()
+  const deviceId = getDeviceId(cfg)
+  const body = new URLSearchParams({ ...getClientCredentials(runtimeAnonBasic), grant_type: 'client_id', scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_ANON, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': DEVICE_ID, 'Cookie': _cookies },
+    headers: { ...authHeaders(_cookies), 'ETP-Anonymous-ID': deviceId },
     body: body.toString(), signal: AbortSignal.timeout(15_000),
   })
-  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`Auth anónima HTTP ${res.status}: ${t.slice(0,80)}`) }
+  updateCookies(res)
+  if (!res.ok) {
+    const reason = await parseAuthError(res)
+    const apiCode = reason
+    if (res.status === 401 && apiCode === 'auth.obtain_access_token.client_inactive') {
+      if (retryWithFreshCredentials && await getFreshBasicAuth(true)) {
+        anonClientInactive = false
+        return getAnonToken(false)
+      }
+      anonClientInactive = true
+      _token = null
+      _tokenExp = 0
+      throw makeAnonClientInactiveError()
+    }
+    throw new Error(`Auth anónima HTTP ${res.status}: ${reason}`)
+  }
   const data = await res.json()
   _token = data.access_token; _tokenExp = Date.now() + (data.expires_in || 300) * 1000
   return _token
@@ -87,17 +198,21 @@ async function getAnonToken() {
 
 async function loginWithAccount(email, password) {
   if (!_cookies) await preLogin()
-  const body = new URLSearchParams({ grant_type: 'password', username: email, password, scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
+  await getFreshBasicAuth()
+  const cfg = loadCfg()
+  const deviceId = randomUUID()
+  cfg.deviceId = deviceId
+  const body = new URLSearchParams({ ...getClientCredentials(runtimeBasicAuth), grant_type: 'password', username: email, password, scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': DEVICE_ID, 'Cookie': _cookies },
+    headers: { ...authHeaders(_cookies), 'ETP-Anonymous-ID': deviceId },
     body: body.toString(), signal: AbortSignal.timeout(20_000),
   })
-  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error_description || e.error || `HTTP ${res.status}`) }
+  updateCookies(res)
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await parseAuthError(res)}`)
   const data = await res.json()
-  const cfg  = loadCfg()
   Object.assign(cfg, { accessToken: data.access_token, refreshToken: data.refresh_token || null, tokenExp: Date.now() + (data.expires_in || 300) * 1000, accountId: data.account_id || null, loggedIn: true })
-  saveCfg(cfg); _token = data.access_token; _tokenExp = cfg.tokenExp
+  saveCfg(cfg); _token = data.access_token; _tokenExp = cfg.tokenExp; anonClientInactive = false
   return data
 }
 
@@ -105,13 +220,16 @@ async function refreshAccountToken() {
   const cfg = loadCfg()
   if (!cfg.refreshToken) throw new Error('Sin refresh_token — usa .crlogin de nuevo')
   if (!_cookies) await preLogin()
-  const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: cfg.refreshToken, scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
+  await getFreshBasicAuth()
+  const deviceId = getDeviceId(cfg)
+  const body = new URLSearchParams({ ...getClientCredentials(runtimeBasicAuth), grant_type: 'refresh_token', refresh_token: cfg.refreshToken, scope: 'offline_access', device_id: deviceId, device_name: 'Rikka-TakaradaMD', device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_AUTH, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'Cookie': _cookies },
+    headers: authHeaders(_cookies),
     body: body.toString(), signal: AbortSignal.timeout(15_000),
   })
-  if (!res.ok) throw new Error(`Refresh HTTP ${res.status}`)
+  updateCookies(res)
+  if (!res.ok) throw new Error(`Refresh HTTP ${res.status}: ${await parseAuthError(res)}`)
   const data = await res.json()
   cfg.accessToken  = data.access_token
   cfg.refreshToken = data.refresh_token || cfg.refreshToken
@@ -138,7 +256,7 @@ async function crFetch(path, params = {}, base = CR_BASE) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken()
     const res = await fetch(url.toString(), {
-      headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': CR_UA, 'Accept': 'application/json', 'Cookie': _cookies },
+      headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': runtimeUserAgent, 'Accept': 'application/json', 'Cookie': _cookies },
       signal: AbortSignal.timeout(20_000),
     })
     if (res.ok) return res.json()
@@ -294,6 +412,7 @@ function startCron(conn) {
   stopCron()
 
   const cfg     = loadCfg()
+  if (!cfg.loggedIn && anonClientInactive) return
   const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 1)
   const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 1
 
@@ -328,7 +447,14 @@ function startCron(conn) {
         await delay(3000)
       }
       console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
-    } catch (err) { console.error('[CR-Notify] Cron:', err.message) }
+    } catch (err) {
+      if (err.code === 'CR_ANON_CLIENT_INACTIVE') {
+        stopCron()
+        console.error('[CR-Notify] Cron pausado: Crunchyroll desactivó el cliente OAuth anónimo.', err.message)
+      } else {
+        console.error('[CR-Notify] Cron:', err.message)
+      }
+    }
     finally { cronRunning = false }
   }, minutes * 60_000)
 
@@ -368,7 +494,9 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     saveCfg(cfg)
     _token = null; _tokenExp = 0
     return conn.sendMessage(m.chat, {
-      text: `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
+      text: anonClientInactive
+        ? `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\n⚠️ El cliente anónimo está inactivo; el cron queda pausado hasta configurar credenciales vigentes o iniciar sesión de nuevo.`
+        : `🔒 Sesión cerrada. Grupos conservados (${cfg.targetJids.length}).\nEl cron continúa en modo anónimo.`,
     }, { quoted: m })
   }
 
@@ -412,6 +540,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     return conn.sendMessage(m.chat, {
       text: `📊 *CR-Notify Status*\n\n` +
             `🔑 Modo: *${cfg.loggedIn ? '👤 Cuenta real ✅' : '👻 Anónimo'}*\n` +
+            (anonClientInactive ? `⚠️ Cliente anónimo: *inactivo; cron pausado*\n` : '') +
             `⏳ Token expira: *${exp}*\n` +
             `🔁 Refresh token: *${cfg.refreshToken ? 'Sí ✅' : 'No ❌'}*\n` +
             `⏱ Cron: cada *${mins} min*\n` +
