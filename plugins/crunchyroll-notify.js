@@ -18,19 +18,22 @@ for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
   }
 }
 
-// ─── Constantes (actualizadas) ──────────────────────────────────────────────
+// ─── Constantes ─────────────────────────────────────────────────────────────
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
 
-// Credenciales vigentes (obtenidas de crextractor el 03/11/2026)
-const BASIC_ANON_FALLBACK = 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
+// Fuente 1: crextractor (se actualiza semanalmente)
+const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
+// Fuente 2 (respaldo): artifacts de crunchyroll-rs
+const CRUNCHYROLL_RS_ARTIFACTS = 'https://raw.githubusercontent.com/crunchy-labs/artifacts/main/credentials.json'
+
+// Token de respaldo final (verificado y actualizado)
+const BASIC_ANON_FALLBACK = 'Basic bmR0aTZicXlqcm9wNXZnZjF0dnU6elpIcS00SEJJVDlDb2FMcnBPREJjRVRCTUNHai1QNlg='
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
 
 const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 
-// Device ID persistente y aleatorio
 let DEVICE_ID = (() => {
   try {
     const cfg = loadCfg()
@@ -52,10 +55,10 @@ const CREDENTIAL_RETRY_MS = 15 * 60_000
 
 let BASIC_ANON = BASIC_ANON_FALLBACK
 let CR_UA = CR_UA_FALLBACK
-let _credCache = { exp: 0, source: 'fallback' }
+let _credCache = { exp: 0, source: 'fallback', lastError: null }
 let _credRefresh = null
 
-// ─── Utilidades de archivo ──────────────────────────────────────────────────
+// ─── Utilidades ──────────────────────────────────────────────────────────────
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
@@ -82,38 +85,56 @@ function buildUserAgent(version, build) {
   return `Crunchyroll/ANDROIDTV/${version}_${build} (Android 16; en-US; sdk_gphone64_x86_64)`
 }
 
-// ─── Credenciales ────────────────────────────────────────────────────────────
+// ─── Credenciales (triple fuente) ────────────────────────────────────────────
+async function fetchCredentialsFrom(url) {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(5_000),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const raw = await res.text()
+  if (raw.length > 32 * 1024) throw new Error('respuesta demasiado grande')
+  const credentials = JSON.parse(raw)
+  const authorization = credentials?.authorization
+  const client = parseClientVersion(credentials?.version)
+  if (!isValidBasicCredential(authorization)) throw new Error('authorization inválida')
+  if (!client) throw new Error('versión inválida')
+  return { authorization, client }
+}
+
 async function refreshCredentials() {
   if (_credRefresh) return _credRefresh
   if (_credCache.exp && Date.now() < _credCache.exp) return
 
   _credRefresh = (async () => {
-    // 1. Intentar descarga remota
+    // Fuente 1: crextractor
     try {
-      const res = await fetch(CREDENTIALS_URL, {
-        headers: { Accept: 'application/json' },
-        redirect: 'error',
-        signal: AbortSignal.timeout(5_000),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const raw = await res.text()
-      if (raw.length > 32 * 1024) throw new Error('respuesta demasiado grande')
-      const credentials = JSON.parse(raw)
-      const authorization = credentials?.authorization
-      const client = parseClientVersion(credentials?.version)
-      if (!isValidBasicCredential(authorization)) throw new Error('authorization inválida')
-      if (!client) throw new Error('versión inválida')
-
+      const { authorization, client } = await fetchCredentialsFrom(CREDENTIALS_URL)
       BASIC_ANON = authorization
       CR_UA = buildUserAgent(client.version, client.build)
-      _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'remote' }
-      console.log(`[CR-Notify] Credenciales actualizadas (v${client.version}, build ${client.build}).`)
+      _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'crextractor', lastError: null }
+      console.log(`[CR-Notify] Credenciales desde crextractor (v${client.version}, build ${client.build}).`)
       return
     } catch (err) {
-      console.warn(`[CR-Notify] Fallo remoto: ${err.message}. Probando fallback local...`)
+      console.warn(`[CR-Notify] crextractor falló: ${err.message}. Probando crunchyroll-rs...`)
+      _credCache.lastError = `crextractor: ${err.message}`
     }
 
-    // 2. Fallback local (archivo credentials.tv.json en la carpeta del plugin)
+    // Fuente 2: artifacts de crunchyroll-rs
+    try {
+      const { authorization, client } = await fetchCredentialsFrom(CRUNCHYROLL_RS_ARTIFACTS)
+      BASIC_ANON = authorization
+      CR_UA = buildUserAgent(client.version, client.build)
+      _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'crunchyroll-rs', lastError: null }
+      console.log(`[CR-Notify] Credenciales desde crunchyroll-rs (v${client.version}, build ${client.build}).`)
+      return
+    } catch (err) {
+      console.warn(`[CR-Notify] crunchyroll-rs falló: ${err.message}. Probando archivo local...`)
+      _credCache.lastError = `crunchyroll-rs: ${err.message}`
+    }
+
+    // Fuente 3: archivo local
     try {
       if (existsSync(LOCAL_CREDENTIALS_PATH)) {
         const raw = readFileSync(LOCAL_CREDENTIALS_PATH, 'utf-8')
@@ -123,24 +144,25 @@ async function refreshCredentials() {
         if (isValidBasicCredential(authorization) && client) {
           BASIC_ANON = authorization
           CR_UA = buildUserAgent(client.version, client.build)
-          _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'local' }
+          _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'local', lastError: null }
           console.log(`[CR-Notify] Credenciales locales cargadas (v${client.version}).`)
           return
         }
       }
     } catch (localErr) {
-      console.warn(`[CR-Notify] Fallback local falló: ${localErr.message}`)
+      console.warn(`[CR-Notify] Archivo local falló: ${localErr.message}`)
+      _credCache.lastError = `local: ${localErr.message}`
     }
 
-    // 3. Fallback hardcodeado final
+    // Fallback final (hardcodeado)
     if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
       BASIC_ANON = BASIC_ANON_FALLBACK
       CR_UA = CR_UA_FALLBACK
-      _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback' }
+      _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback', lastError: _credCache.lastError }
     } else {
       _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
     }
-    console.warn(`[CR-Notify] Usando credenciales de reserva (fallback).`)
+    console.warn('[CR-Notify] Usando credenciales de respaldo final (fallback).')
   })().finally(() => {
     _credRefresh = null
   })
@@ -230,7 +252,7 @@ async function preLogin() {
     const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
     _cookies  = raw.map(c => c.split(';')[0]).join('; ')
-  } catch { /* no crítico */ }
+  } catch {}
 }
 
 // ─── Tokens ───────────────────────────────────────────────────────────────────
@@ -240,15 +262,47 @@ async function getAnonToken() {
   if (_token && Date.now() < _tokenExp - 30_000) return _token
   await refreshCredentials()
   if (!_cookies) await preLogin()
-  const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
-  const res  = await fetch(CR_AUTH, {
+
+  const doRequest = () => fetch(CR_AUTH, {
     method: 'POST',
-    headers: { 'Authorization': BASIC_ANON, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': CR_UA, 'ETP-Anonymous-ID': DEVICE_ID, 'Cookie': _cookies },
-    body: body.toString(), signal: AbortSignal.timeout(15_000),
+    headers: {
+      'Authorization': BASIC_ANON,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': CR_UA,
+      'ETP-Anonymous-ID': DEVICE_ID,
+      'Cookie': _cookies,
+    },
+    body: new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE }).toString(),
+    signal: AbortSignal.timeout(15_000),
   })
-  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`Auth anónima HTTP ${res.status}: ${t.slice(0,80)}`) }
+
+  let res = await doRequest()
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '')
+    const isClientInactive = res.status === 401 && /client_inactive|invalid_client|invalid_grant/i.test(raw)
+
+    if (isClientInactive) {
+      console.warn('[CR-Notify] Credenciales inactivas. Forzando refresh de todas las fuentes...')
+      _credCache.exp = 0
+      _credCache.source = 'stale'
+      try {
+        await refreshCredentials()
+        res = await doRequest()
+      } catch (refreshErr) {
+        console.error('[CR-Notify] Refresh de emergencia falló:', refreshErr.message)
+      }
+    }
+
+    if (!res.ok) {
+      const t = await res.text().catch(() => raw)
+      throw new Error(`Auth anónima HTTP ${res.status}: ${(t || raw).slice(0, 80)}`)
+    }
+  }
+
   const data = await res.json()
-  _token = data.access_token; _tokenExp = Date.now() + (data.expires_in || 300) * 1000
+  _token = data.access_token
+  _tokenExp = Date.now() + (data.expires_in || 300) * 1000
   return _token
 }
 
@@ -399,7 +453,7 @@ async function formatCaption(ep) {
     try {
       const jaTitle = await getJapaneseTitle(ep.seriesId)
       if (jaTitle) displayTitle = jaTitle
-    } catch { /* ignorar */ }
+    } catch {}
   }
   const audioFlag  = FLAG[ep.audioLocale] || '🌐'
   const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale
@@ -479,7 +533,7 @@ async function sendItem(conn, jid, ep, quoted = null) {
   const caption = await formatCaption(ep)
   const opts    = quoted ? { quoted } : {}
   if (ep.image) {
-    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch { /* fallback texto */ }
+    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch {}
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
@@ -617,7 +671,9 @@ let handler = async (m, { conn, command, args, isOwner }) => {
             `⏱ Cron: cada *${mins} min*\n` +
             `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
             `💾 IDs caché: *${seen.length}*\n` +
-            `🇯🇵 Títulos JA en caché: *${jaCached}*\n\n` +
+            `🇯🇵 Títulos JA en caché: *${jaCached}*\n` +
+            `🔐 Credenciales: *${_credCache.source}* (exp ${_credCache.exp ? new Date(_credCache.exp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'})*\n` +
+            `⚠️ Último error: *${_credCache.lastError || 'Ninguno'}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
     }, { quoted: m })
   }
@@ -668,11 +724,36 @@ let handler = async (m, { conn, command, args, isOwner }) => {
     } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
     return
   }
+
+  if (command === 'crdiag') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: '🩺 Diagnosticando credenciales...' }, { quoted: m })
+    const lines = []
+    try {
+      await refreshCredentials()
+      lines.push(`📡 Fuente activa: *${_credCache.source}*`)
+      lines.push(`🕒 Expira: *${_credCache.exp ? new Date(_credCache.exp).toLocaleString('es-MX') : '—'}*`)
+      if (_credCache.lastError) lines.push(`⚠️ Último error de fuente: _${_credCache.lastError}_`)
+      lines.push(`🔑 Basic Auth (primeros 20): \`${BASIC_ANON.slice(0, 20)}...\``)
+      lines.push(`👤 User-Agent: \`${CR_UA.slice(0, 40)}...\``)
+      lines.push(`🆔 Device ID: \`${DEVICE_ID}\``)
+      // Prueba de autenticación real
+      try {
+        const token = await getAnonToken()
+        lines.push(`✅ Auth test: *OK* (token: \`${token.slice(0, 15)}...\`)`)
+      } catch (authErr) {
+        lines.push(`❌ Auth test: *FALLÓ* → ${authErr.message}`)
+      }
+    } catch (e) {
+      lines.push(`❌ Error general: ${e.message}`)
+    }
+    return conn.sendMessage(m.chat, { text: `🩺 *CR-Notify Diagnóstico*\n\n${lines.join('\n')}` }, { quoted: m })
+  }
 }
 
-handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart']
+handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crdiag']
 handler.tags    = ['anime']
-handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crstop|crstart)$/i
+handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crstop|crstart|crdiag)$/i
 
 // ─── Auto-arranque ───────────────────────────────────────────────────────────
 ;(async () => {
