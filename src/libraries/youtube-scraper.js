@@ -218,6 +218,7 @@ const providerYtDlp = async (ytUrl, type, quality) => {
         '--newline',
         '--js-runtimes', 'node',
         '--remote-components', 'ejs:github',
+        '--extractor-args', 'youtube:player_client=android_vr,web_embedded',
         '--output', output,
     ];
 
