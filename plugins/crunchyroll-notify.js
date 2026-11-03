@@ -319,12 +319,31 @@ function formatCaption(ep) {
 }
 
 // ─── Fetch episodios ──────────────────────────────────────────────────────────
-async function fetchNewEpisodes() {
-  const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  const valid = [...new Map(rows.map(normalizeEpisode)
+async function fetchBrowseEpisodes(pageCount = 3) {
+  const allRows = []
+  const pageSize = 100
+
+  for (let page = 0; page < pageCount; page++) {
+    const data = await crFetch('/content/v1/browse', {
+      count: String(pageSize),
+      start: String(page * pageSize),
+      sort_by: 'newly_added',
+      type: 'episode',
+      locale: 'es-419',
+    }, CR_BETA)
+    const rows = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
+    if (!rows.length) break
+    allRows.push(...rows)
+    if (rows.length < pageSize) break
+  }
+
+  return [...new Map(allRows.map(normalizeEpisode)
     .filter(i => i.id && i.series && ALLOWED_LOCALES.has(i.audioLocale))
     .map(i => [i.id, i])).values()]
+}
+
+async function fetchNewEpisodes() {
+  const valid = await fetchBrowseEpisodes(3)
   if (!valid.length) return []
 
   const seen = loadSeen()
@@ -345,11 +364,7 @@ function markSeen(id) {
 }
 
 async function getLatestEpisodes(limit = 10) {
-  const data  = await crFetch('/content/v1/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : []
-  const episodes = [...new Map(rows.map(normalizeEpisode)
-    .filter(i => i.id && ALLOWED_LOCALES.has(i.audioLocale))
-    .map(i => [i.id, i])).values()]
+  const episodes = await fetchBrowseEpisodes(3)
   return sortNewest(episodes).slice(0, limit)
 }
 
