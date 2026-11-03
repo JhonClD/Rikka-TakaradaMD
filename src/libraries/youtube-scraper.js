@@ -224,9 +224,19 @@ const fetchLoaderJson = async (url, timeout = 30_000) => {
         headers: LOADER_HEADERS,
         signal: AbortSignal.timeout(timeout),
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.text();
+    if (!response.ok) {
+        let detail = '';
+        try {
+            const data = JSON.parse(body);
+            detail = data.message || data.error || data.error_code || data.text || '';
+        } catch {
+            detail = body.replace(/\s+/g, ' ').slice(0, 180);
+        }
+        throw new Error(`HTTP ${response.status}${detail ? ` — ${detail}` : ''}`);
+    }
     try {
-        return await response.json();
+        return JSON.parse(body);
     } catch {
         throw new Error('respuesta JSON inválida');
     }
