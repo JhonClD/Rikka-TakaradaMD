@@ -178,7 +178,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // ── Provider: loader.to (API v2) ─────────────────────────────────────────────
 
 const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
-const LOADER_API_KEY = 'dfcb6d76f2f6a9894gjkege8a4ab232222';
+const LOADER_API_KEY = String(process.env.LOADER_TO_API_KEY || '').trim();
 const LOADER_PAGE    = 'https://en.loader.to/4/';
 const LOADER_HEADERS = {
     'User-Agent': UA,
@@ -215,6 +215,10 @@ const alternateLoaderUrl = (url) => {
 };
 
 const providerLoaderTo = async (ytUrl, fmt) => {
+    if (!LOADER_API_KEY) {
+        throw new Error('loader.to requiere LOADER_TO_API_KEY en el archivo .env');
+    }
+
     let start;
     let startError;
 
