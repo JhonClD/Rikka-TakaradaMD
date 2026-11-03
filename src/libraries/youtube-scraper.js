@@ -204,7 +204,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // ── Provider: loader.to / Video Download API ─────────────────────────────────
 
 const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
-const LOADER_API_KEY = String(process.env.LOADER_TO_API_KEY || '').trim();
+const LOADER_API_KEY = '57d9ef35d68a349222bb370f8df4332bbb1da542';
 const LOADER_PAGE    = 'https://en.loader.to/4/';
 const LOADER_HEADERS = {
     'User-Agent': UA,
