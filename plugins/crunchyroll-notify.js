@@ -593,13 +593,14 @@ function startCron(conn) {
 }
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
-let handler = async (m, { conn, command, args, isOwner }) => {
+let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
   if (conn) storedConn = conn
   if (!cronTimer && !cronStopped) startCron(conn)
+  const canManageGroup = isOwner || isAdmin
 
   if (command === 'crlogin') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
-    if (!m.chat.endsWith('@s.whatsapp.net')) {
+    if (m.isGroup) {
       return conn.sendMessage(m.chat, { text: '⛔ Por seguridad, usa *.crlogin* solo por privado.' }, { quoted: m })
     }
     const email = args[0]
@@ -629,7 +630,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   }
 
   if (command === 'crset') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!canManageGroup) return conn.sendMessage(m.chat, { text: '⛔ Solo administradores del grupo o el dueño.' }, { quoted: m })
     const cfg = loadCfg()
     if (cfg.targetJids.includes(m.chat)) {
       return conn.sendMessage(m.chat, { text: `ℹ️ Este chat ya está en la lista.\n📋 Grupos: *${cfg.targetJids.length}*` }, { quoted: m })
@@ -642,7 +643,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
   }
 
   if (command === 'crrem') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    if (!canManageGroup) return conn.sendMessage(m.chat, { text: '⛔ Solo administradores del grupo o el dueño.' }, { quoted: m })
     const cfg = loadCfg()
     const before = cfg.targetJids.length
     cfg.targetJids = cfg.targetJids.filter(j => j !== m.chat)
