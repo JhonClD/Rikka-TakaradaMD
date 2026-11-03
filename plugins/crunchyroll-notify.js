@@ -6,7 +6,7 @@
  * v2: Auto-start al arrancar el bot + soporte multi-grupo
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -15,22 +15,96 @@ const TMP_DIR   = join(__dirname, '../tmp')
 const DB_PATH   = join(TMP_DIR, 'crunchyroll-seen.json')
 const CFG_PATH  = join(TMP_DIR, 'crunchyroll-cfg.json')
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
+try { chmodSync(TMP_DIR, 0o700) } catch { /* puede no estar disponible en Windows */ }
+for (const sensitivePath of [DB_PATH, CFG_PATH]) {
+  if (existsSync(sensitivePath)) {
+    try { chmodSync(sensitivePath, 0o600) } catch { /* puede no estar disponible en Windows */ }
+  }
+}
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
-const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
+const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
+const BASIC_ANON_FALLBACK = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
+const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
 const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
 const DEVICE_TYPE= 'ANDROIDTV'
 const MAX_SEEN   = 500
+const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
+const CREDENTIAL_RETRY_MS = 15 * 60_000
+let BASIC_ANON = BASIC_ANON_FALLBACK
+let CR_UA = CR_UA_FALLBACK
+let _credCache = { exp: 0, source: 'fallback' }
+let _credRefresh = null
 
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
+  try { chmodSync(tmp, 0o600) } catch { /* puede no estar disponible en Windows */ }
   renameSync(tmp, path)
+}
+
+function isValidBasicCredential(value) {
+  if (typeof value !== 'string' || !/^Basic [A-Za-z0-9+/]+={0,2}$/.test(value) || value.length > 512) return false
+  try {
+    const decoded = Buffer.from(value.slice(6), 'base64').toString('utf8')
+    const separator = decoded.indexOf(':')
+    return separator > 0 && separator < decoded.length - 1 && !/[\u0000-\u001f\u007f]/.test(decoded)
+  } catch { return false }
+}
+
+function parseClientVersion(value) {
+  if (typeof value !== 'string' || value.length > 48) return null
+  const match = value.match(/^((?:\d+\.){1,3}\d+) \((\d{3,8})\)$/)
+  return match ? { version: match[1], build: match[2] } : null
+}
+
+function buildUserAgent(version, build) {
+  return `Crunchyroll/ANDROIDTV/${version}_${build} (Android 16; en-US; sdk_gphone64_x86_64)`
+}
+
+async function refreshCredentials() {
+  if (_credRefresh) return _credRefresh
+  if (_credCache.exp && Date.now() < _credCache.exp) return
+
+  _credRefresh = (async () => {
+    try {
+      const res = await fetch(CREDENTIALS_URL, {
+        headers: { Accept: 'application/json' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const raw = await res.text()
+      if (raw.length > 32 * 1024) throw new Error('respuesta demasiado grande')
+      const credentials = JSON.parse(raw)
+      const authorization = credentials?.authorization
+      const client = parseClientVersion(credentials?.version)
+      if (!isValidBasicCredential(authorization)) throw new Error('authorization inválida')
+      if (!client) throw new Error('versión inválida')
+
+      BASIC_ANON = authorization
+      CR_UA = buildUserAgent(client.version, client.build)
+      _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'remote' }
+      console.log(`[CR-Notify] Credenciales actualizadas (v${client.version}, build ${client.build}).`)
+    } catch (err) {
+      // Nunca sustituir el último valor válido por una respuesta remota inválida.
+      if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
+        BASIC_ANON = BASIC_ANON_FALLBACK
+        CR_UA = CR_UA_FALLBACK
+        _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback' }
+      } else {
+        _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
+      }
+      console.warn(`[CR-Notify] No se pudieron actualizar credenciales; se conserva el valor válido actual: ${err.message}`)
+    } finally {
+      _credRefresh = null
+    }
+  })()
+  return _credRefresh
 }
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
@@ -41,7 +115,7 @@ function loadCfg() {
     if (cfg.targetJid && !cfg.targetJids) {
       cfg.targetJids = [cfg.targetJid]
       delete cfg.targetJid
-      writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2), 'utf-8')
+      saveCfg(cfg)
     }
     if (!Array.isArray(cfg.targetJids)) cfg.targetJids = cfg.targetJids ? [cfg.targetJids] : []
     cfg.targetJids = [...new Set(cfg.targetJids.filter(j => typeof j === 'string' && j.trim()))]
@@ -60,6 +134,7 @@ function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_S
 // ─── Cookie jar ──────────────────────────────────────────────────────────────
 let _cookies = ''
 async function preLogin() {
+  await refreshCredentials()
   try {
     const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
@@ -72,6 +147,7 @@ let _token = null, _tokenExp = 0
 
 async function getAnonToken() {
   if (_token && Date.now() < _tokenExp - 30_000) return _token
+  await refreshCredentials()
   if (!_cookies) await preLogin()
   const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
