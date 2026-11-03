@@ -207,7 +207,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
 // Clave pública que el cliente web de loaderr.to usa; no es la clave privada
 // de la cuenta del usuario ni depende de su saldo.
-const LOADERR_PUBLIC_KEY = 'dfcb6d76f2f2a12c83a82a4de3bc75e8';
+const LOADERR_PUBLIC_KEY = 'dfcb6d76f2f6a9894gjkege8a4ab232222';
 const LOADER_PAGE    = 'https://en.loader.to/4/';
 const LOADER_HEADERS = {
     'User-Agent': UA,
