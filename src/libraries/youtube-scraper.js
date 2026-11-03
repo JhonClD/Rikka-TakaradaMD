@@ -201,7 +201,7 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Provider: loader.to (API v2) ─────────────────────────────────────────────
+// ── Provider: loader.to / Video Download API ─────────────────────────────────
 
 const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
 const LOADER_API_KEY = String(process.env.LOADER_TO_API_KEY || '').trim();
@@ -247,33 +247,40 @@ const providerLoaderTo = async (ytUrl, fmt) => {
 
     let start;
     let startError;
+    let startDomain = LOADER_DOMAINS[0];
 
     for (const domain of LOADER_DOMAINS) {
         try {
-            const startUrl = loaderApiUrl(domain, '/api/v2/download', {
+            const startUrl = loaderApiUrl(domain, '/ajax/download.php', {
                 format: fmt,
+                ...(fmt === 'mp3' ? { audio_quality: '320' } : {}),
                 url: ytUrl,
                 apikey: LOADER_API_KEY,
             });
             start = await fetchLoaderJson(startUrl, 30_000);
-            if (start?.success && start.id && start.progress_url) break;
-            throw new Error(start?.text || `respuesta sin progress_url: ${JSON.stringify(start).slice(0, 160)}`);
+            if (start?.success && start.id) {
+                startDomain = domain;
+                break;
+            }
+            throw new Error(start?.message || start?.text || `respuesta sin id: ${JSON.stringify(start).slice(0, 160)}`);
         } catch (error) {
             startError = error;
             console.warn(`[loader.to] inicio falló en ${domain}: ${error.message}`);
         }
     }
 
-    if (!start?.id || !start.progress_url) {
+    if (!start?.id) {
         throw new Error(`loader.to: no se pudo iniciar la conversión (${startError?.message || 'sin respuesta'})`);
     }
 
     console.log(`[loader.to] id=${start.id} fmt=${fmt}`);
 
-    // La API v2 devuelve progress_url; no se debe reconstruir con el endpoint antiguo.
+    // La API compatible puede devolver progress_url o solo el id.
     const MAX_MS = 3 * 60 * 1_000;
     const t0 = Date.now();
-    let progressUrl = new URL(start.progress_url);
+    let progressUrl = new URL(
+        start.progress_url || loaderApiUrl(startDomain, '/ajax/progress.php', { id: start.id })
+    );
     let lastPct = -1;
     let hostFailures = 0;
 
