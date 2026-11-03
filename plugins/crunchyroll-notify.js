@@ -1,37 +1,111 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const TMP_DIR   = join(__dirname, '../tmp')
+const TMP_DIR   = join(__dirname, '../tmp/cr-notify')
 const DB_PATH   = join(TMP_DIR, 'crunchyroll-seen.json')
 const CFG_PATH  = join(TMP_DIR, 'crunchyroll-cfg.json')
+const JA_CACHE_PATH = join(TMP_DIR, 'crunchyroll-series-ja.json')
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
+try { chmodSync(TMP_DIR, 0o700) } catch {}
+for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH]) {
+  if (existsSync(sensitivePath)) {
+    try { chmodSync(sensitivePath, 0o600) } catch {}
+  }
+}
 
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
-const BASIC_ANON = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
-const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
-const CR_UA      = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
+const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
+const BASIC_ANON_FALLBACK = 'Basic dC1rZGdwMmg4YzNqdWI4Zm4wZnE6eWZMRGZNZnJZdktYaDRKWFMxTEVJMmNDcXUxdjVXYW4='
+const BASIC_AUTH = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
+const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 13.0; en-US; TCL-S5400AF Build/TP1A.220624.014)'
 const DEVICE_ID  = '00000000-dead-beef-cafe-000000000000'
 const DEVICE_TYPE= 'ANDROIDTV'
 const MAX_SEEN   = 500
+const MAX_JA_CACHE = 2000
+const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
+const CREDENTIAL_RETRY_MS = 15 * 60_000
+let BASIC_ANON = BASIC_ANON_FALLBACK
+let CR_UA = CR_UA_FALLBACK
+let _credCache = { exp: 0, source: 'fallback' }
+let _credRefresh = null
 
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
+  try { chmodSync(tmp, 0o600) } catch {}
   renameSync(tmp, path)
+}
+
+function isValidBasicCredential(value) {
+  if (typeof value !== 'string' || !/^Basic [A-Za-z0-9+/]+={0,2}$/.test(value) || value.length > 512) return false
+  try {
+    const decoded = Buffer.from(value.slice(6), 'base64').toString('utf8')
+    const separator = decoded.indexOf(':')
+    return separator > 0 && separator < decoded.length - 1 && !/[\u0000-\u001f\u007f]/.test(decoded)
+  } catch { return false }
+}
+
+function parseClientVersion(value) {
+  if (typeof value !== 'string' || value.length > 48) return null
+  const match = value.match(/^((?:\d+\.){1,3}\d+) \((\d{3,8})\)$/)
+  return match ? { version: match[1], build: match[2] } : null
+}
+
+function buildUserAgent(version, build) {
+  return `Crunchyroll/ANDROIDTV/${version}_${build} (Android 16; en-US; sdk_gphone64_x86_64)`
+}
+
+async function refreshCredentials() {
+  if (_credRefresh) return _credRefresh
+  if (_credCache.exp && Date.now() < _credCache.exp) return
+
+  _credRefresh = (async () => {
+    try {
+      const res = await fetch(CREDENTIALS_URL, {
+        headers: { Accept: 'application/json' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const raw = await res.text()
+      if (raw.length > 32 * 1024) throw new Error('respuesta demasiado grande')
+      const credentials = JSON.parse(raw)
+      const authorization = credentials?.authorization
+      const client = parseClientVersion(credentials?.version)
+      if (!isValidBasicCredential(authorization)) throw new Error('authorization inválida')
+      if (!client) throw new Error('versión inválida')
+
+      BASIC_ANON = authorization
+      CR_UA = buildUserAgent(client.version, client.build)
+      _credCache = { exp: Date.now() + CREDENTIAL_CACHE_MS, source: 'remote' }
+      console.log(`[CR-Notify] Credenciales actualizadas (v${client.version}, build ${client.build}).`)
+    } catch (err) {
+      if (_credCache.source !== 'remote' || !isValidBasicCredential(BASIC_ANON)) {
+        BASIC_ANON = BASIC_ANON_FALLBACK
+        CR_UA = CR_UA_FALLBACK
+        _credCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback' }
+      } else {
+        _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
+      }
+      console.warn(`[CR-Notify] No se pudieron actualizar credenciales; se conserva el valor válido actual: ${err.message}`)
+    } finally {
+      _credRefresh = null
+    }
+  })()
+  return _credRefresh
 }
 
 function loadCfg() {
   try {
     const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf-8'))
-
     if (cfg.targetJid && !cfg.targetJids) {
       cfg.targetJids = [cfg.targetJid]
       delete cfg.targetJid
-      writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2), 'utf-8')
+      saveCfg(cfg)
     }
     if (!Array.isArray(cfg.targetJids)) cfg.targetJids = cfg.targetJids ? [cfg.targetJids] : []
     cfg.targetJids = [...new Set(cfg.targetJids.filter(j => typeof j === 'string' && j.trim()))]
@@ -47,19 +121,74 @@ function loadSeen() {
 }
 function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN)) }
 
+let _seriesCache = {}
+function loadSeriesCache() {
+  try {
+    const raw = JSON.parse(readFileSync(JA_CACHE_PATH, 'utf-8'))
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      _seriesCache = raw
+    } else {
+      _seriesCache = {}
+    }
+  } catch { _seriesCache = {} }
+}
+function saveSeriesCache() {
+  const keys = Object.keys(_seriesCache)
+  if (keys.length > MAX_JA_CACHE) {
+    for (const k of keys.slice(0, keys.length - MAX_JA_CACHE)) delete _seriesCache[k]
+  }
+  try { writeJsonAtomic(JA_CACHE_PATH, _seriesCache) } catch {}
+}
+loadSeriesCache()
+
+const _seriesFetching = new Map()
+
+function extractSeriesTitle(data) {
+  if (!data || typeof data !== 'object') return ''
+  if (typeof data.title === 'string' && data.title) return data.title
+  if (data.series_metadata?.title) return data.series_metadata.title
+  if (Array.isArray(data.items) && data.items[0]?.title) return data.items[0].title
+  if (Array.isArray(data.data) && data.data[0]?.title) return data.data[0].title
+  return ''
+}
+
+async function getJapaneseTitle(seriesId) {
+  if (!seriesId) return ''
+  if (typeof _seriesCache[seriesId] === 'string') return _seriesCache[seriesId]
+  if (_seriesFetching.has(seriesId)) return _seriesFetching.get(seriesId)
+
+  const promise = (async () => {
+    try {
+      const data = await crFetch(`/content/v1/series/${seriesId}`, { locale: 'ja-JP' }, CR_BETA)
+      const title = extractSeriesTitle(data)
+      _seriesCache[seriesId] = title || ''
+      saveSeriesCache()
+      return _seriesCache[seriesId]
+    } catch {
+      return ''
+    } finally {
+      _seriesFetching.delete(seriesId)
+    }
+  })()
+  _seriesFetching.set(seriesId, promise)
+  return promise
+}
+
 let _cookies = ''
 async function preLogin() {
+  await refreshCredentials()
   try {
     const res = await fetch(CR_BASE, { headers: { 'User-Agent': CR_UA }, signal: AbortSignal.timeout(15_000) })
     const raw = res.headers.getSetCookie?.() || []
     _cookies  = raw.map(c => c.split(';')[0]).join('; ')
-  } catch {  }
+  } catch {}
 }
 
 let _token = null, _tokenExp = 0
 
 async function getAnonToken() {
   if (_token && Date.now() < _tokenExp - 30_000) return _token
+  await refreshCredentials()
   if (!_cookies) await preLogin()
   const body = new URLSearchParams({ grant_type: 'client_id', scope: 'offline_access', device_id: DEVICE_ID, device_type: DEVICE_TYPE })
   const res  = await fetch(CR_AUTH, {
@@ -130,9 +259,14 @@ async function crFetch(path, params = {}, base = CR_BASE) {
     })
     if (res.ok) return res.json()
     if (res.status === 401 && attempt === 0) {
-      _token = null; _tokenExp = 0
+      _token = null
+      _tokenExp = 0
       const cfg = loadCfg()
-      if (cfg.loggedIn) { delete cfg.accessToken; delete cfg.tokenExp; saveCfg(cfg) }
+      if (cfg.loggedIn) {
+        delete cfg.accessToken
+        delete cfg.tokenExp
+        saveCfg(cfg)
+      }
       continue
     }
     const detail = (await res.text().catch(() => '')).slice(0, 120)
@@ -142,7 +276,6 @@ async function crFetch(path, params = {}, base = CR_BASE) {
 }
 
 function extractImage(images = {}) {
-
   const candidates = Object.values(images)
     .flat(Infinity)
     .filter(Boolean)
@@ -163,11 +296,12 @@ function extractImage(images = {}) {
 
 function normalizeEpisode(p) {
   const meta    = p.episode_metadata || {}
-  const airRaw  = p.episode_air_date || p.premium_available_date || p.availability_starts || ''
+  const airRaw  = p.premium_available_date || p.availability_starts || p.episode_air_date || ''
   const airTime = airRaw ? new Date(airRaw).getTime() : 0
   const epNum   = p.episode_number ?? meta.episode_number ?? null
   const epId    = p.id || ''
   const slug    = p.slug_title || meta.slug_title || ''
+  const seriesId = p.series_id || meta.series_id || ''
 
   let locale = p.audio_locale || meta.audio_locale || ''
   if (!locale && Array.isArray(meta.audio_locales) && meta.audio_locales.length) {
@@ -184,6 +318,7 @@ function normalizeEpisode(p) {
 
   return {
     id: epId,
+    seriesId,
     series: seriesName.trim(),
     epTitle: p.title || '',
     epNum: epNum !== null ? epNum : 'Especial',
@@ -192,6 +327,14 @@ function normalizeEpisode(p) {
     image: extractImage(p.images),
     airTime
   }
+}
+
+function sortNewest(episodes) {
+  return [...episodes].sort((a, b) => {
+    const dateDiff = (Number(b.airTime) || 0) - (Number(a.airTime) || 0)
+    if (dateDiff !== 0) return dateDiff
+    return String(b.id).localeCompare(String(a.id))
+  })
 }
 
 const FLAG = {
@@ -204,35 +347,63 @@ const LOCALE_NAME = {
 }
 const ALLOWED_LOCALES = new Set(['ja-JP','es-419','es-LA','es-ES'])
 
-function formatCaption(ep) {
+async function formatCaption(ep) {
+  let displayTitle = ep.series
+  if (ep.seriesId) {
+    try {
+      const jaTitle = await getJapaneseTitle(ep.seriesId)
+      if (jaTitle) displayTitle = jaTitle
+    } catch {}
+  }
   const audioFlag  = FLAG[ep.audioLocale] || '🌐'
   const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale
   const epLabel    = `Ep. ${ep.epNum}`
   const epLine     = ep.epTitle ? `${epLabel} - ${ep.epTitle}` : epLabel
   return (
-    `📺 ${ep.series}\n` +
+    `📺 ${displayTitle}\n` +
     `🎬 ${epLine}\n` +
     `${audioFlag} ${localeName}\n\n` +
     `${ep.link}`
   )
 }
 
-function warnLocale(i) {
-  if (!i.audioLocale || !LOCALE_NAME[i.audioLocale]) {
-    console.warn('[CR-Notify] Descartado por locale desconocido:', i.id, i.series, i.audioLocale)
-  }
+function getPageCount() {
+  const pages = Number(process.env.CR_PAGES ?? 1)
+  return Number.isFinite(pages) && pages > 0 ? Math.floor(pages) : 1
 }
 
-async function fetchNewEpisodes() {
-  const data  = await crFetch('/content/v2/discover/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.data) ? data.data : Array.isArray(data?.items) ? data.items : []
-  const valid = [...new Map(rows.map(normalizeEpisode)
+async function fetchBrowseEpisodes(pageCount = getPageCount()) {
+  const allRows = []
+  const pageSize = 100
+
+  for (let page = 0; page < pageCount; page++) {
+    const data = await crFetch('/content/v2/discover/browse', {
+      count: String(pageSize),
+      start: String(page * pageSize),
+      sort_by: 'newly_added',
+      type: 'episode',
+      locale: 'es-419',
+    }, CR_BETA)
+    const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data?.items) ? data.items : []
+    if (!rows.length) break
+    allRows.push(...rows)
+    if (rows.length < pageSize) break
+  }
+
+  return [...new Map(allRows.map(normalizeEpisode)
     .filter(i => {
       if (!i.id || !i.series) return false
-      if (!ALLOWED_LOCALES.has(i.audioLocale)) { warnLocale(i); return false }
+      if (!ALLOWED_LOCALES.has(i.audioLocale)) {
+        console.warn('[CR-Notify] Descartado por locale:', i.id, i.series, i.audioLocale || '(vacío)')
+        return false
+      }
       return true
     })
     .map(i => [i.id, i])).values()]
+}
+
+async function fetchNewEpisodes() {
+  const valid = await fetchBrowseEpisodes()
   if (!valid.length) return []
 
   const seen = loadSeen()
@@ -243,7 +414,7 @@ async function fetchNewEpisodes() {
     return []
   }
 
-  return valid.filter(i => !seen.includes(i.id))
+  return sortNewest(valid.filter(i => !seen.includes(i.id)))
 }
 
 function markSeen(id) {
@@ -252,22 +423,15 @@ function markSeen(id) {
 }
 
 async function getLatestEpisodes(limit = 10) {
-  const data  = await crFetch('/content/v2/discover/browse', { count: '100', sort_by: 'newly_added', type: 'episode', locale: 'es-419' }, CR_BETA)
-  const rows  = Array.isArray(data?.data) ? data.data : Array.isArray(data?.items) ? data.items : []
-  return [...new Map(rows.map(normalizeEpisode)
-    .filter(i => {
-      if (!i.id || !i.series) return false
-      if (!ALLOWED_LOCALES.has(i.audioLocale)) { warnLocale(i); return false }
-      return true
-    })
-    .map(i => [i.id, i])).values()].slice(0, limit)
+  const episodes = await fetchBrowseEpisodes()
+  return sortNewest(episodes).slice(0, limit)
 }
 
 async function sendItem(conn, jid, ep, quoted = null) {
-  const caption = formatCaption(ep)
+  const caption = await formatCaption(ep)
   const opts    = quoted ? { quoted } : {}
   if (ep.image) {
-    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch {  }
+    try { await conn.sendMessage(jid, { image: { url: ep.image }, caption }, opts); return } catch {}
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
@@ -276,7 +440,7 @@ const delay = ms => new Promise(r => setTimeout(r, ms))
 let cronTimer = null
 let storedConn = null
 let cronRunning = false
-let cronPaused = false
+let cronStopped = false
 
 function stopCron() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null } }
 
@@ -284,12 +448,12 @@ function getConn() { return storedConn || global.conn || null }
 
 function startCron(conn) {
   if (conn) storedConn = conn
-  cronPaused = false
+  cronStopped = false
   stopCron()
 
   const cfg     = loadCfg()
-  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 1)
-  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 1
+  const configuredMinutes = Number(process.env.CR_MINUTES ?? cfg.minutes ?? 5)
+  const minutes = Number.isFinite(configuredMinutes) ? Math.max(1, configuredMinutes) : 5
 
   cronTimer = setInterval(async () => {
     if (cronRunning) return
@@ -315,7 +479,6 @@ function startCron(conn) {
             console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
           }
         }
-
         if (algunExito) markSeen(ep.id)
         await delay(3000)
       }
@@ -329,14 +492,13 @@ function startCron(conn) {
 }
 
 let handler = async (m, { conn, command, args, isOwner }) => {
-
   if (conn) storedConn = conn
-  if (!cronTimer && !cronPaused) startCron(conn)
+  if (!cronTimer && !cronStopped) startCron(conn)
 
   if (command === 'crlogin') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     if (!m.chat.endsWith('@s.whatsapp.net')) {
-      return conn.sendMessage(m.chat, { text: '⛔ Por seguridad, usa *.crlogin* solo por privado (DM al owner).' }, { quoted: m })
+      return conn.sendMessage(m.chat, { text: '⛔ Por seguridad, usa *.crlogin* solo por privado.' }, { quoted: m })
     }
     const email = args[0]
     const pass  = args.slice(1).join(' ')
@@ -347,28 +509,14 @@ let handler = async (m, { conn, command, args, isOwner }) => {
       startCron(conn)
       const cfg = loadCfg()
       return conn.sendMessage(m.chat, {
-        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 1} min\n🔁 Refresh automático habilitado`,
+        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 5} min\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
     } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
-  }
-
-  if (command === 'crstop') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
-    stopCron()
-    cronPaused = true
-    return conn.sendMessage(m.chat, { text: '🛑 Cron detenido' }, { quoted: m })
-  }
-
-  if (command === 'crstart') {
-    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
-    startCron(conn)
-    return conn.sendMessage(m.chat, { text: '▶️ Cron reiniciado' }, { quoted: m })
   }
 
   if (command === 'crlogout') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
     const cfg = loadCfg()
-
     delete cfg.accessToken; delete cfg.refreshToken; delete cfg.tokenExp
     delete cfg.accountId; delete cfg.loggedIn
     saveCfg(cfg)
@@ -406,12 +554,13 @@ let handler = async (m, { conn, command, args, isOwner }) => {
 
   if (command === 'crstatus') {
     const cfg  = loadCfg()
-    const mins = process.env.CR_MINUTES || cfg.minutes || '1'
+    const mins = process.env.CR_MINUTES || cfg.minutes || 5
     const seen = loadSeen()
     const exp  = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
     const gruposList = cfg.targetJids.length
       ? cfg.targetJids.map((j, i) => `  ${i + 1}. \`${j}\``).join('\n')
       : '  _Ninguno — usa .crset_'
+    const jaCached = Object.keys(_seriesCache).length
     return conn.sendMessage(m.chat, {
       text: `📊 *CR-Notify Status*\n\n` +
             `🔑 Modo: *${cfg.loggedIn ? '👤 Cuenta real ✅' : '👻 Anónimo'}*\n` +
@@ -419,9 +568,23 @@ let handler = async (m, { conn, command, args, isOwner }) => {
             `🔁 Refresh token: *${cfg.refreshToken ? 'Sí ✅' : 'No ❌'}*\n` +
             `⏱ Cron: cada *${mins} min*\n` +
             `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : 'No ❌'}*\n` +
-            `💾 IDs caché: *${seen.length}*\n\n` +
+            `💾 IDs caché: *${seen.length}*\n` +
+            `🇯🇵 Títulos JA en caché: *${jaCached}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
     }, { quoted: m })
+  }
+
+  if (command === 'crstop') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    cronStopped = true
+    stopCron()
+    return conn.sendMessage(m.chat, { text: '🛑 Cron detenido.' }, { quoted: m })
+  }
+
+  if (command === 'crstart') {
+    if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+    startCron(conn)
+    return conn.sendMessage(m.chat, { text: '▶️ Cron reiniciado.' }, { quoted: m })
   }
 
   if (command === 'crlist') {
@@ -437,12 +600,12 @@ let handler = async (m, { conn, command, args, isOwner }) => {
 
   if (command === 'crnotify') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
-    await conn.sendMessage(m.chat, { text: '🔍 Buscando episodios recientes...' }, { quoted: m })
+    const cfg  = loadCfg()
+    const jids = cfg.targetJids.length ? cfg.targetJids : [m.chat]
+    await conn.sendMessage(m.chat, { text: `🔍 Enviando los 10 estrenos recientes a ${jids.length} grupo(s)...` }, { quoted: m })
     try {
       const episodes = await getLatestEpisodes(10)
       if (!episodes.length) return conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
-      const cfgTargets = loadCfg().targetJids || []
-      const jids = cfgTargets.length ? cfgTargets : [m.chat]
       for (const ep of episodes) {
         for (const jid of jids) {
           try {
@@ -452,7 +615,7 @@ let handler = async (m, { conn, command, args, isOwner }) => {
             console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
           }
         }
-        await delay(2000)
+        await delay(3000)
       }
     } catch (err) { await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m }) }
     return
@@ -465,13 +628,12 @@ handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crsto
 
 ;(async () => {
   const cfg = loadCfg()
-
   if (cfg.loggedIn && cfg.accessToken) {
     _token    = cfg.accessToken
     _tokenExp = cfg.tokenExp || 0
   }
   startCron(null)
-  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'}`)
+  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'} | Títulos JA cacheados: ${Object.keys(_seriesCache).length}`)
 })()
 
 export default handler
