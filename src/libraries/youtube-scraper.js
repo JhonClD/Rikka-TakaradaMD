@@ -1,13 +1,13 @@
 import fs            from 'fs';
 import yts           from 'yt-search';
-import { exec }      from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import os             from 'os';
 import path           from 'path';
 import { fileURLToPath } from 'url';
-import { createHash } from 'crypto';
 
 const execPromise    = promisify(exec);
+const execFilePromise = promisify(execFile);
 const FFMPEG_TIMEOUT = 120_000;
 const TMP_DIR        = os.tmpdir();
 
@@ -135,7 +135,7 @@ export const ytSearch = async (query) => {
 
 export const ytInfo = (url) => ytSearch(url);
 
-// ── Mapeo de calidad → formato loader.to ─────────────────────────────────────
+// ── Mapeo de calidad → formato yt-dlp ─────────────────────────────────────────
 // Video soportado: 144 240 360 480 720 1080 1440 4k
 // Audio soportado: mp3 m4a webm aac flac opus ogg wav
 
@@ -202,187 +202,80 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Provider: loader.to / Video Download API ─────────────────────────────────
+// ── Provider: yt-dlp local ───────────────────────────────────────────────────
 
-const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
-// Clave pública que el cliente web de loaderr.to usa; no es la clave privada
-// de la cuenta del usuario ni depende de su saldo.
-const LOADERR_PUBLIC_KEY = 'dfcb6d76f2f6a9894gjkege8a4ab232222';
-const LOADER_PAGE    = 'https://en.loader.to/4/';
-const LOADER_HEADERS = {
-    'User-Agent': UA,
-    'Referer': LOADER_PAGE,
-    'Origin': 'https://en.loader.to',
-    'Accept': 'application/json',
-};
+const YTDLP_BIN = process.env.YTDLP_BIN || 'yt-dlp';
 
-const loaderApiUrl = (domain, pathname, params = {}) => {
-    const url = new URL(`https://${domain}${pathname}`);
-    Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-    return url;
-};
+const providerYtDlp = async (ytUrl, type, quality) => {
+    const stamp = `${process.pid}_${Date.now()}`;
+    const base = path.join(TMP_DIR, `ytdlp_${stamp}`);
+    const output = `${base}.%(ext)s`;
+    const args = [
+        '--no-playlist',
+        '--no-part',
+        '--no-mtime',
+        '--no-warnings',
+        '--newline',
+        '--js-runtimes', 'node',
+        '--remote-components', 'ejs:github',
+        '--output', output,
+    ];
 
-const fetchLoaderJson = async (url, timeout = 30_000, token = '') => {
-    const response = await fetch(url, {
-        headers: token ? { ...LOADER_HEADERS, Authorization: `Bearer ${token}` } : LOADER_HEADERS,
-        signal: AbortSignal.timeout(timeout),
-    });
-    const body = await response.text();
-    if (!response.ok) {
-        let detail = '';
-        try {
-            const data = JSON.parse(body);
-            detail = data.message || data.error || data.error_code || data.text || '';
-        } catch {
-            detail = body.replace(/\s+/g, ' ').slice(0, 180);
-        }
-        throw new Error(`HTTP ${response.status}${detail ? ` — ${detail}` : ''}`);
+    if (type === 'audio') {
+        args.push('-x', '--audio-format', 'mp3', '--audio-quality', '192K',
+            '-f', 'bestaudio/best');
+    } else {
+        const height = String(quality || '360p').replace(/p$/i, '');
+        args.push('-f', `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
+            '--merge-output-format', 'mp4');
     }
+    args.push('--', ytUrl);
+
+    console.log(`[yt-dlp] iniciando ${type} (${quality || '192K'})`);
     try {
-        return JSON.parse(body);
-    } catch {
-        throw new Error('respuesta JSON inválida');
-    }
-};
-
-const solveLoaderrPow = (salt, difficulty, budgetMs = 1_000) => {
-    const prefix = '0'.repeat(Number(difficulty));
-    const deadline = Date.now() + budgetMs;
-    for (let nonce = 0; Date.now() < deadline; nonce++) {
-        const digest = createHash('sha256').update(`${salt}:${nonce}`).digest('hex');
-        if (digest.startsWith(prefix)) return nonce;
-    }
-    return null;
-};
-
-const mintLoaderrToken = async () => {
-    const host = `https://${LOADER_DOMAINS[0]}`;
-    const challenge = await fetchLoaderJson(`${host}/api/pow/challenge`, 15_000);
-    const nonce = solveLoaderrPow(challenge.salt, challenge.difficulty);
-    if (nonce === null) throw new Error('no se pudo resolver el desafío PoW');
-    const response = await fetch(`${host}/api/pow/verify`, {
-        method: 'POST',
-        headers: { ...LOADER_HEADERS, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            salt: challenge.salt,
-            difficulty: challenge.difficulty,
-            expires_at: challenge.expires_at,
-            signature: challenge.signature,
-            nonce,
-        }),
-        signal: AbortSignal.timeout(15_000),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.success || !data.token) {
-        throw new Error(data.message || data.error || `HTTP ${response.status}`);
-    }
-    return data.token;
-};
-
-const alternateLoaderUrl = (url) => {
-    const next = new URL(url);
-    const index = LOADER_DOMAINS.indexOf(next.hostname);
-    if (index === -1) return null;
-    next.hostname = LOADER_DOMAINS[(index + 1) % LOADER_DOMAINS.length];
-    return next;
-};
-
-const providerLoaderTo = async (ytUrl, fmt) => {
-    let start;
-    let startError;
-    let token;
-
-    try {
-        token = await mintLoaderrToken();
+        await execFilePromise(YTDLP_BIN, args, {
+            timeout: 4 * 60_000,
+            maxBuffer: 4 * 1024 * 1024,
+        });
     } catch (error) {
-        throw new Error(`loaderr.to: autenticación web falló — ${error.message}`);
+        const detail = String(error.stderr || error.message || '').trim().split('\n').slice(-4).join(' ');
+        if (/ENOENT/.test(String(error.code)) || /not found/i.test(detail)) {
+            throw new Error('yt-dlp no está instalado. Instala yt-dlp y ffmpeg en la VPS.');
+        }
+        throw new Error(`yt-dlp falló${detail ? `: ${detail}` : ''}`);
     }
 
-    for (const domain of LOADER_DOMAINS) {
-        try {
-            const startUrl = loaderApiUrl(domain, '/api/v2/download', {
-                format: fmt,
-                url: ytUrl,
-                apikey: LOADERR_PUBLIC_KEY,
-            });
-            start = await fetchLoaderJson(startUrl, 30_000, token);
-            if (start?.success && start.id && start.progress_url) {
-                break;
-            }
-            throw new Error(start?.message || start?.text || `respuesta sin progress_url: ${JSON.stringify(start).slice(0, 160)}`);
-        } catch (error) {
-            startError = error;
-            console.warn(`[loader.to] inicio falló en ${domain}: ${error.message}`);
+    const files = fs.readdirSync(TMP_DIR)
+        .filter(name => name.startsWith(`ytdlp_${stamp}.`))
+        .map(name => path.join(TMP_DIR, name))
+        .filter(file => fs.statSync(file).size > 0);
+    if (!files.length) throw new Error('yt-dlp terminó sin producir un archivo');
+    const file = files[0];
+    try {
+        return { buffer: fs.readFileSync(file), provider: 'yt-dlp' };
+    } finally {
+        for (const candidate of files) {
+            try { fs.unlinkSync(candidate); } catch {}
         }
     }
-
-    if (!start?.id || !start.progress_url) {
-        throw new Error(`loader.to: no se pudo iniciar la conversión (${startError?.message || 'sin respuesta'})`);
-    }
-
-    console.log(`[loader.to] id=${start.id} fmt=${fmt}`);
-
-    const MAX_MS = 3 * 60 * 1_000;
-    const t0 = Date.now();
-    let progressUrl = new URL(start.progress_url);
-    let lastPct = -1;
-    let hostFailures = 0;
-
-    for (let i = 0; Date.now() - t0 < MAX_MS; i++) {
-        await new Promise(r => setTimeout(r, i < 5 ? 1_000 : i < 10 ? 2_000 : 5_000));
-
-        let prog;
-        try {
-            prog = await fetchLoaderJson(progressUrl, 20_000, token);
-            hostFailures = 0;
-        } catch (error) {
-            hostFailures++;
-            const alternate = alternateLoaderUrl(progressUrl);
-            if (!alternate || hostFailures < 2) {
-                console.warn(`[loader.to] progreso falló (${hostFailures}): ${error.message}`);
-                continue;
-            }
-            progressUrl = alternate;
-            hostFailures = 0;
-            console.warn(`[loader.to] cambiando polling a ${progressUrl.hostname}`);
-            continue;
-        }
-
-        const pct = prog.progress ?? prog.percent ?? null;
-        if (pct !== null && pct !== lastPct) {
-            console.log(`[loader.to] progreso: ${pct / 10}%`);
-            lastPct = pct;
-        }
-
-        if (prog.download_url && Number(prog.success) === 1) {
-            console.log(`[loader.to] ✅ listo en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-            return await fetchBuffer(prog.download_url, {
-                Referer: LOADER_PAGE,
-                Origin: 'https://en.loader.to',
-            });
-        }
-        if (Number(prog.progress) >= 1000 && !prog.download_url) {
-            throw new Error(`loader.to: conversión fallida${prog.text ? ` — ${prog.text}` : ''}`);
-        }
-    }
-    throw new Error('loader.to: timeout esperando conversión (3 min)');
 };
 
 // ── Descarga ──────────────────────────────────────────────────────────────────
 
 const downloadViaProviders = async (ytUrl, type, quality) => {
     const fmt = resolveFormat(type, quality);
-    console.log(`[yt-providers] loader.to — fmt=${fmt}`);
+    console.log(`[yt-providers] yt-dlp — fmt=${fmt}`);
     try {
-        const buf = await providerLoaderTo(ytUrl, fmt);
+        const result = await providerYtDlp(ytUrl, type, quality);
+        const buf = result?.buffer;
         if (buf && buf.length > 10_000) {
-            console.log(`[yt-providers] ✅ ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
-            return { buffer: buf, provider: 'loader.to' };
+            console.log(`[yt-providers] ✅ ${(buf.length / 1024 / 1024).toFixed(2)} MB vía yt-dlp`);
+            return result;
         }
         throw new Error(`Buffer muy pequeño (${buf?.length ?? 0} bytes)`);
     } catch (e) {
-        console.warn(`[yt-providers] ❌ loader.to: ${e.message}`);
-        throw new Error(`loader.to falló: ${e.message}`);
+        console.warn(`[yt-providers] ❌ yt-dlp: ${e.message}`);
+        throw new Error(`yt-dlp falló: ${e.message}`);
     }
 };
 
