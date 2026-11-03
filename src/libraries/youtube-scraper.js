@@ -175,56 +175,114 @@ const ffmpegVideo = async (rawFile, outFile) => {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Provider: loader.to ───────────────────────────────────────────────────────
+// ── Provider: loader.to (API v2) ─────────────────────────────────────────────
+
+const LOADER_DOMAINS = ['p.savenow.to', 'p.lbserver.xyz'];
+const LOADER_API_KEY = 'dfcb6d76f2f6a9894gjkege8a4ab232222';
+const LOADER_PAGE    = 'https://en.loader.to/4/';
+const LOADER_HEADERS = {
+    'User-Agent': UA,
+    'Referer': LOADER_PAGE,
+    'Origin': 'https://en.loader.to',
+    'Accept': 'application/json',
+};
+
+const loaderApiUrl = (domain, pathname, params = {}) => {
+    const url = new URL(`https://${domain}${pathname}`);
+    Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+    return url;
+};
+
+const fetchLoaderJson = async (url, timeout = 30_000) => {
+    const response = await fetch(url, {
+        headers: LOADER_HEADERS,
+        signal: AbortSignal.timeout(timeout),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    try {
+        return await response.json();
+    } catch {
+        throw new Error('respuesta JSON inválida');
+    }
+};
+
+const alternateLoaderUrl = (url) => {
+    const next = new URL(url);
+    const index = LOADER_DOMAINS.indexOf(next.hostname);
+    if (index === -1) return null;
+    next.hostname = LOADER_DOMAINS[(index + 1) % LOADER_DOMAINS.length];
+    return next;
+};
 
 const providerLoaderTo = async (ytUrl, fmt) => {
-    const BASE    = 'https://loader.to';
-    const REFERER = `${BASE}/`;
+    let start;
+    let startError;
 
-    const startRes = await fetch(
-        `${BASE}/ajax/download.php?format=${fmt}&url=${encodeURIComponent(ytUrl)}&api=dfcb6d76f2f2a12c83a82a4de3bc75e8`,
-        { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(30_000) }
-    );
-    if (!startRes.ok) throw new Error(`loader.to start HTTP ${startRes.status}`);
-    const start = await startRes.json();
-    if (!start.id) throw new Error(`loader.to: sin id — ${JSON.stringify(start).slice(0, 100)}`);
+    for (const domain of LOADER_DOMAINS) {
+        try {
+            const startUrl = loaderApiUrl(domain, '/api/v2/download', {
+                format: fmt,
+                url: ytUrl,
+                apikey: LOADER_API_KEY,
+            });
+            start = await fetchLoaderJson(startUrl, 30_000);
+            if (start?.success && start.id && start.progress_url) break;
+            throw new Error(start?.text || `respuesta sin progress_url: ${JSON.stringify(start).slice(0, 160)}`);
+        } catch (error) {
+            startError = error;
+            console.warn(`[loader.to] inicio falló en ${domain}: ${error.message}`);
+        }
+    }
+
+    if (!start?.id || !start.progress_url) {
+        throw new Error(`loader.to: no se pudo iniciar la conversión (${startError?.message || 'sin respuesta'})`);
+    }
 
     console.log(`[loader.to] id=${start.id} fmt=${fmt}`);
 
-    // Polling adaptativo: 1s×5 → 2s×5 → 3s×5 → 5s×∞  (tope 3 min)
-    const intervals = [
-        ...Array(5).fill(1_000),
-        ...Array(5).fill(2_000),
-        ...Array(5).fill(3_000),
-    ];
-    const getDelay = (i) => intervals[i] ?? 5_000;
-    const MAX_MS   = 3 * 60 * 1_000;
-    const t0       = Date.now();
-    let   lastPct  = -1;
+    // La API v2 devuelve progress_url; no se debe reconstruir con el endpoint antiguo.
+    const MAX_MS = 3 * 60 * 1_000;
+    const t0 = Date.now();
+    let progressUrl = new URL(start.progress_url);
+    let lastPct = -1;
+    let hostFailures = 0;
 
     for (let i = 0; Date.now() - t0 < MAX_MS; i++) {
-        await new Promise(r => setTimeout(r, getDelay(i)));
+        await new Promise(r => setTimeout(r, i < 5 ? 1_000 : i < 10 ? 2_000 : 5_000));
 
-        const progRes = await fetch(
-            `${BASE}/ajax/progress.php?id=${start.id}`,
-            { headers: { 'User-Agent': UA, 'Referer': REFERER }, signal: AbortSignal.timeout(20_000) }
-        );
-        if (!progRes.ok) continue;
+        let prog;
+        try {
+            prog = await fetchLoaderJson(progressUrl, 20_000);
+            hostFailures = 0;
+        } catch (error) {
+            hostFailures++;
+            const alternate = alternateLoaderUrl(progressUrl);
+            if (!alternate || hostFailures < 2) {
+                console.warn(`[loader.to] progreso falló (${hostFailures}): ${error.message}`);
+                continue;
+            }
+            progressUrl = alternate;
+            hostFailures = 0;
+            console.warn(`[loader.to] cambiando polling a ${progressUrl.hostname}`);
+            continue;
+        }
 
-        const prog = await progRes.json();
-
-        // Loguear progreso solo cuando cambia
         const pct = prog.progress ?? prog.percent ?? null;
         if (pct !== null && pct !== lastPct) {
-            console.log(`[loader.to] progreso: ${pct}%`);
+            console.log(`[loader.to] progreso: ${pct / 10}%`);
             lastPct = pct;
         }
 
-        if (prog.download_url) {
+        if (prog.download_url && Number(prog.success) === 1) {
             console.log(`[loader.to] ✅ listo en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-            return await fetchBuffer(prog.download_url, { Referer: REFERER });
+            return await fetchBuffer(prog.download_url, {
+                Referer: LOADER_PAGE,
+                Origin: 'https://en.loader.to',
+            });
         }
-        if (prog.success === false) throw new Error('loader.to: falló la conversión');
+        if (Number(prog.progress) >= 1000 && !prog.download_url) {
+            throw new Error(`loader.to: conversión fallida${prog.text ? ` — ${prog.text}` : ''}`);
+        }
     }
     throw new Error('loader.to: timeout esperando conversión (3 min)');
 };
