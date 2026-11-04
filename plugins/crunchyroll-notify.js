@@ -7,32 +7,38 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const TMP_DIR   = join(__dirname, '../tmp/cr-notify')
 const DB_PATH   = join(TMP_DIR, 'crunchyroll-seen.json')
 const CFG_PATH  = join(TMP_DIR, 'crunchyroll-cfg.json')
-const JA_CACHE_PATH = join(TMP_DIR, 'crunchyroll-series-ja.json')
 const LOCAL_CREDENTIALS_PATH = join(__dirname, 'credentials.tv.json')
 
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true })
 try { chmodSync(TMP_DIR, 0o700) } catch {}
-for (const sensitivePath of [DB_PATH, CFG_PATH, JA_CACHE_PATH, LOCAL_CREDENTIALS_PATH]) {
+for (const sensitivePath of [DB_PATH, CFG_PATH, LOCAL_CREDENTIALS_PATH]) {
   if (existsSync(sensitivePath)) {
     try { chmodSync(sensitivePath, 0o600) } catch {}
   }
 }
 
-// ─── Constantes ─────────────────────────────────────────────────────────────
 const CR_BASE    = 'https://www.crunchyroll.com'
 const CR_BETA    = 'https://beta-api.crunchyroll.com'
 const CR_AUTH    = `${CR_BASE}/auth/v1/token`
 const CR_RSS     = 'https://feeds.feedburner.com/crunchyroll/rss/anime'
 
-// Fuente 1: crextractor (se actualiza semanalmente)
 const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
-// Fuente 2 (respaldo): artifacts de crunchyroll-rs
 const CRUNCHYROLL_RS_ARTIFACTS = 'https://raw.githubusercontent.com/crunchy-labs/artifacts/main/credentials.json'
 
-// Fallback final (verificado y actualizado)
 const BASIC_ANON_FALLBACK = 'Basic bmR0aTZicXlqcm9wNXZnZjF0dnU6elpIcS00SEJJVDlDb2FMcnBPREJjRVRCTUNHai1QNlg='
 const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
+
+function envNum(name, def, min = 0) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return def
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= min ? n : def
+}
+
+const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500, 0)
+const SEND_DELAY_MS     = envNum('CR_SEND_DELAY_MS', 1000, 0)
+const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
 
 let DEVICE_ID = (() => {
   try {
@@ -47,18 +53,14 @@ let DEVICE_ID = (() => {
   }
 })()
 
-// ID anónimo efímero por sesión (ETP-Anonymous-ID). Semánticamente distinto del device_id persistente.
 const ANON_ETP_ID = randomUUID()
 
 const DEVICE_TYPE = 'ANDROIDTV'
 const MAX_SEEN    = 500
-const MAX_JA_CACHE = 2000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL = 6 * 60 * 60_000
 const HEALTH_INTERVAL_MS = 30 * 60_000
-const JA_TIMEOUT_MS = 15_000
-const JA_NEG_CACHE_MS = 15 * 60_000
 
 let BASIC_ANON = BASIC_ANON_FALLBACK
 let BASIC_AUTH = BASIC_AUTH_FALLBACK
@@ -66,7 +68,8 @@ let CR_UA = CR_UA_FALLBACK
 let _credCache = { exp: 0, source: 'fallback', lastError: null }
 let _credRefresh = null
 
-// ─── Utilidades ──────────────────────────────────────────────────────────────
+const delay = ms => new Promise(r => setTimeout(r, ms))
+
 function writeJsonAtomic(path, value) {
   const tmp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8')
@@ -101,7 +104,6 @@ function buildBasicAuth(clientId, clientSecret) {
   return isValidBasicCredential(b64) ? b64 : null
 }
 
-// ─── Mutex simple (promesa encadenada, sin polling) ─────────────────────────
 let _lockChain = Promise.resolve()
 async function withGlobalLock(fn) {
   const prev = _lockChain
@@ -111,7 +113,6 @@ async function withGlobalLock(fn) {
   try { return await fn() } finally { release() }
 }
 
-// ─── Credenciales (triple fuente + rotación de BASIC_AUTH) ──────────────────
 async function fetchCredentialsFrom(url) {
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
@@ -141,7 +142,6 @@ async function refreshCredentials() {
   if (_credCache.exp && Date.now() < _credCache.exp) return
 
   _credRefresh = (async () => {
-    // Fuente 1: crextractor
     try {
       const { authorization, client, basicAuth } = await fetchCredentialsFrom(CREDENTIALS_URL)
       applyCredentials(authorization, client, basicAuth)
@@ -153,7 +153,6 @@ async function refreshCredentials() {
       _credCache.lastError = `crextractor: ${err.message}`
     }
 
-    // Fuente 2: artifacts de crunchyroll-rs
     try {
       const { authorization, client, basicAuth } = await fetchCredentialsFrom(CRUNCHYROLL_RS_ARTIFACTS)
       applyCredentials(authorization, client, basicAuth)
@@ -165,7 +164,6 @@ async function refreshCredentials() {
       _credCache.lastError = `crunchyroll-rs: ${err.message}`
     }
 
-    // Fuente 3: archivo local
     try {
       if (existsSync(LOCAL_CREDENTIALS_PATH)) {
         const raw = readFileSync(LOCAL_CREDENTIALS_PATH, 'utf-8')
@@ -185,7 +183,6 @@ async function refreshCredentials() {
       _credCache.lastError = `local: ${localErr.message}`
     }
 
-    // Fallback final (hardcodeado) — sólo si no tenemos una credencial buena previa
     const sourceIsFallback = _credCache.source === 'fallback' || _credCache.source === 'stale'
     if (sourceIsFallback || !isValidBasicCredential(BASIC_ANON)) {
       BASIC_ANON = BASIC_ANON_FALLBACK
@@ -197,7 +194,6 @@ async function refreshCredentials() {
       }
       console.warn('[CR-Notify] Usando credenciales de respaldo final (fallback).')
     } else {
-      // Conservamos la última credencial buena y reintentamos pronto
       _credCache.exp = Date.now() + CREDENTIAL_RETRY_MS
       console.warn('[CR-Notify] Fuentes remotas fallaron; conservando credencial previa y reintentando pronto.')
     }
@@ -208,7 +204,6 @@ async function refreshCredentials() {
   return _credRefresh
 }
 
-// ─── Persistencia ─────────────────────────────────────────────────────────────
 function loadCfg() {
   try {
     const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf-8'))
@@ -232,96 +227,6 @@ function loadSeen() {
 }
 function saveSeen(ids) { writeJsonAtomic(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN)) }
 
-// ─── Caché de títulos japoneses ──────────────────────────────────────────────
-let _seriesCache = {}
-function loadSeriesCache() {
-  try {
-    const raw = JSON.parse(readFileSync(JA_CACHE_PATH, 'utf-8'))
-    _seriesCache = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
-  } catch { _seriesCache = {} }
-}
-function saveSeriesCache() {
-  const keys = Object.keys(_seriesCache)
-  if (keys.length > MAX_JA_CACHE) {
-    for (const k of keys.slice(0, keys.length - MAX_JA_CACHE)) delete _seriesCache[k]
-  }
-  try { writeJsonAtomic(JA_CACHE_PATH, _seriesCache) } catch {}
-}
-loadSeriesCache()
-
-const _seriesFetching = new Map()
-const _seriesNegUntil = new Map()
-
-function extractSeriesTitle(data) {
-  if (!data || typeof data !== 'object') return ''
-  if (typeof data.title === 'string' && data.title) return data.title
-  if (data.series_metadata?.title) return data.series_metadata.title
-  if (Array.isArray(data.items) && data.items[0]?.title) return data.items[0].title
-  if (Array.isArray(data.data) && data.data[0]?.title) return data.data[0].title
-  return ''
-}
-
-async function getJapaneseTitle(seriesId, fallbackName = '') {
-  if (!seriesId) return ''
-  if (typeof _seriesCache[seriesId] === 'string' && _seriesCache[seriesId]) return _seriesCache[seriesId]
-
-  const negUntil = _seriesNegUntil.get(seriesId)
-  if (negUntil && Date.now() < negUntil) return ''
-  if (_seriesFetching.has(seriesId)) return _seriesFetching.get(seriesId)
-
-  const promise = (async () => {
-    // 1️⃣ Intento directo: /content/v1/series/{id}?locale=ja-JP
-    try {
-      const data = await crFetch(
-        `/content/v1/series/${seriesId}`,
-        { locale: 'ja-JP' },
-        CR_BETA,
-        JA_TIMEOUT_MS
-      )
-      const title = extractSeriesTitle(data)
-      if (title && title.trim()) {
-        _seriesCache[seriesId] = title
-        _seriesNegUntil.delete(seriesId)
-        saveSeriesCache()
-        return title
-      }
-    } catch { /* sigue al fallback */ }
-
-    // 2️⃣ Fallback: búsqueda por nombre con locale=ja-JP
-    if (fallbackName) {
-      try {
-        const searchData = await crFetch(
-          '/content/v1/search',
-          { q: fallbackName, type: 'series', locale: 'ja-JP', limit: '5' },
-          CR_BETA,
-          JA_TIMEOUT_MS
-        )
-        const items = Array.isArray(searchData?.items) ? searchData.items
-                    : Array.isArray(searchData?.data)  ? searchData.data
-                    : []
-        const match = items.find(it => (it.id || it.series_id) === seriesId)
-        const title = match ? (match.title || match.series_metadata?.title || '') : ''
-        if (title && title.trim()) {
-          _seriesCache[seriesId] = title
-          _seriesNegUntil.delete(seriesId)
-          saveSeriesCache()
-          return title
-        }
-      } catch { /* sin suerte */ }
-    }
-
-    // 3️⃣ Nada funcionó: caché negativo 15 min
-    _seriesNegUntil.set(seriesId, Date.now() + JA_NEG_CACHE_MS)
-    return ''
-  })().finally(() => {
-    _seriesFetching.delete(seriesId)
-  })
-
-  _seriesFetching.set(seriesId, promise)
-  return promise
-}
-
-// ─── Cookies (con TTL) ───────────────────────────────────────────────────────
 let _cookies = ''
 let _cookiesExp = 0
 async function preLogin(force = false) {
@@ -335,7 +240,6 @@ async function preLogin(force = false) {
   } catch {}
 }
 
-// ─── Tokens ───────────────────────────────────────────────────────────────────
 let _token = null, _tokenExp = 0
 
 async function getAnonToken() {
@@ -435,7 +339,7 @@ async function getToken() {
 }
 
 async function crFetch(path, params = {}, base = CR_BASE, timeoutMs = 20_000) {
-  const url   = new URL(`${base}${path}`)
+  const url = new URL(`${base}${path}`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken()
@@ -457,7 +361,6 @@ async function crFetch(path, params = {}, base = CR_BASE, timeoutMs = 20_000) {
   throw new Error(`CR API no pudo renovar el token → ${path}`)
 }
 
-// ─── Normalización de episodios ──────────────────────────────────────────────
 function extractImage(images = {}) {
   const candidates = Object.values(images)
     .flat(Infinity)
@@ -484,7 +387,6 @@ function normalizeEpisode(p) {
   const epNum   = p.episode_number ?? meta.episode_number ?? null
   const epId    = p.id || ''
   const slug    = p.slug_title || meta.slug_title || ''
-  const seriesId = p.series_id || meta.series_id || ''
 
   let locale = p.audio_locale || meta.audio_locale || ''
   if (!locale && Array.isArray(meta.audio_locales) && meta.audio_locales.length) {
@@ -500,7 +402,6 @@ function normalizeEpisode(p) {
 
   return {
     id: epId,
-    seriesId,
     series: seriesName.trim(),
     epTitle: p.title || '',
     epNum: epNum !== null ? epNum : 'Especial',
@@ -519,7 +420,6 @@ function sortNewest(episodes) {
   })
 }
 
-// ─── Parser RSS (fallback de emergencia) ─────────────────────────────────────
 function stripCdata(s) {
   return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim()
 }
@@ -543,16 +443,13 @@ function parseRssItems(xml) {
     const idMatch = link.match(/\/watch\/([^\/\s?#]+)/)
     const id = idMatch ? idMatch[1] : (guid || '')
 
-    // Heurística para extraer número de episodio del título
     const epMatch = title.match(/(?:^|\s)(?:Episode|Ep\.?|E)\s*(\d+)(?:\s|$)/i)
     const epNum = epMatch ? Number(epMatch[1]) : null
 
-    // Series = título sin el sufijo "Episode N ..."
     const series = title
       .replace(/\s*(?:Episode|Ep\.?|E)\s*\d+.*$/i, '')
       .trim() || title
 
-    // Intentar thumbnail de media:thumbnail o enclosure
     let image = ''
     const thumbMatch = block.match(/<media:thumbnail\b[^>]*url="([^"]+)"/i)
     if (thumbMatch) image = thumbMatch[1]
@@ -563,7 +460,6 @@ function parseRssItems(xml) {
 
     items.push({
       id,
-      seriesId: '',
       series,
       epTitle: '',
       epNum: epNum !== null ? epNum : 'Especial',
@@ -587,7 +483,6 @@ async function fetchRssEpisodes() {
   return parseRssItems(xml)
 }
 
-// ─── Formato y locales ───────────────────────────────────────────────────────
 const FLAG = {
   'ja-JP':'🇯🇵','en-US':'🇺🇸','es-419':'🇲🇽','es-LA':'🇲🇽','es-ES':'🇪🇸','pt-BR':'🇧🇷',
   'fr-FR':'🇫🇷','de-DE':'🇩🇪','it-IT':'🇮🇹','ru-RU':'🇷🇺','ar-SA':'🇸🇦',
@@ -598,49 +493,49 @@ const LOCALE_NAME = {
 }
 const ALLOWED_LOCALES = new Set(['ja-JP','es-419','es-LA','es-ES'])
 
-async function formatCaption(ep) {
-  let displayTitle = ep.series
-  if (ep.seriesId) {
-    try {
-      const jaTitle = await getJapaneseTitle(ep.seriesId, ep.series)
-      if (jaTitle) displayTitle = jaTitle
-    } catch {}
-  }
+function formatCaption(ep) {
   const audioFlag  = FLAG[ep.audioLocale] || '🌐'
   const localeName = LOCALE_NAME[ep.audioLocale] || ep.audioLocale || 'Desconocido'
   const epLabel    = `Ep. ${ep.epNum}`
   const epLine     = ep.epTitle ? `${epLabel} - ${ep.epTitle}` : epLabel
   return (
-    `📺 ${displayTitle}\n` +
+    `📺 ${ep.series}\n` +
     `🎬 ${epLine}\n` +
     `${audioFlag} ${localeName}\n\n` +
     `${ep.link}`
   )
 }
 
-// ─── Fetch de episodios ──────────────────────────────────────────────────────
 function getPageCount() {
   const pages = Number(process.env.CR_PAGES ?? 1)
   return Number.isFinite(pages) && pages > 0 ? Math.floor(pages) : 1
 }
 
 async function fetchBrowseEpisodes(pageCount = getPageCount()) {
-  const allRows = []
   const pageSize = 100
-
-  for (let page = 0; page < pageCount; page++) {
-    const data = await crFetch('/content/v2/discover/browse', {
+  const requests = Array.from({ length: pageCount }, (_, i) =>
+    crFetch('/content/v2/discover/browse', {
       count: String(pageSize),
-      start: String(page * pageSize),
+      start: String(i * pageSize),
       sort_by: 'newly_added',
       type: 'episode',
       locale: 'es-419',
-    }, CR_BETA)
-    const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data?.items) ? data.items : []
-    if (!rows.length) break
-    allRows.push(...rows)
-    if (rows.length < pageSize) break
-  }
+    }, CR_BETA, BROWSE_TIMEOUT_MS)
+  )
+
+  const results = await Promise.allSettled(requests)
+  const allRows = []
+  results.forEach((r, idx) => {
+    if (r.status === 'fulfilled') {
+      const rows = Array.isArray(r.value?.data) ? r.value.data
+                 : Array.isArray(r.value?.items) ? r.value.items
+                 : []
+      allRows.push(...rows)
+    } else {
+      if (idx === 0) throw r.reason
+      console.warn(`[CR-Notify] Página ${idx} de browse falló: ${r.reason?.message || r.reason}`)
+    }
+  })
 
   return [...new Map(allRows.map(normalizeEpisode)
     .filter(i => {
@@ -692,9 +587,8 @@ async function getLatestEpisodes(limit = 10) {
   return sortNewest(episodes).slice(0, limit)
 }
 
-// ─── Envío ────────────────────────────────────────────────────────────────────
-async function sendItem(conn, jid, ep, quoted = null) {
-  const caption = await formatCaption(ep)
+async function sendItem(conn, jid, ep, quoted = null, preCaption = null) {
+  const caption = preCaption || formatCaption(ep)
   const opts    = quoted ? { quoted } : {}
   if (ep.image) {
     try {
@@ -706,9 +600,7 @@ async function sendItem(conn, jid, ep, quoted = null) {
   }
   await conn.sendMessage(jid, { text: caption }, opts)
 }
-const delay = ms => new Promise(r => setTimeout(r, ms))
 
-// ─── Cron ─────────────────────────────────────────────────────────────────────
 let cronTimer = null
 let healthTimer = null
 let storedConn = null
@@ -723,7 +615,7 @@ function startHealthCheck() {
   if (healthTimer) return
   healthTimer = setInterval(async () => {
     try {
-      await crFetch('/content/v2/discover/browse', { count: '1', type: 'episode', locale: 'es-419' }, CR_BETA)
+      await crFetch('/content/v2/discover/browse', { count: '1', type: 'episode', locale: 'es-419' }, CR_BETA, BROWSE_TIMEOUT_MS)
     } catch (err) {
       console.warn(`[CR-Notify] Health-check falló (${err.message}). Refrescando credenciales y cookies...`)
       _credCache.exp = 0
@@ -765,24 +657,26 @@ function startCron(conn) {
     cronRunning = true
     try {
       await withGlobalLock(async () => {
+        const t0 = Date.now()
         const items = await fetchNewEpisodes()
         if (!items.length) return
 
         for (const ep of items) {
+          const caption = formatCaption(ep)
           let algunExito = false
           for (const jid of jids) {
             try {
-              await sendItem(activeConn, jid, ep)
+              await sendItem(activeConn, jid, ep, null, caption)
               algunExito = true
-              await delay(1500)
+              if (SEND_JID_DELAY_MS > 0) await delay(SEND_JID_DELAY_MS)
             } catch (err) {
               console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
             }
           }
           if (algunExito) markSeen(ep.id)
-          await delay(3000)
+          if (SEND_DELAY_MS > 0) await delay(SEND_DELAY_MS)
         }
-        console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s)`)
+        console.log(`[CR-Notify] ${items.length} ep(s) → ${jids.length} grupo(s) en ${((Date.now() - t0) / 1000).toFixed(1)}s`)
       })
     } catch (err) {
       console.error('[CR-Notify] Cron:', err.message)
@@ -795,7 +689,6 @@ function startCron(conn) {
   console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${jids.length} grupo(s) configurado(s)`)
 }
 
-// ─── Handler de comandos ──────────────────────────────────────────────────────
 let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
   if (conn) storedConn = conn
   if (!cronTimer) {
@@ -871,7 +764,6 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     const gruposList = cfg.targetJids.length
       ? cfg.targetJids.map((j, i) => `  ${i + 1}. \`${j}\``).join('\n')
       : '  _Ninguno — usa .crset_'
-    const jaCached = Object.keys(_seriesCache).length
     const authRotated = BASIC_AUTH !== BASIC_AUTH_FALLBACK ? '✅ rotada' : '⚠️ fallback'
     return conn.sendMessage(m.chat, {
       text: `📊 *CR-Notify Status*\n\n` +
@@ -881,9 +773,9 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
             `⏱ Cron: cada *${mins} min*\n` +
             `🔄 Cron activo: *${cronTimer ? 'Sí ✅' : (cfg.cronDisabled ? 'Detenido ⏸️' : 'No ❌')}*\n` +
             `💾 IDs caché: *${seen.length}*\n` +
-            `🇯🇵 Títulos JA en caché: *${jaCached}*\n` +
             `🔐 Basic Auth (login): *${authRotated}*\n` +
             `🔐 Credenciales anón.: *${_credCache.source}* (exp ${_credCache.exp ? new Date(_credCache.exp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'})*\n` +
+            `⚡ Delays: JID ${SEND_JID_DELAY_MS}ms / Ep ${SEND_DELAY_MS}ms\n` +
             `⚠️ Último error: *${_credCache.lastError || 'Ninguno'}*\n\n` +
             `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${gruposList}`,
     }, { quoted: m })
@@ -918,8 +810,9 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
           return
         }
         for (const ep of episodes) {
-          await sendItem(conn, m.chat, ep, m)
-          await delay(2000)
+          const caption = formatCaption(ep)
+          await sendItem(conn, m.chat, ep, m, caption)
+          if (SEND_DELAY_MS > 0) await delay(SEND_DELAY_MS)
         }
       })
     } catch (err) {
@@ -935,22 +828,25 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     await conn.sendMessage(m.chat, { text: `🔍 Enviando los 10 estrenos recientes a ${jids.length} grupo(s)...` }, { quoted: m })
     try {
       await withGlobalLock(async () => {
+        const t0 = Date.now()
         const episodes = await getLatestEpisodes(10)
         if (!episodes.length) {
           await conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
           return
         }
         for (const ep of episodes) {
+          const caption = formatCaption(ep)
           for (const jid of jids) {
             try {
-              await sendItem(conn, jid, ep)
-              await delay(1500)
+              await sendItem(conn, jid, ep, null, caption)
+              if (SEND_JID_DELAY_MS > 0) await delay(SEND_JID_DELAY_MS)
             } catch (err) {
               console.error(`[CR-Notify] Error enviando a ${jid}:`, err.message)
             }
           }
-          await delay(3000)
+          if (SEND_DELAY_MS > 0) await delay(SEND_DELAY_MS)
         }
+        await conn.sendMessage(m.chat, { text: `✅ Enviados ${episodes.length} ep(s) en ${((Date.now() - t0) / 1000).toFixed(1)}s` }, { quoted: m })
       })
     } catch (err) {
       await conn.sendMessage(m.chat, { text: `❌ Error: ${err.message}` }, { quoted: m })
@@ -973,6 +869,7 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
       lines.push(`🆔 Device ID: \`${DEVICE_ID}\``)
       lines.push(`🆔 ETP-Anon ID: \`${ANON_ETP_ID.slice(0, 8)}...\``)
       lines.push(`🍪 Cookies: ${_cookies ? '✅' : '❌'} (TTL ${_cookiesExp ? new Date(_cookiesExp).toLocaleTimeString('es-MX') : '—'})`)
+      lines.push(`⚡ Delays: JID ${SEND_JID_DELAY_MS}ms / Ep ${SEND_DELAY_MS}ms / Browse ${BROWSE_TIMEOUT_MS}ms`)
       try {
         const token = await getAnonToken()
         lines.push(`✅ Auth anónima: *OK* (token: \`${token.slice(0, 15)}...\`)`)
@@ -996,7 +893,6 @@ handler.help    = ['crlogin <email> <pass>', 'crlogout', 'crset', 'crrem', 'crst
 handler.tags    = ['anime']
 handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crstop|crstart|crdiag)$/i
 
-// ─── Auto-arranque ───────────────────────────────────────────────────────────
 ;(async () => {
   const cfg = loadCfg()
   if (cfg.loggedIn && cfg.accessToken) {
@@ -1005,7 +901,8 @@ handler.command = /^(crlogin|crlogout|crset|crrem|crstatus|crlist|crnotify|crsto
   }
   if (!cfg.cronDisabled) startCron(null)
   startHealthCheck()
-  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'} | Cron: ${cfg.cronDisabled ? 'OFF' : 'ON'} | Títulos JA cacheados: ${Object.keys(_seriesCache).length}`)
+  console.log(`[CR-Notify] Auto-inicio | Grupos: ${cfg.targetJids.length} | Modo: ${cfg.loggedIn ? 'Cuenta' : 'Anónimo'} | Cron: ${cfg.cronDisabled ? 'OFF' : 'ON'}`)
+  console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)
 })()
 
 export default handler
