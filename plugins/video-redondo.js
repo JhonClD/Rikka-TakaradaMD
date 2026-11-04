@@ -35,7 +35,7 @@ function runFfmpeg(inputPath, outputPath, isVideo) {
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-movflags', '+faststart',
-      '-an',
+      ...(isVideo ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
       outputPath,
     ]
     const child = spawn(ffmpegPath || 'ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
