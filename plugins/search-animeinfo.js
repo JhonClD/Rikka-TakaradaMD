@@ -22,63 +22,37 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) return m.reply(`*${tradutor.texto1}*`);
 
   try {
-    const query = `query ($search: String) { 
-      Media (search: $search, type: ANIME) { 
-        id 
-        title { romaji english native } 
-        studios(isMain: true) { nodes { name } } 
-        seasonYear 
-        episodes 
-        genres 
-        duration 
-        format 
-        season 
-        status 
-        description 
-        bannerImage 
-        coverImage { extraLarge large medium } 
-      } 
-    }`;
-
-    const response = await axios({
-      url: 'https://graphql.anilist.co',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      data: { query, variables: { search: text } },
-      timeout: 20000
+    const response = await axios.get('https://api.jikan.moe/v4/anime', {
+      params: { q: text, limit: 1 },
+      timeout: 20000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
 
-    const result = response.data?.data?.Media;
+    const result = response.data?.data?.[0];
     if (!result) return m.reply(`*${tradutor.texto3}*`);
 
     const TRADUCCIONES = {
       estados: {
-        'FINISHED': 'Finalizado',
-        'RELEASING': 'En emisión',
-        'NOT_YET_RELEASED': 'Próximamente',
-        'CANCELLED': 'Cancelado',
-        'HIATUS': 'En pausa'
+        'Finished Airing': 'Finalizado',
+        'Currently Airing': 'En emisión',
+        'Not yet aired': 'Próximamente'
       },
       temporadas: {
-        'WINTER': 'Invierno',
-        'SPRING': 'Primavera',
-        'SUMMER': 'Verano',
-        'FALL': 'Otoño'
+        'winter': 'Invierno',
+        'spring': 'Primavera',
+        'summer': 'Verano',
+        'fall': 'Otoño'
       },
       formatos: {
         'TV': 'Serie de TV',
-        'MOVIE': 'Película',
-        'SPECIAL': 'Especial',
+        'Movie': 'Película',
         'OVA': 'OVA',
         'ONA': 'ONA',
-        'MUSIC': 'Musical',
-        'TV_SHORT': 'Serie Corta',
-        'MANGA': 'Manga',
-        'NOVEL': 'Novela',
-        'ONE_SHOT': 'One-Shot'
+        'Special': 'Especial',
+        'Music': 'Musical',
+        'TV Special': 'Especial de TV',
+        'CM': 'Comercial',
+        'PV': 'Video Promocional'
       },
       generos: {
         'Action': 'Acción',
@@ -124,12 +98,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
     };
 
-    let cleanDesc = result.description
-      ? result.description
-          .replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<\/?[^>]+(>|$)/g, '')
-          .trim()
-      : '';
+    let cleanDesc = result.synopsis ? result.synopsis.replace(/\[Written by MAL Rewrite\]/gi, '').trim() : '';
 
     let sinopsisFormateada = '> No disponible';
 
@@ -148,41 +117,39 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         .join('\n');
     }
 
-    const titulo = result.title?.romaji || result.title?.english || result.title?.native || 'Desconocido';
-    const tituloIngles = result.title?.english && result.title.english !== result.title.romaji
-      ? `\n🔤 *Título en inglés:* ${result.title.english}`
+    const titulo = result.title || result.title_english || result.title_japanese || 'Desconocido';
+    const tituloIngles = result.title_english && result.title_english !== result.title
+      ? `\n🔤 *Título en inglés:* ${result.title_english}`
       : '';
-    const tituloNativo = result.title?.native && result.title.native !== result.title.romaji
-      ? ` (${result.title.native})`
+    const tituloNativo = result.title_japanese && result.title_japanese !== result.title
+      ? ` (${result.title_japanese})`
       : '';
 
-    const estudios = result.studios?.nodes?.map(s => s.name).join(', ') || 'Desconocido';
+    const estudios = result.studios?.map(s => s.name).join(', ') || 'Desconocido';
     const generosEsp = result.genres?.length
-      ? result.genres.map(g => TRADUCCIONES.generos[g] || g).join(', ')
+      ? result.genres.map(g => TRADUCCIONES.generos[g.name] || g.name).join(', ')
       : 'N/A';
+
+    const puntuacion = result.score ? `\n⭐ *Puntuación:* ${result.score}/10` : '';
 
     const AnimeInfo = `✨*INFORMACIÓN DEL ANIME*✨
 
 🈺 *Título:* ${titulo}${tituloIngles}${tituloNativo}
 🏦 *Estudio:* ${estudios}
-📆 *Año:* ${result.seasonYear || 'N/A'}
+📆 *Año:* ${result.year || 'N/A'}
 🗂 *Episodios:* ${result.episodes || 'En emisión'}
 🎧 *Audio:* Japonés
 💬 *Subtítulos:* Español
 🏷 *Géneros:* ${generosEsp}
-⏱ *Duración:* ${result.duration ? result.duration + ' min' : 'N/A'}
-💽 *Formato:* ${TRADUCCIONES.formatos[result.format] || result.format || 'N/A'}
-🔅 *Temporada:* ${TRADUCCIONES.temporadas[result.season] || 'N/A'}
+⏱ *Duración:* ${result.duration || 'N/A'}${puntuacion}
+💽 *Formato:* ${TRADUCCIONES.formatos[result.type] || result.type || 'N/A'}
+🔅 *Temporada:* ${TRADUCCIONES.temporadas[result.season?.toLowerCase()] || 'N/A'}
 ⏳ *Estado:* ${TRADUCCIONES.estados[result.status] || result.status || 'N/A'}
 
 📜 *Sinopsis:*
 ${sinopsisFormateada}`;
 
-    const imageUrl =
-      result.coverImage?.extraLarge ||
-      result.coverImage?.large ||
-      result.bannerImage ||
-      result.coverImage?.medium;
+    const imageUrl = result.images?.jpg?.large_image_url || result.images?.jpg?.image_url;
 
     if (!imageUrl) {
       return conn.sendMessage(m.chat, { text: AnimeInfo }, { quoted: m });
@@ -205,7 +172,7 @@ ${sinopsisFormateada}`;
       );
     }
 
-    const MAX_CAPTION = 1000;
+    const MAX_CAPTION = 950;
     const caption = AnimeInfo.length > MAX_CAPTION
       ? AnimeInfo.slice(0, MAX_CAPTION - 3) + '...'
       : AnimeInfo;
