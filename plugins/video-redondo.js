@@ -22,11 +22,11 @@ function normalizeBuffer(value) {
   throw new TypeError('La descarga no devolvió un Buffer válido.')
 }
 
-function runFfmpeg(inputPath, outputPath) {
+function runFfmpeg(inputPath, outputPath, isVideo) {
   return new Promise((resolve, reject) => {
     const args = [
       '-y',
-      '-loop', '1',
+      ...(isVideo ? [] : ['-loop', '1']),
       '-i', inputPath,
       '-t', String(DURATION_SECONDS),
       '-vf', `scale=${SIZE}:${SIZE}:force_original_aspect_ratio=increase,crop=${SIZE}:${SIZE},format=yuv420p`,
@@ -53,8 +53,10 @@ const handler = async (m, { conn }) => {
   const media = getMediaMessage(quoted)
   const mime = String(media.mimetype || '').toLowerCase()
 
-  if (!mime.startsWith('image/')) {
-    return m.reply('✖ Responde a una imagen o envía una imagen con el comando *redondo*.')
+  const isImage = mime.startsWith('image/')
+  const isVideo = mime.startsWith('video/')
+  if (!isImage && !isVideo) {
+    return m.reply('✖ Responde a una imagen, video o GIF con el comando *redondo*.')
   }
 
   let inputBuffer
@@ -74,7 +76,7 @@ const handler = async (m, { conn }) => {
 
   try {
     await fs.promises.writeFile(inputPath, inputBuffer)
-    await runFfmpeg(inputPath, outputPath)
+    await runFfmpeg(inputPath, outputPath, isVideo)
     const videoBuffer = await fs.promises.readFile(outputPath)
     await conn.sendMessage(m.chat, {
       video: videoBuffer,
