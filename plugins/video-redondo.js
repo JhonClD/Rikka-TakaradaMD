@@ -57,19 +57,21 @@ const handler = async (m, { conn }) => {
   const isImage = mime.startsWith('image/')
   const isVideo = mime.startsWith('video/')
   if (!isImage && !isVideo) {
-    return m.reply('✖ Responde a una imagen, video o GIF con el comando *redondo*.')
+    return m.reply('❎ Responde a una imagen, video o GIF con uno de estos comandos: *ptv*, *orbe* o *cvid*.')
   }
+
+  await m.reply('⏳ Procesando video circular...')
 
   let inputBuffer
   try {
     inputBuffer = normalizeBuffer(await quoted.download())
   } catch (error) {
     console.error('[video-redondo] Error descargando la imagen:', error?.stack || error)
-    return m.reply('❌ No se pudo descargar la imagen.')
+    return m.reply('❎ No se pudo descargar el archivo.')
   }
 
-  if (!inputBuffer.length) return m.reply('❌ La imagen está vacía.')
-  if (inputBuffer.length > MAX_INPUT_BYTES) return m.reply('❌ La imagen supera el límite de 25 MB.')
+  if (!inputBuffer.length) return m.reply('❎ El archivo está vacío.')
+  if (inputBuffer.length > MAX_INPUT_BYTES) return m.reply('❎ El archivo supera el límite de 25 MB.')
 
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'video-redondo-'))
   const inputPath = path.join(tempDir, 'entrada')
@@ -85,9 +87,10 @@ const handler = async (m, { conn }) => {
       fileName: 'video-redondo.mp4',
       ptv: true,
     }, { quoted: m })
+    await m.reply('✅ Video circular enviado correctamente.')
   } catch (error) {
     console.error('[video-redondo] Error creando el video:', error?.stack || error)
-    return m.reply('❌ No se pudo crear el video circular. Comprueba que FFmpeg esté disponible.')
+    return m.reply('❎ No se pudo crear el video circular.')
   } finally {
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
   }
