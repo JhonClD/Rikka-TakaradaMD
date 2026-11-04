@@ -146,6 +146,21 @@ function getRecipientChatIds(extra = []) {
   return [...new Set([CENTRAL_CHAT_ID, ...configured, ...extra].filter(Boolean))]
 }
 
+async function avisarNuevosEpisodiosAlCentral(nuevos, conn) {
+  if (!Array.isArray(nuevos) || !nuevos.length || !conn?.sendMessage) return
+  const resumen = nuevos
+    .map((ep, index) => `${index + 1}. *${ep.titulo}* — Ep ${zeroPad(ep.epNum)}${ep.fuente === 'latanime' ? ' [LatAnime]' : ' [TioAnime]'}`)
+    .join('\n')
+  try {
+    await conn.sendMessage(CENTRAL_CHAT_ID, {
+      text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n${resumen}\n\n⏳ _Se descargarán una sola vez desde el grupo central..._`,
+    })
+  } catch (error) {
+    console.error(`[tioanime-notify] No se pudo enviar el aviso al grupo central: ${error.message}`)
+    void reportTioError(conn, 'Aviso de episodios nuevos al grupo central', error)
+  }
+}
+
 function normalizeAnimeTitle(value) {
   return String(value || '')
     .toLowerCase()
@@ -1313,6 +1328,9 @@ async function checkNuevosEpisodios(_chatId, conn) {
         && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${idAnterior}`)
     })
     if (!nuevos.length) return
+
+    // Este resumen es informativo y debe llegar únicamente al grupo central.
+    await avisarNuevosEpisodiosAlCentral(nuevos, conn)
 
     for (const ep of nuevos) {
       global.tioEpisodeQueue.push({ chatId: CENTRAL_CHAT_ID, ep, recipients })
