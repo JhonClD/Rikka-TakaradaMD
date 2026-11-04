@@ -16,11 +16,28 @@ const VIDEO_HEADERS = {
   Referer: 'https://www.tikwm.com/',
 };
 
-const handler = async (m, { conn, text, args, usedPrefix, command }) => {
-  if (!text) throw `📎 Ingresa un enlace de TikTok.\n_${usedPrefix + command} https://vt.tiktok.com/ZS12345/_`;
+async function reaccionarAlComando(conn, m, text) {
+  if (!conn?.sendMessage || !m?.key) return;
+  try {
+    await conn.sendMessage(m.chat, { react: { text, key: m.key } });
+  } catch (error) {
+    console.error(`[TikTok-DL] No se pudo reaccionar con ${text}:`, error?.message || error);
+  }
+}
+
+const handler = async (m, { conn, text, args }) => {
+  if (!text) {
+    await reaccionarAlComando(conn, m, '❎');
+    return;
+  }
 
   const url = extractTikTokUrl(text, args);
-  if (!url) throw '❌ El enlace no parece ser de TikTok.';
+  if (!url) {
+    await reaccionarAlComando(conn, m, '❎');
+    return;
+  }
+
+  await reaccionarAlComando(conn, m, '⏳');
 
   const tmpInput = join(tmpdir(), `tiktok_in_${process.pid}_${Date.now()}.mp4`);
   const tmpOutput = join(tmpdir(), `tiktok_out_${process.pid}_${Date.now()}.mp4`);
@@ -48,11 +65,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     await conn.sendMessage(m.chat, {
       video: buffer,
       mimetype: 'video/mp4',
-      caption: '✅ *TikTok descargado*',
     }, { quoted: m });
+    await reaccionarAlComando(conn, m, '✅');
   } catch (e) {
     console.error('[TikTok-DL]', e?.message || e);
-    throw '❌ No se pudo descargar el TikTok. Verifica que el enlace sea público e inténtalo de nuevo.';
+    await reaccionarAlComando(conn, m, '❎');
   } finally {
     for (const file of [tmpInput, tmpOutput]) {
       if (existsSync(file)) unlinkSync(file);
