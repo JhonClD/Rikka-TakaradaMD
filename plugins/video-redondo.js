@@ -93,8 +93,8 @@ const handler = async (m, { conn }) => {
   }
 }
 
-handler.command = /^(redondo|videoredondo|ptv)$/i
-handler.help = ['redondo', 'videoredondo', 'ptv']
+handler.command = /^(ptv|orbe|cvid)$/i
+handler.help = ['ptv', 'orbe', 'cvid']
 handler.tags = ['tools', 'media']
 handler.limit = false
 
