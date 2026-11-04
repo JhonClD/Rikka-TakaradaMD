@@ -21,6 +21,14 @@ const LATANIME_URL            = 'https://latanime.org'
 const ANILIST_URL             = 'https://graphql.anilist.co'
 const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
 const ERROR_OWNER_JID         = process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
+const httpCache = new Map()
+
+class NotModified extends Error {
+  constructor(url) {
+    super(`304 Not Modified: ${url}`)
+    this.name = 'NotModified'
+  }
+}
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
 const DB_DIR = path.join(process.cwd(), 'database')
@@ -29,7 +37,7 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 const SEEN_FILE              = path.join(DB_DIR, 'tioanime_seen.json')
 const STATE_FILE             = path.join(DB_DIR, 'tioanime_state.json')
 
-const CHECK_INTERVAL_DEFAULT = 10        // minutos históricos
+const CHECK_INTERVAL_DEFAULT = 3         // minutos
 const CHECK_INTERVAL_SECONDS = CHECK_INTERVAL_DEFAULT * 60
 const MIN_INTERVAL_SECONDS   = 15
 const MAX_INTERVAL_SECONDS   = 3600
@@ -44,7 +52,7 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const TIO_SERVIDORES = ['mega', 'voe', 'yourupload']
+const TIO_SERVIDORES = ['mega', 'voe', 'yourupload', 'mediafire']
 const LAT_SERVIDORES = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
@@ -66,6 +74,7 @@ global.tioQueuedIds    = global.tioQueuedIds    || new Set()
 global.tioCheckingChats = global.tioCheckingChats || new Set()
 global.tioCentralTimer  = global.tioCentralTimer  || null
 global.tioAnimeCoverCache = global.tioAnimeCoverCache || new Map()
+global.tioAnimeCoverNegTime = global.tioAnimeCoverNegTime || new Map()
 
 async function reportTioError(conn, context, error) {
   const message = error instanceof Error ? error.message : String(error || 'Error desconocido')
@@ -145,27 +154,144 @@ function normalizeAnimeTitle(value) {
     .trim()
 }
 
-async function getAniListCover(titulo, slug = '', epNum = 0) {
-  const title = cleanTitle(titulo, epNum) || slug.replace(/[-_]/g, ' ')
-  const key = normalizeAnimeTitle(title)
-  if (!key) return null
-  if (global.tioAnimeCoverCache.has(key)) return global.tioAnimeCoverCache.get(key)
-  const query = `query ($search: String) { Media(search: $search, type: ANIME) { coverImage { extraLarge large medium } } }`
+const COVER_NEGATIVE_TTL_MS = 6 * 60 * 60 * 1000
+
+function getCachedCover(key) {
+  if (!key || !global.tioAnimeCoverCache.has(key)) return undefined
+  const value = global.tioAnimeCoverCache.get(key)
+  if (value === null) {
+    const negativeAt = global.tioAnimeCoverNegTime.get(key) || 0
+    if (Date.now() - negativeAt >= COVER_NEGATIVE_TTL_MS) {
+      global.tioAnimeCoverCache.delete(key)
+      global.tioAnimeCoverNegTime.delete(key)
+      return undefined
+    }
+  }
+  return value
+}
+
+function setCachedCoverPositive(key, cover) {
+  if (!key) return
+  global.tioAnimeCoverCache.set(key, cover)
+  global.tioAnimeCoverNegTime.delete(key)
+}
+
+function setCachedCoverNegative(key) {
+  if (!key) return
+  global.tioAnimeCoverNegTime.set(key, Date.now())
+  global.tioAnimeCoverCache.set(key, null)
+}
+
+function buildAniListSearchTitles(titulo, slug, epNum) {
+  const candidates = []
+  const addCandidate = value => {
+    const candidate = String(value || '').replace(/\s+/g, ' ').trim()
+    const key = normalizeAnimeTitle(candidate)
+    if (candidate && key && !candidates.some(item => normalizeAnimeTitle(item) === key)) candidates.push(candidate)
+  }
+
+  addCandidate(titulo)
+  let slugText = String(slug || '')
+  try { slugText = decodeURIComponent(slugText) } catch (_) {}
+  const cleanedSlug = cleanTitle(slugText.replace(/[-_]+/g, ' '), epNum)
+  addCandidate(cleanedSlug)
+
+  const words = cleanedSlug.split(/\s+/).filter(Boolean)
+  const titleWords = new Set(normalizeAnimeTitle(titulo).split(/\s+/).filter(Boolean))
+  for (let size = Math.min(words.length - 1, 8); size >= 2 && candidates.length < 10; size--) {
+    const suffix = words.slice(-size)
+    const sharedWords = suffix.filter(word => titleWords.has(normalizeAnimeTitle(word))).length
+    if (sharedWords * 2 <= suffix.length) addCandidate(suffix.join(' '))
+  }
+  return candidates
+}
+
+function looksSpanish(text) {
+  const value = String(text || '').toLowerCase()
+  if (/[ñáéíóúü]/.test(value)) return true
+  return /\b(?:el|la|los|las|de|del|que|esta|este|esto|muerta|muerto|vida|mundo|amor|guerra|nino|nina|noche|dia|tierra|cielo|muerte|sangre|fuego|agua|corazon|alma|ciudad|pais|rey|reina|espada|magia|heroe|princesa|secreto|viaje|historia)\b/i.test(value)
+}
+
+async function translateToEnglish(text) {
   try {
-    const response = await axios.post(ANILIST_URL, { query, variables: { search: title } }, {
+    const response = await axios.get('https://api.mymemory.translated.net/get', {
+      params: { q: text, langpair: 'es|en' },
+      timeout: 8000,
+    })
+    const translated = response.data?.responseData?.translatedText
+    if (!translated || typeof translated !== 'string') return null
+    if (normalizeAnimeTitle(translated) === normalizeAnimeTitle(text)) return null
+    return translated
+  } catch (_) {
+    return null
+  }
+}
+
+async function queryAniList(searchTerm) {
+  const query = `query ($search: String) { Page(perPage: 3) { media(search: $search, type: ANIME) { id title { romaji english native } coverImage { extraLarge large medium } } } }`
+  try {
+    const response = await axios.post(ANILIST_URL, { query, variables: { search: searchTerm } }, {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       timeout: 10000,
     })
-    const cover = response.data?.data?.Media?.coverImage?.extraLarge
-      || response.data?.data?.Media?.coverImage?.large
-      || response.data?.data?.Media?.coverImage?.medium
-      || null
-    global.tioAnimeCoverCache.set(key, cover)
-    return cover
+    const results = response.data?.data?.Page?.media || []
+    for (const media of results) {
+      const cover = media?.coverImage?.extraLarge || media?.coverImage?.large || media?.coverImage?.medium
+      if (cover) return cover
+    }
   } catch (error) {
-    console.error(`[tioanime-notify] AniList no disponible para "${title}": ${error.message}`)
-    void reportTioError(global.tioConn, `AniList — ${title}`, error)
-    global.tioAnimeCoverCache.set(key, null)
+    if (error.response?.status !== 404) {
+      console.warn(`[tioanime-notify] AniList no pudo resolver "${searchTerm}": ${error.message}`)
+    }
+  }
+  return null
+}
+
+async function getAniListCover(titulo, slug = '', epNum = 0) {
+  const cleaned = cleanTitle(titulo, epNum)
+  let decodedSlug = String(slug || '')
+  try { decodedSlug = decodeURIComponent(decodedSlug) } catch (_) {}
+  const slugText = cleanTitle(decodedSlug
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b(?:episode|episodio|ep)\s*\d*.*/i, ''), epNum)
+  const primaryKey = normalizeAnimeTitle(cleaned)
+  const slugKey = normalizeAnimeTitle(slugText)
+  const cacheKeys = [...new Set([primaryKey, slugKey].filter(Boolean))]
+  if (!cacheKeys.length) return null
+
+  const cachedValues = cacheKeys.map(getCachedCover)
+  const cachedPositive = cachedValues.find(value => typeof value === 'string' && value)
+  if (cachedPositive) return cachedPositive
+  if (cachedValues.length && cachedValues.every(value => value === null)) return null
+
+  try {
+    const searchTitles = buildAniListSearchTitles(cleaned, slugText, epNum)
+    for (const searchTitle of searchTitles) {
+      const cover = await queryAniList(searchTitle)
+      if (cover) {
+        const positiveKeys = [...new Set([...cacheKeys, normalizeAnimeTitle(searchTitle)].filter(Boolean))]
+        for (const key of positiveKeys) setCachedCoverPositive(key, cover)
+        return cover
+      }
+    }
+
+    if (looksSpanish(cleaned) || looksSpanish(slugText)) {
+      const translated = await translateToEnglish(cleaned || slugText)
+      if (translated && !searchTitles.some(value => normalizeAnimeTitle(value) === normalizeAnimeTitle(translated))) {
+        const cover = await queryAniList(translated)
+        if (cover) {
+          const positiveKeys = [...new Set([...cacheKeys, normalizeAnimeTitle(translated)].filter(Boolean))]
+          for (const key of positiveKeys) setCachedCoverPositive(key, cover)
+          return cover
+        }
+      }
+    }
+
+    for (const key of cacheKeys) setCachedCoverNegative(key)
+    return null
+  } catch (error) {
+    console.error(`[tioanime-notify] AniList no disponible para "${cleaned || slugText}": ${error.message}`)
+    for (const key of cacheKeys) setCachedCoverNegative(key)
     return null
   }
 }
@@ -173,7 +299,7 @@ async function getAniListCover(titulo, slug = '', epNum = 0) {
 async function describeRecipientGroups(conn) {
   const groups = getRecipientChatIds()
   const descriptions = await Promise.all(groups.map(async jid => {
-    if (jid === CENTRAL_CHAT_ID) return `🎯 *${jid === CENTRAL_CHAT_ID ? 'Central' : 'Receptor'}* — \`${jid}\``
+    if (jid === CENTRAL_CHAT_ID) return `🎯 *Central* — \`${jid}\``
     try {
       const metadata = await conn?.groupMetadata?.(jid)
       return `📣 *${metadata?.subject || 'Grupo sin nombre'}* — \`${jid}\``
@@ -206,11 +332,29 @@ function parseEpisodeHref(href, baseUrl) {
 }
 
 async function getPage(url, options = {}, attempts = 3) {
+  const cached = httpCache.get(url) || {}
+  const headers = { ...(options.headers || {}) }
+  if (cached.etag) headers['If-None-Match'] = cached.etag
+  if (cached.lastModified) headers['If-Modified-Since'] = cached.lastModified
+
   let lastError
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      return await axios.get(url, { ...options, timeout: options.timeout || 15000 })
+      const response = await axios.get(url, {
+        ...options,
+        headers,
+        timeout: options.timeout || 8000,
+        validateStatus: status => status === 304 || (status >= 200 && status < 300),
+      })
+      if (response.status === 304) throw new NotModified(url)
+
+      const etag = response.headers.etag
+      const lastModified = response.headers['last-modified']
+      if (etag || lastModified) httpCache.set(url, { etag, lastModified })
+      else httpCache.delete(url)
+      return response
     } catch (err) {
+      if (err instanceof NotModified) throw err
       lastError = err
       if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 1000))
     }
@@ -220,7 +364,8 @@ async function getPage(url, options = {}, attempts = 3) {
 
 function detectarServidor(url, label = '') {
   const u = `${url} ${label}`.toLowerCase()
-  if (u.includes('mega.nz') || u.includes('mega.co.nz') || u.includes(' mega')) return 'mega'
+  if (u.includes('mega.nz') || u.includes('mega.co.nz')) return 'mega'
+  if (/\bmega\b/.test(u) && !u.includes('megacloud')) return 'mega'
   if (u.includes('mediafire')) return 'mediafire'
   if (u.includes('voe')) return 'voe'
   if (u.includes('yourupload')) return 'yourupload'
@@ -263,6 +408,8 @@ function seasonValue(value) {
 }
 function getSeasonNumber(...values) {
   const text = values.filter(Boolean).join(' ')
+  if (/\bAct\s+(?:VIII|VII|VI|IX|IV|V|III|II|X|I)\b/i.test(text)
+    && !/(?:temporada|season|saison|\bS\s*\d+\b|\bT\s*\d+\b)/i.test(text)) return 1
   const token = '(\\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)'
   const patterns = [
     /\b(first|second|third|fourth|fifth)\s+season\b/i,
@@ -284,6 +431,7 @@ function getSeasonNumber(...values) {
 }
 function cleanTitle(titulo, epNum) {
   return titulo
+    .replace(new RegExp(`^\\s*(?:episodio|cap[ií]tulo|capitulo)\\s*0?${Number(epNum)}\\s*[-–—:]?\\s*`, 'i'), '')
     .replace(new RegExp(`\\s*[-–—:]?\\s*${Number(epNum)}\\s*$`), '')
     .replace(/\s*(?:first|second|third|fourth|fifth)\s+season/ig, '')
     .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season|saison)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
@@ -292,7 +440,7 @@ function cleanTitle(titulo, epNum) {
       // "Act II" es parte del título de Diamond no Ace, no una marca de temporada.
       return /\bAct\s*$/i.test(full.slice(0, offset)) ? match : prefix
     })
-    .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano|de\s+españa))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
     .replace(/\s*(?:latino|castellano)\s*(?:🇲🇽|🇪🇸)?/ig, '')
     .replace(/\s*\(\s*(?:720p|1080p)\s*\)/ig, '')
     .replace(/\s+/g, ' ')
@@ -391,7 +539,7 @@ async function scrapeServidores(epUrl) {
       if (err.response?.status === 404) {
         console.warn(`[tioanime-notify] API de descargas TioAnime devolvió 404 para ${epUrl}; se probará la extracción desde la página del episodio.`)
       } else {
-        void reportTioError(global.tioConn, `API de servidores TioAnime — ${epUrl}`, err)
+        console.error(`[tioanime-notify] API de servidores TioAnime — ${epUrl}: ${err.message}`)
       }
     }
   }
@@ -463,14 +611,30 @@ async function fetchLatestEpisodesLatAnime() {
     if (!parsed) return
     const { slug, normSlug, epNum, epUrl } = parsed
     const tAttr  = ($(el).attr('title') || '').trim()
-    const tFind  = $(el).find('h3, h2, p, span, [class*="title"], [class*="name"]').first().text().trim()
+    const tFind  = $(el).find('h1, h2, h3, [class*="title"], [class*="name"]').first().text().trim()
     const tSlug  = slug.replace(/-episodio$/i, '').replace(/-/g, ' ').trim()
     const titulo = tAttr || tFind || tSlug
     const imgEl  = $(el).find('img').first()
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy') || imgEl.attr('data-original') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
     const imgUrl = (!imgSrc || imgSrc.startsWith('data:')) ? '' : imgSrc.startsWith('//') ? 'https:' + imgSrc : absoluteUrl(imgSrc, LATANIME_URL)
-    const id     = `lat-${normSlug}-${epNum}`
-    const idioma = href.toLowerCase().includes('castellano') ? 'castellano' : 'latino'
+    const idiomaTexto = [
+      href,
+      $(el).attr('title'),
+      $(el).attr('aria-label'),
+      $(el).attr('data-language'),
+      $(el).attr('data-lang'),
+      tFind,
+      $(el).text(),
+      $(el).find('img').first().attr('alt'),
+    ].filter(Boolean).join(' ').toLowerCase()
+    const idiomaNormalizado = idiomaTexto.normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+    const esCastellano = idiomaTexto.includes('🇪🇸')
+      || /\bcastellano\b|\bespanol(?:\s+(?:de\s+)?espana)\b|\bes\s+es\b/i.test(idiomaNormalizado)
+    const idioma = esCastellano ? 'castellano' : 'latino'
+    const id = `lat-${normSlug}-${epNum}-${idioma}`
     if (!lista.find(e => e.id === id)) lista.push({ id, slug, titulo, epNum, epUrl, imgUrl, fuente: 'latanime', idioma })
   })
   return lista
@@ -521,7 +685,7 @@ async function scrapeServidoresLatAnime(epUrl) {
         if (idx !== -1) srvs.splice(idx, 1)
       }
     } catch (err) {
-      void reportTioError(global.tioConn, `Redirector LatAnime — ${r.url}`, err)
+      console.error(`[tioanime-notify] Redirector LatAnime — ${r.url}: ${err.message}`)
       const idx = srvs.findIndex(s => s.url === r.url)
       if (idx !== -1) srvs.splice(idx, 1)
     }
@@ -534,7 +698,7 @@ async function scrapeServidoresLatAnime(epUrl) {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8')
       if (decoded.startsWith('http')) embedUrl = decoded
     } catch (err) {
-      void reportTioError(global.tioConn, `Embed LatAnime — ${epUrl}`, err)
+      console.error(`[tioanime-notify] Embed LatAnime — ${epUrl}: ${err.message}`)
     }
     const servidor = detectarServidor(embedUrl)
     if (embedUrl.startsWith('http') && servidor && LAT_SERVIDORES.includes(servidor) && !srvs.find(s => s.url === embedUrl)) {
@@ -550,7 +714,7 @@ function detectarServNombre(url) {
 
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_TIO = ['yourupload', 'mega', 'voe']
+const PREFS_TIO = ['yourupload', 'mega', 'voe', 'mediafire']
 const PREFS_LAT = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
 
 function ordenarServidores(srvs, fuente = 'tioanime') {
@@ -665,7 +829,7 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
   } catch (_) {}
 
   let done = 0
-  const start = Date.now()
+  let start = Date.now()
   let lastLog = 0
   const reportar = (bytes) => {
     done += bytes
@@ -704,8 +868,13 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
         if (!contentRange.startsWith(`bytes ${p.start}-${p.end}/`)) {
           throw new Error(`MediaFire devolvió un rango inesperado: ${contentRange || 'sin Content-Range'}`)
         }
-        res.data.on('data', chunk => reportar(chunk.length))
-        await pipeline(res.data, fs.createWriteStream(p.path))
+        const tracker = new Transform({
+          transform(chunk, _enc, cb) {
+            reportar(chunk.length)
+            cb(null, chunk)
+          },
+        })
+        await pipeline(res.data, tracker, fs.createWriteStream(p.path))
       }))
 
       // Unir las partes en orden
@@ -731,6 +900,8 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
       for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
       console.log(`[tioanime-notify] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
       done = 0 // reiniciar contador para el fallback
+      start = Date.now()
+      lastLog = 0
       // sigue abajo al modo de un solo stream
     }
   }
@@ -844,6 +1015,13 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 
+function getSupportedServers(servers, fuente) {
+  const allowed = fuente === 'latanime' ? LAT_SERVIDORES : TIO_SERVIDORES
+  return servers
+    .map(server => ({ ...server, nombre: detectarServidor(server.url, server.nombre) || server.nombre }))
+    .filter(server => allowed.includes(server.nombre))
+}
+
 async function enviarEpisodio(chatIds, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl, slug = '', fuente = 'tioanime', idioma = 'latino' } = ep
   const recipients = [...new Set((Array.isArray(chatIds) ? chatIds : [chatIds]).filter(Boolean))]
@@ -861,7 +1039,15 @@ async function enviarEpisodio(chatIds, ep, conn) {
     let coverBuffer = null
     let centralCoverSent = false
 
-    // Enviar la portada al central al iniciar para indicar que comenzó el proceso.
+    console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
+    const discovered = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
+    const srvs = getSupportedServers(discovered, fuente)
+    if (!srvs.length) {
+      console.log(`[tioanime-notify] 📭 Sin servidores compatibles para "${titulo}" ep ${epNum}; se descarta sin enviar mensajes.`)
+      return false
+    }
+
+    // Avisar al central solo después de confirmar que existe un servidor compatible.
     try {
       const anilistCover = await getAniListCover(titulo, slug, epNum)
       const coverUrl = anilistCover || imgUrl
@@ -883,22 +1069,16 @@ async function enviarEpisodio(chatIds, ep, conn) {
       void reportTioError(conn, `Portada — ${titulo} ep. ${epNum}`, error)
     }
 
-    console.log(`[tioanime-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
-    const srvs = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
-    if (!srvs.length) throw new Error('No se encontraron servidores')
-
     await new Promise(r => setTimeout(r, 15_000))
-    const orden = ordenarServidores(srvs, fuente).slice(0, fuente === 'latanime' ? 10 : 3)
+    const orden = ordenarServidores(srvs, fuente).slice(0, fuente === 'latanime' ? 10 : 4)
     let videoPath = null
 
     for (const srv of orden) {
       const nombreServidor = (srv.nombre || 'servidor').toUpperCase()
       try {
-        if (srv.nombre === 'mega' || srv.nombre === 'mediafire' || (fuente === 'tioanime' && srv.nombre === 'yourupload') || (fuente === 'latanime' && LAT_SERVIDORES.includes(srv.nombre))) {
-          console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
-        } else {
-          continue
-        }
+        const procesables = fuente === 'latanime' ? LAT_SERVIDORES : ['mega', 'mediafire', 'yourupload', 'voe']
+        if (!procesables.includes(srv.nombre)) continue
+        console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
 
         if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
         else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
@@ -930,6 +1110,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
     console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — preparando 360p antes de avisar...`)
     const fileName360 = build360FileName(fileName)
     const video360Path = path.join(tmpDir, fileName360)
+    let originalSent = false
     try {
       console.log(`[tioanime-notify] ⚙️ Iniciando compresión /dw4 360p: ${fileName}`)
       await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
@@ -945,42 +1126,53 @@ async function enviarEpisodio(chatIds, ep, conn) {
       }
 
       // El central ya recibió la portada al inicio; los demás la reciben solo cuando ambos videos están listos.
+      let originalBuffer = fs.readFileSync(videoPath)
       for (const chatId of recipients) {
         if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
           await conn.sendMessage(chatId, { image: coverBuffer })
         }
         await conn.sendMessage(chatId, {
-          document : { url: videoPath },
+          document : originalBuffer,
           fileName,
           mimetype : 'video/mp4',
           jpegThumbnail,
         })
       }
+      originalBuffer = null
+      originalSent = true
       console.log(`[tioanime-notify] 🚀 Enviado original: ${fileName}`)
+      let video360Buffer = fs.readFileSync(video360Path)
       for (const chatId of recipients) {
         await conn.sendMessage(chatId, {
-          document : { url: video360Path },
+          document : video360Buffer,
           fileName: fileName360,
           mimetype : 'video/mp4',
           jpegThumbnail: jpegThumbnail360,
         })
       }
+      video360Buffer = null
       console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
     } catch (error) {
-      console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${error.message}`)
-      void reportTioError(conn, `Compresión o entrega 360p — ${titulo} ep. ${epNum}`, error)
+      const retryError = error instanceof Error ? error : new Error(String(error))
+      console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${retryError.message}`)
+      void reportTioError(conn, `Compresión o entrega 360p — ${titulo} ep. ${epNum}`, retryError)
       try {
         for (const chatId of recipients) {
           await conn.sendMessage(chatId, {
-            text: `⚠️ No se pudieron preparar los dos archivos de *${titulo}* ep. *${zeroPad(epNum)}*. No se envió el aviso ni los vídeos para evitar una entrega incompleta.`,
+            text: originalSent
+              ? `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* se envió, pero falló la versión 360p.`
+              : `⚠️ No se pudieron completar los envíos de *${titulo}* ep. *${zeroPad(epNum)}*.`,
           })
         }
+        retryError.tioRecipientNoticeSent = true
       } catch (noticeError) {
         console.error(`[tioanime-notify] No se pudo notificar el fallo 360p: ${noticeError.message}`)
         void reportTioError(conn, `Aviso de fallo 360p — ${titulo} ep. ${epNum}`, noticeError)
       }
+      throw retryError
     }
 
+    return true
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {}
   }
@@ -1018,7 +1210,12 @@ async function procesarCola() {
           continue
         }
         try {
-          await enviarEpisodio(recipients, ep, connActivo)
+          const enviado = await enviarEpisodio(recipients, ep, connActivo)
+          if (!enviado) {
+            quitarItemActual()
+            global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
+            break
+          }
           exito = true
           if (!manual) {
             const seen = loadSeen()
@@ -1049,12 +1246,14 @@ async function procesarCola() {
           } else {
             quitarItemActual()
             global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
-            try {
-              const connErr = global.tioConn
-              for (const recipient of recipients) {
-                if (connErr) await connErr.sendMessage(recipient, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
-              }
-            } catch (_) {}
+            if (!err.tioRecipientNoticeSent) {
+              try {
+                const connErr = global.tioConn
+                for (const recipient of recipients) {
+                  if (connErr) await connErr.sendMessage(recipient, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
+                }
+              } catch (_) {}
+            }
           }
         }
       }
@@ -1075,15 +1274,21 @@ async function checkNuevosEpisodios(_chatId, conn) {
   let lista = []
   let consultasCompletas = true
   try {
-    try { lista = lista.concat(await fetchLatestEpisodes()) } catch (err) {
-      consultasCompletas = false
-      console.error(`[tioanime-notify] TioAnime: ${err.message}`)
-      void reportTioError(conn, 'Consulta de episodios TioAnime', err)
-    }
-    try { lista = lista.concat(await fetchLatestEpisodesLatAnime()) } catch (err) {
-      consultasCompletas = false
-      console.error(`[tioanime-notify] LatAnime: ${err.message}`)
-      void reportTioError(conn, 'Consulta de episodios LatAnime', err)
+    const [tioRes, latRes] = await Promise.allSettled([
+      fetchLatestEpisodes(),
+      fetchLatestEpisodesLatAnime(),
+    ])
+    for (const [source, result] of [['TioAnime', tioRes], ['LatAnime', latRes]]) {
+      if (result.status === 'fulfilled') {
+        lista = lista.concat(result.value)
+      } else if (result.reason instanceof NotModified) {
+        // El servidor confirma que la portada no cambió desde el último GET.
+      } else {
+        consultasCompletas = false
+        const error = result.reason instanceof Error ? result.reason : new Error(String(result.reason))
+        console.error(`[tioanime-notify] ${source}: ${error.message}`)
+        void reportTioError(conn, `Consulta de episodios ${source}`, error)
+      }
     }
     if (!lista.length) return
 
@@ -1094,16 +1299,14 @@ async function checkNuevosEpisodios(_chatId, conn) {
       saveSeen(seen)
       return
     }
-    const nuevos = lista.filter(e => !seen[CENTRAL_CHAT_ID].includes(e.id) && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${e.id}`))
+    const nuevos = lista.filter(e => {
+      const idAnterior = e.fuente === 'latanime' ? e.id.replace(/-(?:castellano|latino)$/, '') : e.id
+      return !seen[CENTRAL_CHAT_ID].includes(e.id)
+        && !seen[CENTRAL_CHAT_ID].includes(idAnterior)
+        && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${e.id}`)
+        && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${idAnterior}`)
+    })
     if (!nuevos.length) return
-
-    if (nuevos.length > 1) {
-      try {
-        for (const recipient of recipients) {
-          await conn.sendMessage(recipient, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e, i) => `${i + 1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + `\n\n⏳ _Se descargarán una sola vez desde el grupo central..._` })
-        }
-      } catch (err) { console.error(`[tioanime-notify] No se pudo enviar el resumen: ${err.message}`) }
-    }
 
     for (const ep of nuevos) {
       global.tioEpisodeQueue.push({ chatId: CENTRAL_CHAT_ID, ep, recipients })
@@ -1123,6 +1326,7 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
       void reportTioError(global.tioConn, 'Sondeo automático central', err)
     })
   }, intervalSec * 1000)
+  if (typeof global.tioCentralTimer.unref === 'function') global.tioCentralTimer.unref()
   if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
     void reportTioError(global.tioConn, 'Sondeo inicial central', err)
   })
@@ -1131,12 +1335,10 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
 function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
   if (conn) global.tioConn = conn
   intervalSec = Number(intervalSec) || getGlobalIntervalSec()
-  const previous = global.tioActiveChats.get(chatId)
-  if (previous?.timer) clearInterval(previous.timer)
   const state = loadState()
   const startedAt = Date.now()
   const sentCount = Number(state[chatId]?.sentCount) || 0
-  global.tioActiveChats.set(chatId, { timer: null, intervalSec, startedAt, sentCount })
+  global.tioActiveChats.set(chatId, { intervalSec, startedAt, sentCount })
   state[chatId] = { intervalSec, startedAt, sentCount }
   saveState(state)
   iniciarSondeoCentral(conn, intervalSec, checkNow)
@@ -1144,7 +1346,7 @@ function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
 
 function detenerNotificador(chatId) {
   const entry = global.tioActiveChats.get(chatId)
-  if (entry) { clearInterval(entry.timer); global.tioActiveChats.delete(chatId) }
+  if (entry) global.tioActiveChats.delete(chatId)
   const pendientes = global.tioEpisodeQueue.filter(item => item.chatId === chatId)
   global.tioEpisodeQueue = global.tioEpisodeQueue.filter(item => item.chatId !== chatId)
   for (const item of pendientes) global.tioQueuedIds.delete(`${chatId}:${item.ep.id}`)
@@ -1175,6 +1377,7 @@ if (!global.tioWatchdog) {
       }
     }
   }, 2 * 60 * 1000)
+  if (typeof global.tioWatchdog.unref === 'function') global.tioWatchdog.unref()
 }
 
 let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
