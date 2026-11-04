@@ -815,13 +815,24 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
 
   if (command === 'crnotify') {
     if (!isOwner) return conn.sendMessage(m.chat, { text: '⛔ Solo el dueño.' }, { quoted: m })
+
+    const rawLimit = args[0]
+    let limit = 1
+    if (rawLimit !== undefined) {
+      const parsed = Number(rawLimit)
+      if (!Number.isFinite(parsed) || parsed < 1 || !Number.isInteger(parsed)) {
+        return conn.sendMessage(m.chat, { text: '💡 Uso: *.crnotify <número>* (1-50)\nEj: *.crnotify 4*' }, { quoted: m })
+      }
+      limit = Math.min(50, parsed)
+    }
+
     const cfg  = loadCfg()
     const jids = cfg.targetJids.length ? cfg.targetJids : [m.chat]
-    await conn.sendMessage(m.chat, { text: `🔍 Enviando los 10 estrenos recientes a ${jids.length} grupo(s)...` }, { quoted: m })
+    await conn.sendMessage(m.chat, { text: `🔍 Enviando los ${limit} estreno(s) más reciente(s) a ${jids.length} grupo(s)...` }, { quoted: m })
     try {
       await withGlobalLock(async () => {
         const t0 = Date.now()
-        const episodes = await getLatestEpisodes(10)
+        const episodes = await getLatestEpisodes(limit)
         if (!episodes.length) {
           await conn.sendMessage(m.chat, { text: '📭 No se encontraron episodios.' }, { quoted: m })
           return
