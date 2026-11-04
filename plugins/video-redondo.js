@@ -23,6 +23,15 @@ function normalizeBuffer(value) {
   throw new TypeError('La descarga no devolvió un Buffer válido.')
 }
 
+async function reaccionarAlComando(conn, m, text) {
+  if (!conn?.sendMessage || !m?.key) return
+  try {
+    await conn.sendMessage(m.chat, { react: { text, key: m.key } })
+  } catch (error) {
+    console.error(`[video-redondo] No se pudo reaccionar con ${text}:`, error?.message || error)
+  }
+}
+
 function runFfmpeg(inputPath, outputPath, isVideo) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -57,21 +66,29 @@ const handler = async (m, { conn }) => {
   const isImage = mime.startsWith('image/')
   const isVideo = mime.startsWith('video/')
   if (!isImage && !isVideo) {
-    return m.reply('❎ Responde a una imagen, video o GIF con uno de estos comandos: *ptv*, *orbe* o *cvid*.')
+    await reaccionarAlComando(conn, m, '❎')
+    return
   }
 
-  await m.reply('⏳ Procesando video circular...')
+  await reaccionarAlComando(conn, m, '⏳')
 
   let inputBuffer
   try {
     inputBuffer = normalizeBuffer(await quoted.download())
   } catch (error) {
     console.error('[video-redondo] Error descargando la imagen:', error?.stack || error)
-    return m.reply('❎ No se pudo descargar el archivo.')
+    await reaccionarAlComando(conn, m, '❎')
+    return
   }
 
-  if (!inputBuffer.length) return m.reply('❎ El archivo está vacío.')
-  if (inputBuffer.length > MAX_INPUT_BYTES) return m.reply('❎ El archivo supera el límite de 25 MB.')
+  if (!inputBuffer.length) {
+    await reaccionarAlComando(conn, m, '❎')
+    return
+  }
+  if (inputBuffer.length > MAX_INPUT_BYTES) {
+    await reaccionarAlComando(conn, m, '❎')
+    return
+  }
 
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'video-redondo-'))
   const inputPath = path.join(tempDir, 'entrada')
@@ -87,10 +104,10 @@ const handler = async (m, { conn }) => {
       fileName: 'video-redondo.mp4',
       ptv: true,
     }, { quoted: m })
-    await m.reply('✅ Video circular enviado correctamente.')
+    await reaccionarAlComando(conn, m, '✅')
   } catch (error) {
     console.error('[video-redondo] Error creando el video:', error?.stack || error)
-    return m.reply('❎ No se pudo crear el video circular.')
+    await reaccionarAlComando(conn, m, '❎')
   } finally {
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
   }
