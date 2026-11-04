@@ -1,7 +1,10 @@
 import axios from 'axios';
+import https from 'https';
 import pkg from '@vitalets/google-translate-api';
 const { translate } = pkg;
 import fs from 'fs';
+
+const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const datas = global;
@@ -22,20 +25,35 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) return m.reply(`*${tradutor.texto1}*`);
 
   try {
-    const response = await axios.get('https://api.jikan.moe/v4/anime', {
-      params: { q: text, limit: 1 },
-      timeout: 20000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
+    let result = null;
 
-    const result = response.data?.data?.[0];
+    try {
+      const response = await fetchJikanWithRetry(text);
+      result = response.data?.data?.[0];
+    } catch (jikanErr) {
+      console.warn('[animeinfo] Jikan falló, intentando Kitsu:', jikanErr.message);
+    }
+
+    if (!result) {
+      try {
+        result = await fetchFromKitsu(text);
+      } catch (kitsuErr) {
+        console.warn('[animeinfo] Kitsu también falló:', kitsuErr.message);
+      }
+    }
+
     if (!result) return m.reply(`*${tradutor.texto3}*`);
 
     const TRADUCCIONES = {
       estados: {
         'Finished Airing': 'Finalizado',
         'Currently Airing': 'En emisión',
-        'Not yet aired': 'Próximamente'
+        'Not yet aired': 'Próximamente',
+        'finished': 'Finalizado',
+        'current': 'En emisión',
+        'tba': 'Próximamente',
+        'unreleased': 'Próximamente',
+        'upcoming': 'Próximamente'
       },
       temporadas: {
         'winter': 'Invierno',
@@ -98,7 +116,9 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
     };
 
-    let cleanDesc = result.synopsis ? result.synopsis.replace(/\[Written by MAL Rewrite\]/gi, '').trim() : '';
+    let cleanDesc = result.synopsis
+      ? result.synopsis.replace(/\[Written by MAL Rewrite\]/gi, '').trim()
+      : '';
 
     let sinopsisFormateada = '> No disponible';
 
@@ -125,7 +145,10 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       ? ` (${result.title_japanese})`
       : '';
 
-    const estudios = result.studios?.map(s => s.name).join(', ') || 'Desconocido';
+    const estudios = result.studios?.length
+      ? result.studios.map(s => s.name).join(', ')
+      : 'Desconocido';
+
     const generosEsp = result.genres?.length
       ? result.genres.map(g => TRADUCCIONES.generos[g.name] || g.name).join(', ')
       : 'N/A';
@@ -160,7 +183,8 @@ ${sinopsisFormateada}`;
       const { data } = await axios.get(imageUrl, {
         responseType: 'arraybuffer',
         timeout: 15000,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        httpsAgent
       });
       imageBuffer = Buffer.from(data);
     } catch (imgErr) {
@@ -201,8 +225,8 @@ ${sinopsisFormateada}`;
 
     if (e.message?.includes('timeout')) {
       errorMsg += '\n\n⏱️ _La búsqueda tardó demasiado. Intenta nuevamente._';
-    } else if (e.message?.includes('Network')) {
-      errorMsg += '\n\n🌐 _Error de conexión. Verifica tu internet._';
+    } else if (e.message?.includes('Network') || e.message?.includes('TLS') || e.message?.includes('socket')) {
+      errorMsg += '\n\n🌐 _Error de conexión con el servidor. Intenta nuevamente en unos segundos._';
     } else {
       errorMsg += `\n\n📝 _Detalles: ${e.message || 'Error desconocido'}_`;
     }
@@ -210,6 +234,67 @@ ${sinopsisFormateada}`;
     m.reply(errorMsg);
   }
 };
+
+async function fetchJikanWithRetry(queryText, maxRetries = 3) {
+  let lastError;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await axios.get('https://api.jikan.moe/v4/anime', {
+        params: { q: queryText, limit: 1 },
+        timeout: 25000,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        httpsAgent
+      });
+      return response;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[animeinfo] Jikan intento ${i + 1} falló: ${err.message}`);
+      if (i < maxRetries - 1) {
+        await new Promise(res => setTimeout(res, 1000 * Math.pow(2, i)));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function fetchFromKitsu(queryText) {
+  const res = await axios.get('https://kitsu.io/api/edge/anime', {
+    params: { 'filter[text]': queryText, 'page[limit]': 1 },
+    timeout: 20000,
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.api+json' },
+    httpsAgent
+  });
+
+  const item = res.data?.data?.[0];
+  if (!item) return null;
+
+  const attrs = item.attributes;
+
+  return {
+    title: attrs.canonicalTitle || attrs.titles?.en || attrs.titles?.en_jp || 'Desconocido',
+    title_english: attrs.titles?.en || null,
+    title_japanese: attrs.titles?.ja_jp || null,
+    synopsis: attrs.synopsis || null,
+    year: attrs.startDate ? new Date(attrs.startDate).getFullYear() : null,
+    episodes: attrs.episodeCount || null,
+    duration: attrs.episodeLength ? `${attrs.episodeLength} min` : null,
+    type: attrs.subtype === 'TV' ? 'TV' : (attrs.subtype === 'movie' ? 'Movie' : attrs.subtype),
+    status: attrs.status === 'finished' ? 'Finished Airing'
+          : attrs.status === 'current' ? 'Currently Airing'
+          : attrs.status === 'tba' ? 'Not yet aired'
+          : attrs.status,
+    season: attrs.season || null,
+    score: attrs.averageRating ? (parseFloat(attrs.averageRating) / 10).toFixed(1) : null,
+    studios: [],
+    genres: [],
+    images: {
+      jpg: {
+        large_image_url: attrs.posterImage?.large || attrs.posterImage?.original || attrs.posterImage?.medium,
+        image_url: attrs.posterImage?.medium
+      }
+    }
+  };
+}
 
 async function traducirTexto(texto) {
   if (!texto || texto === 'No disponible') return texto || 'No disponible';
@@ -245,7 +330,8 @@ async function traducirTexto(texto) {
       try {
         const res = await axios.get('https://api.mymemory.translated.net/get', {
           params: { q: fragmento, langpair: 'en|es' },
-          timeout: 8000
+          timeout: 8000,
+          httpsAgent
         });
         if (res.data?.responseStatus === 200 && res.data?.responseData?.translatedText) {
           traducidos.push(res.data.responseData.translatedText);
