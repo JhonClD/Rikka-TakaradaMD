@@ -5,7 +5,8 @@ import { spawn } from 'node:child_process'
 import ffmpegPath from 'ffmpeg-static'
 
 const MAX_INPUT_BYTES = 25 * 1024 * 1024
-const DURATION_SECONDS = 3
+const IMAGE_DURATION_SECONDS = 3
+const MAX_VIDEO_DURATION_SECONDS = 60
 const SIZE = 720
 
 function getMediaMessage(message) {
@@ -28,7 +29,7 @@ function runFfmpeg(inputPath, outputPath, isVideo) {
       '-y',
       ...(isVideo ? [] : ['-loop', '1']),
       '-i', inputPath,
-      '-t', String(DURATION_SECONDS),
+      '-t', String(isVideo ? MAX_VIDEO_DURATION_SECONDS : IMAGE_DURATION_SECONDS),
       '-vf', `scale=${SIZE}:${SIZE}:force_original_aspect_ratio=increase,crop=${SIZE}:${SIZE},format=yuv420p`,
       '-r', '30',
       '-c:v', 'libx264',
