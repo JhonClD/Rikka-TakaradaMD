@@ -57,6 +57,8 @@ const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL = 6 * 60 * 60_000
 const HEALTH_INTERVAL_MS = 30 * 60_000
+const JA_TIMEOUT_MS = 15_000
+const JA_NEG_CACHE_MS = 15 * 60_000
 
 let BASIC_ANON = BASIC_ANON_FALLBACK
 let BASIC_AUTH = BASIC_AUTH_FALLBACK
@@ -248,6 +250,7 @@ function saveSeriesCache() {
 loadSeriesCache()
 
 const _seriesFetching = new Map()
+const _seriesNegUntil = new Map()
 
 function extractSeriesTitle(data) {
   if (!data || typeof data !== 'object') return ''
@@ -258,27 +261,62 @@ function extractSeriesTitle(data) {
   return ''
 }
 
-async function getJapaneseTitle(seriesId) {
+async function getJapaneseTitle(seriesId, fallbackName = '') {
   if (!seriesId) return ''
   if (typeof _seriesCache[seriesId] === 'string' && _seriesCache[seriesId]) return _seriesCache[seriesId]
+
+  const negUntil = _seriesNegUntil.get(seriesId)
+  if (negUntil && Date.now() < negUntil) return ''
   if (_seriesFetching.has(seriesId)) return _seriesFetching.get(seriesId)
 
   const promise = (async () => {
+    // 1️⃣ Intento directo: /content/v1/series/{id}?locale=ja-JP
     try {
-      const data = await crFetch(`/content/v1/series/${seriesId}`, { locale: 'ja-JP' }, CR_BETA)
+      const data = await crFetch(
+        `/content/v1/series/${seriesId}`,
+        { locale: 'ja-JP' },
+        CR_BETA,
+        JA_TIMEOUT_MS
+      )
       const title = extractSeriesTitle(data)
-      // No cachear títulos vacíos (permite reintentar si es transitorio)
-      if (title) {
+      if (title && title.trim()) {
         _seriesCache[seriesId] = title
+        _seriesNegUntil.delete(seriesId)
         saveSeriesCache()
+        return title
       }
-      return title
-    } catch {
-      return ''
-    } finally {
-      _seriesFetching.delete(seriesId)
+    } catch { /* sigue al fallback */ }
+
+    // 2️⃣ Fallback: búsqueda por nombre con locale=ja-JP
+    if (fallbackName) {
+      try {
+        const searchData = await crFetch(
+          '/content/v1/search',
+          { q: fallbackName, type: 'series', locale: 'ja-JP', limit: '5' },
+          CR_BETA,
+          JA_TIMEOUT_MS
+        )
+        const items = Array.isArray(searchData?.items) ? searchData.items
+                    : Array.isArray(searchData?.data)  ? searchData.data
+                    : []
+        const match = items.find(it => (it.id || it.series_id) === seriesId)
+        const title = match ? (match.title || match.series_metadata?.title || '') : ''
+        if (title && title.trim()) {
+          _seriesCache[seriesId] = title
+          _seriesNegUntil.delete(seriesId)
+          saveSeriesCache()
+          return title
+        }
+      } catch { /* sin suerte */ }
     }
-  })()
+
+    // 3️⃣ Nada funcionó: caché negativo 15 min
+    _seriesNegUntil.set(seriesId, Date.now() + JA_NEG_CACHE_MS)
+    return ''
+  })().finally(() => {
+    _seriesFetching.delete(seriesId)
+  })
+
   _seriesFetching.set(seriesId, promise)
   return promise
 }
@@ -396,14 +434,14 @@ async function getToken() {
   return getAnonToken()
 }
 
-async function crFetch(path, params = {}, base = CR_BASE) {
+async function crFetch(path, params = {}, base = CR_BASE, timeoutMs = 20_000) {
   const url   = new URL(`${base}${path}`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken()
     const res = await fetch(url.toString(), {
       headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': CR_UA, 'Accept': 'application/json', 'Cookie': _cookies },
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (res.ok) return res.json()
     if (res.status === 401 && attempt === 0) {
@@ -564,7 +602,7 @@ async function formatCaption(ep) {
   let displayTitle = ep.series
   if (ep.seriesId) {
     try {
-      const jaTitle = await getJapaneseTitle(ep.seriesId)
+      const jaTitle = await getJapaneseTitle(ep.seriesId, ep.series)
       if (jaTitle) displayTitle = jaTitle
     } catch {}
   }
