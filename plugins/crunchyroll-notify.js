@@ -412,14 +412,6 @@ function normalizeEpisode(p) {
   }
 }
 
-function sortNewest(episodes) {
-  return [...episodes].sort((a, b) => {
-    const dateDiff = (Number(b.airTime) || 0) - (Number(a.airTime) || 0)
-    if (dateDiff !== 0) return dateDiff
-    return String(b.id).localeCompare(String(a.id))
-  })
-}
-
 function stripCdata(s) {
   return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim()
 }
@@ -574,7 +566,7 @@ async function fetchNewEpisodes() {
     return []
   }
 
-  return sortNewest(valid.filter(i => !seen.includes(i.id)))
+  return valid.filter(i => !seen.includes(i.id))
 }
 
 function markSeen(id) {
@@ -584,7 +576,7 @@ function markSeen(id) {
 
 async function getLatestEpisodes(limit = 10) {
   const episodes = await fetchBrowseEpisodes()
-  return sortNewest(episodes).slice(0, limit)
+  return episodes.slice(0, limit)
 }
 
 async function sendItem(conn, jid, ep, quoted = null, preCaption = null) {
@@ -643,9 +635,9 @@ function startCron(conn) {
     return
   }
 
-  const rawMinutes = process.env.CR_MINUTES || cfg.minutes || 5
+  const rawMinutes = process.env.CR_MINUTES || cfg.minutes || 1
   const parsedMinutes = Number(rawMinutes)
-  const minutes = Number.isFinite(parsedMinutes) && parsedMinutes > 0 ? Math.max(1, Math.floor(parsedMinutes)) : 5
+  const minutes = Number.isFinite(parsedMinutes) && parsedMinutes > 0 ? Math.max(1, Math.floor(parsedMinutes)) : 1
 
   cronTimer = setInterval(async () => {
     if (cronRunning) return
@@ -713,7 +705,7 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
       saveCfg(cfg)
       startCron(conn)
       return conn.sendMessage(m.chat, {
-        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 5} min\n🔁 Refresh automático habilitado`,
+        text: `✅ *Login exitoso*\n👤 Cuenta real activa\n🎯 Grupos: ${cfg.targetJids.length}\n🔄 Monitor cada ${process.env.CR_MINUTES || cfg.minutes || 1} min\n🔁 Refresh automático habilitado`,
       }, { quoted: m })
     } catch (e) { return conn.sendMessage(m.chat, { text: `❌ *Auth fallida*\n${e.message}` }, { quoted: m }) }
   }
@@ -758,7 +750,7 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
 
   if (command === 'crstatus') {
     const cfg  = loadCfg()
-    const mins = process.env.CR_MINUTES || cfg.minutes || 5
+    const mins = process.env.CR_MINUTES || cfg.minutes || 1
     const seen = loadSeen()
     const exp  = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
     const gruposList = cfg.targetJids.length
