@@ -52,8 +52,8 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const TIO_SERVIDORES = ['mega', 'voe', 'yourupload', 'mediafire']
-const LAT_SERVIDORES = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
+const TIO_SERVIDORES = ['yourupload', 'mega']
+const LAT_SERVIDORES = ['mediafire', 'mega']
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -714,15 +714,21 @@ function detectarServNombre(url) {
 
 // ─── Descarga ─────────────────────────────────────────────────────────────────
 
-const PREFS_TIO = ['yourupload', 'mega', 'voe', 'mediafire']
-const PREFS_LAT = ['mediafire', 'mega', 'voe', 'cloud', 'savefiles', 'hexload', 'dsvplay', 'byse']
+const PREFS_TIO = [...TIO_SERVIDORES]
+const PREFS_LAT = [...LAT_SERVIDORES]
 
 function ordenarServidores(srvs, fuente = 'tioanime') {
   const preferencias = fuente === 'latanime' ? PREFS_LAT : PREFS_TIO
-  return [...srvs].sort((a, b) => {
+  const permitidos = new Set(preferencias)
+  const vistos = new Set()
+  return [...srvs].filter(srv => permitidos.has(srv.nombre)).sort((a, b) => {
     const ia = preferencias.indexOf(a.nombre)
     const ib = preferencias.indexOf(b.nombre)
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+  }).filter(srv => {
+    if (vistos.has(srv.nombre)) return false
+    vistos.add(srv.nombre)
+    return true
   })
 }
 
@@ -1070,13 +1076,13 @@ async function enviarEpisodio(chatIds, ep, conn) {
     }
 
     await new Promise(r => setTimeout(r, 15_000))
-    const orden = ordenarServidores(srvs, fuente).slice(0, fuente === 'latanime' ? 10 : 4)
+    const orden = ordenarServidores(srvs, fuente)
     let videoPath = null
 
     for (const srv of orden) {
       const nombreServidor = (srv.nombre || 'servidor').toUpperCase()
       try {
-        const procesables = fuente === 'latanime' ? LAT_SERVIDORES : ['mega', 'mediafire', 'yourupload', 'voe']
+        const procesables = fuente === 'latanime' ? LAT_SERVIDORES : TIO_SERVIDORES
         if (!procesables.includes(srv.nombre)) continue
         console.log(`[tioanime-notify] 🔄 Conectando con [ ${nombreServidor} ]...`)
 
