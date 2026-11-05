@@ -12,7 +12,7 @@ const SEND_DELAY_MS       = 1_500
 const TRANSLATE_TIMEOUT   = 6_000
 const TRANSLATE_CACHE_MAX = 500
 const VER_LIMIT           = 5
-const MAX_DESC_LEN        = 500 // Aumentado para que la descripción se vea mejor
+const MAX_DESC_LEN        = 400
 
 const _translateCache = new Map()
 
@@ -243,20 +243,22 @@ function capitalize(s = '') {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-// NUEVO DISEÑO TIPO TARJETA
-function buildMessage(feed, item, translatedTitle, translatedDesc) {
+function buildMessage(feed, item, translatedTitle, translatedDesc, index = 0, total = 0) {
   const dateStr = formatDate(item.pubDate)
-  let text = `*${translatedTitle}*\n`
-  
+  const counter = total > 0 ? ` (${index}/${total})` : ''
+  const lines = [
+    `📰 *${capitalize(feed.label || 'RSS')}*${counter}`,
+    `━━━━━━━━━━━━━━━━`,
+    `🎌 *${translatedTitle}*`,
+    dateStr ? `🕐 ${dateStr}` : null,
+  ]
   if (translatedDesc) {
-    text += `\n${translatedDesc}\n`
+    lines.push('')
+    lines.push(`📝 ${translatedDesc}`)
   }
-  
-  if (dateStr) {
-    text += `\n_${dateStr}_`
-  }
-  
-  return text.trim()
+  lines.push('')
+  lines.push(`🔗 ${item.link}`)
+  return lines.filter(l => l !== null).join('\n')
 }
 
 async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
@@ -267,33 +269,14 @@ async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
   descClean = trimDesc(descClean)
   const translatedDesc = descClean ? await translateText(descClean) : ''
 
-  const text = buildMessage(feed, item, translatedTitle, translatedDesc)
-  
-  // Usamos templateButtons para el botón de "Leer noticia"
-  const buttons = [
-    { 
-      index: 1, 
-      urlButton: { 
-        displayText: '📰 Leer noticia', 
-        url: item.link 
-      } 
-    }
-  ]
-
-  const options = {
-    caption: text,
-    footer: capitalize(feed.label || 'RSS News'),
-    templateButtons: buttons
-  }
+  const text = buildMessage(feed, item, translatedTitle, translatedDesc, index, total)
 
   if (item.video) {
-    await conn.sendMessage(chatId, { video: { url: item.video }, mimetype: 'video/mp4', ...options })
+    await conn.sendMessage(chatId, { video: { url: item.video }, caption: text, mimetype: 'video/mp4' })
   } else if (item.img) {
-    await conn.sendMessage(chatId, { image: { url: item.img }, ...options })
+    await conn.sendMessage(chatId, { image: { url: item.img }, caption: text })
   } else {
-    // Si no hay imagen, se envía el texto con los botones
-    delete options.caption;
-    await conn.sendMessage(chatId, { text, footer: options.footer, templateButtons: buttons })
+    await conn.sendMessage(chatId, { text })
   }
 }
 
@@ -403,7 +386,7 @@ function menu(prefix) {
     `*${prefix}rss* → este menú`,
     `*${prefix}rss <url>* → agregar feed`,
     `*${prefix}rss list* → ver feeds`,
-    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias`,
+    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias (con imagen y descripción)`,
     `*${prefix}rss del <n>* → borrar feed`,
     `*${prefix}rss pause <n>* → pausar`,
     `*${prefix}rss resume <n>* → reanudar`,
@@ -561,6 +544,23 @@ let handler = async (m, { conn, text, usedPrefix, isOwner, isAdmin, isROwner }) 
     feeds.splice(p.idx, 1)
     await global.db.write()
     return m.reply(`🗑️ Eliminado: *${p.feed.label}*`)
+  }
+
+  if (sub === 'pause' || sub === 'resume') {
+    if (!canManage) return m.reply('⛔ Solo administradores.')
+    const p = pickFeed(feeds, rest[0])
+    if (!p) return m.reply('❌ Número inválido. Mira *.rss list*')
+    const isPause = sub === 'pause'
+    p.feed.paused = isPause
+    await global.db.write()
+    return m.reply(`${isPause ? '⏸️ Pausado' : '▶️ Reanudado'}: *${p.feed.label}*`)
+  }
+
+  if (sub === 'check') {
+    if (!canManage) return m.reply('⛔ Solo administradores.')
+    await m.reply('🔄 Buscando novedades...')
+    await checkAllFeeds()
+    return m.reply('✅ Listo. Solo se enviaron items nuevos.')
   }
 
   if (sub === 'test') {
