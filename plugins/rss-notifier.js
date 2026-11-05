@@ -3,14 +3,15 @@ import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 const cheerio = require('cheerio')
 
-const POLL_INTERVAL_MS   = 10 * 60 * 1000
-const MAX_FEEDS_PER_CHAT = 10
-const MAX_SEEN_GUIDS     = 300
-const REQUEST_TIMEOUT    = 20_000
-const MAX_SEND_PER_TICK  = 3
-const SEND_DELAY_MS      = 1_500
-const TRANSLATE_TIMEOUT  = 6_000
+const POLL_INTERVAL_MS    = 10 * 60 * 1000
+const MAX_FEEDS_PER_CHAT  = 10
+const MAX_SEEN_GUIDS      = 300
+const REQUEST_TIMEOUT     = 20_000
+const MAX_SEND_PER_TICK   = 3
+const SEND_DELAY_MS       = 1_500
+const TRANSLATE_TIMEOUT   = 6_000
 const TRANSLATE_CACHE_MAX = 500
+const VER_LIMIT           = 5
 
 const _translateCache = new Map()
 
@@ -188,10 +189,11 @@ function capitalize(s = '') {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-function buildMessage(feed, item, translatedTitle) {
+function buildMessage(feed, item, translatedTitle, index = 0, total = 0) {
   const dateStr = formatDate(item.pubDate)
+  const counter = total > 0 ? ` (${index}/${total})` : ''
   return [
-    `📰 *${capitalize(feed.label || 'RSS')}*`,
+    `📰 *${capitalize(feed.label || 'RSS')}*${counter}`,
     `━━━━━━━━━━━━━━━━`,
     `🎌 *${translatedTitle}*`,
     dateStr ? `🕐 ${dateStr}` : null,
@@ -200,9 +202,9 @@ function buildMessage(feed, item, translatedTitle) {
   ].filter(l => l !== null).join('\n')
 }
 
-async function sendItem(conn, chatId, feed, item) {
+async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
   const translatedTitle = await translateText(item.title)
-  const text = buildMessage(feed, item, translatedTitle)
+  const text = buildMessage(feed, item, translatedTitle, index, total)
   if (item.video) {
     await conn.sendMessage(chatId, { video: { url: item.video }, caption: text, mimetype: 'video/mp4' })
   } else if (item.img) {
@@ -251,16 +253,16 @@ async function checkAllFeeds() {
           continue
         }
 
-        const seen = new Set(feed.seenGuids)
+        const seen     = new Set(feed.seenGuids)
         const newItems = items.filter(i => !seen.has(i.guid))
         if (!newItems.length) continue
 
         const toSend   = newItems.slice(0, MAX_SEND_PER_TICK)
         const overflow = newItems.slice(MAX_SEND_PER_TICK).map(i => i.guid)
 
-        for (const item of toSend) {
+        for (let k = 0; k < toSend.length; k++) {
           try {
-            await sendItem(conn, chatId, feed, item)
+            await sendItem(conn, chatId, feed, toSend[k], k + 1, toSend.length)
             await new Promise(r => setTimeout(r, SEND_DELAY_MS))
           } catch (e) {
             console.error(`[RSS Send] ${chatId}:`, e.message)
@@ -299,136 +301,213 @@ function startPoller() {
   )
 }
 
-let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isROwner }) => {
-  const chatId = m.chat
-  const feeds  = feedsOf(chatId)
+const ALIASES = {
+  add: 'add', agregar: 'add', a: 'add', '+': 'add',
+  del: 'del', delete: 'del', borrar: 'del', eliminar: 'del', quitar: 'del', d: 'del', '-': 'del',
+  list: 'list', lista: 'list', ls: 'list', l: 'list',
+  ver: 'ver', info: 'ver', ultimas: 'ver', 'últimas': 'ver', ultima: 'ver', 'última': 'ver', v: 'ver',
+  pause: 'pause', pausar: 'pause', p: 'pause',
+  resume: 'resume', reanudar: 'resume', reanuda: 'resume', r: 'resume',
+  check: 'check', buscar: 'check', actualizar: 'check', actualiza: 'check', c: 'check',
+  test: 'test', probar: 'test', prueba: 'test', t: 'test',
+  all: 'all', todos: 'all', global: 'all', g: 'all',
+}
+
+function menu(prefix) {
+  return [
+    `📡 *Comandos RSS*`,
+    `━━━━━━━━━━━━━━━━`,
+    `*${prefix}rss* → este menú`,
+    `*${prefix}rss <url>* → agregar feed`,
+    `*${prefix}rss list* → ver feeds`,
+    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias (con imagen, una a una)`,
+    `*${prefix}rss del <n>* → borrar feed`,
+    `*${prefix}rss pause <n>* → pausar`,
+    `*${prefix}rss resume <n>* → reanudar`,
+    `*${prefix}rss check* → buscar novedades ahora`,
+    `*${prefix}rss test [n]* → enviar último item aquí`,
+    `*${prefix}rss all* → enviar último a todos (owner)`,
+    ``,
+    `_El [n] es el número del feed (mira_ *${prefix}rss list*_)_.`,
+  ].join('\n')
+}
+
+function pickFeed(feeds, arg) {
+  const n = parseInt(arg || '1', 10) - 1
+  if (isNaN(n) || !feeds[n]) return null
+  return { idx: n, feed: feeds[n] }
+}
+
+async function doAdd(m, feeds, canManage, usedPrefix, url) {
+  if (!canManage) return m.reply('⛔ Solo administradores.')
+  if (!isHttpUrl(url)) return m.reply(`Ejemplo: *${usedPrefix}rss <url>*`)
+  if (feeds.some(f => f.url === url)) return m.reply('⚠️ Ya está en la lista.')
+  if (feeds.length >= MAX_FEEDS_PER_CHAT) return m.reply(`⚠️ Límite alcanzado (${MAX_FEEDS_PER_CHAT}).`)
+  await m.reply('⏳ Verificando...')
+  try {
+    const { items, channelTitle } = await fetchFeed(url)
+    if (!items.length) return m.reply('❌ No se encontraron noticias en ese feed.')
+    const label = channelTitle || new URL(url).hostname
+    feeds.push({ url, label, seenGuids: items.map(i => i.guid).slice(0, MAX_SEEN_GUIDS), paused: false })
+    await global.db.write()
+    return m.reply(`✅ Agregado: *${capitalize(label)}*\n📌 ${items.length} items. Notificará solo los nuevos.`)
+  } catch (e) {
+    return m.reply(`❌ No se pudo conectar: ${e.message}`)
+  }
+}
+
+async function showLatest(m, conn, chatId, feeds, arg) {
+  if (!feeds.length) return m.reply('❌ No hay feeds. Agrega uno con *.rss <url>*')
+  const p = pickFeed(feeds, arg)
+  if (!p) return m.reply('❌ Número inválido. Mira *.rss list*')
+  await m.reply(`⏳ Enviando últimas ${VER_LIMIT} de *${p.feed.label}*...`)
+  let items
+  try {
+    ;({ items } = await fetchFeed(p.feed.url))
+  } catch (e) {
+    return m.reply(`❌ Error al conectar: ${e.message}`)
+  }
+  if (!items.length) return m.reply('❌ El feed no tiene items.')
+  const top = items.slice(0, VER_LIMIT)
+  for (let k = 0; k < top.length; k++) {
+    try {
+      await sendItem(conn, chatId, p.feed, top[k], k + 1, top.length)
+      await new Promise(r => setTimeout(r, SEND_DELAY_MS))
+    } catch (e) {
+      console.error(`[rss ver send] ${chatId}:`, e.message)
+      await conn.sendMessage(chatId, { text: `⚠️ Error al enviar item ${k + 1}: ${e.message}` }).catch(() => {})
+    }
+  }
+  return m.reply('✅ Listo.')
+}
+
+async function testHere(m, conn, chatId, feeds, arg) {
+  if (!feeds.length) return m.reply('❌ No hay feeds.')
+  if (arg) {
+    const p = pickFeed(feeds, arg)
+    if (!p) return m.reply('❌ Número inválido.')
+    try {
+      const { items } = await fetchFeed(p.feed.url)
+      if (!items.length) return m.reply('❌ Sin items.')
+      await sendItem(conn, chatId, p.feed, items[0], 1, 1)
+      return m.reply('✅ Enviado.')
+    } catch (e) {
+      return m.reply(`❌ ${e.message}`)
+    }
+  }
+  const active = feeds.filter(f => !f.paused)
+  if (!active.length) return m.reply('❌ Todos los feeds están pausados.')
+  await m.reply(`📡 Enviando último item de *${active.length}* feed(s)...`)
+  for (const feed of active) {
+    try {
+      const { items } = await fetchFeed(feed.url)
+      if (!items.length) continue
+      await sendItem(conn, chatId, feed, items[0], 1, 1)
+      await new Promise(r => setTimeout(r, SEND_DELAY_MS))
+    } catch (e) {
+      await conn.sendMessage(chatId, { text: `⚠️ Error en *${feed.label}*: ${e.message}` })
+    }
+  }
+  return m.reply('✅ Listo.')
+}
+
+async function testAll(conn, isOwner) {
+  if (!isOwner) return { ok: false, msg: '⛔ Solo el dueño puede usar esto.' }
+  const db = getDB()
+  if (!db) return { ok: false, msg: '❌ Sin datos RSS.' }
+  const urlMap = {}
+  for (const [cid, cfeeds] of Object.entries(db)) {
+    if (!Array.isArray(cfeeds)) continue
+    for (const feed of cfeeds) {
+      if (!feed?.url || feed.paused) continue
+      if (!urlMap[feed.url]) urlMap[feed.url] = []
+      urlMap[feed.url].push({ chatId: cid, feed })
+    }
+  }
+  for (const [url, subscribers] of Object.entries(urlMap)) {
+    let items
+    try {
+      ;({ items } = await fetchFeed(url))
+      if (!items.length) continue
+    } catch { continue }
+    for (const { chatId, feed } of subscribers) {
+      try {
+        await sendItem(conn, chatId, feed, items[0], 1, 1)
+        await new Promise(r => setTimeout(r, SEND_DELAY_MS))
+      } catch (e) { console.error(`[rss all] ${chatId}:`, e.message) }
+    }
+  }
+  return { ok: true, msg: '✅ Enviado a todos los grupos suscritos.' }
+}
+
+let handler = async (m, { conn, text, usedPrefix, isOwner, isAdmin, isROwner }) => {
+  const chatId    = m.chat
+  const feeds     = feedsOf(chatId)
   if (!feeds) return m.reply('⏳ Base de datos no lista. Intenta de nuevo.')
   const canManage = isOwner || isAdmin || isROwner
 
-  if (/list$/i.test(command)) {
-    if (!feeds.length) return m.reply(`❌ No hay feeds activos.\nUsa *${usedPrefix}rssadd <url>*`)
-    let msg = `📋 *Feeds Activos (${feeds.length}/${MAX_FEEDS_PER_CHAT})*\n━━━━━━━━━━━━━━━━\n`
+  const raw = (text || '').trim()
+  if (!raw) return m.reply(menu(usedPrefix))
+
+  const parts = raw.split(/\s+/)
+  const first = parts[0]
+  const rest  = parts.slice(1)
+
+  if (isHttpUrl(first)) return doAdd(m, feeds, canManage, usedPrefix, first)
+
+  const sub = ALIASES[first.toLowerCase()]
+  if (!sub) return m.reply(`❌ No entendí *${first}*.\n\n${menu(usedPrefix)}`)
+
+  if (sub === 'add') return doAdd(m, feeds, canManage, usedPrefix, rest[0])
+
+  if (sub === 'list') {
+    if (!feeds.length) return m.reply(`❌ No hay feeds.\nAgrega uno con *${usedPrefix}rss <url>*`)
+    let msg = `📋 *Feeds (${feeds.length}/${MAX_FEEDS_PER_CHAT})*\n━━━━━━━━━━━━━━━━\n`
     feeds.forEach((f, i) => {
       msg += `*${i + 1}.* ${capitalize(f.label)}${f.paused ? ' ⏸️' : ''}\n   🔗 ${f.url}\n`
     })
     return m.reply(msg)
   }
 
-  if (/recientes$/i.test(command)) {
-    if (!feeds.length) return m.reply(`❌ No hay feeds registrados.`)
-    const idx  = parseInt(text) - 1
-    const feed = (!isNaN(idx) && feeds[idx]) ? feeds[idx] : feeds[0]
-    await m.reply(`⏳ Cargando noticias de *${feed.label}*...`)
-    try {
-      const { items } = await fetchFeed(feed.url)
-      const top = items.slice(0, 5)
-      let res = `📰 *${capitalize(feed.label)}*\n━━━━━━━━━━━━━━━━\n`
-      for (const [i, it] of top.entries()) {
-        const translated = await translateText(it.title)
-        res += `*${i + 1}.* ${translated}\n🔗 ${it.link}\n───────────────\n`
-      }
-      return m.reply(res.trim())
-    } catch (e) {
-      return m.reply(`❌ Error al conectar con el feed: ${e.message}`)
-    }
-  }
+  if (sub === 'ver') return showLatest(m, conn, chatId, feeds, rest[0])
 
-  if (/add$/i.test(command)) {
+  if (sub === 'del') {
     if (!canManage) return m.reply('⛔ Solo administradores.')
-    if (!text)      return m.reply(`Ejemplo: *${usedPrefix}rssadd <url>*`)
-    const url = text.trim()
-    if (!isHttpUrl(url))                    return m.reply('❌ URL inválida.')
-    if (feeds.some(f => f.url === url))     return m.reply('⚠️ Ya está en la lista.')
-    if (feeds.length >= MAX_FEEDS_PER_CHAT) return m.reply('⚠️ Límite alcanzado.')
-    await m.reply('⏳ Verificando URL...')
-    try {
-      const { items, channelTitle } = await fetchFeed(url)
-      if (!items.length) return m.reply('❌ No se encontraron noticias en ese feed.')
-      const label = channelTitle || new URL(url).hostname
-      feeds.push({ url, label, seenGuids: items.map(i => i.guid).slice(0, MAX_SEEN_GUIDS), paused: false })
-      await global.db.write()
-      return m.reply(`✅ Feed agregado: *${capitalize(label)}*\n📌 ${items.length} items encontrados, notificará solo los nuevos.`)
-    } catch (e) {
-      return m.reply(`❌ No se pudo conectar: ${e.message}`)
-    }
-  }
-
-  if (/del$/i.test(command)) {
-    if (!canManage) return m.reply('⛔ Solo administradores.')
-    const n = parseInt(text) - 1
-    if (isNaN(n) || !feeds[n]) return m.reply('❌ Número inválido. Usa *.rsslist* para ver los feeds.')
-    const [removed] = feeds.splice(n, 1)
+    const p = pickFeed(feeds, rest[0])
+    if (!p) return m.reply('❌ Número inválido. Mira *.rss list*')
+    feeds.splice(p.idx, 1)
     await global.db.write()
-    return m.reply(`🗑️ Feed *${removed.label}* eliminado.`)
+    return m.reply(`🗑️ Eliminado: *${p.feed.label}*`)
   }
 
-  if (/pause$/i.test(command) || /resume$/i.test(command)) {
+  if (sub === 'pause' || sub === 'resume') {
     if (!canManage) return m.reply('⛔ Solo administradores.')
-    const isPause = /pause$/i.test(command)
-    const n = parseInt(text) - 1
-    if (isNaN(n) || !feeds[n]) return m.reply('❌ Número inválido.')
-    feeds[n].paused = isPause
+    const p = pickFeed(feeds, rest[0])
+    if (!p) return m.reply('❌ Número inválido. Mira *.rss list*')
+    const isPause = sub === 'pause'
+    p.feed.paused = isPause
     await global.db.write()
-    return m.reply(`${isPause ? '⏸️ Pausado' : '▶️ Reanudado'}: *${feeds[n].label}*`)
+    return m.reply(`${isPause ? '⏸️ Pausado' : '▶️ Reanudado'}: *${p.feed.label}*`)
   }
 
-  if (/check$/i.test(command)) {
-    const mode = text?.trim()
-
-    if (mode === '1') {
-      if (!canManage) return m.reply('⛔ Solo administradores.')
-      if (!feeds.length) return m.reply('❌ No hay feeds en este grupo.')
-      const active = feeds.filter(f => !f.paused)
-      if (!active.length) return m.reply('❌ Todos los feeds están pausados.')
-      await m.reply(`📡 Enviando último item de *${active.length}* feed(s)...`)
-      for (const feed of active) {
-        try {
-          const { items } = await fetchFeed(feed.url)
-          if (!items.length) continue
-          await sendItem(conn, chatId, feed, items[0])
-          await new Promise(r => setTimeout(r, SEND_DELAY_MS))
-        } catch (e) {
-          await conn.sendMessage(chatId, { text: `⚠️ Error en *${feed.label}*: ${e.message}` })
-        }
-      }
-      return m.reply('✅ Listo.')
-    }
-
-    if (mode === '2') {
-      if (!isOwner && !isROwner) return m.reply('⛔ Solo dueño.')
-      const db = getDB()
-      if (!db) return m.reply('❌ Sin datos RSS.')
-      await m.reply('📡 Enviando último item a todos los grupos suscritos...')
-      const urlMap = {}
-      for (const [cid, cfeeds] of Object.entries(db)) {
-        if (!Array.isArray(cfeeds)) continue
-        for (const feed of cfeeds) {
-          if (!feed?.url || feed.paused) continue
-          if (!urlMap[feed.url]) urlMap[feed.url] = []
-          urlMap[feed.url].push({ chatId: cid, feed })
-        }
-      }
-      for (const [url, subscribers] of Object.entries(urlMap)) {
-        let items
-        try {
-          ;({ items } = await fetchFeed(url))
-          if (!items.length) continue
-        } catch { continue }
-        for (const { chatId: cid, feed } of subscribers) {
-          try {
-            await sendItem(conn, cid, feed, items[0])
-            await new Promise(r => setTimeout(r, SEND_DELAY_MS))
-          } catch (e) { console.error(`[rsscheck 2 send] ${cid}:`, e.message) }
-        }
-      }
-      return m.reply('✅ Listo.')
-    }
-
+  if (sub === 'check') {
     if (!canManage) return m.reply('⛔ Solo administradores.')
-    await m.reply('🔄 Buscando actualizaciones...')
+    await m.reply('🔄 Buscando novedades...')
     await checkAllFeeds()
-    return m.reply('✅ Listo. Solo se enviaron items no vistos anteriormente.')
+    return m.reply('✅ Listo. Solo se enviaron items nuevos.')
   }
+
+  if (sub === 'test') {
+    if (!canManage) return m.reply('⛔ Solo administradores.')
+    return testHere(m, conn, chatId, feeds, rest[0])
+  }
+
+  if (sub === 'all') {
+    const r = await testAll(conn, isOwner || isROwner)
+    return m.reply(r.msg)
+  }
+
+  return m.reply(menu(usedPrefix))
 }
 
 handler.all = async function () {
@@ -438,8 +517,8 @@ handler.all = async function () {
   if (!global._rssPoller.started) startPoller()
 }
 
-handler.command = /^rss(add|del|list|recientes|check|pause|resume)$/i
+handler.command = /^rss$/i
 handler.tags    = ['tools']
-handler.help    = ['rssadd <url>', 'rssdel <número>', 'rsslist', 'rssrecientes [n]', 'rsscheck [1|2]', 'rsspause <n>', 'rssresume <n>']
+handler.help    = ['rss <url>', 'rss list', 'rss ver [n]', 'rss del <n>', 'rss pause <n>', 'rss resume <n>', 'rss check', 'rss test [n]', 'rss all']
 
 export default handler
