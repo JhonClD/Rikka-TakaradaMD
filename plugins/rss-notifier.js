@@ -9,16 +9,29 @@ const MAX_SEEN_GUIDS     = 300
 const REQUEST_TIMEOUT    = 20_000
 const MAX_SEND_PER_TICK  = 3
 const SEND_DELAY_MS      = 1_500
+const TRANSLATE_TIMEOUT  = 6_000
+const TRANSLATE_CACHE_MAX = 500
+
+const _translateCache = new Map()
 
 async function translateText(text, retries = 2) {
+  if (!text) return text
+  const cached = _translateCache.get(text)
+  if (cached) return cached
   for (let i = 0; i <= retries; i++) {
     try {
       const res = await axios.get(
         `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q=${encodeURIComponent(text)}`,
-        { timeout: 6_000 }
+        { timeout: TRANSLATE_TIMEOUT }
       )
       const translated = res.data?.[0]?.[0]?.[0]
-      if (translated) return translated
+      if (translated) {
+        if (_translateCache.size >= TRANSLATE_CACHE_MAX) {
+          _translateCache.delete(_translateCache.keys().next().value)
+        }
+        _translateCache.set(text, translated)
+        return translated
+      }
     } catch {
       if (i < retries) await new Promise(r => setTimeout(r, 1_000 * (i + 1)))
     }
@@ -26,23 +39,34 @@ async function translateText(text, retries = 2) {
   return text
 }
 
-function initDB() {
-  if (!global.db?.data) return
+function getDB() {
+  if (!global.db?.data) return null
   global.db.data.rss = global.db.data.rss || {}
+  return global.db.data.rss
 }
 
 function feedsOf(chatId) {
-  initDB()
-  if (!global.db.data.rss[chatId]) global.db.data.rss[chatId] = []
-  return global.db.data.rss[chatId]
+  const db = getDB()
+  if (!db) return null
+  if (!Array.isArray(db[chatId])) db[chatId] = []
+  return db[chatId]
+}
+
+function isHttpUrl(u) {
+  return typeof u === 'string' && /^https?:\/\//i.test(u)
+}
+
+function extractFirstImgSrc(html = '') {
+  const m = html.match(/<img[^>]+src=["']([^"'>]+)["']/i)
+  return m ? m[1] : null
 }
 
 async function fetchFeed(url) {
   const { data } = await axios.get(url, {
     timeout: REQUEST_TIMEOUT,
     headers: {
-      'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept':        'application/rss+xml,application/atom+xml,application/xml,text/xml,*/*',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/rss+xml,application/atom+xml,application/xml,text/xml,*/*',
       'Cache-Control': 'no-cache',
     }
   })
@@ -67,12 +91,12 @@ async function fetchFeed(url) {
 
   const extractLink = el => {
     const byText = $(el).find('link').first().text().trim()
-    if (byText && /^https?:\/\//.test(byText)) return byText
+    if (isHttpUrl(byText)) return byText
     const byHref = $(el).find('link[rel="alternate"]').attr('href') ||
                    $(el).find('link').first().attr('href')
-    if (byHref && /^https?:\/\//.test(byHref)) return byHref
+    if (isHttpUrl(byHref)) return byHref
     const m = $.html(el).match(/<link[^>]*?>([^<]+)<\/link>/)
-    return (m && /^https?:\/\//.test(m[1].trim())) ? m[1].trim() : ''
+    return (m && isHttpUrl(m[1].trim())) ? m[1].trim() : ''
   }
 
   const extractMedia = (el, desc = '') => {
@@ -90,7 +114,6 @@ async function fetchFeed(url) {
       const m = raw.match(new RegExp(`<${mediaPrefix}:thumbnail[^>]+url=["']([^"']+)["']`, 'i'))
       if (m) img = m[1]
     }
-
     if (!video) {
       const m = raw.match(new RegExp(`<${mediaPrefix}:content[^>]+medium=["']video["'][^>]+url=["']([^"']+)["']`, 'i'))
              || raw.match(new RegExp(`<${mediaPrefix}:content[^>]+url=["']([^"']+\\.(?:mp4|webm|mov))[^"']*["']`, 'i'))
@@ -101,13 +124,14 @@ async function fetchFeed(url) {
              || raw.match(new RegExp(`<${mediaPrefix}:content[^>]+medium=["']image["'][^>]+url=["']([^"']+)["']`, 'i'))
       if (m) img = m[1]
     }
-
     if (!img) {
       const m = raw.match(new RegExp(`<${contentPrefix}:encoded[^>]*>([\\s\\S]*?)<\\/${contentPrefix}:encoded>`, 'i'))
       if (m) img = extractFirstImgSrc(m[1])
     }
-
     if (!img) img = extractFirstImgSrc(desc)
+
+    if (img && !isHttpUrl(img)) img = null
+    if (video && !isHttpUrl(video)) video = null
 
     return { img, video }
   }
@@ -117,7 +141,7 @@ async function fetchFeed(url) {
     const raw     = $.html(el)
     const pubDate = txt($(el).find('pubDate').first())
     if (pubDate) return pubDate
-    const m = raw.match(new RegExp(`<${dcPrefix}:date[^>]*>([^<]+)<\/${dcPrefix}:date>`, 'i'))
+    const m = raw.match(new RegExp(`<${dcPrefix}:date[^>]*>([^<]+)<\\/${dcPrefix}:date>`, 'i'))
     return m ? m[1].trim() : ''
   }
 
@@ -126,7 +150,7 @@ async function fetchFeed(url) {
   $('item').each((_, el) => {
     const title   = txt($(el).find('title').first())
     const link    = extractLink(el)
-    const guid    = extractGuid(el, link)
+    const guid    = extractGuid(el, link) || link
     const pubDate = extractDate(el)
     const desc    = txt($(el).find('description').first())
     const { img, video } = extractMedia(el, desc)
@@ -149,15 +173,15 @@ async function fetchFeed(url) {
   return { items, channelTitle }
 }
 
-function extractFirstImgSrc(html = '') {
-  const m = html.match(/<img[^>]+src=["']([^"'>]+)["']/i)
-  return m ? m[1] : null
-}
-
 function formatDate(pubDate) {
   if (!pubDate) return ''
   const d = new Date(pubDate)
-  return isNaN(d) ? '' : d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })
+  if (isNaN(d)) return ''
+  try {
+    return new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(d)
+  } catch {
+    return d.toISOString().slice(0, 10)
+  }
 }
 
 function capitalize(s = '') {
@@ -188,74 +212,78 @@ async function sendItem(conn, chatId, feed, item) {
   }
 }
 
-if (!global._rssPoller) global._rssPoller = { started: false, timer: null, initTimer: null }
+if (!global._rssPoller) global._rssPoller = { started: false, timer: null, initTimer: null, running: false }
 
 async function checkAllFeeds() {
-  const conn = global.conn
-  if (!conn) return
-  if (!global.db?.data?.rss) return
-
-  const urlMap = {}
-  for (const [chatId, feeds] of Object.entries(global.db.data.rss)) {
-    if (!Array.isArray(feeds) || !feeds.length) continue
-    for (const feed of feeds) {
-      if (!feed?.url || feed.paused) continue
-      if (!urlMap[feed.url]) urlMap[feed.url] = []
-      urlMap[feed.url].push({ chatId, feed })
-    }
-  }
-
+  if (global._rssPoller.running) return
+  global._rssPoller.running = true
   let dbDirty = false
 
-  for (const [url, subscribers] of Object.entries(urlMap)) {
-    let items
-    try {
-      ;({ items } = await fetchFeed(url))
-      if (!items.length) continue
-    } catch (e) {
-      if (e.code !== 'ECONNRESET') console.error(`[RSS Error] ${url}:`, e.message)
-      continue
+  try {
+    const conn = global.conn
+    const db   = getDB()
+    if (!conn || !db) return
+
+    const urlMap = {}
+    for (const [chatId, feeds] of Object.entries(db)) {
+      if (!Array.isArray(feeds) || !feeds.length) continue
+      for (const feed of feeds) {
+        if (!feed?.url || feed.paused) continue
+        if (!urlMap[feed.url]) urlMap[feed.url] = []
+        urlMap[feed.url].push({ chatId, feed })
+      }
     }
 
-    for (const { chatId, feed } of subscribers) {
-      if (!Array.isArray(feed.seenGuids) || !feed.seenGuids.length) {
-        feed.seenGuids = items.map(i => i.guid).slice(0, MAX_SEEN_GUIDS)
-        dbDirty = true
+    for (const [url, subscribers] of Object.entries(urlMap)) {
+      let items
+      try {
+        ;({ items } = await fetchFeed(url))
+        if (!items.length) continue
+      } catch (e) {
+        if (e.code !== 'ECONNRESET') console.error(`[RSS Error] ${url}:`, e.message)
         continue
       }
 
-      const newItems = items.filter(i => !feed.seenGuids.includes(i.guid))
-      if (!newItems.length) continue
-
-      const toSend = newItems.reverse().slice(0, MAX_SEND_PER_TICK)
-
-      for (const item of toSend) {
-        try {
-          await sendItem(conn, chatId, feed, item)
-          await new Promise(r => setTimeout(r, SEND_DELAY_MS))
-        } catch (e) {
-          console.error(`[RSS Send] ${chatId}:`, e.message)
+      for (const { chatId, feed } of subscribers) {
+        if (!Array.isArray(feed.seenGuids) || !feed.seenGuids.length) {
+          feed.seenGuids = items.map(i => i.guid).slice(0, MAX_SEEN_GUIDS)
+          dbDirty = true
+          continue
         }
+
+        const seen = new Set(feed.seenGuids)
+        const newItems = items.filter(i => !seen.has(i.guid))
+        if (!newItems.length) continue
+
+        const toSend   = newItems.slice(0, MAX_SEND_PER_TICK)
+        const overflow = newItems.slice(MAX_SEND_PER_TICK).map(i => i.guid)
+
+        for (const item of toSend) {
+          try {
+            await sendItem(conn, chatId, feed, item)
+            await new Promise(r => setTimeout(r, SEND_DELAY_MS))
+          } catch (e) {
+            console.error(`[RSS Send] ${chatId}:`, e.message)
+          }
+        }
+
+        feed.seenGuids = [
+          ...toSend.map(i => i.guid),
+          ...overflow,
+          ...feed.seenGuids
+        ].slice(0, MAX_SEEN_GUIDS)
+        dbDirty = true
       }
-
-      feed.seenGuids = [
-        ...newItems.map(i => i.guid),
-        ...feed.seenGuids
-      ].slice(0, MAX_SEEN_GUIDS)
-      dbDirty = true
     }
-  }
-
-  if (dbDirty) {
-    try { await global.db.write() } catch (e) { console.error('[RSS] db.write error:', e.message) }
+  } finally {
+    global._rssPoller.running = false
+    if (dbDirty) {
+      try { await global.db.write() } catch (e) { console.error('[RSS] db.write error:', e.message) }
+    }
   }
 }
 
 function startPoller() {
-  if (global._rssPoller.initTimer) { clearTimeout(global._rssPoller.initTimer);  global._rssPoller.initTimer = null }
-  if (global._rssPoller.timer)     { clearInterval(global._rssPoller.timer);      global._rssPoller.timer = null }
-  global._rssPoller.started = false
-
   if (global._rssPoller.started) return
   global._rssPoller.started = true
   console.log('[RSS] Poller activo ✓')
@@ -272,8 +300,9 @@ function startPoller() {
 }
 
 let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isROwner }) => {
-  const chatId    = m.chat
-  const feeds     = feedsOf(chatId)
+  const chatId = m.chat
+  const feeds  = feedsOf(chatId)
+  if (!feeds) return m.reply('⏳ Base de datos no lista. Intenta de nuevo.')
   const canManage = isOwner || isAdmin || isROwner
 
   if (/list$/i.test(command)) {
@@ -308,7 +337,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isR
     if (!canManage) return m.reply('⛔ Solo administradores.')
     if (!text)      return m.reply(`Ejemplo: *${usedPrefix}rssadd <url>*`)
     const url = text.trim()
-    if (!/^https?:\/\//.test(url))          return m.reply('❌ URL inválida.')
+    if (!isHttpUrl(url))                    return m.reply('❌ URL inválida.')
     if (feeds.some(f => f.url === url))     return m.reply('⚠️ Ya está en la lista.')
     if (feeds.length >= MAX_FEEDS_PER_CHAT) return m.reply('⚠️ Límite alcanzado.')
     await m.reply('⏳ Verificando URL...')
@@ -347,9 +376,12 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isR
     const mode = text?.trim()
 
     if (mode === '1') {
+      if (!canManage) return m.reply('⛔ Solo administradores.')
       if (!feeds.length) return m.reply('❌ No hay feeds en este grupo.')
-      await m.reply(`📡 Enviando último item de *${feeds.length}* feed(s)...`)
-      for (const feed of feeds) {
+      const active = feeds.filter(f => !f.paused)
+      if (!active.length) return m.reply('❌ Todos los feeds están pausados.')
+      await m.reply(`📡 Enviando último item de *${active.length}* feed(s)...`)
+      for (const feed of active) {
         try {
           const { items } = await fetchFeed(feed.url)
           if (!items.length) continue
@@ -363,13 +395,15 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isR
     }
 
     if (mode === '2') {
-      if (!canManage && !isOwner) return m.reply('⛔ Solo dueño.')
-      if (!global.db?.data?.rss) return m.reply('❌ Sin datos RSS.')
+      if (!isOwner && !isROwner) return m.reply('⛔ Solo dueño.')
+      const db = getDB()
+      if (!db) return m.reply('❌ Sin datos RSS.')
       await m.reply('📡 Enviando último item a todos los grupos suscritos...')
       const urlMap = {}
-      for (const [cid, cfeeds] of Object.entries(global.db.data.rss)) {
+      for (const [cid, cfeeds] of Object.entries(db)) {
         if (!Array.isArray(cfeeds)) continue
         for (const feed of cfeeds) {
+          if (!feed?.url || feed.paused) continue
           if (!urlMap[feed.url]) urlMap[feed.url] = []
           urlMap[feed.url].push({ chatId: cid, feed })
         }
@@ -390,20 +424,22 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner, isAdmin, isR
       return m.reply('✅ Listo.')
     }
 
+    if (!canManage) return m.reply('⛔ Solo administradores.')
     await m.reply('🔄 Buscando actualizaciones...')
     await checkAllFeeds()
     return m.reply('✅ Listo. Solo se enviaron items no vistos anteriormente.')
   }
 }
 
-handler.all = async function (_m) {
+handler.all = async function () {
   const c = this || global.conn
-  if (c && !global._rssPoller.started) startPoller()
+  if (!c) return
+  if (!global.conn) global.conn = c
+  if (!global._rssPoller.started) startPoller()
 }
 
 handler.command = /^rss(add|del|list|recientes|check|pause|resume)$/i
 handler.tags    = ['tools']
-handler.help    = ['rssadd <url>', 'rssdel <número>', 'rsslist', 'rssrecientes [n]', 'rsscheck', 'rsspause <n>', 'rssresume <n>']
+handler.help    = ['rssadd <url>', 'rssdel <número>', 'rsslist', 'rssrecientes [n]', 'rsscheck [1|2]', 'rsspause <n>', 'rssresume <n>']
 
 export default handler
-    
