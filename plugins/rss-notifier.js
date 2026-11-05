@@ -12,6 +12,7 @@ const SEND_DELAY_MS       = 1_500
 const TRANSLATE_TIMEOUT   = 6_000
 const TRANSLATE_CACHE_MAX = 500
 const VER_LIMIT           = 5
+const MAX_DESC_LEN        = 500 // Aumentado para que la descripción se vea mejor
 
 const _translateCache = new Map()
 
@@ -60,6 +61,46 @@ function isHttpUrl(u) {
 function extractFirstImgSrc(html = '') {
   const m = html.match(/<img[^>]+src=["']([^"'>]+)["']/i)
   return m ? m[1] : null
+}
+
+function cleanDesc(raw) {
+  if (!raw) return ''
+  let s = String(raw)
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+       .replace(/<[^>]+>/g, ' ')
+       .replace(/&nbsp;/gi, ' ')
+       .replace(/&amp;/gi, '&')
+       .replace(/&lt;/gi, '<')
+       .replace(/&gt;/gi, '>')
+       .replace(/&quot;/gi, '"')
+       .replace(/&#39;|&#x27;/gi, "'")
+       .replace(/&#(\d+);/g, (_, n) => {
+         const c = parseInt(n, 10)
+         return c >= 32 && c <= 0xFFFF ? String.fromCharCode(c) : ''
+       })
+       .replace(/&#x([\da-f]+);/gi, (_, n) => {
+         const c = parseInt(n, 16)
+         return c >= 32 && c <= 0xFFFF ? String.fromCharCode(c) : ''
+       })
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+function trimDesc(s, max = MAX_DESC_LEN) {
+  if (!s) return ''
+  if (s.length <= max) return s
+  return s.slice(0, max).replace(/\s+\S*$/, '').trimEnd() + '…'
+}
+
+function stripTitlePrefix(desc, title) {
+  if (!desc || !title) return desc
+  const dl = desc.toLowerCase()
+  const tl = title.toLowerCase()
+  if (dl === tl) return ''
+  if (dl.startsWith(tl)) {
+    return desc.slice(title.length).replace(/^[\s\-–—:|.]+/, '').trim()
+  }
+  return desc
 }
 
 async function fetchFeed(url) {
@@ -137,6 +178,17 @@ async function fetchFeed(url) {
     return { img, video }
   }
 
+  const extractDesc = (el, primaryText) => {
+    const raw = $.html(el)
+    let best = cleanDesc(primaryText)
+    const m = raw.match(new RegExp(`<${contentPrefix}:encoded[^>]*>([\\s\\S]*?)<\\/${contentPrefix}:encoded>`, 'i'))
+    if (m) {
+      const alt = cleanDesc(m[1])
+      if (alt.length > best.length) best = alt
+    }
+    return best
+  }
+
   const extractGuid = (el, link) => txt($(el).find('guid').first()) || link || ''
   const extractDate = el => {
     const raw     = $.html(el)
@@ -153,9 +205,10 @@ async function fetchFeed(url) {
     const link    = extractLink(el)
     const guid    = extractGuid(el, link) || link
     const pubDate = extractDate(el)
-    const desc    = txt($(el).find('description').first())
-    const { img, video } = extractMedia(el, desc)
-    if (title && guid) items.push({ title, link, guid, pubDate, img, video })
+    const descTxt = txt($(el).find('description').first())
+    const desc    = extractDesc(el, descTxt)
+    const { img, video } = extractMedia(el, descTxt)
+    if (title && guid) items.push({ title, link, guid, pubDate, img, video, desc })
   })
 
   if (!items.length) {
@@ -166,8 +219,9 @@ async function fetchFeed(url) {
       const guid    = txt($(el).find('id').first()) || link
       const pubDate = txt($(el).find('published').first()) || txt($(el).find('updated').first())
       const content = txt($(el).find('content').first()) || txt($(el).find('summary').first())
+      const desc    = extractDesc(el, content)
       const { img, video } = extractMedia(el, content)
-      if (title && guid) items.push({ title, link, guid, pubDate, img, video })
+      if (title && guid) items.push({ title, link, guid, pubDate, img, video, desc })
     })
   }
 
@@ -189,28 +243,57 @@ function capitalize(s = '') {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-function buildMessage(feed, item, translatedTitle, index = 0, total = 0) {
+// NUEVO DISEÑO TIPO TARJETA
+function buildMessage(feed, item, translatedTitle, translatedDesc) {
   const dateStr = formatDate(item.pubDate)
-  const counter = total > 0 ? ` (${index}/${total})` : ''
-  return [
-    `📰 *${capitalize(feed.label || 'RSS')}*${counter}`,
-    `━━━━━━━━━━━━━━━━`,
-    `🎌 *${translatedTitle}*`,
-    dateStr ? `🕐 ${dateStr}` : null,
-    ``,
-    `🔗 ${item.link}`
-  ].filter(l => l !== null).join('\n')
+  let text = `*${translatedTitle}*\n`
+  
+  if (translatedDesc) {
+    text += `\n${translatedDesc}\n`
+  }
+  
+  if (dateStr) {
+    text += `\n_${dateStr}_`
+  }
+  
+  return text.trim()
 }
 
 async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
   const translatedTitle = await translateText(item.title)
-  const text = buildMessage(feed, item, translatedTitle, index, total)
+
+  let descClean = cleanDesc(item.desc || '')
+  descClean = stripTitlePrefix(descClean, item.title)
+  descClean = trimDesc(descClean)
+  const translatedDesc = descClean ? await translateText(descClean) : ''
+
+  const text = buildMessage(feed, item, translatedTitle, translatedDesc)
+  
+  // Usamos templateButtons para el botón de "Leer noticia"
+  const buttons = [
+    { 
+      index: 1, 
+      urlButton: { 
+        displayText: '📰 Leer noticia', 
+        url: item.link 
+      } 
+    }
+  ]
+
+  const options = {
+    caption: text,
+    footer: capitalize(feed.label || 'RSS News'),
+    templateButtons: buttons
+  }
+
   if (item.video) {
-    await conn.sendMessage(chatId, { video: { url: item.video }, caption: text, mimetype: 'video/mp4' })
+    await conn.sendMessage(chatId, { video: { url: item.video }, mimetype: 'video/mp4', ...options })
   } else if (item.img) {
-    await conn.sendMessage(chatId, { image: { url: item.img }, caption: text })
+    await conn.sendMessage(chatId, { image: { url: item.img }, ...options })
   } else {
-    await conn.sendMessage(chatId, { text })
+    // Si no hay imagen, se envía el texto con los botones
+    delete options.caption;
+    await conn.sendMessage(chatId, { text, footer: options.footer, templateButtons: buttons })
   }
 }
 
@@ -320,7 +403,7 @@ function menu(prefix) {
     `*${prefix}rss* → este menú`,
     `*${prefix}rss <url>* → agregar feed`,
     `*${prefix}rss list* → ver feeds`,
-    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias (con imagen, una a una)`,
+    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias`,
     `*${prefix}rss del <n>* → borrar feed`,
     `*${prefix}rss pause <n>* → pausar`,
     `*${prefix}rss resume <n>* → reanudar`,
@@ -478,23 +561,6 @@ let handler = async (m, { conn, text, usedPrefix, isOwner, isAdmin, isROwner }) 
     feeds.splice(p.idx, 1)
     await global.db.write()
     return m.reply(`🗑️ Eliminado: *${p.feed.label}*`)
-  }
-
-  if (sub === 'pause' || sub === 'resume') {
-    if (!canManage) return m.reply('⛔ Solo administradores.')
-    const p = pickFeed(feeds, rest[0])
-    if (!p) return m.reply('❌ Número inválido. Mira *.rss list*')
-    const isPause = sub === 'pause'
-    p.feed.paused = isPause
-    await global.db.write()
-    return m.reply(`${isPause ? '⏸️ Pausado' : '▶️ Reanudado'}: *${p.feed.label}*`)
-  }
-
-  if (sub === 'check') {
-    if (!canManage) return m.reply('⛔ Solo administradores.')
-    await m.reply('🔄 Buscando novedades...')
-    await checkAllFeeds()
-    return m.reply('✅ Listo. Solo se enviaron items nuevos.')
   }
 
   if (sub === 'test') {
