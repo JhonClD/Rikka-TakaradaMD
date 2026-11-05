@@ -9,33 +9,68 @@ const MAX_SEEN_GUIDS      = 300
 const REQUEST_TIMEOUT     = 20_000
 const MAX_SEND_PER_TICK   = 3
 const SEND_DELAY_MS       = 1_500
-const TRANSLATE_TIMEOUT   = 6_000
+const TRANSLATE_TIMEOUT   = 8_000
 const TRANSLATE_CACHE_MAX = 500
+const TRANSLATE_MIN_GAP   = 120
 const VER_LIMIT           = 5
 const MAX_DESC_LEN        = 400
+const MAX_HEADER_LEN      = 40
 
 const _translateCache = new Map()
+let _lastTranslateAt = 0
 
-async function translateText(text, retries = 2) {
+async function translateText(text, retries = 3) {
   if (!text) return text
-  const cached = _translateCache.get(text)
+  const input = String(text).trim()
+  if (!input) return text
+
+  const cached = _translateCache.get(input)
   if (cached) return cached
+
   for (let i = 0; i <= retries; i++) {
     try {
-      const res = await axios.get(
-        `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q=${encodeURIComponent(text)}`,
-        { timeout: TRANSLATE_TIMEOUT }
-      )
-      const translated = res.data?.[0]?.[0]?.[0]
-      if (translated) {
-        if (_translateCache.size >= TRANSLATE_CACHE_MAX) {
-          _translateCache.delete(_translateCache.keys().next().value)
+      const gap = Date.now() - _lastTranslateAt
+      if (gap < TRANSLATE_MIN_GAP) {
+        await new Promise(r => setTimeout(r, TRANSLATE_MIN_GAP - gap))
+      }
+      _lastTranslateAt = Date.now()
+
+      const res = await axios.get('https://translate.googleapis.com/translate_a/single', {
+        params: {
+          client: 'gtx',
+          sl: 'auto',
+          tl: 'es',
+          hl: 'es',
+          dt: 't',
+          q: input
+        },
+        timeout: TRANSLATE_TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/json,text/plain,*/*',
+          'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8'
         }
-        _translateCache.set(text, translated)
-        return translated
+      })
+
+      const chunks = res.data?.[0]
+      if (Array.isArray(chunks) && chunks.length) {
+        let translated = ''
+        for (const chunk of chunks) {
+          if (Array.isArray(chunk) && typeof chunk[0] === 'string') {
+            translated += chunk[0]
+          }
+        }
+        translated = translated.trim()
+        if (translated) {
+          if (_translateCache.size >= TRANSLATE_CACHE_MAX) {
+            _translateCache.delete(_translateCache.keys().next().value)
+          }
+          _translateCache.set(input, translated)
+          return translated
+        }
       }
     } catch {
-      if (i < retries) await new Promise(r => setTimeout(r, 1_000 * (i + 1)))
+      if (i < retries) await new Promise(r => setTimeout(r, 800 * (i + 1)))
     }
   }
   return text
@@ -179,14 +214,13 @@ async function fetchFeed(url) {
   }
 
   const extractDesc = (el, primaryText) => {
+    const desc1 = cleanDesc(primaryText)
     const raw = $.html(el)
-    let best = cleanDesc(primaryText)
     const m = raw.match(new RegExp(`<${contentPrefix}:encoded[^>]*>([\\s\\S]*?)<\\/${contentPrefix}:encoded>`, 'i'))
-    if (m) {
-      const alt = cleanDesc(m[1])
-      if (alt.length > best.length) best = alt
-    }
-    return best
+    const desc2 = m ? cleanDesc(m[1]) : ''
+    if (desc1.length >= 40) return desc1
+    if (desc2.length >= 40) return desc2
+    return desc1 || desc2
   }
 
   const extractGuid = (el, link) => txt($(el).find('guid').first()) || link || ''
@@ -243,25 +277,34 @@ function capitalize(s = '') {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-function buildMessage(feed, item, translatedTitle, translatedDesc, index = 0, total = 0) {
+function buildMessage(feed, item, translatedLabel, translatedTitle, translatedDesc, index = 0, total = 0) {
   const dateStr = formatDate(item.pubDate)
-  const counter = total > 0 ? ` (${index}/${total})` : ''
+  const counter = total > 0 ? ` | ${index}/${total}` : ''
+  const header  = (translatedLabel || feed.label || 'RSS').toUpperCase().slice(0, MAX_HEADER_LEN)
+
   const lines = [
-    `📰 *${capitalize(feed.label || 'RSS')}*${counter}`,
-    `━━━━━━━━━━━━━━━━`,
-    `🎌 *${translatedTitle}*`,
-    dateStr ? `🕐 ${dateStr}` : null,
+    `*[ 📰 ${header}${counter} ]*`,
+    ``,
+    ` _📍${translatedTitle}_`,
+    ``,
+    `• *Fecha:* \`${dateStr || '—'}\``,
   ]
+
   if (translatedDesc) {
     lines.push('')
-    lines.push(`📝 ${translatedDesc}`)
+    lines.push(`> ${translatedDesc}`)
   }
+
   lines.push('')
-  lines.push(`🔗 ${item.link}`)
-  return lines.filter(l => l !== null).join('\n')
+  lines.push(`*✨ Fuente:*`)
+  lines.push('')
+  lines.push(item.link)
+
+  return lines.join('\n')
 }
 
 async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
+  const translatedLabel = await translateText(feed.label || 'RSS')
   const translatedTitle = await translateText(item.title)
 
   let descClean = cleanDesc(item.desc || '')
@@ -269,7 +312,7 @@ async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
   descClean = trimDesc(descClean)
   const translatedDesc = descClean ? await translateText(descClean) : ''
 
-  const text = buildMessage(feed, item, translatedTitle, translatedDesc, index, total)
+  const text = buildMessage(feed, item, translatedLabel, translatedTitle, translatedDesc, index, total)
 
   if (item.video) {
     await conn.sendMessage(chatId, { video: { url: item.video }, caption: text, mimetype: 'video/mp4' })
@@ -386,7 +429,7 @@ function menu(prefix) {
     `*${prefix}rss* → este menú`,
     `*${prefix}rss <url>* → agregar feed`,
     `*${prefix}rss list* → ver feeds`,
-    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias (con imagen y descripción)`,
+    `*${prefix}rss ver [n]* → últimas ${VER_LIMIT} noticias (imagen + descripción)`,
     `*${prefix}rss del <n>* → borrar feed`,
     `*${prefix}rss pause <n>* → pausar`,
     `*${prefix}rss resume <n>* → reanudar`,
