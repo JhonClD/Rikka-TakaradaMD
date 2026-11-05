@@ -53,7 +53,8 @@ async function translateText(text, retries = 3) {
         }
       })
 
-      const chunks = res.data?.[0]
+      const payload = typeof res.data === 'string' ? JSON.parse(res.data) : res.data
+      const chunks = payload?.[0]
       if (Array.isArray(chunks) && chunks.length) {
         let translated = ''
         for (const chunk of chunks) {
@@ -73,6 +74,26 @@ async function translateText(text, retries = 3) {
     } catch {
       if (i < retries) await new Promise(r => setTimeout(r, 800 * (i + 1)))
     }
+  }
+
+  // Respaldo para cuando Google Translate limita temporalmente las consultas.
+  try {
+    const fallback = await axios.get('https://api.mymemory.translated.net/get', {
+      // Los feeds que se traducen aquí son principalmente noticias en inglés.
+      params: { q: input, langpair: 'en|es' },
+      timeout: TRANSLATE_TIMEOUT,
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    })
+    const translated = fallback.data?.responseData?.translatedText?.trim()
+    if (fallback.data?.responseStatus === 200 && translated) {
+      if (_translateCache.size >= TRANSLATE_CACHE_MAX) {
+        _translateCache.delete(_translateCache.keys().next().value)
+      }
+      _translateCache.set(input, translated)
+      return translated
+    }
+  } catch (error) {
+    console.warn(`[RSS Traducción] Google y MyMemory no respondieron: ${error.message}`)
   }
   return text
 }
