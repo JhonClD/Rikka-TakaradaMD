@@ -15,7 +15,6 @@ import syntaxerror from 'syntax-error';
 import { format } from 'util';
 import pino from 'pino';
 import Pino from 'pino';
-import { Boom } from '@hapi/boom';
 import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
@@ -158,7 +157,9 @@ async function flushOwnerErrorAlerts() {
   if (ownerErrorAlertFlushRunning) return;
   const target = global.conn;
   const ownerJid = getOwnerErrorJid();
-  if (!target?.sendMessage || !target?.user || !ownerJid) return;
+  // No intentes enviar avisos usando un socket que ya recibió `close`.
+  // En caso contrario cada error de un plugin genera otro error de conexión.
+  if (stopped !== 'open' || target !== global.conn || !target?.sendMessage || !target?.user || !ownerJid) return;
   ownerErrorAlertFlushRunning = true;
   try {
     while (pendingOwnerErrorAlerts.length) {
@@ -243,6 +244,7 @@ const connectionOptions = {
 };
 
 global.conn = makeWASocket(connectionOptions);
+store?.bind(global.conn);
 
 if (methodCode && !state.creds.registered) {
   withPairingGuard(global.conn, {
@@ -356,6 +358,9 @@ fs.watch(dirToWatchccc, (eventType, filename) => {
 
 
 async function connectionUpdate(update) {
+  // Un socket viejo puede emitir eventos durante su cierre. Ignóralos para
+  // evitar que vuelva a programar una reconexión después de crear el nuevo.
+  if (this && this !== global.conn) return;
   const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
@@ -379,7 +384,8 @@ async function connectionUpdate(update) {
     isFirstConnection = true;
     void flushOwnerErrorAlerts();
   }
-  let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+  const reason = lastDisconnect?.error?.output?.statusCode
+    ?? lastDisconnect?.error?.output?.payload?.statusCode;
   const lastErrors = {};
   const errorTimers = {};
   const errorCounters = {};
@@ -473,46 +479,52 @@ global.reloadHandler = async function (restatConn) {
   if (restatConn) {
     if (socketReloadInProgress) return false;
     socketReloadInProgress = true;
-    const oldChats = global.conn.chats;
     const oldConn = global.conn;
     try {
-      oldConn.ev.removeAllListeners();
-      await oldConn.ws?.close?.();
-    } catch { }
-    try {
-      global.conn = makeWASocket(connectionOptions, { chats: oldChats });
+      // El patrón de Yuki es cerrar completamente la instancia anterior.
+      // No reutilizamos su EventEmitter ni sus listeners, porque Baileys puede
+      // emitir eventos tardíos del WebSocket que ya murió.
+      oldConn?.ev?.removeAllListeners?.();
+      try { oldConn?.ws?.close?.(); } catch {}
+      try { oldConn?.end?.(new Error('socket-replaced')); } catch {}
+
+      stopped = 'connecting';
+      global.conn = makeWASocket(connectionOptions);
       store?.bind(global.conn);
       isInit = true;
-    } finally {
+    }
+    finally {
       socketReloadInProgress = false;
     }
   }
+
+  const activeConn = global.conn;
   if (!isInit) {
-    conn.ev.off('messages.upsert', conn.handler);
-    conn.ev.off('group-participants.update', conn.participantsUpdate);
-    conn.ev.off('groups.update', conn.groupsUpdate);
-    conn.ev.off('message.delete', conn.onDelete);
-    conn.ev.off('call', conn.onCall);
-    conn.ev.off('connection.update', conn.connectionUpdate);
-    conn.ev.off('creds.update', conn.credsUpdate);
+    activeConn.ev.off('messages.upsert', activeConn.handler);
+    activeConn.ev.off('group-participants.update', activeConn.participantsUpdate);
+    activeConn.ev.off('groups.update', activeConn.groupsUpdate);
+    activeConn.ev.off('message.delete', activeConn.onDelete);
+    activeConn.ev.off('call', activeConn.onCall);
+    activeConn.ev.off('connection.update', activeConn.connectionUpdate);
+    activeConn.ev.off('creds.update', activeConn.credsUpdate);
   }
 
-  conn.handler = handler.handler.bind(global.conn);
+  activeConn.handler = handler.handler.bind(activeConn);
 
-  conn.participantsUpdate = handler.participantsUpdate.bind(global.conn);
-  conn.groupsUpdate = handler.groupsUpdate.bind(global.conn);
-  conn.onDelete = handler.deleteUpdate.bind(global.conn);
-  conn.onCall = handler.callUpdate.bind(global.conn);
-  conn.connectionUpdate = connectionUpdate.bind(global.conn);
-  conn.credsUpdate = saveCreds.bind(global.conn, true);
+  activeConn.participantsUpdate = handler.participantsUpdate.bind(activeConn);
+  activeConn.groupsUpdate = handler.groupsUpdate.bind(activeConn);
+  activeConn.onDelete = handler.deleteUpdate.bind(activeConn);
+  activeConn.onCall = handler.callUpdate.bind(activeConn);
+  activeConn.connectionUpdate = connectionUpdate.bind(activeConn);
+  activeConn.credsUpdate = saveCreds.bind(activeConn, true);
 
-  conn.ev.on('messages.upsert', conn.handler);
-  conn.ev.on('group-participants.update', conn.participantsUpdate);
-  conn.ev.on('groups.update', conn.groupsUpdate);
-  conn.ev.on('message.delete', conn.onDelete);
-  conn.ev.on('call', conn.onCall);
-  conn.ev.on('connection.update', conn.connectionUpdate);
-  conn.ev.on('creds.update', conn.credsUpdate);
+  activeConn.ev.on('messages.upsert', activeConn.handler);
+  activeConn.ev.on('group-participants.update', activeConn.participantsUpdate);
+  activeConn.ev.on('groups.update', activeConn.groupsUpdate);
+  activeConn.ev.on('message.delete', activeConn.onDelete);
+  activeConn.ev.on('call', activeConn.onCall);
+  activeConn.ev.on('connection.update', activeConn.connectionUpdate);
+  activeConn.ev.on('creds.update', activeConn.credsUpdate);
 
 
   isInit = false;
