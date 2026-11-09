@@ -5,7 +5,6 @@ import axios from 'axios'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
-import { fetchText } from './Hentai-DL.js'
 
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -23,18 +22,17 @@ const isJKAnimeUrl = url => {
 async function request(url, options = {}) {
   if (isJKAnimeUrl(url)) {
     try {
-      if (/\/ajax\//i.test(new URL(url).pathname)) {
-        try {
-          return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers }, timeout: options.timeout || 15000 })
-        } catch (_) { /* Si JKAnime bloquea el acceso directo, probar la cadena de Hentai-DL. */ }
+      const response = await axios.get(url, {
+        ...options,
+        headers: { ...HEADERS, ...options.headers },
+        timeout: options.timeout || 15000,
+      })
+      if (/\/ajax\//i.test(new URL(url).pathname) && typeof response.data === 'string') {
+        try { response.data = JSON.parse(response.data) } catch (_) {}
       }
-      let data = await fetchText(url)
-      if (/\/ajax\//i.test(new URL(url).pathname)) {
-        try { data = JSON.parse(data) } catch (_) {}
-      }
-      return { data, status: 200 }
+      return response
     } catch (err) {
-      const blocked = new Error(`No se pudo acceder a JKAnime ni con la cadena de solicitudes de Hentai-DL: ${err.message}`)
+      const blocked = new Error(`No se pudo acceder a JKAnime: ${err.message}`)
       blocked.code = 'JKANIME_FETCH_FAILED'
       throw blocked
     }
