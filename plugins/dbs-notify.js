@@ -18,6 +18,7 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 const ANIMEDBS_URL          = 'https://www.animedbs.online'
 const DBS_LATINO_CATALOG_URL = `${ANIMEDBS_URL}/anime/?sub=lat&order=update`
+const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
 const DB_DIR = path.join(process.cwd(), 'database')
@@ -42,6 +43,7 @@ const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFir
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
 const DBS_SERVIDORES = new Set(['mega', 'mediafire', 'directo'])
+const ERROR_OWNER_JID = process.env.DBS_ERROR_OWNER_JID || process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -52,6 +54,28 @@ const HEADERS = {
   'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
 }
 
+global.dbsAnimeCoverCache = global.dbsAnimeCoverCache || new Map()
+async function getAniListCover(titulo, slug = '') {
+  const candidates = [titulo, String(slug).replace(/[-_]+/g, ' ')].map(v => String(v || '').trim()).filter(Boolean)
+  const key = candidates[0]?.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim()
+  if (!key) return null
+  if (global.dbsAnimeCoverCache.has(key)) return global.dbsAnimeCoverCache.get(key)
+  const query = `query ($search: String) { Page(perPage: 3) { media(search: $search, type: ANIME) { coverImage { extraLarge large medium } } } }`
+  for (const search of candidates) {
+    try {
+      const response = await axios.post(ANILIST_URL, { query, variables: { search } }, {
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        timeout: 10000,
+      })
+      const media = response.data?.data?.Page?.media || []
+      const cover = media[0]?.coverImage?.extraLarge || media[0]?.coverImage?.large || media[0]?.coverImage?.medium
+      if (cover) { global.dbsAnimeCoverCache.set(key, cover); return cover }
+    } catch (_) {}
+  }
+  global.dbsAnimeCoverCache.set(key, null)
+  return null
+}
+
 // ─── Estado global ────────────────────────────────────────────────────────────
 
 global.dbsActiveChats  = global.dbsActiveChats  || new Map()
@@ -59,7 +83,17 @@ global.dbsEpisodeQueue = global.dbsEpisodeQueue || []
 global.dbsQueueRunning = global.dbsQueueRunning || false
 global.dbsConn         = global.dbsConn         || null
 global.dbsQueuedIds    = global.dbsQueuedIds    || new Set()
-global.dbsCheckingChats = global.dbsCheckingChats || new Set()
+global.dbsChecking = global.dbsChecking || false
+global.dbsGlobalTimer = global.dbsGlobalTimer || null
+
+async function reportDbsError(conn, context, error) {
+  const message = error instanceof Error ? error.message : String(error || 'Error desconocido')
+  console.error(`[dbs-notify] ${context}: ${message}`)
+  if (!conn?.sendMessage) return
+  try {
+    await conn.sendMessage(ERROR_OWNER_JID, { text: `🚨 *Error en DBS Notify*\n📍 *Contexto:* ${context}\n💬 *Mensaje:* ${message}`.slice(0, 4000) })
+  } catch (_) {}
+}
 
 // ─── Persistencia ─────────────────────────────────────────────────────────────
 
@@ -624,8 +658,10 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
         if (!contentRange.startsWith(`bytes ${p.start}-${p.end}/`)) {
           throw new Error(`MediaFire devolvió un rango inesperado: ${contentRange || 'sin Content-Range'}`)
         }
-        res.data.on('data', chunk => reportar(chunk.length))
-        await pipeline(res.data, fs.createWriteStream(p.path))
+        const tracker = new Transform({
+          transform(chunk, _enc, cb) { reportar(chunk.length); cb(null, chunk) },
+        })
+        await pipeline(res.data, tracker, fs.createWriteStream(p.path))
       }))
 
       // Unir las partes en orden
@@ -650,7 +686,8 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
       process.stdout.write('\n')
       for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) {} }
       console.log(`[dbs-notify] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
-      done = 0 // reiniciar contador para el fallback
+      done = 0
+      lastLog = 0
       // sigue abajo al modo de un solo stream
     }
   }
@@ -735,6 +772,7 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
   if (!directUrl) {
     const page = await axios.get(serverUrl, {
       headers: { ...HEADERS, Referer: serverUrl },
+      httpsAgent,
       timeout: 15000,
       maxRedirects: 5,
       responseType: 'text',
@@ -750,8 +788,10 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) 
 // ─── Enviar episodio ──────────────────────────────────────────────────────────
 async function enviarEpisodio(chatId, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl } = ep
+  const recipients = [...new Set((Array.isArray(chatId) ? chatId : [chatId]).filter(Boolean))]
+  if (!recipients.length) throw new Error('No hay chats receptores configurados')
   const esLatino = ep.fuente === 'latino' || ep.idioma === 'latino'
-  const fileName = buildFileName(titulo, epNum, esLatino ? 'latino' : 'dbs')
+  const fileName = buildFileName(titulo, epNum, esLatino ? 'latino' : 'dbs', ep.idioma, ep.slug)
   console.log(`[dbs-notify] 🔎 Buscando servidores para "${titulo}" ep ${epNum}...`)
   const srvs = Array.isArray(ep.servidores)
     ? ep.servidores
@@ -769,10 +809,18 @@ async function enviarEpisodio(chatId, ep, conn) {
   try {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🎙️ Audio: *${esLatino ? 'Latino' : 'Sub Español'}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
-    if (imgUrl) {
-      try { const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data) }) }
-      catch (_) { await conn.sendMessage(chatId, { text: caption }) }
-    } else await conn.sendMessage(chatId, { text: caption })
+    let coverBuffer = null
+    try {
+      const coverUrl = await getAniListCover(titulo, ep.slug) || imgUrl
+      if (coverUrl) {
+        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+        coverBuffer = Buffer.from(imgRes.data)
+      }
+    } catch (_) {}
+    for (const recipient of recipients) {
+      if (coverBuffer) await conn.sendMessage(recipient, { image: coverBuffer })
+      else await conn.sendMessage(recipient, { text: caption })
+    }
     await new Promise(r => setTimeout(r, 15_000))
     let videoPath = null
     let downloadedFileName = fileName
@@ -797,19 +845,29 @@ async function enviarEpisodio(chatId, ep, conn) {
     }
     if (!videoPath) throw new Error('Todos los servidores fallaron')
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
-    const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
-    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName: downloadedFileName, mimetype: 'video/mp4', jpegThumbnail })
-    console.log(`[dbs-notify] 🚀 Enviado: ${fileName} (${sizeMB} MB)`)
+    let jpegThumbnail
+    try { jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath) } catch (_) {}
+    const originalBuffer = fs.readFileSync(videoPath)
+    for (const recipient of recipients) {
+      await conn.sendMessage(recipient, { document: originalBuffer, fileName: downloadedFileName, mimetype: 'video/mp4', jpegThumbnail })
+    }
+    console.log(`[dbs-notify] 🚀 Enviado: ${downloadedFileName} (${sizeMB} MB) a ${recipients.length} chat(s)`)
     const fileName360 = build360FileName(downloadedFileName)
     const video360Path = path.join(tmpDir, fileName360)
     try {
       await compressDw4(videoPath, video360Path, { label: 'DW4 AnimeDBS' })
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
-      await conn.sendMessage(chatId, { document: { url: video360Path }, fileName: fileName360, mimetype: 'video/mp4', jpegThumbnail: jpegThumbnail360 })
+      const video360Buffer = fs.readFileSync(video360Path)
+      for (const recipient of recipients) {
+        await conn.sendMessage(recipient, { document: video360Buffer, fileName: fileName360, mimetype: 'video/mp4', jpegThumbnail: jpegThumbnail360 })
+      }
       console.log(`[dbs-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
     } catch (error) {
       console.error(`[dbs-notify] No se pudo crear o enviar 360p: ${error.message}`)
-      try { await conn.sendMessage(chatId, { text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* fue enviado, pero falló la versión 360p.` }) } catch (_) {}
+      await reportDbsError(conn, `Versión 360p de ${titulo} ep. ${epNum}`, error)
+      for (const recipient of recipients) {
+        try { await conn.sendMessage(recipient, { text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* fue enviado, pero falló la versión 360p.` }) } catch (_) {}
+      }
     }
     return true
   } finally { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {} }
@@ -818,191 +876,171 @@ async function enviarEpisodio(chatId, ep, conn) {
 // ─── Cola ─────────────────────────────────────────────────────────────────────
 
 async function procesarCola() {
-  if (global.dbsQueueRunning) return
-  if (!global.dbsEpisodeQueue.length) return
+  if (global.dbsQueueRunning || !global.dbsEpisodeQueue.length) return
   global.dbsQueueRunning = true
-
-  const MAX_REINTENTOS   = 3
+  const MAX_REINTENTOS = 3
   const ESPERA_REINTENTO = 3 * 60_000
-  const ESPERA_REQUEUEUE = 5 * 60_000
-
+  const ESPERA_REQUEUE = 5 * 60_000
   try {
-    while (global.dbsEpisodeQueue.length > 0) {
+    while (global.dbsEpisodeQueue.length) {
       const item = global.dbsEpisodeQueue[0]
       if (!item) { global.dbsEpisodeQueue.shift(); continue }
-      const { chatId, ep, manual = false } = item
-      const quitarItemActual = () => {
+      const recipients = item.recipients || (item.chatId ? [item.chatId] : [])
+      const activeRecipients = item.manual
+        ? recipients
+        : recipients.filter(chatId => global.dbsActiveChats.has(chatId))
+      const { ep, manual = false } = item
+      const removeItem = () => {
         const index = global.dbsEpisodeQueue.indexOf(item)
         if (index !== -1) global.dbsEpisodeQueue.splice(index, 1)
       }
-      if (!manual && !global.dbsActiveChats.has(chatId)) {
-        quitarItemActual()
-        global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
-        continue
-      }
-      let intentos = 0
-      let exito    = false
-      let omitidoSinServidores = false
+      const clearQueued = () => recipients.forEach(chatId => global.dbsQueuedIds.delete(`${chatId}:${ep.id}`))
+      if (!activeRecipients.length) { removeItem(); clearQueued(); continue }
 
-      while (intentos < MAX_REINTENTOS && !exito) {
-        intentos++
-        if (!manual && !global.dbsActiveChats.has(chatId)) {
-          quitarItemActual()
-          global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
-          break
+      let sent = false
+      for (let attempt = 1; attempt <= MAX_REINTENTOS && !sent; attempt++) {
+        if (!manual && !activeRecipients.some(chatId => global.dbsActiveChats.has(chatId))) {
+          removeItem(); clearQueued(); break
         }
-        const connActivo = global.dbsConn
-        if (!connActivo) {
-          await new Promise(r => setTimeout(r, ESPERA_REINTENTO))
-          continue
-        }
+        const conn = global.dbsConn
+        if (!conn) { await new Promise(resolve => setTimeout(resolve, ESPERA_REINTENTO)); continue }
         try {
-          const enviado = await enviarEpisodio(chatId, ep, connActivo)
-          if (enviado === false) {
-            quitarItemActual()
-            global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
-            omitidoSinServidores = true
-            exito = true
-            break
-          }
-          exito = true
+          const result = await enviarEpisodio(activeRecipients, ep, conn)
+          if (result === false) { removeItem(); clearQueued(); sent = true; break }
           const seen = loadSeen()
-          if (!seen[chatId]) seen[chatId] = []
-          for (const seenId of ep.variantSeenIds || [ep.id]) {
-            if (!seen[chatId].includes(seenId)) seen[chatId].push(seenId)
+          for (const chatId of activeRecipients) {
+            if (!seen[chatId]) seen[chatId] = []
+            for (const seenId of ep.variantSeenIds || [ep.id]) {
+              if (!seen[chatId].includes(seenId)) seen[chatId].push(seenId)
+            }
+            if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
           }
-          if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
           saveSeen(seen)
           const state = loadState()
-          const sentCount = (Number(state[chatId]?.sentCount) || 0) + 1
-          if (state[chatId]) state[chatId].sentCount = sentCount
-          const active = global.dbsActiveChats.get(chatId)
-          if (active) active.sentCount = sentCount
+          for (const chatId of activeRecipients) {
+            const count = (Number(state[chatId]?.sentCount) || 0) + 1
+            if (state[chatId]) state[chatId].sentCount = count
+            const active = global.dbsActiveChats.get(chatId)
+            if (active) active.sentCount = count
+          }
           saveState(state)
-          quitarItemActual()
-          global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
-        } catch (err) {
-          const esConexion = /connection closed|stream errored|timed out|econnreset|econnrefused|socket hang up|precondition required/i.test(err.message)
-          if (esConexion && intentos < MAX_REINTENTOS) {
-            await new Promise(r => setTimeout(r, ESPERA_REINTENTO * intentos))
-          } else if (esConexion) {
-            quitarItemActual()
-            global.dbsEpisodeQueue.push({ chatId, ep, manual })
-            await new Promise(r => setTimeout(r, ESPERA_REQUEUEUE))
-            break
+          removeItem(); clearQueued(); sent = true
+        } catch (error) {
+          const connectionError = /connection closed|stream errored|timed out|econnreset|econnrefused|socket hang up|precondition required/i.test(error.message)
+          if (connectionError && attempt < MAX_REINTENTOS) {
+            await new Promise(resolve => setTimeout(resolve, ESPERA_REINTENTO * attempt))
+          } else if (connectionError) {
+            removeItem()
+            global.dbsEpisodeQueue.push({ recipients, ep, manual })
+            await new Promise(resolve => setTimeout(resolve, ESPERA_REQUEUE))
+            sent = true
           } else {
-            quitarItemActual()
-            global.dbsQueuedIds.delete(`${chatId}:${ep.id}`)
-            try {
-              const connErr = global.dbsConn
-              if (connErr) await connErr.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
-            } catch (_) {}
+            removeItem(); clearQueued()
+            await reportDbsError(conn, `Entrega de ${ep.titulo} ep. ${ep.epNum}`, error)
+            for (const chatId of activeRecipients) {
+              try { await conn.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${error.message}` }) } catch (_) {}
+            }
+            sent = true
           }
         }
       }
-      if (omitidoSinServidores) continue
-      if (global.dbsEpisodeQueue.length > 0) await new Promise(r => setTimeout(r, QUEUE_DELAY))
+      if (global.dbsEpisodeQueue.length) await new Promise(resolve => setTimeout(resolve, QUEUE_DELAY))
     }
-  } catch (fatalErr) {
-    console.error(`[dbs-notify] Error fatal en la cola: ${fatalErr.message}`)
-  } finally {
-    global.dbsQueueRunning = false
-  }
+  } catch (error) {
+    await reportDbsError(global.dbsConn, 'Cola de episodios', error)
+  } finally { global.dbsQueueRunning = false }
 }
 
-async function checkNuevosEpisodios(chatId, conn) {
-  if (global.dbsCheckingChats.has(chatId)) return
-  global.dbsCheckingChats.add(chatId)
-  let lista = []
+async function checkNuevosEpisodiosGlobal(conn) {
+  if (global.dbsChecking) return
+  global.dbsChecking = true
   try {
-    try { lista = await fetchLatestEpisodesDBS() } catch (err) { console.error(`[dbs-notify] AnimeDBS: ${err.message}`) }
-    if (!lista.length) return
-
+    let lista
+    try { lista = await fetchLatestEpisodesDBS() }
+    catch (error) { await reportDbsError(conn, 'Consulta AnimeDBS', error); return }
+    if (!lista.length || !global.dbsActiveChats.size) return
     const seen = loadSeen()
-    if (!global.dbsActiveChats.has(chatId)) return
-    // Primera revisión: establece el punto de partida, pero no envía el
-    // catálogo actual. Así los episodios antiguos nunca se anuncian como nuevos.
-    if (!Array.isArray(seen[chatId])) {
-      seedChatSeen(chatId, lista, seen)
-      console.log(`[dbs-notify] Base inicial creada para ${chatId}: ${seen[chatId].length} episodios.`)
-      return
+    const nuevosPorChat = new Map()
+    for (const chatId of global.dbsActiveChats.keys()) {
+      if (!Array.isArray(seen[chatId]) || !seen[chatId].length) {
+        seedChatSeen(chatId, lista, seen)
+        continue
+      }
+      const nuevos = await seleccionarVersionPreferidaDBS(lista, { seen: seen[chatId], chatId, skipQueued: true })
+      if (nuevos.length) nuevosPorChat.set(chatId, nuevos)
     }
-    if (!seen[chatId].length && lista.length) {
-      seedChatSeen(chatId, lista, seen)
-      console.log(`[dbs-notify] Base inicial vacía reconstruida para ${chatId}; no se enviarán episodios antiguos.`)
-      return
-    }
-    if (!seen[chatId]) seen[chatId] = []
-    const nuevos = await seleccionarVersionPreferidaDBS(lista, {
-      seen: seen[chatId],
-      chatId,
-      skipQueued: true,
-    })
     saveSeen(seen)
-    if (!nuevos.length) return
-
-    for (const ep of nuevos) {
-      global.dbsEpisodeQueue.push({ chatId, ep })
-      global.dbsQueuedIds.add(`${chatId}:${ep.id}`)
+    const grouped = new Map()
+    for (const [chatId, episodes] of nuevosPorChat) {
+      for (const ep of episodes) {
+        if (!grouped.has(ep.id)) grouped.set(ep.id, { ep, recipients: [] })
+        grouped.get(ep.id).recipients.push(chatId)
+      }
     }
-    procesarCola().catch(err => console.error(`[dbs-notify] Error procesando cola: ${err.message}`))
-  } finally {
-    global.dbsCheckingChats.delete(chatId)
-  }
+    for (const { ep, recipients } of grouped.values()) {
+      global.dbsEpisodeQueue.push({ recipients, ep, manual: false })
+      recipients.forEach(chatId => global.dbsQueuedIds.add(`${chatId}:${ep.id}`))
+    }
+    if (grouped.size) procesarCola().catch(error => reportDbsError(global.dbsConn, 'Procesamiento de cola', error))
+  } finally { global.dbsChecking = false }
 }
 
-function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
+async function checkNuevosEpisodios(_chatId, conn) {
+  return checkNuevosEpisodiosGlobal(conn || global.dbsConn)
+}
+
+function iniciarSondeoGlobal(conn, intervalSec, checkNow = false) {
   if (conn) global.dbsConn = conn
-  if (global.dbsActiveChats.has(chatId)) clearInterval(global.dbsActiveChats.get(chatId).timer)
-  intervalSec = Number(intervalSec) || getGlobalIntervalSec()
-  const timer = setInterval(() => {
-    const c = global.dbsConn
-    if (!c) return
-    checkNuevosEpisodios(chatId, c).catch(e => {})
+  if (global.dbsGlobalTimer) clearInterval(global.dbsGlobalTimer)
+  global.dbsGlobalTimer = setInterval(() => {
+    if (global.dbsConn) checkNuevosEpisodiosGlobal(global.dbsConn).catch(error => reportDbsError(global.dbsConn, 'Sondeo global', error))
   }, intervalSec * 1000)
+  if (global.dbsGlobalTimer.unref) global.dbsGlobalTimer.unref()
+  if (checkNow && global.dbsConn) checkNuevosEpisodiosGlobal(global.dbsConn).catch(error => reportDbsError(global.dbsConn, 'Sondeo inicial', error))
+}
+
+function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = false) {
+  if (conn) global.dbsConn = conn
+  intervalSec = Number(intervalSec) || getGlobalIntervalSec()
   const state = loadState()
-  const startedAt = Date.now()
+  const startedAt = state[chatId]?.startedAt || Date.now()
   const sentCount = Number(state[chatId]?.sentCount) || 0
-  global.dbsActiveChats.set(chatId, { timer, intervalSec, startedAt, sentCount })
+  global.dbsActiveChats.set(chatId, { intervalSec, startedAt, sentCount })
   state[chatId] = { intervalSec, startedAt, sentCount }
   saveState(state)
-  // No esperar hasta el siguiente tick: detecta novedades al activar/restaurar.
-  if (checkNow && global.dbsConn) checkNuevosEpisodios(chatId, global.dbsConn).catch(() => {})
+  const interval = Math.min(...[...global.dbsActiveChats.values()].map(entry => entry.intervalSec))
+  iniciarSondeoGlobal(conn, interval, checkNow)
 }
 
 function detenerNotificador(chatId) {
-  const entry = global.dbsActiveChats.get(chatId)
-  if (entry) { clearInterval(entry.timer); global.dbsActiveChats.delete(chatId) }
-  const pendientes = global.dbsEpisodeQueue.filter(item => item.chatId === chatId)
-  global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.chatId !== chatId)
-  for (const item of pendientes) global.dbsQueuedIds.delete(`${chatId}:${item.ep.id}`)
+  global.dbsActiveChats.delete(chatId)
+  for (const item of global.dbsEpisodeQueue) {
+    if (!item.recipients?.includes(chatId)) continue
+    item.recipients = item.recipients.filter(id => id !== chatId)
+    global.dbsQueuedIds.delete(`${chatId}:${item.ep.id}`)
+  }
+  global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.recipients?.length)
   const state = loadState()
   delete state[chatId]
   saveState(state)
+  if (!global.dbsActiveChats.size && global.dbsGlobalTimer) {
+    clearInterval(global.dbsGlobalTimer)
+    global.dbsGlobalTimer = null
+  }
 }
 
 function restaurarNotificadores(conn) {
   const state = loadState()
   for (const [chatId, cfg] of Object.entries(state)) {
-    if (chatId === '__config') continue
-    if (!global.dbsActiveChats.has(chatId)) {
-      iniciarNotificador(chatId, conn, getGlobalIntervalSec())
+    if (chatId !== '__config' && !global.dbsActiveChats.has(chatId)) {
+      iniciarNotificador(chatId, conn, cfg.intervalSec || getGlobalIntervalSec())
     }
   }
 }
 
 if (!global.dbsWatchdog) {
-  global.dbsWatchdog = setInterval(() => {
-    const conn = global.dbsConn
-    if (!conn) return
-    const state = loadState()
-    for (const [chatId, cfg] of Object.entries(state)) {
-      if (chatId === '__config') continue
-      if (!global.dbsActiveChats.has(chatId)) {
-        iniciarNotificador(chatId, conn, getGlobalIntervalSec())
-      }
-    }
-  }, 2 * 60 * 1000)
+  global.dbsWatchdog = setInterval(() => restaurarNotificadores(global.dbsConn), 2 * 60 * 1000)
+  if (global.dbsWatchdog.unref) global.dbsWatchdog.unref()
 }
 let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.dbsConn = conn
@@ -1030,17 +1068,17 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     return m.reply(`🛑 *Notificador detenido*\n\n├ Activo: *${activeTime}*\n└ Avisos enviados: *${sentCount}*\n\n*Usa ${usedPrefix}dbsstart para reactivarlo.*`)
   }
   if (command === 'dbsstatus') {
-    const active = global.dbsActiveChats.has(m.chat); const entry = global.dbsActiveChats.get(m.chat); const cola = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); const vistos = (loadSeen()[m.chat] || []).length
+    const active = global.dbsActiveChats.has(m.chat); const entry = global.dbsActiveChats.get(m.chat); const cola = global.dbsEpisodeQueue.filter(i => i.recipients?.includes(m.chat) || i.chatId === m.chat); const vistos = (loadSeen()[m.chat] || []).length
     let txt = `📡 *Estado AnimeDBS (SUB + LAT)*\n\n${active ? `✅ *Activo* — cada ${formatInterval(entry.intervalSec)}` : '🔴 *Inactivo*'}\n📋 Cola: *${cola.length}* pendiente(s)\n🔵 Procesando: *${global.dbsQueueRunning ? 'Sí' : 'No'}*\n👁️ Vistos: *${vistos}*`
     if (cola.length) txt += `\n\n*En cola:*\n` + cola.slice(0,5).map((i,n) => `  ${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)}`).join('\n')
     return m.reply(txt)
   }
-  if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} [${i.chatId === m.chat ? 'este chat' : 'otro chat'}]`).join('\n') : '✅ Cola vacía.')
-  if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; const removed = global.dbsEpisodeQueue.filter(i => i.chatId === m.chat); global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(i => i.chatId !== m.chat); for (const item of removed) global.dbsQueuedIds.delete(`${item.chatId}:${item.ep.id}`); return m.reply(`🗑️ *${antes - global.dbsEpisodeQueue.length}* episodio(s) eliminado(s).`) }
+  if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} [${i.recipients?.includes(m.chat) ? 'este chat' : 'otro chat'}]`).join('\n') : '✅ Cola vacía.')
+  if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; let removed = 0; for (const item of global.dbsEpisodeQueue) { if (!item.recipients?.includes(m.chat)) continue; item.recipients = item.recipients.filter(id => id !== m.chat); global.dbsQueuedIds.delete(`${m.chat}:${item.ep.id}`); removed++ } global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.recipients?.length); return m.reply(`🗑️ *${removed}* episodio(s) eliminado(s) de este chat.`) }
   if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
-  if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
+  if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.recipients?.includes(m.chat) || i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
   if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }
-  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.'); lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad }); if (!lista.length) return m.reply('❌ No hay enlaces LAT ni SUB disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (LAT preferido; SUB de respaldo 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ chatId:m.chat, ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
+  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.'); lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad }); if (!lista.length) return m.reply('❌ No hay enlaces LAT ni SUB disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (LAT preferido; SUB de respaldo 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ recipients:[m.chat], ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
 }
 handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime','notificaciones']
