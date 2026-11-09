@@ -4,7 +4,7 @@
 
 ### Bot multifunción para WhatsApp basado en Node.js y Baileys
 
-<img src="./src/menu/galaxiaMenu.png" alt="Rikka Takarada" width="720">
+<img src="./src/menu/menu.png" alt="Rikka Takarada" width="720">
 
 <p>
   <img src="https://img.shields.io/badge/Node.js-18%2B-0ea5e9?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 18+">
@@ -210,6 +210,6 @@ Rikka-TakaradaMD/
 
 ### 💙 Hecho con cariño para la comunidad de WhatsApp
 
-<img src="./src/menu/galaxiaMenu.png" alt="Rikka Takarada" width="520">
+<img src="./src/menu/menu.png" alt="Rikka Takarada" width="520">
 
 </div>
