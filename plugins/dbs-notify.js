@@ -88,6 +88,12 @@ function loadSeen()   { return loadJson(SEEN_FILE) }
 function saveSeen(d)  { saveJsonAtomic(SEEN_FILE, d) }
 function loadState()  { return loadJson(STATE_FILE) }
 function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+function seedChatSeen(chatId, lista, seen = {}) {
+  const ids = [...new Set(lista.flatMap(ep => ep.variantSeenIds || [ep.id]))]
+  seen[chatId] = ids.slice(-500)
+  saveSeen(seen)
+  return seen
+}
 function getGlobalIntervalSec() {
   const state = loadState()
   const configured = Number(state.__config?.intervalSec)
@@ -914,6 +920,18 @@ async function checkNuevosEpisodios(chatId, conn) {
 
     const seen = loadSeen()
     if (!global.dbsActiveChats.has(chatId)) return
+    // Primera revisión: establece el punto de partida, pero no envía el
+    // catálogo actual. Así los episodios antiguos nunca se anuncian como nuevos.
+    if (!Array.isArray(seen[chatId])) {
+      seedChatSeen(chatId, lista, seen)
+      console.log(`[dbs-notify] Base inicial creada para ${chatId}: ${seen[chatId].length} episodios.`)
+      return
+    }
+    if (!seen[chatId].length && lista.length) {
+      seedChatSeen(chatId, lista, seen)
+      console.log(`[dbs-notify] Base inicial vacía reconstruida para ${chatId}; no se enviarán episodios antiguos.`)
+      return
+    }
     if (!seen[chatId]) seen[chatId] = []
     const nuevos = await seleccionarVersionPreferidaDBS(lista, {
       seen: seen[chatId],
