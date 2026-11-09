@@ -1,26 +1,25 @@
-import axios    from 'axios'
+import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { lookup as mimeLookup } from 'mime-types'
-import fs        from 'fs'
-import { join }  from 'path'
+import fs from 'fs'
+import { join } from 'path'
 import { tmpdir } from 'os'
 import { pipeline } from 'stream/promises'
-import { Transform } from 'stream'
-import https     from 'https'
-
-// ─── Agente persistente ───────────────────────────────────────────────────────
+import { Transform, PassThrough } from 'stream'
+import https from 'https'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 
-// ─── Cancelaciones activas ────────────────────────────────────────────────────
-
 global.mfActiveDownloads = global.mfActiveDownloads || new Map()
+global.mfUserDownloads = global.mfUserDownloads || new Map()
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const MAX_SIZE = 2 * 1024 ** 3
+const IDLE_TIMEOUT = 60000
+const EDIT_INTERVAL = 3000
 
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
-  if (b >= 1048576)    return (b / 1048576).toFixed(2) + ' MB'
+  if (b >= 1048576) return (b / 1048576).toFixed(2) + ' MB'
   return (b / 1024).toFixed(2) + ' KB'
 }
 
@@ -30,28 +29,73 @@ function progressBar(pct, width = 16) {
 }
 
 function buildStatus(emoji, label, pct, done, total, speed) {
+  if (total > 0) {
+    return (
+      `${emoji} *${label}*\n` +
+      `\`[${progressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
+      `📦 ${fmtBytes(done)} / ${fmtBytes(total)}\n` +
+      `⚡ ${fmtBytes(speed)}/s`
+    )
+  }
   return (
     `${emoji} *${label}*\n` +
-    `\`[${progressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
-    `📦 ${fmtBytes(done)} / ${fmtBytes(total)}\n` +
+    `📦 ${fmtBytes(done)}\n` +
     `⚡ ${fmtBytes(speed)}/s`
   )
 }
 
-// ─── MediaFire scraper ────────────────────────────────────────────────────────
+function sanitize(name) {
+  return name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
+}
+
+function isAbort(e) {
+  return (
+    e?.name === 'AbortError' ||
+    e?.name === 'CanceledError' ||
+    e?.code === 'ERR_CANCELED' ||
+    e?.code === 'ABORT_ERR'
+  )
+}
+
+function createSpeedSampler(windowSize = 5) {
+  const samples = []
+  return {
+    sample(bytes, elapsedMs) {
+      const speed = bytes / (elapsedMs / 1000 || 0.001)
+      samples.push(speed)
+      if (samples.length > windowSize) samples.shift()
+      return samples.reduce((a, b) => a + b, 0) / samples.length
+    }
+  }
+}
+
+function makeWatchdog(controller) {
+  let last = Date.now()
+  const timer = setInterval(() => {
+    if (Date.now() - last > IDLE_TIMEOUT) {
+      controller.abort()
+      clearInterval(timer)
+    }
+  }, 5000)
+  timer.unref?.()
+  return {
+    ping() { last = Date.now() },
+    stop() { clearInterval(timer) }
+  }
+}
 
 async function mediafireDl(url) {
   const res = await axios.get(url, {
-    headers   : { 'User-Agent': 'Mozilla/5.0' },
+    headers: { 'User-Agent': 'Mozilla/5.0' },
     httpsAgent,
-    timeout   : 15000,
+    timeout: 15000,
   })
   const $ = cheerio.load(res.data)
   const link =
     $('#downloadButton').attr('href') ||
     res.data.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/)?.[1]
 
-  if (!link) throw '❌ No se pudo obtener el enlace de descarga de MediaFire.'
+  if (!link) throw new Error('El enlace no es válido o el archivo fue eliminado.')
 
   const name =
     $('.promoDownloadName').first().attr('title') ||
@@ -62,18 +106,13 @@ async function mediafireDl(url) {
   return { name: name.replace(/\s+/g, ' ').trim(), link }
 }
 
-// ─── Handler principal ────────────────────────────────────────────────────────
-
 const handler = async (m, { conn, args, usedPrefix, command }) => {
-  // ── Cancelar descarga activa ───────────────────────────────────────────────
   if (/^(cancelar|stop)$/i.test(command)) {
-    const quotedId = m.quoted?.id
-    if (!quotedId) return m.reply('❌ Responde al mensaje de progreso de la descarga.')
-    const dl = global.mfActiveDownloads.get(quotedId)
-    if (!dl) return m.reply('❌ No hay descarga activa para ese mensaje.')
+    const userKey = m.chat + ':' + m.sender
+    const dl = global.mfActiveDownloads.get(userKey)
+    if (!dl) return m.reply('❌ No hay descarga activa para este chat.')
     dl.controller.abort()
-    global.mfActiveDownloads.delete(quotedId)
-    return m.reply('🚫 *Descarga cancelada.*')
+    return
   }
 
   const url = args[0]
@@ -85,63 +124,90 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     )
   }
 
+  const userKey = m.chat + ':' + m.sender
+  if (global.mfUserDownloads.get(userKey)) {
+    return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
+  }
+
   const controller = new AbortController()
   const { signal } = controller
   let tempPath
+  let watchdog
+  let statusKey
 
-  const { key: statusKey } = await m.reply('🔄 _Obteniendo información del archivo..._')
-  const editStatus = txt => conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+  const statusMsg = await conn.sendMessage(m.chat, {
+    text: '🔄 _Obteniendo información del archivo..._',
+  })
+  statusKey = statusMsg.key
+
+  const editStatus = async (txt) => {
+    try {
+      await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+    } catch {}
+  }
 
   try {
     const mfData = await mediafireDl(url)
 
-    // Obtener tamaño real con HEAD
-    const head = await axios.head(mfData.link, {
-      headers   : { 'User-Agent': 'Mozilla/5.0' },
-      httpsAgent,
-      signal,
-      timeout   : 10000,
-    })
-    const sizeBytes = parseInt(head.headers['content-length'] || '0')
+    let sizeBytes = 0
+    try {
+      const head = await axios.head(mfData.link, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        httpsAgent,
+        signal,
+        timeout: 10000,
+      })
+      sizeBytes = parseInt(head.headers['content-length'] || '0') || 0
+    } catch (e) {
+      if (isAbort(e)) throw e
+    }
+
+    if (sizeBytes > MAX_SIZE) {
+      await editStatus(`❌ El archivo (${fmtBytes(sizeBytes)}) supera el límite de WhatsApp (2 GB).`)
+      return
+    }
 
     await editStatus(
       `🔥 *${mfData.name}*\n` +
-      `⚖️ ${fmtBytes(sizeBytes)}\n` +
+      (sizeBytes > 0 ? `⚖️ ${fmtBytes(sizeBytes)}\n` : '⚖️ _Tamaño desconocido_\n') +
       `🔄 _Iniciando descarga..._\n` +
-      `_Responde este mensaje con_ *.cancelar* _para detener._`
+      `_Usa_ *.cancelar* _para detener._`
     )
 
-    global.mfActiveDownloads.set(statusKey.id, { controller })
+    global.mfActiveDownloads.set(userKey, { controller })
+    global.mfUserDownloads.set(userKey, true)
 
-    // ── Descarga con progreso ─────────────────────────────────────────────
-    tempPath = join(tmpdir(), `mf_${Date.now()}_${mfData.name.replace(/[/\\:*?"<>|]/g, '_')}`)
+    tempPath = join(tmpdir(), `mf_${Date.now()}_${sanitize(mfData.name)}`)
 
     const response = await axios({
-      method      : 'get',
-      url         : mfData.link,
+      method: 'get',
+      url: mfData.link,
       responseType: 'stream',
       signal,
       httpsAgent,
-      timeout     : 0,
+      timeout: 0,
     })
+
+    watchdog = makeWatchdog(controller)
 
     let dlBytes = 0
     const dlStart = Date.now()
     let lastWAUpdate = 0
+    const dlSampler = createSpeedSampler()
 
     const dlStream = new Transform({
       transform(chunk, _, cb) {
         dlBytes += chunk.length
-        const now   = Date.now()
-        const secs  = (now - dlStart) / 1000 || 0.001
-        const speed = dlBytes / secs
-        const pct   = sizeBytes > 0 ? (dlBytes / sizeBytes) * 100 : 0
+        watchdog.ping()
+        const now = Date.now()
+        const speed = dlSampler.sample(dlBytes, now - dlStart)
+        const pct = sizeBytes > 0 ? (dlBytes / sizeBytes) * 100 : 0
 
         process.stdout.write(
           `\r[MediaFire] 📥 ${pct.toFixed(1)}% | ${fmtBytes(dlBytes)} | ${fmtBytes(speed)}/s`
         )
 
-        if (now - lastWAUpdate > 3000) {
+        if (now - lastWAUpdate > EDIT_INTERVAL) {
           lastWAUpdate = now
           editStatus(buildStatus('📥', 'Descargando de MediaFire', pct, dlBytes, sizeBytes, speed))
         }
@@ -150,29 +216,30 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     })
 
     await pipeline(response.data, dlStream, fs.createWriteStream(tempPath), { signal })
+    watchdog.stop()
+    watchdog = null
     console.log(`\n[MediaFire] ✅ Descarga completa: ${mfData.name}`)
 
-    // ── Subida con progreso ───────────────────────────────────────────────
     await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
 
     const realSize = fs.statSync(tempPath).size
-    let upBytes  = 0
+    let upBytes = 0
     const upStart = Date.now()
-    let lastUpWA  = 0
+    let lastUpWA = 0
+    const upSampler = createSpeedSampler()
 
     const upStream = new Transform({
       transform(chunk, _, cb) {
         upBytes += chunk.length
-        const now   = Date.now()
-        const secs  = (now - upStart) / 1000 || 0.001
-        const speed = upBytes / secs
-        const pct   = (upBytes / realSize) * 100
+        const now = Date.now()
+        const speed = upSampler.sample(upBytes, now - upStart)
+        const pct = realSize > 0 ? (upBytes / realSize) * 100 : 0
 
         process.stdout.write(
           `\r[MediaFire] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(realSize)} | ${fmtBytes(speed)}/s`
         )
 
-        if (now - lastUpWA > 3000) {
+        if (now - lastUpWA > EDIT_INTERVAL) {
           lastUpWA = now
           editStatus(buildStatus('📤', 'Subiendo a WhatsApp', pct, upBytes, realSize, speed))
         }
@@ -180,39 +247,46 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       },
     })
 
-    const readStream = fs.createReadStream(tempPath).pipe(upStream)
+    const pass = new PassThrough()
+    pipeline(fs.createReadStream(tempPath), upStream, pass).catch(err => pass.destroy(err))
 
-    await conn.sendMessage(m.chat, {
-      document : { stream: readStream },
-      fileName : mfData.name,
-      mimetype : mimeLookup(mfData.name) || 'application/octet-stream',
-      caption  :
-        `✅ *${mfData.name}*\n` +
-        `⚖️ *Tamaño:* ${fmtBytes(realSize)}\n` +
-        `🚀 _Enviado con éxito._`,
-    }, { quoted: m })
+    await conn.sendMessage(
+      m.chat,
+      {
+        document: { stream: pass },
+        fileName: mfData.name,
+        mimetype: mimeLookup(mfData.name) || 'application/octet-stream',
+        caption:
+          `✅ *${mfData.name}*\n` +
+          `⚖️ *Tamaño:* ${fmtBytes(realSize)}\n` +
+          `🚀 _Enviado con éxito._`,
+      },
+      { quoted: m }
+    )
 
     console.log(`\n[MediaFire] 🚀 Enviado a ${m.sender}`)
     await editStatus('✅ *¡Listo!* Archivo enviado correctamente.')
-    global.mfActiveDownloads.delete(statusKey.id)
-
   } catch (e) {
-    if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') {
+    if (isAbort(e)) {
       console.log('\n[MediaFire] 🛑 Descarga cancelada.')
+      await editStatus('🚫 *Descarga cancelada.*')
     } else {
       const msg = typeof e === 'string' ? e : `❌ *Error:* ${e.message}`
       await editStatus(msg)
       console.error('\n[MediaFire ERROR]', e)
     }
-    global.mfActiveDownloads.delete(statusKey?.id)
   } finally {
-    if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+    if (watchdog) watchdog.stop()
+    global.mfActiveDownloads.delete(userKey)
+    global.mfUserDownloads.delete(userKey)
+    if (tempPath && fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath) } catch {}
+    }
   }
 }
 
-handler.help    = ['mediafire <enlace>', 'mf <enlace>']
-handler.tags    = ['downloader']
+handler.help = ['mediafire <enlace>', 'mf <enlace>']
+handler.tags = ['downloader']
 handler.command = /^(mediafire|mf|cancelar|stop)$/i
 
 export default handler
-      
