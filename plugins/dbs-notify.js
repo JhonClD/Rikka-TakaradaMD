@@ -770,7 +770,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🎙️ Audio: *${esLatino ? 'Latino' : 'Sub Español'}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
     if (imgUrl) {
-      try { const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption }) }
+      try { const imgRes = await axios.get(imgUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data) }) }
       catch (_) { await conn.sendMessage(chatId, { text: caption }) }
     } else await conn.sendMessage(chatId, { text: caption })
     await new Promise(r => setTimeout(r, 15_000))
