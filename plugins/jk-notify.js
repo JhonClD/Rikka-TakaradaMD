@@ -5,7 +5,7 @@ import axios from 'axios'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
-
+import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const HEADERS = {
@@ -51,7 +51,19 @@ async function request(url, options = {}) {
 }
 function zeroPad(n) { return String(n).padStart(2, '0') }
 function safeFile(s) { return s.replace(/[/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
-function buildFileName(titulo, epNum) { return `${zeroPad(epNum)} ${safeFile(titulo)}.mp4` }
+function cleanTitle(titulo, epNum) {
+  return String(titulo || '')
+    .replace(new RegExp(`^\\s*(?:episodio|cap[ií]tulo|capitulo)\\s*0?${Number(epNum)}\\s*[-–—:]?\\s*`, 'i'), '')
+    .replace(new RegExp(`\\s*[-–—:]?\\s*${Number(epNum)}\\s*$`), '')
+    .replace(/\s*(?:(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)(?:st|nd|rd|th|ª|º)?\s*)?(?:temporada|season)\s*[-_: ]*\s*(?:\d+|VIII|VII|VI|IX|IV|V|III|II|X|I)?/ig, '')
+    .replace(/\s*(?:sub\s+)?español(?:\s+(?:latino|castellano|de\s+españa))?\s*(?:🇲🇽|🇪🇸)?/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function buildFileName(titulo, epNum, slug = '') {
+  const title = cleanTitle(titulo || slug.replace(/[-_]+/g, ' '), epNum)
+  return `${zeroPad(epNum)} ${safeFile(title)} Sub Español (720p) [[JK]].mp4`
+}
 function detectarServNombre(url) {
   const u = url.toLowerCase()
   if (u.includes('mediafire')) return 'mediafire'
@@ -282,16 +294,20 @@ async function descargarEmbed(embedUrl, outputDir, fileName, referer = 'https://
 }
 
 const JKANIME_URL = 'https://jkanime.net'
-const SEEN_FILE = path.join(process.env.TMPDIR || '/tmp', 'jk_seen.json')
-const STATE_FILE = path.join(process.env.TMPDIR || '/tmp', 'jk_state.json')
+const DB_DIR = path.join(process.cwd(), 'database')
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
+const SEEN_FILE = path.join(DB_DIR, 'jkanime_seen.json')
+const STATE_FILE = path.join(DB_DIR, 'jkanime_state.json')
 const CHECK_INTERVAL_DEFAULT = 10
 const QUEUE_DELAY = 90_000
 const DL_TIMEOUT = 3 * 60 * 60 * 1000
-
+const ANILIST_URL = 'https://graphql.anilist.co'
 global.jkActiveChats = global.jkActiveChats || new Map()
 global.jkEpisodeQueue = global.jkEpisodeQueue || []
 global.jkQueueRunning = global.jkQueueRunning || false
 global.jkConn = global.jkConn || null
+global.jkQueuedIds = global.jkQueuedIds || new Set()
+global.jkCoverCache = global.jkCoverCache || new Map()
 
 async function fetchLatestEpisodesJK() {
   const { data } = await request(JKANIME_URL, { timeout: 15000 })
@@ -422,27 +438,69 @@ async function scrapeServidoresJK(epUrl) {
   return srvs
 }
 
-function loadSeen() { try { return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf-8')) } catch (_) { return {} } }
-function saveSeen(d) { try { fs.writeFileSync(SEEN_FILE, JSON.stringify(d, null, 2)) } catch (_) {} }
-function loadState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) } catch (_) { return {} } }
-function saveState(d) { try { fs.writeFileSync(STATE_FILE, JSON.stringify(d, null, 2)) } catch (_) {} }
+function loadJson(file, fallback = {}) {
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    return value && typeof value === 'object' ? value : fallback
+  } catch (_) { return fallback }
+}
+function saveJsonAtomic(file, data) {
+  const tempFile = `${file}.tmp-${process.pid}`
+  try {
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2))
+    fs.renameSync(tempFile, file)
+  } catch (_) { try { fs.unlinkSync(tempFile) } catch (_) {} }
+}
+function loadSeen() { return loadJson(SEEN_FILE) }
+function saveSeen(d) { saveJsonAtomic(SEEN_FILE, d) }
+function loadState() { return loadJson(STATE_FILE) }
+function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+
+async function getAniListCover(titulo, slug = '') {
+  const candidates = [titulo, slug.replace(/[-_]+/g, ' ')].map(v => String(v || '').trim()).filter(Boolean)
+  const key = candidates[0]?.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  if (!key) return null
+  if (global.jkCoverCache.has(key)) return global.jkCoverCache.get(key)
+  const query = `query ($search: String) { Page(perPage: 3) { media(search: $search, type: ANIME) { coverImage { extraLarge large medium } } } }`
+  for (const search of candidates) {
+    try {
+      const response = await axios.post(ANILIST_URL, { query, variables: { search } }, {
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        timeout: 10000,
+      })
+      const media = response.data?.data?.Page?.media || []
+      const cover = media[0]?.coverImage?.extraLarge || media[0]?.coverImage?.large || media[0]?.coverImage?.medium
+      if (cover) { global.jkCoverCache.set(key, cover); return cover }
+    } catch (_) {}
+  }
+  global.jkCoverCache.set(key, null)
+  return null
+}
 
 async function enviarEpisodio(chatId, ep, conn) {
-  const { titulo, epNum, epUrl, imgUrl } = ep
-  const fileName = buildFileName(titulo, epNum)
-  const tmpDir = path.join(process.env.TMPDIR || '/tmp', `jk_${Date.now()}`)
+  const { titulo, epNum, epUrl, imgUrl, slug = '' } = ep
+  const fileName = buildFileName(titulo, epNum, slug)
+  const tmpRoot = path.join(process.cwd(), 'temp_videos')
+  if (!fs.existsSync(tmpRoot)) fs.mkdirSync(tmpRoot, { recursive: true })
+  const tmpDir = path.join(tmpRoot, `jk_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   const bandera = '🇯🇵'
   const etiqueta = 'JKAnime 🇯🇵'
   try {
-    const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
-    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
-    if (imgUrl) {
-      try { const imgRes = await request(imgUrl, { responseType: 'arraybuffer', timeout: 10000 }); await conn.sendMessage(chatId, { image: Buffer.from(imgRes.data), caption }) }
-      catch (_) { await conn.sendMessage(chatId, { text: caption }) }
-    } else await conn.sendMessage(chatId, { text: caption })
     const srvs = await scrapeServidoresJK(epUrl)
     if (!srvs.length) throw new Error('No se encontraron servidores de video')
+    let coverBuffer = null
+    try {
+      const coverUrl = await getAniListCover(titulo, slug) || imgUrl
+      if (coverUrl) {
+        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+        coverBuffer = Buffer.from(imgRes.data)
+      }
+    } catch (err) { console.warn(`[jk-notify] No se pudo obtener la portada de ${titulo}: ${err.message}`) }
+    const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()
+    const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
+    if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
+    else await conn.sendMessage(chatId, { text: caption })
     await new Promise(r => setTimeout(r, 15_000))
     let videoPath = null
     for (const srv of ordenarServidores(srvs).slice(0, 5)) {
@@ -457,7 +515,17 @@ async function enviarEpisodio(chatId, ep, conn) {
     }
     if (!videoPath) throw new Error('Todos los servidores fallaron')
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
-    await conn.sendMessage(chatId, { document: { url: videoPath }, fileName, mimetype: 'video/mp4', caption: `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}` })
+    const videoBuffer = fs.readFileSync(videoPath)
+    let jpegThumbnail
+    try { jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath) } catch (_) {}
+    await conn.sendMessage(chatId, {
+      document: videoBuffer,
+      fileName,
+      mimetype: 'video/mp4',
+      jpegThumbnail,
+      caption: `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeMB} MB · ${etiqueta}`,
+    })
+    console.log(`[jk-notify] 🚀 Enviado como documento: ${fileName}`)
   } finally { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {} }
 }
 
@@ -473,11 +541,25 @@ async function procesarCola() {
       for (let intento = 1; intento <= 3 && !ok; intento++) {
         const conn = global.jkConn
         if (!conn) { await new Promise(r => setTimeout(r, 180_000)); continue }
-        try { await enviarEpisodio(chatId, ep, conn); ok = true; global.jkEpisodeQueue.shift() }
+        try {
+          await enviarEpisodio(chatId, ep, conn)
+          ok = true
+          global.jkEpisodeQueue.shift()
+          global.jkQueuedIds.delete(`${chatId}:${ep.id}`)
+          const seen = loadSeen()
+          if (!seen[chatId]) seen[chatId] = []
+          if (!seen[chatId].includes(ep.id)) seen[chatId].push(ep.id)
+          if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
+          saveSeen(seen)
+        }
         catch (err) {
           if (intento < 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) await new Promise(r => setTimeout(r, intento * 180_000))
           else if (intento === 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) { global.jkEpisodeQueue.shift(); global.jkEpisodeQueue.push(item); await new Promise(r => setTimeout(r, 300_000)) }
-          else { global.jkEpisodeQueue.shift(); try { await global.jkConn?.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` }) } catch (_) {} }
+          else {
+            global.jkEpisodeQueue.shift()
+            global.jkQueuedIds.delete(`${chatId}:${ep.id}`)
+            try { await global.jkConn?.sendMessage(chatId, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` }) } catch (_) {}
+          }
         }
       }
       if (global.jkEpisodeQueue.length) await new Promise(r => setTimeout(r, QUEUE_DELAY))
@@ -490,13 +572,13 @@ async function checkNuevosEpisodios(chatId, conn) {
   try { lista = await fetchLatestEpisodesJK() } catch (_) { return }
   if (!lista.length) return
   const seen = loadSeen(); if (!seen[chatId]) seen[chatId] = []
-  const nuevos = lista.filter(e => !seen[chatId].includes(e.id))
+  const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.jkQueuedIds.has(`${chatId}:${e.id}`))
   if (!nuevos.length) return
-  for (const ep of nuevos) seen[chatId].push(ep.id)
-  if (seen[chatId].length > 500) seen[chatId] = seen[chatId].slice(-500)
-  saveSeen(seen)
   if (nuevos.length > 1) try { await conn.sendMessage(chatId, { text: `📋 *${nuevos.length} episodios nuevos detectados*\n\n` + nuevos.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} [🇯🇵 JKAnime]`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._' }) } catch (_) {}
-  for (const ep of nuevos) global.jkEpisodeQueue.push({ chatId, ep })
+  for (const ep of nuevos) {
+    global.jkEpisodeQueue.push({ chatId, ep })
+    global.jkQueuedIds.add(`${chatId}:${ep.id}`)
+  }
   procesarCola().catch(() => {})
 }
 function iniciarNotificador(chatId, conn, intervalMin = CHECK_INTERVAL_DEFAULT) {
@@ -527,7 +609,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (command === 'jkunblock') { const estaba = global.jkQueueRunning; global.jkQueueRunning = false; procesarCola().catch(() => {}); return m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.`) }
   if (command === 'jkcheck') { await m.reply('🔍 Chequeando JKAnime...'); const antes = global.jkEpisodeQueue.length; await checkNuevosEpisodios(m.chat, conn); if (global.jkEpisodeQueue.length === antes) await m.reply('✅ Sin episodios nuevos.'); return }
   if (command === 'jkinterval') { const min = parseInt(text?.trim()); if (isNaN(min) || min < 5 || min > 60) return m.reply(`❌ Número entre *5* y *60*.\nEj: ${usedPrefix}jkinterval 15`); if (!global.jkActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}jkstart* primero.`); iniciarNotificador(m.chat, conn, min); return m.reply(`⏱️ Intervalo actualizado a *${min} minutos*.`) }
-  if (command === 'jkexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *JKAnime*...`); let lista; try { lista = await fetchLatestEpisodesJK() } catch (err) { return m.reply(`❌ Error: ${err.message}`) } if (!lista.length) return m.reply('❌ Sin episodios disponibles.'); const seleccion = lista.slice(0, cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (JKAnime 🇯🇵):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) global.jkEpisodeQueue.push({ chatId: m.chat, ep }); procesarCola().catch(() => {}); return }
+  if (command === 'jkexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *JKAnime*...`); let lista; try { lista = await fetchLatestEpisodesJK() } catch (err) { return m.reply(`❌ Error: ${err.message}`) } if (!lista.length) return m.reply('❌ Sin episodios disponibles.'); const seleccion = lista.slice(0, cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (JKAnime 🇯🇵):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)}`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { if (!global.jkQueuedIds.has(`${m.chat}:${ep.id}`)) { global.jkEpisodeQueue.push({ chatId: m.chat, ep }); global.jkQueuedIds.add(`${m.chat}:${ep.id}`) } } procesarCola().catch(() => {}); return }
 }
 handler.command = /^(?:jkstart|jkstop|jkstatus|jkcheck|jkqueue|jkflush|jkunblock|jkinterval|jkexample)$/i
 handler.tags = ['anime', 'notificaciones']
