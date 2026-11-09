@@ -269,25 +269,6 @@ function episodeAgeSeconds(text) {
   return amount * 31536000
 }
 
-function seriesKey(titulo, epNum) {
-  return cleanTitle(String(titulo || ''), epNum)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-}
-
-function keepCurrentSeasons(lista) {
-  const maxSeasonBySeries = new Map()
-  for (const ep of lista) {
-    const key = ep.seriesKey || seriesKey(ep.titulo, ep.epNum)
-    const current = maxSeasonBySeries.get(key) || 1
-    maxSeasonBySeries.set(key, Math.max(current, Number(ep.season) || 1))
-  }
-  return lista.filter(ep => (Number(ep.season) || 1) >= (maxSeasonBySeries.get(ep.seriesKey) || 1))
-}
-
 function buildFileName(titulo, epNum, fuente = 'dbs', idioma = 'latino', slug = '') {
   const season = getSeasonNumber(titulo, slug)
   const seasonLabel = season > 1 ? `T${season} ` : ''
@@ -333,8 +314,6 @@ async function fetchLatestEpisodesDBS() {
     lista.push({
       id, slug, titulo, epNum: number, epUrl, imgUrl,
       fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub',
-      season: getSeasonNumber(titulo, slug),
-      seriesKey: seriesKey(titulo, number),
       ageSeconds,
     })
   }
@@ -365,9 +344,8 @@ async function fetchLatestEpisodesDBS() {
   // No usamos el catálogo /anime/?sub=lat como fuente principal: puede poner
   // doblajes recientes de temporadas antiguas por delante de la temporada vigente.
 
-  const vigentes = keepCurrentSeasons(lista)
   const gruposPorEpisodio = new Map()
-  for (const ep of vigentes) {
+  for (const ep of lista) {
     const key = `${ep.epUrl}:${ep.epNum}`
     if (!gruposPorEpisodio.has(key)) gruposPorEpisodio.set(key, [])
     gruposPorEpisodio.get(key).push(ep)
@@ -377,15 +355,12 @@ async function fetchLatestEpisodesDBS() {
       const ageA = Math.min(...a.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
       const ageB = Math.min(...b.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
       if (ageA !== ageB) return ageA - ageB
-      const seasonA = Math.max(...a.map(ep => Number(ep.season) || 1))
-      const seasonB = Math.max(...b.map(ep => Number(ep.season) || 1))
-      if (seasonA !== seasonB) return seasonB - seasonA
       return Math.max(...a.map(ep => ep.epNum)) - Math.max(...b.map(ep => ep.epNum))
     })
     .flatMap(grupo => grupo.sort((a, b) => (a.idioma === 'latino' ? 0 : 1) - (b.idioma === 'latino' ? 0 : 1)))
   lista.splice(0, lista.length, ...priorizados)
 
-  console.log(`[dbs-notify] ${lista.length} episodios recientes detectados desde la portada general (temporadas vigentes; SUB + LAT)`)
+  console.log(`[dbs-notify] ${lista.length} episodios recientes detectados desde la portada general (SUB + LAT)`)
   return lista
 }
 
