@@ -1,15 +1,20 @@
-import fetch    from 'node-fetch'
-import fs       from 'fs'
-import path     from 'path'
-import os       from 'os'
-import { pipeline }  from 'stream/promises'
-import { Transform } from 'stream'
+import fetch from 'node-fetch'
+import fs from 'fs'
+import path from 'path'
+import os from 'os'
+import { pipeline } from 'stream/promises'
+import { Transform, PassThrough } from 'stream'
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+global.gdActiveDownloads = global.gdActiveDownloads || new Map()
+global.gdUserDownloads = global.gdUserDownloads || new Map()
+
+const MAX_SIZE = 2 * 1024 ** 3
+const IDLE_TIMEOUT = 60000
+const EDIT_INTERVAL = 3000
 
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
-  if (b >= 1048576)    return (b / 1048576).toFixed(2) + ' MB'
+  if (b >= 1048576) return (b / 1048576).toFixed(2) + ' MB'
   return (b / 1024).toFixed(2) + ' KB'
 }
 
@@ -19,108 +24,203 @@ function progressBar(pct, width = 16) {
 }
 
 function buildStatus(emoji, label, pct, done, total, speed) {
+  if (total > 0) {
+    return (
+      `${emoji} *${label}*\n` +
+      `\`[${progressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
+      `📦 ${fmtBytes(done)} / ${fmtBytes(total)}\n` +
+      `⚡ ${fmtBytes(speed)}/s`
+    )
+  }
   return (
     `${emoji} *${label}*\n` +
-    `\`[${progressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
-    `📦 ${fmtBytes(done)} / ${fmtBytes(total)}\n` +
+    `📦 ${fmtBytes(done)}\n` +
     `⚡ ${fmtBytes(speed)}/s`
   )
 }
 
-// ─── Google Drive API ─────────────────────────────────────────────────────────
+function sanitize(name) {
+  return name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
+}
 
-async function gdriveDl(url) {
-  if (!url?.match(/drive\.google/i)) throw '❌ URL no válida de Google Drive.'
+function isAbort(e) {
+  return (
+    e?.name === 'AbortError' ||
+    e?.name === 'CanceledError' ||
+    e?.code === 'ERR_CANCELED' ||
+    e?.code === 'ABORT_ERR' ||
+    e?.type === 'aborted' ||
+    e?.message === 'Aborted'
+  )
+}
+
+function createSpeedSampler(windowSize = 5) {
+  const samples = []
+  return {
+    sample(bytes, elapsedMs) {
+      const speed = bytes / (elapsedMs / 1000 || 0.001)
+      samples.push(speed)
+      if (samples.length > windowSize) samples.shift()
+      return samples.reduce((a, b) => a + b, 0) / samples.length
+    }
+  }
+}
+
+function makeWatchdog(controller) {
+  let last = Date.now()
+  const timer = setInterval(() => {
+    if (Date.now() - last > IDLE_TIMEOUT) {
+      controller.abort()
+      clearInterval(timer)
+    }
+  }, 5000)
+  timer.unref?.()
+  return {
+    ping() { last = Date.now() },
+    stop() { clearInterval(timer) }
+  }
+}
+
+function parseGDriveError(e) {
+  const msg = e?.message || String(e)
+  if (msg.includes('quota') || msg.includes('Too many')) return '❌ Límite de descarga de Google Drive alcanzado. Intenta más tarde.'
+  if (msg.includes('404') || msg.includes('notFound')) return '❌ Archivo no encontrado en Google Drive.'
+  if (msg.includes('403') || msg.includes('private') || msg.includes('permission')) return '❌ El archivo es privado o no tienes permiso.'
+  return `❌ Error de Google Drive: ${msg}`
+}
+
+async function gdriveDl(url, signal) {
+  if (!url?.match(/drive\.google/i)) throw new Error('URL no válida de Google Drive.')
 
   const idMatch = url.match(/\/d\/(.*?)\//) || url.match(/[?&]id=([^&]+)/)
   const id = idMatch?.[1]
-  if (!id) throw '❌ No se pudo extraer el ID del archivo.'
+  if (!id) throw new Error('No se pudo extraer el ID del archivo.')
 
   const res = await fetch(`https://drive.google.com/uc?id=${id}&authuser=0&export=download`, {
-    method : 'post',
+    method: 'post',
+    signal,
     headers: {
-      'accept-encoding' : 'gzip, deflate, br',
-      'content-length'  : '0',
-      'Content-Type'    : 'application/x-www-form-urlencoded;charset=UTF-8',
-      'origin'          : 'https://drive.google.com',
-      'user-agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      'accept-encoding': 'gzip, deflate, br',
+      'content-length': '0',
+      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      'origin': 'https://drive.google.com',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
       'x-drive-first-party': 'DriveWebUi',
       'x-json-requested': 'true',
     },
   })
 
   const raw = await res.text()
-  const { fileName, sizeBytes, downloadUrl } = JSON.parse(raw.slice(4))
+  let parsed
+  try {
+    parsed = JSON.parse(raw.slice(4))
+  } catch {
+    throw new Error('Respuesta inválida de Google Drive. Verifica el enlace.')
+  }
 
-  if (!downloadUrl) throw '❌ Límite de descarga alcanzado o el archivo es privado.'
+  const { fileName, sizeBytes, downloadUrl } = parsed || {}
+  if (!downloadUrl) throw new Error('Límite de descarga alcanzado o el archivo es privado.')
 
-  const head = await fetch(downloadUrl, { method: 'HEAD' })
-  if (!head.ok) throw `❌ Error HTTP al verificar el archivo: ${head.statusText}`
+  const head = await fetch(downloadUrl, { method: 'HEAD', signal })
+  if (!head.ok) throw new Error(`Error HTTP al verificar el archivo: ${head.statusText}`)
 
   return {
     downloadUrl,
-    fileName,
-    sizeBytes : Number(sizeBytes),
-    mimetype  : head.headers.get('content-type') || 'application/octet-stream',
+    fileName: fileName || 'archivo',
+    sizeBytes: Number(sizeBytes) || 0,
+    mimetype: head.headers.get('content-type') || 'application/octet-stream',
   }
 }
 
-// ─── Handler principal ────────────────────────────────────────────────────────
-
 const handler = async (m, { conn, args, usedPrefix, command }) => {
+  if (/^(cancelar|stop)$/i.test(command)) {
+    const userKey = m.chat + ':' + m.sender
+    const dl = global.gdActiveDownloads.get(userKey)
+    if (!dl) return m.reply('❌ No hay descarga activa para este chat.')
+    dl.controller.abort()
+    return
+  }
+
   if (!args[0]) {
     throw (
       `📁 *Google Drive Downloader*\n\n` +
       `Envía el enlace del archivo de Google Drive.\n` +
-      `_Ej: ${usedPrefix + command} https://drive.google.com/file/d/XXXXX/view_`
+      `_Ej: ${usedPrefix + command} https://drive.google.com/file/d/XXXXX/view_\n\n` +
+      `Para cancelar, envía *.cancelar*`
     )
   }
 
-  const LIMIT_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
-  let tempPath
+  const userKey = m.chat + ':' + m.sender
+  if (global.gdUserDownloads.get(userKey)) {
+    return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
+  }
 
-  // Mensaje de estado editable
-  const { key: statusKey } = await m.reply('🔄 _Obteniendo información del archivo..._')
-  const editStatus = txt => conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+  const controller = new AbortController()
+  const { signal } = controller
+  let tempPath
+  let watchdog
+  let statusKey
+
+  const statusMsg = await conn.sendMessage(m.chat, {
+    text: '🔄 _Obteniendo información del archivo..._',
+  })
+  statusKey = statusMsg.key
+
+  const editStatus = async (txt) => {
+    try {
+      await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+    } catch {}
+  }
 
   try {
-    const info = await gdriveDl(args[0])
+    let info
+    try {
+      info = await gdriveDl(args[0], signal)
+    } catch (err) {
+      if (isAbort(err)) throw err
+      throw parseGDriveError(err)
+    }
 
-    if (info.sizeBytes > LIMIT_BYTES) {
-      throw `❌ El archivo es demasiado grande (${fmtBytes(info.sizeBytes)}). Límite: 2 GB.`
+    if (info.sizeBytes > MAX_SIZE) {
+      await editStatus(`❌ El archivo (${fmtBytes(info.sizeBytes)}) supera el límite de WhatsApp (2 GB).`)
+      return
     }
 
     await editStatus(
       `📁 *${info.fileName}*\n` +
-      `⚖️ ${fmtBytes(info.sizeBytes)}\n` +
-      `🔄 _Iniciando descarga..._`
+      (info.sizeBytes > 0 ? `⚖️ ${fmtBytes(info.sizeBytes)}\n` : '⚖️ _Tamaño desconocido_\n') +
+      `🔄 _Iniciando descarga..._\n` +
+      `_Usa_ *.cancelar* _para detener._`
     )
 
-    // ── Descarga con progreso ───────────────────────────────────────────────
-    tempPath = path.join(os.tmpdir(), `gdrive_${Date.now()}_${info.fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
+    global.gdActiveDownloads.set(userKey, { controller })
+    global.gdUserDownloads.set(userKey, true)
 
-    const fileRes = await fetch(info.downloadUrl)
-    if (!fileRes.ok) throw `❌ Error al descargar: ${fileRes.statusText}`
+    tempPath = path.join(os.tmpdir(), `gdrive_${Date.now()}_${sanitize(info.fileName)}`)
+
+    const fileRes = await fetch(info.downloadUrl, { signal })
+    if (!fileRes.ok) throw new Error(`Error al descargar: ${fileRes.statusText}`)
+
+    watchdog = makeWatchdog(controller)
 
     let dlBytes = 0
     const dlStart = Date.now()
     let lastWAUpdate = 0
+    const dlSampler = createSpeedSampler()
 
     const dlStream = new Transform({
       transform(chunk, _, cb) {
         dlBytes += chunk.length
-        const now  = Date.now()
-        const secs = (now - dlStart) / 1000 || 0.001
-        const speed = dlBytes / secs
-        const pct   = (dlBytes / info.sizeBytes) * 100
+        watchdog.ping()
+        const now = Date.now()
+        const speed = dlSampler.sample(dlBytes, now - dlStart)
+        const pct = info.sizeBytes > 0 ? (dlBytes / info.sizeBytes) * 100 : 0
 
-        // Terminal
         process.stdout.write(
-          `\r[GDrive] 📥 ${pct.toFixed(1)}% | ${fmtBytes(dlBytes)}/${fmtBytes(info.sizeBytes)} | ${fmtBytes(speed)}/s`
+          `\r[GDrive] 📥 ${pct.toFixed(1)}% | ${fmtBytes(dlBytes)} | ${fmtBytes(speed)}/s`
         )
 
-        // WhatsApp cada 3 s
-        if (now - lastWAUpdate > 3000) {
+        if (now - lastWAUpdate > EDIT_INTERVAL) {
           lastWAUpdate = now
           editStatus(buildStatus('📥', 'Descargando de Drive', pct, dlBytes, info.sizeBytes, speed))
         }
@@ -128,66 +228,83 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       },
     })
 
-    await pipeline(fileRes.body, dlStream, fs.createWriteStream(tempPath))
+    try {
+      await pipeline(fileRes.body, dlStream, fs.createWriteStream(tempPath), { signal })
+    } catch (err) {
+      if (isAbort(err)) throw err
+      throw parseGDriveError(err)
+    }
+    watchdog.stop()
+    watchdog = null
     console.log(`\n[GDrive] ✅ Descarga completa: ${info.fileName}`)
 
-    // ── Subida con progreso ─────────────────────────────────────────────────
-    await editStatus(
-      `✅ _Descarga completa._\n` +
-      `📤 _Subiendo a WhatsApp..._`
-    )
+    await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
 
+    const realSize = fs.statSync(tempPath).size
     let upBytes = 0
     const upStart = Date.now()
-    let lastUpWA  = 0
+    let lastUpWA = 0
+    const upSampler = createSpeedSampler()
 
     const upStream = new Transform({
       transform(chunk, _, cb) {
         upBytes += chunk.length
-        const now   = Date.now()
-        const secs  = (now - upStart) / 1000 || 0.001
-        const speed = upBytes / secs
-        const pct   = (upBytes / info.sizeBytes) * 100
+        const now = Date.now()
+        const speed = upSampler.sample(upBytes, now - upStart)
+        const pct = realSize > 0 ? (upBytes / realSize) * 100 : 0
 
         process.stdout.write(
-          `\r[GDrive] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(info.sizeBytes)} | ${fmtBytes(speed)}/s`
+          `\r[GDrive] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(realSize)} | ${fmtBytes(speed)}/s`
         )
 
-        if (now - lastUpWA > 3000) {
+        if (now - lastUpWA > EDIT_INTERVAL) {
           lastUpWA = now
-          editStatus(buildStatus('📤', 'Subiendo a WhatsApp', pct, upBytes, info.sizeBytes, speed))
+          editStatus(buildStatus('📤', 'Subiendo a WhatsApp', pct, upBytes, realSize, speed))
         }
         cb(null, chunk)
       },
     })
 
-    const readStream = fs.createReadStream(tempPath).pipe(upStream)
+    const pass = new PassThrough()
+    pipeline(fs.createReadStream(tempPath), upStream, pass).catch(err => pass.destroy(err))
 
-    await conn.sendMessage(m.chat, {
-      document : { stream: readStream },
-      fileName : info.fileName,
-      mimetype : info.mimetype,
-      caption  :
-        `✅ *${info.fileName}*\n` +
-        `⚖️ *Tamaño:* ${fmtBytes(info.sizeBytes)}\n` +
-        `🚀 _Enviado con éxito._`,
-    }, { quoted: m })
+    await conn.sendMessage(
+      m.chat,
+      {
+        document: { stream: pass },
+        fileName: info.fileName,
+        mimetype: info.mimetype,
+        caption:
+          `✅ *${info.fileName}*\n` +
+          `⚖️ *Tamaño:* ${fmtBytes(realSize)}\n` +
+          `🚀 _Enviado con éxito._`,
+      },
+      { quoted: m }
+    )
 
     console.log(`\n[GDrive] 🚀 Enviado a ${m.sender}`)
-    await editStatus(`✅ *¡Listo!* Archivo enviado correctamente.`)
-
+    await editStatus('✅ *¡Listo!* Archivo enviado correctamente.')
   } catch (e) {
-    const msg = typeof e === 'string' ? e : `❌ *Error:* ${e.message}`
-    await editStatus(msg)
-    console.error('\n[GDrive ERROR]', e)
+    if (isAbort(e)) {
+      console.log('\n[GDrive] 🛑 Descarga cancelada.')
+      await editStatus('🚫 *Descarga cancelada.*')
+    } else {
+      const msg = typeof e === 'string' ? e : `❌ *Error:* ${e.message}`
+      await editStatus(msg)
+      console.error('\n[GDrive ERROR]', e)
+    }
   } finally {
-    if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+    if (watchdog) watchdog.stop()
+    global.gdActiveDownloads.delete(userKey)
+    global.gdUserDownloads.delete(userKey)
+    if (tempPath && fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath) } catch {}
+    }
   }
 }
 
-handler.help    = ['gdrive <enlace>']
-handler.tags    = ['downloader']
-handler.command = /^(gdrive|gd|drive)$/i
+handler.help = ['gdrive <enlace>']
+handler.tags = ['downloader']
+handler.command = /^(gdrive|gd|drive|cancelar|stop)$/i
 
 export default handler
-
