@@ -17,7 +17,6 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const ANIMEDBS_URL          = 'https://www.animedbs.online'
-const DBS_LATINO_CATALOG_URL = `${ANIMEDBS_URL}/anime/?sub=lat&order=update`
 const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
@@ -253,6 +252,42 @@ function cleanTitle(titulo, epNum) {
     .replace(/\s+/g, ' ')
     .trim()
 }
+function episodeAgeSeconds(text) {
+  const value = String(text || '').toLowerCase().trim()
+  if (!value) return Number.POSITIVE_INFINITY
+  const match = value.match(/(\d+(?:[.,]\d+)?)\s*(segundo|minuto|hora|día|dia|semana|mes|year|año)/i)
+  if (!match) return Number.POSITIVE_INFINITY
+  const amount = Number(match[1].replace(',', '.'))
+  if (!Number.isFinite(amount)) return Number.POSITIVE_INFINITY
+  const unit = match[2].toLowerCase()
+  if (unit.startsWith('seg')) return amount
+  if (unit.startsWith('min')) return amount * 60
+  if (unit.startsWith('hora')) return amount * 3600
+  if (unit.startsWith('día') || unit.startsWith('dia')) return amount * 86400
+  if (unit.startsWith('sem')) return amount * 604800
+  if (unit.startsWith('mes')) return amount * 2592000
+  return amount * 31536000
+}
+
+function seriesKey(titulo, epNum) {
+  return cleanTitle(String(titulo || ''), epNum)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function keepCurrentSeasons(lista) {
+  const maxSeasonBySeries = new Map()
+  for (const ep of lista) {
+    const key = ep.seriesKey || seriesKey(ep.titulo, ep.epNum)
+    const current = maxSeasonBySeries.get(key) || 1
+    maxSeasonBySeries.set(key, Math.max(current, Number(ep.season) || 1))
+  }
+  return lista.filter(ep => (Number(ep.season) || 1) >= (maxSeasonBySeries.get(ep.seriesKey) || 1))
+}
+
 function buildFileName(titulo, epNum, fuente = 'dbs', idioma = 'latino', slug = '') {
   const season = getSeasonNumber(titulo, slug)
   const seasonLabel = season > 1 ? `T${season} ` : ''
@@ -286,7 +321,7 @@ async function fetchLatestEpisodesDBS() {
   const lista = []
   const ids = new Set()
   const episodiosPortada = new Map()
-  const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false }) => {
+  const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false, ageSeconds = Number.POSITIVE_INFINITY }) => {
     const epUrl = absoluteUrl(href, ANIMEDBS_URL)
     const number = Number.parseInt(epNum, 10)
     if (!epUrl || !Number.isInteger(number) || number < 0) return
@@ -295,7 +330,13 @@ async function fetchLatestEpisodesDBS() {
     const id = `${latino ? 'dbs-lat' : 'dbs'}-${slug}-${number}`
     if (ids.has(id)) return
     ids.add(id)
-    lista.push({ id, slug, titulo, epNum: number, epUrl, imgUrl, fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub' })
+    lista.push({
+      id, slug, titulo, epNum: number, epUrl, imgUrl,
+      fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub',
+      season: getSeasonNumber(titulo, slug),
+      seriesKey: seriesKey(titulo, number),
+      ageSeconds,
+    })
   }
 
   $('.listupd .bs').each((_, el) => {
@@ -310,74 +351,41 @@ async function fetchLatestEpisodesDBS() {
     const anime = $el.find('.tite1').text().trim()
     const h2 = $el.find('h2').text().trim() || $el.find('.tt').text().trim()
     const titulo = anime || h2.replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').replace(/hace\s+.*$/i, '').trim()
+    const ageSeconds = episodeAgeSeconds($el.find('.sosev').text())
     const imgEl = $el.find('img').first()
     const imgSrc = imgEl.attr('data-src') || imgEl.attr('data-lazy-src') || imgEl.attr('src') || ''
     const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, ANIMEDBS_URL)
     const latino = /latino/i.test(`${href} ${titulo} ${$el.find('.lg').text()}`)
     episodiosPortada.set(epUrl, { href: epUrl, title: titulo, epNum: epNumStr, imgUrl })
-    addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: false })
-    if (latino) addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: true })
+    addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: false, ageSeconds })
+    if (latino) addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: true, ageSeconds })
   })
 
-  // El catálogo "Audio Latino" aporta los episodios más recientes y los enlaces
-  // de portada de esas series. Se crean IDs para ambos idiomas y el preflight
-  // confirma si cada episodio tiene bloque SUB/LAT antes de descargarlo.
-  try {
-    const { data: catalogHtml } = await getPage(DBS_LATINO_CATALOG_URL, { headers: HEADERS })
-    const $catalog = cheerio.load(catalogHtml)
-    const series = []
-    $catalog('.listupd .bs').each((_, el) => {
-      const $el = $catalog(el)
-      if (!/emisi[oó]n/i.test($el.find('.epx').text())) return
-      const href = $el.find('a[href]').first().attr('href') || ''
-      if (href) series.push({ href, title: $el.find('.tt').text().trim() || $el.find('h2').text().trim() })
-    })
+  // La portada general ya mezcla SUB y LAT y está ordenada por actualización.
+  // No usamos el catálogo /anime/?sub=lat como fuente principal: puede poner
+  // doblajes recientes de temporadas antiguas por delante de la temporada vigente.
 
-    const concurrency = 5
-    for (let i = 0; i < series.length; i += concurrency) {
-      await Promise.all(series.slice(i, i + concurrency).map(async item => {
-        try {
-          const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
-          const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_LATINO_CATALOG_URL } })
-          const $series = cheerio.load(seriesHtml)
-          const title = $series('h1').first().text().trim() || item.title
-          const imgEl = $series('.thumb img, .thumbook img').first()
-          const imgSrc = imgEl.attr('data-src') || imgEl.attr('src') || ''
-          const imgUrl = imgSrc.startsWith('data:') ? '' : absoluteUrl(imgSrc, seriesUrl)
-          $series('.eplister a[href]').each((index, el) => {
-            const $episode = $series(el)
-            const episodeHref = $episode.attr('href') || ''
-            const episodeUrl = absoluteUrl(episodeHref, seriesUrl)
-            const homeEpisode = episodiosPortada.get(episodeUrl)
-            if (index !== 0 && !homeEpisode) return
-            const epNum = homeEpisode?.epNum || episodeUrl.match(/episodio[- _]?(\d+)/i)?.[1] || $episode.text().match(/\d+/)?.[0]
-            if (episodeHref && epNum) {
-              const episodeData = { href: episodeHref, title: homeEpisode?.title || title, epNum, imgUrl: homeEpisode?.imgUrl || imgUrl }
-              addEpisode({ ...episodeData, latino: false })
-              addEpisode({ ...episodeData, latino: true })
-            }
-          })
-        } catch (err) {
-          console.error(`[dbs-notify] No se pudo revisar una serie del catálogo LAT (${item.href}): ${err.message}`)
-        }
-      }))
-    }
-  } catch (err) {
-    console.error(`[dbs-notify] Catálogo Audio Latino no disponible: ${err.message}`)
-  }
-
+  const vigentes = keepCurrentSeasons(lista)
   const gruposPorEpisodio = new Map()
-  for (const ep of lista) {
+  for (const ep of vigentes) {
     const key = `${ep.epUrl}:${ep.epNum}`
     if (!gruposPorEpisodio.has(key)) gruposPorEpisodio.set(key, [])
     gruposPorEpisodio.get(key).push(ep)
   }
-  const priorizados = [...gruposPorEpisodio.values()].flatMap(grupo =>
-    grupo.sort((a, b) => (a.idioma === 'latino' ? 0 : 1) - (b.idioma === 'latino' ? 0 : 1)),
-  )
+  const priorizados = [...gruposPorEpisodio.values()]
+    .sort((a, b) => {
+      const ageA = Math.min(...a.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
+      const ageB = Math.min(...b.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
+      if (ageA !== ageB) return ageA - ageB
+      const seasonA = Math.max(...a.map(ep => Number(ep.season) || 1))
+      const seasonB = Math.max(...b.map(ep => Number(ep.season) || 1))
+      if (seasonA !== seasonB) return seasonB - seasonA
+      return Math.max(...a.map(ep => ep.epNum)) - Math.max(...b.map(ep => ep.epNum))
+    })
+    .flatMap(grupo => grupo.sort((a, b) => (a.idioma === 'latino' ? 0 : 1) - (b.idioma === 'latino' ? 0 : 1)))
   lista.splice(0, lista.length, ...priorizados)
 
-  console.log(`[dbs-notify] ${lista.length} episodios recientes detectados (SUB + LAT)`)
+  console.log(`[dbs-notify] ${lista.length} episodios recientes detectados desde la portada general (temporadas vigentes; SUB + LAT)`)
   return lista
 }
 
