@@ -22,10 +22,6 @@
 
 **Rikka Takarada MD** es un bot de WhatsApp modular. Cada función está organizada como un plugin dentro de `plugins/`, lo que permite añadir, retirar o actualizar comandos sin mezclar toda la lógica del bot.
 
-<div align="center">
-  <img src="./src/avatar_contact.png" alt="Rikka Takarada" width="420">
-</div>
-
 > ℹ️ Esta documentación refleja los archivos y plugins que existen actualmente en la rama `main`. Las funciones no incluidas en esta lista todavía no forman parte de esta versión.
 
 ---
