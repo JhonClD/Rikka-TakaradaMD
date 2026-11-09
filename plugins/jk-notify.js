@@ -14,38 +14,88 @@ const HEADERS = {
   'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
 }
 
+// Anti-Cloudflare (JKAnime responde 403 a clientes que no parecen un navegador):
+//   JK_COOKIE=cf_clearance=...   cookie copiada de tu navegador (usa el mismo JK_UA e IP)
+//   JK_UA=...                    User-Agent del navegador del que sacaste la cookie
+//   FLARESOLVERR_URL=http://host:8191   resuelve el desafío solo y renueva la cookie
+const FLARESOLVERR_URL = (process.env.FLARESOLVERR_URL || '').replace(/\/+$/, '')
+const jk = { ua: process.env.JK_UA || UA, cookie: process.env.JK_COOKIE || '' }
+
+const sleep = ms => sleep(ms)
+
 const isJKAnimeUrl = url => {
   try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
 }
 
+const jkHeaders = (extra = {}) => ({
+  ...HEADERS,
+  'User-Agent': jk.ua,
+  'Upgrade-Insecure-Requests': '1',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  ...(jk.cookie && { Cookie: jk.cookie }),
+  ...extra,
+})
+
+function curlGet(url, headers, timeout) {
+  return new Promise((resolve, reject) => {
+    const args = ['-sSL', '--compressed', '--max-time', String(Math.ceil(timeout / 1000)), '-w', '\n%{http_code}']
+    for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`)
+    const proc = spawn('curl', [...args, url])
+    let out = '', err = ''
+    proc.stdout.on('data', d => { out += d })
+    proc.stderr.on('data', d => { err += d })
+    proc.on('error', reject)
+    proc.on('close', () => {
+      const i = out.lastIndexOf('\n')
+      const status = parseInt(out.slice(i + 1))
+      status >= 200 && status < 300 ? resolve(out.slice(0, i)) : reject(new Error(err.trim() || `curl HTTP ${status}`))
+    })
+  })
+}
+
+async function flareSession() {
+  const { data } = await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'request.get', url: JKANIME_URL, maxTimeout: 60000 }, { timeout: 75000 })
+  const sol = data?.solution
+  if (data?.status !== 'ok' || !sol) throw new Error(`FlareSolverr: ${data?.message || 'sin respuesta'}`)
+  jk.ua = sol.userAgent || jk.ua
+  jk.cookie = (sol.cookies || []).map(c => `${c.name}=${c.value}`).join('; ') || jk.cookie
+}
+
+async function jkRequest(url, options = {}) {
+  const timeout = options.timeout || 15000
+  const ajax = /\/ajax\//i.test(new URL(url).pathname)
+  const attempts = [
+    () => axios.get(url, { ...options, headers: jkHeaders(options.headers), timeout }),
+    async () => ({ data: await curlGet(url, jkHeaders(options.headers), timeout) }),
+  ]
+  let lastErr
+  for (let round = 0; round < 2; round++) {
+    for (const attempt of attempts) {
+      try {
+        const res = await attempt()
+        if (ajax && typeof res.data === 'string') { try { res.data = JSON.parse(res.data) } catch (_) {} }
+        return res
+      } catch (err) { lastErr = err }
+    }
+    if (round === 1 || !FLARESOLVERR_URL) break
+    try { await flareSession() } catch (err) { lastErr = err; break }
+  }
+  const failed = new Error(`No se pudo acceder a JKAnime: ${lastErr.message}`)
+  failed.code = 'JKANIME_FETCH_FAILED'
+  throw failed
+}
 
 async function request(url, options = {}) {
-  if (isJKAnimeUrl(url)) {
-    try {
-      const response = await axios.get(url, {
-        ...options,
-        headers: { ...HEADERS, ...options.headers },
-        timeout: options.timeout || 15000,
-      })
-      if (/\/ajax\//i.test(new URL(url).pathname) && typeof response.data === 'string') {
-        try { response.data = JSON.parse(response.data) } catch (_) {}
-      }
-      return response
-    } catch (err) {
-      const blocked = new Error(`No se pudo acceder a JKAnime: ${err.message}`)
-      blocked.code = 'JKANIME_FETCH_FAILED'
-      throw blocked
-    }
-  }
-
-  let retries = 3
-  while (retries > 0) {
+  if (isJKAnimeUrl(url)) return jkRequest(url, options)
+  for (let intento = 1; ; intento++) {
     try {
       return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
     } catch (err) {
-      retries--
-      if (retries === 0) throw err
-      await new Promise(r => setTimeout(r, 2000))
+      if (intento === 3) throw err
+      await sleep(2000)
     }
   }
 }
@@ -85,13 +135,12 @@ const PREFS_EMBED = ['mp4upload', 'filemoon', 'streamwish', 'streamtape', 'doods
 function ordenarServidores(srvs) {
   const mega = srvs.filter(s => s.nombre === 'mega')
   const mediafire = srvs.filter(s => s.nombre === 'mediafire')
-  const otros = srvs.filter(s => s.directo && s.nombre !== 'mega' && s.nombre !== 'mediafire')
   const embeds = [...srvs.filter(s => !s.directo)].sort((a, b) => {
     const ia = PREFS_EMBED.findIndex(p => a.nombre.includes(p) || a.url.includes(p))
     const ib = PREFS_EMBED.findIndex(p => b.nombre.includes(p) || b.url.includes(p))
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
   })
-  return [...mega, ...mediafire, ...otros, ...embeds]
+  return [...mega, ...mediafire, ...embeds]
 }
 async function descargarMega(megaUrl, outputDir, fileName) {
   let url = megaUrl
@@ -106,8 +155,6 @@ async function descargarMega(megaUrl, outputDir, fileName) {
   const destPath = path.join(outputDir, fileName)
   const fileStream = file.download()
 
-  let downloaded = 0
-  fileStream.on('data', chunk => { downloaded += chunk.length })
 
   try {
     await pipeline(fileStream, fs.createWriteStream(destPath))
@@ -183,7 +230,7 @@ function extraerUrlVideo(code) {
 
 async function resolverEmbed(embedUrl) {
   const u = embedUrl.toLowerCase()
-  if (u.includes('voe.sx') || u.match(/voe\d*\.sx/)) {
+  if (/voe\d*\.sx/.test(u)) {
     try {
       const { data } = await request(embedUrl.replace(/\/e\//, '/'), { headers: { Referer: embedUrl }, timeout: 15000 })
       const mHls = data.match(/["']hls["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']/)
@@ -232,7 +279,7 @@ async function resolverEmbed(embedUrl) {
   }
   if (u.includes('streamwish') || u.includes('wishembed') || u.includes('vidhide') || u.includes('filelions')) {
     try {
-      const { data } = await request(embedUrl, { headers: { 'Sec-Fetch-Dest': 'document' }, timeout: 15000 })
+      const { data } = await request(embedUrl, { timeout: 15000 })
       const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
       if (packed) {
         const code = jsUnpack(packed[0])
@@ -246,7 +293,7 @@ async function resolverEmbed(embedUrl) {
   return null
 }
 
-async function descargarEmbed(embedUrl, outputDir, fileName, referer = 'https://jkanime.net') {
+async function descargarEmbed(embedUrl, outputDir, fileName, referer) {
   const u = embedUrl.toLowerCase()
   if (u.includes('hqq.tv') || u.includes('netu.tv') || u.includes('netu.ac') || u.includes('biribup.com'))
     throw new Error(`Servidor sin soporte: ${embedUrl.split('/')[2]}`)
@@ -337,7 +384,7 @@ async function fetchLatestEpisodesJK() {
     const id = `jk-${slug.toLowerCase()}-${epNum}`
 
     if (!lista.find(e => e.id === id))
-      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl, fuente: 'jkanime' })
+      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl })
   })
 
   if (lista.length === 0) {
@@ -351,7 +398,7 @@ async function fetchLatestEpisodesJK() {
       if (lista.find(e => e.id === id)) return
       const titulo = ($(el).attr('title') || $(el).text() || slug.replace(/-/g, ' ')).trim()
       const epUrl = href.startsWith('http') ? href : JKANIME_URL + href
-      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl: '', fuente: 'jkanime' })
+      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl: '' })
     })
   }
 
@@ -365,7 +412,6 @@ async function scrapeServidoresJK(epUrl) {
 
   $('script').each((_, el) => {
     const code = $(el).html() || ''
-    if (!code.includes('var servers') && !code.includes('var\tservers')) return
     const match = code.match(/var\s+servers\s*=\s*(\[[\s\S]*?\]);/)
     if (!match) return
     try {
@@ -402,7 +448,7 @@ async function scrapeServidoresJK(epUrl) {
     try {
       const ajaxUrl = `${JKANIME_URL}/ajax/download_episode/${epId}`
       const ajaxRes = await request(ajaxUrl, {
-        headers: { Referer: epUrl, 'X-Requested-With': 'XMLHttpRequest' },
+        headers: { Referer: epUrl, 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json, text/plain, */*', 'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-origin' },
         timeout: 12000,
       })
       const d = ajaxRes.data
@@ -423,7 +469,7 @@ async function scrapeServidoresJK(epUrl) {
     if (!href.startsWith('http')) return
     const esMega = href.includes('mega.nz') || href.includes('mega.co.nz')
     const esMediafire = href.includes('mediafire.com')
-    if (href.includes('hqq.tv') || href.includes('netu.tv') || (!esMega && !esMediafire)) return
+    if (!esMega && !esMediafire) return
     if (srvs.find(s => s.url === href)) return
     srvs.push({ nombre: esMega ? 'mega' : 'mediafire', url: href, directo: true })
   })
@@ -501,7 +547,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     const caption = `*✨Nuevo Episodio ✨*\n━━━━━━━━━━━━━━━━━━━━━\n> ${bandera} ${titulo}\n> 🆕 Capítulo: *${epNum}*\n> 🕐 Publicado: *${ahora}*\n> 🌐 Ver online: ${epUrl}\n> 📡 Fuente: *${etiqueta}*\n━━━━━━━━━━━━━━━━━━━━━\n✅ _INICIANDO DESCARGA..._`
     if (coverBuffer) await conn.sendMessage(chatId, { image: coverBuffer, caption })
     else await conn.sendMessage(chatId, { text: caption })
-    await new Promise(r => setTimeout(r, 15_000))
+    await sleep(15_000)
     let videoPath = null
     for (const srv of ordenarServidores(srvs).slice(0, 5)) {
       try {
@@ -510,7 +556,7 @@ async function enviarEpisodio(chatId, ep, conn) {
         else videoPath = await descargarEmbed(srv.url, tmpDir, fileName, JKANIME_URL)
         break
       } catch (_) {
-        for (const f of fs.readdirSync(tmpDir)) { try { if (f !== 'cover.jpg') fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {} }
+        for (const f of fs.readdirSync(tmpDir)) { try { fs.unlinkSync(path.join(tmpDir, f)) } catch (_) {} }
       }
     }
     if (!videoPath) throw new Error('Todos los servidores fallaron')
@@ -535,12 +581,11 @@ async function procesarCola() {
   try {
     while (global.jkEpisodeQueue.length) {
       const item = global.jkEpisodeQueue[0]
-      if (!item) { global.jkEpisodeQueue.shift(); continue }
       const { chatId, ep } = item
       let ok = false
       for (let intento = 1; intento <= 3 && !ok; intento++) {
         const conn = global.jkConn
-        if (!conn) { await new Promise(r => setTimeout(r, 180_000)); continue }
+        if (!conn) { await sleep(180_000); continue }
         try {
           await enviarEpisodio(chatId, ep, conn)
           ok = true
@@ -553,8 +598,8 @@ async function procesarCola() {
           saveSeen(seen)
         }
         catch (err) {
-          if (intento < 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) await new Promise(r => setTimeout(r, intento * 180_000))
-          else if (intento === 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) { global.jkEpisodeQueue.shift(); global.jkEpisodeQueue.push(item); await new Promise(r => setTimeout(r, 300_000)) }
+          if (intento < 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) await sleep(intento * 180_000)
+          else if (intento === 3 && /connection closed|stream errored|timed out|econnreset|socket hang up|precondition required/i.test(err.message)) { global.jkEpisodeQueue.shift(); global.jkEpisodeQueue.push(item); await sleep(300_000) }
           else {
             global.jkEpisodeQueue.shift()
             global.jkQueuedIds.delete(`${chatId}:${ep.id}`)
@@ -562,14 +607,14 @@ async function procesarCola() {
           }
         }
       }
-      if (global.jkEpisodeQueue.length) await new Promise(r => setTimeout(r, QUEUE_DELAY))
+      if (global.jkEpisodeQueue.length) await sleep(QUEUE_DELAY)
     }
   } finally { global.jkQueueRunning = false }
 }
 
 async function checkNuevosEpisodios(chatId, conn) {
   let lista = []
-  try { lista = await fetchLatestEpisodesJK() } catch (_) { return }
+  try { lista = await fetchLatestEpisodesJK() } catch (err) { console.warn(`[jk-notify] Chequeo falló: ${err.message}`); return }
   if (!lista.length) return
   const seen = loadSeen(); if (!seen[chatId]) seen[chatId] = []
   const nuevos = lista.filter(e => !seen[chatId].includes(e.id) && !global.jkQueuedIds.has(`${chatId}:${e.id}`))
@@ -593,8 +638,6 @@ function restaurarNotificadores(conn) { for (const [chatId, cfg] of Object.entri
 if (!global.jkWatchdog) global.jkWatchdog = setInterval(() => restaurarNotificadores(global.jkConn), 2 * 60 * 1000)
 
 const handler = async (m, { conn, text, usedPrefix, command }) => {
-  if (conn) global.jkConn = conn
-  restaurarNotificadores(conn)
   if (command === 'jkstart') {
     const min = parseInt(text?.trim()); const intervalMin = (!isNaN(min) && min >= 5 && min <= 60) ? min : CHECK_INTERVAL_DEFAULT
     iniciarNotificador(m.chat, conn, intervalMin)
