@@ -515,6 +515,7 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
   const idiomaGrupoDescarga = el => {
     const heading = $(el).find('h3').first().text().trim()
     if (/latino/i.test(heading)) return 'latino'
+    if (paginaTieneLat && !paginaTieneSub) return 'latino'
     // En AnimeDBS el bloque SUB suele llamarse simplemente "Descargar MP4".
     return 'sub'
   }
