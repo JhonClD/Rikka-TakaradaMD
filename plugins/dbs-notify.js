@@ -459,11 +459,21 @@ async function seleccionarVersionPreferidaDBS(lista, { seen = null, chatId = '',
       try {
         const servidores = await scrapeServidoresDBS(ep.epUrl, ep.idioma)
         if (!servidores.length) continue
-        const selectedPublishedAt = ep.publishedAt || 0
-        const variantSeenIds = grupo
-          .filter(item => (item.publishedAt || 0) <= selectedPublishedAt)
-          .map(item => item.id)
-        seleccionados.push({ ...ep, servidores, variantSeenIds: variantSeenIds.length ? variantSeenIds : [ep.id] })
+        const disponibles = [{ ep, servidores }]
+        for (const otra of grupo) {
+          if (otra.id === ep.id || seen?.includes(otra.id)) continue
+          try {
+            const otrosServidores = await scrapeServidoresDBS(otra.epUrl, otra.idioma)
+            if (otrosServidores.length) disponibles.push({ ep: otra, servidores: otrosServidores })
+          } catch (_) {}
+        }
+        seleccionados.push({
+          ...ep,
+          servidores,
+          // Marcar sólo las variantes que realmente existen en esta revisión.
+          // Si LAT aparece después en la misma ficha, quedará como novedad.
+          variantSeenIds: disponibles.map(item => item.ep.id),
+        })
         break
       } catch (err) {
         console.error(`[dbs-notify] No se pudo comprobar ${ep.idioma.toUpperCase()} de "${ep.titulo}" ep ${ep.epNum}: ${err.message}`)
@@ -498,6 +508,13 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
   }
   const bloqueCoincide = el => {
     return idiomaBloque(el) === idiomaObjetivo
+  }
+  const gruposDescarga = $('.episode-download-group').toArray()
+  const idiomaGrupoDescarga = el => {
+    const heading = $(el).find('h3').first().text().trim()
+    if (/latino/i.test(heading)) return 'latino'
+    // En AnimeDBS el bloque SUB suele llamarse simplemente "Descargar MP4".
+    return 'sub'
   }
   const calidadDesde = (...values) => {
     const text = values.filter(Boolean).join(' ')
@@ -534,22 +551,34 @@ async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
       $qualityBlock.find('a[href]').each((___, el) => add($(el).attr('href') || '', $(el).text().trim(), quality))
     })
   })
+  // Diseño actual de AnimeDBS: una sola ficha contiene grupos separados
+  // como "Descargar MP4" y "Descargar MP4 Latino".
+  $('.episode-download-group').each((_, group) => {
+    if (idiomaGrupoDescarga(group) !== idiomaObjetivo) return
+    const $group = $(group)
+    const quality = calidadDesde($group.find('.download-quality').text(), $group.text())
+    $group.find('.download-hosts a[href]').each((__, el) => add($(el).attr('href') || '', $(el).text().trim(), quality))
+  })
   // El sitio puede omitir las clases del bloque; aun así sólo se aceptan los tres tipos esperados.
   $('a[href]').each((_, el) => {
     const $el = $(el)
     const $languageBlock = $el.closest('.soraddlx')
-    if (bloquesIdioma.length && !$languageBlock.length) return
+    const $downloadGroup = $el.closest('.episode-download-group')
+    if ((bloquesIdioma.length || gruposDescarga.length) && !$languageBlock.length && !$downloadGroup.length) return
     if ($languageBlock.length && !bloqueCoincide($languageBlock[0])) return
+    if ($downloadGroup.length && idiomaGrupoDescarga($downloadGroup[0]) !== idiomaObjetivo) return
     const label = `${$el.text().trim()} ${$el.attr('title') || ''}`
-    const context = $el.closest('.soraddlx, .soraurlx, .download, .downloads, .links').text()
+    const context = $el.closest('.soraddlx, .soraurlx, .episode-download-group, .download, .downloads, .links').text()
     add($el.attr('href') || '', label, calidadDesde(context, label))
   })
-  $('[data-src], [data-player], [data-url], iframe[src]').each((_, el) => {
-    const $el = $(el)
-    const raw = $el.attr('data-src') || $el.attr('data-player') || $el.attr('data-url') || $el.attr('src') || ''
-    const context = $el.closest('.soraddlx, .soraurlx, .download, .downloads, .links').text()
-    add(raw, `${$el.attr('title') || ''} ${context}`, calidadDesde(context), true)
-  })
+  if (!gruposDescarga.length) {
+    $('[data-src], [data-player], [data-url], iframe[src]').each((_, el) => {
+      const $el = $(el)
+      const raw = $el.attr('data-src') || $el.attr('data-player') || $el.attr('data-url') || $el.attr('src') || ''
+      const context = $el.closest('.soraddlx, .soraurlx, .download, .downloads, .links').text()
+      add(raw, `${$el.attr('title') || ''} ${context}`, calidadDesde(context), true)
+    })
+  }
   srvs.sort((a, b) => {
     if (a.directo !== b.directo) return a.directo ? -1 : 1
     const rank = v => /720/i.test(v) ? 0 : /1080/i.test(v) ? 1 : 2
