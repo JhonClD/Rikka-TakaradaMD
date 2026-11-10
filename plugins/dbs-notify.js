@@ -317,19 +317,24 @@ async function fetchLatestEpisodesDBS() {
     if (!epUrl || !Number.isInteger(number) || number < 0) return
     const titulo = String(title || '').replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').trim() || 'Anime desconocido'
     const slug = titulo.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const id = `${latino ? 'dbs-lat' : 'dbs'}-${slug}-${number}`
+    const id = `dbs-${slug}-${number}`
+    const idioma = latino ? 'latino' : 'sub'
+    const legacyIds = [`dbs-${slug}-${number}`, `dbs-lat-${slug}-${number}`]
     if (ids.has(id)) {
       const existing = lista.find(ep => ep.id === id)
-      if (existing && publishedAt > (existing.publishedAt || 0)) {
-        Object.assign(existing, { epUrl, imgUrl, ageSeconds, publishedAt })
+      if (existing) {
+        if (!existing.idiomas.includes(idioma)) existing.idiomas.push(idioma)
+        if (publishedAt > (existing.publishedAt || 0)) {
+          Object.assign(existing, { epUrl, imgUrl, ageSeconds, publishedAt })
+        }
       }
       return
     }
     ids.add(id)
     lista.push({
       id, slug, titulo, epNum: number, epUrl, imgUrl,
-      fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub',
-      ageSeconds, publishedAt,
+      fuente: latino ? 'latino' : 'animedbs', idioma,
+      idiomas: [idioma], legacyIds, ageSeconds, publishedAt,
     })
   }
 
@@ -440,7 +445,9 @@ async function seleccionarVersionPreferidaDBS(lista, { seen = null, chatId = '',
   }
   const seleccionados = []
   for (const grupo of grupos.values()) {
-    const candidatos = grupo.filter(ep => !seen?.includes(ep.id) && !(skipQueued && global.dbsQueuedIds.has(`${chatId}:${ep.id}`)))
+    const estaVisto = ep => [ep.id, ...(ep.legacyIds || [])].some(id => seen?.includes(id))
+    const estaEnCola = ep => [ep.id, ...(ep.legacyIds || [])].some(id => global.dbsQueuedIds.has(`${chatId}:${id}`))
+    const candidatos = grupo.filter(ep => !estaVisto(ep) && !(skipQueued && estaEnCola(ep)))
     if (!candidatos.length) continue
     const ordenados = candidatos
       .map((ep, index) => ({ ep, index }))
@@ -456,28 +463,23 @@ async function seleccionarVersionPreferidaDBS(lista, { seen = null, chatId = '',
       })
 
     for (const { ep } of ordenados) {
-      try {
-        const servidores = await scrapeServidoresDBS(ep.epUrl, ep.idioma)
-        if (!servidores.length) continue
-        const disponibles = [{ ep, servidores }]
-        for (const otra of grupo) {
-          if (otra.id === ep.id || seen?.includes(otra.id)) continue
-          try {
-            const otrosServidores = await scrapeServidoresDBS(otra.epUrl, otra.idioma)
-            if (otrosServidores.length) disponibles.push({ ep: otra, servidores: otrosServidores })
-          } catch (_) {}
-        }
-        seleccionados.push({
-          ...ep,
-          servidores,
-          // Marcar sólo las variantes que realmente existen en esta revisión.
-          // Si LAT aparece después en la misma ficha, quedará como novedad.
-          variantSeenIds: disponibles.map(item => item.ep.id),
-        })
-        break
-      } catch (err) {
-        console.error(`[dbs-notify] No se pudo comprobar ${ep.idioma.toUpperCase()} de "${ep.titulo}" ep ${ep.epNum}: ${err.message}`)
+      const idiomas = [...new Set(ep.idiomas?.length ? ep.idiomas : [ep.idioma || 'sub'])]
+      for (const idioma of idiomas) {
+        try {
+          const servidores = await scrapeServidoresDBS(ep.epUrl, idioma)
+          if (!servidores.length) continue
+          seleccionados.push({
+            ...ep,
+            idioma,
+            fuente: idioma === 'latino' ? 'latino' : 'animedbs',
+            servidores,
+            // SUB y LAT son versiones del mismo capítulo y comparten un único visto.
+            variantSeenIds: [ep.id, ...(ep.legacyIds || [])],
+          })
+          break
+        } catch (_) {}
       }
+      if (seleccionados.at(-1)?.id === ep.id) break
     }
     if (seleccionados.length >= limit) break
   }
