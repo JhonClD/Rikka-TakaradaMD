@@ -18,6 +18,7 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 const ANIMEDBS_URL          = 'https://www.animedbs.online'
 const DBS_DIRECTORY_URL      = `${ANIMEDBS_URL}/anime/?status=&type=&order=update`
+const DBS_DIRECTORY_LIMIT    = 12
 const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
@@ -369,12 +370,13 @@ async function fetchLatestEpisodesDBS() {
       const label = $el.text().replace(/\s+/g, ' ').trim()
       series.push({ href, label, title: $el.find('.tite1').text().trim() || $el.find('h2').text().trim() })
     })
-    const concurrency = 5
-    for (let i = 0; i < series.length; i += concurrency) {
-      await Promise.all(series.slice(i, i + concurrency).map(async item => {
+    const recientes = series.slice(0, DBS_DIRECTORY_LIMIT)
+    const concurrency = 6
+    for (let i = 0; i < recientes.length; i += concurrency) {
+      await Promise.all(recientes.slice(i, i + concurrency).map(async item => {
         try {
           const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
-          const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_DIRECTORY_URL } })
+          const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_DIRECTORY_URL }, timeout: 8000, maxRedirects: 3 }, 1)
           const $series = cheerio.load(seriesHtml)
           const first = $series('.eplister a[href]').first()
           const episodeHref = first.attr('href') || ''
@@ -382,7 +384,7 @@ async function fetchLatestEpisodesDBS() {
           const episodeUrl = absoluteUrl(episodeHref, seriesUrl)
           const epNum = first.text().match(/\d+/)?.[0] || episodeUrl.match(/episodio[- _]?(\d+)/i)?.[1]
           if (!epNum) return
-          const { data: episodeHtml } = await getPage(episodeUrl, { headers: { ...HEADERS, Referer: seriesUrl } })
+          const { data: episodeHtml } = await getPage(episodeUrl, { headers: { ...HEADERS, Referer: seriesUrl }, timeout: 8000, maxRedirects: 3 }, 1)
           const $episode = cheerio.load(episodeHtml)
           const publishedAt = parsePublishedAt($episode('.year').first().text())
           const title = $series('h1').first().text().trim() || item.title
@@ -394,9 +396,7 @@ async function fetchLatestEpisodesDBS() {
           const variants = hasLat || hasSub ? { latino: hasLat, sub: hasSub } : { sub: true }
           if (variants.sub) addEpisode({ href: episodeUrl, title, epNum, imgUrl, latino: false, publishedAt })
           if (variants.latino) addEpisode({ href: episodeUrl, title, epNum, imgUrl, latino: true, publishedAt })
-        } catch (error) {
-          console.error(`[dbs-notify] No se pudo revisar una serie del directorio (${item.href}): ${error.message}`)
-        }
+        } catch (_) {}
       }))
     }
   } catch (error) {
