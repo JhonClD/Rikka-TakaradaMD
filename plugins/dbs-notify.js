@@ -440,28 +440,33 @@ async function seleccionarVersionPreferidaDBS(lista, { seen = null, chatId = '',
   }
   const seleccionados = []
   for (const grupo of grupos.values()) {
-    if (skipQueued && grupo.some(ep => global.dbsQueuedIds.has(`${chatId}:${ep.id}`))) continue
-    const latino = grupo.find(ep => ep.idioma === 'latino')
-    const sub = grupo.find(ep => ep.idioma === 'sub')
-    if (latino && seen?.includes(latino.id)) {
-      if (sub && seen && !seen.includes(sub.id)) seen.push(sub.id)
-      continue
-    }
-    if (seen && grupo.every(ep => seen.includes(ep.id))) continue
+    const candidatos = grupo.filter(ep => !seen?.includes(ep.id) && !(skipQueued && global.dbsQueuedIds.has(`${chatId}:${ep.id}`)))
+    if (!candidatos.length) continue
+    const ordenados = candidatos
+      .map((ep, index) => ({ ep, index }))
+      .sort((a, b) => {
+        const publishedA = a.ep.publishedAt || 0
+        const publishedB = b.ep.publishedAt || 0
+        if (publishedA && publishedB && publishedA !== publishedB) return publishedB - publishedA
+        if (publishedA !== publishedB) return publishedA ? -1 : 1
+        const ageA = a.ep.ageSeconds ?? Number.POSITIVE_INFINITY
+        const ageB = b.ep.ageSeconds ?? Number.POSITIVE_INFINITY
+        if (ageA !== ageB) return ageA - ageB
+        return a.index - b.index
+      })
 
-    let servidoresLatinos = []
-    if (latino) {
-      try { servidoresLatinos = await scrapeServidoresDBS(latino.epUrl, 'latino') }
-      catch (err) { console.error(`[dbs-notify] No se pudo comprobar LAT de "${latino.titulo}" ep ${latino.epNum}: ${err.message}`) }
-    }
-    if (servidoresLatinos.length) {
-      seleccionados.push({ ...latino, servidores: servidoresLatinos, variantSeenIds: grupo.map(ep => ep.id) })
-    } else if (sub && (!seen || !seen.includes(sub.id))) {
+    for (const { ep } of ordenados) {
       try {
-        const servidoresSub = await scrapeServidoresDBS(sub.epUrl, 'sub')
-        if (servidoresSub.length) seleccionados.push({ ...sub, servidores: servidoresSub, variantSeenIds: [sub.id] })
+        const servidores = await scrapeServidoresDBS(ep.epUrl, ep.idioma)
+        if (!servidores.length) continue
+        const selectedPublishedAt = ep.publishedAt || 0
+        const variantSeenIds = grupo
+          .filter(item => (item.publishedAt || 0) <= selectedPublishedAt)
+          .map(item => item.id)
+        seleccionados.push({ ...ep, servidores, variantSeenIds: variantSeenIds.length ? variantSeenIds : [ep.id] })
+        break
       } catch (err) {
-        console.error(`[dbs-notify] No se pudo comprobar SUB de "${sub.titulo}" ep ${sub.epNum}: ${err.message}`)
+        console.error(`[dbs-notify] No se pudo comprobar ${ep.idioma.toUpperCase()} de "${ep.titulo}" ep ${ep.epNum}: ${err.message}`)
       }
     }
     if (seleccionados.length >= limit) break
@@ -1128,7 +1133,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
   if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.recipients?.includes(m.chat) || i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
   if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }
-  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.'); lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad }); if (!lista.length) return m.reply('❌ No hay enlaces LAT ni SUB disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios seleccionados (LAT preferido; SUB de respaldo 🌐):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ recipients:[m.chat], ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
+  if (command === 'dbsexample') { const cantidad = Math.min(Math.max(parseInt(text?.trim()) || 1, 1), 10); await m.reply(`🔍 Obteniendo los *${cantidad}* episodio(s) más reciente(s) de *AnimeDBS*...`); let lista; try { lista = await fetchLatestEpisodesDBS(); if (!lista.length) return m.reply('❌ Sin episodios de AnimeDBS disponibles.'); lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad }); if (!lista.length) return m.reply('❌ No hay enlaces SUB ni LAT disponibles.') } catch (err) { return m.reply(`❌ Error: ${err.message}`) }; const seleccion = lista.slice(0,cantidad); if (seleccion.length > 1) await m.reply(`📋 *${seleccion.length} episodios más recientes (según fecha de publicación):*\n\n` + seleccion.map((e,i) => `${i+1}. *${e.titulo}* — Ep ${zeroPad(e.epNum)} (${e.idioma.toUpperCase()})`).join('\n') + '\n\n⏳ _Se enviarán de uno en uno..._'); for (const ep of seleccion) { const id = `${m.chat}:${ep.id}`; if (global.dbsQueuedIds.has(id)) continue; global.dbsEpisodeQueue.push({ recipients:[m.chat], ep, manual:true }); global.dbsQueuedIds.add(id) }; procesarCola().catch(() => {}); return }
 }
 handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime','notificaciones']
