@@ -17,6 +17,7 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const ANIMEDBS_URL          = 'https://www.animedbs.online'
+const DBS_DIRECTORY_URL      = `${ANIMEDBS_URL}/anime/?status=&type=&order=update`
 const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
@@ -252,6 +253,13 @@ function cleanTitle(titulo, epNum) {
     .replace(/\s+/g, ' ')
     .trim()
 }
+function parsePublishedAt(text) {
+  const match = String(text || '').match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/)
+  if (!match) return 0
+  const timestamp = Date.parse(`${match[1].replace(' ', 'T')}-05:00`)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
 function episodeAgeSeconds(text) {
   const value = String(text || '').toLowerCase().trim()
   if (!value) return Number.POSITIVE_INFINITY
@@ -302,19 +310,25 @@ async function fetchLatestEpisodesDBS() {
   const lista = []
   const ids = new Set()
   const episodiosPortada = new Map()
-  const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false, ageSeconds = Number.POSITIVE_INFINITY }) => {
+  const addEpisode = ({ href, title, epNum, imgUrl = '', latino = false, ageSeconds = Number.POSITIVE_INFINITY, publishedAt = 0 }) => {
     const epUrl = absoluteUrl(href, ANIMEDBS_URL)
     const number = Number.parseInt(epNum, 10)
     if (!epUrl || !Number.isInteger(number) || number < 0) return
     const titulo = String(title || '').replace(/episodio\s*\d+/i, '').replace(/sub español/i, '').trim() || 'Anime desconocido'
     const slug = titulo.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
     const id = `${latino ? 'dbs-lat' : 'dbs'}-${slug}-${number}`
-    if (ids.has(id)) return
+    if (ids.has(id)) {
+      const existing = lista.find(ep => ep.id === id)
+      if (existing && publishedAt > (existing.publishedAt || 0)) {
+        Object.assign(existing, { epUrl, imgUrl, ageSeconds, publishedAt })
+      }
+      return
+    }
     ids.add(id)
     lista.push({
       id, slug, titulo, epNum: number, epUrl, imgUrl,
       fuente: latino ? 'latino' : 'animedbs', idioma: latino ? 'latino' : 'sub',
-      ageSeconds,
+      ageSeconds, publishedAt,
     })
   }
 
@@ -340,6 +354,55 @@ async function fetchLatestEpisodesDBS() {
     if (latino) addEpisode({ href: epUrl, title: titulo, epNum: epNumStr, imgUrl, latino: true, ageSeconds })
   })
 
+  // La portada puede mostrar la fecha de modificación del post (por ejemplo,
+  // "Hace 5 segundos"), que no siempre es la fecha de publicación del episodio.
+  // El directorio ordenado por actualización contiene las series recientes; para
+  // cada una consultamos su primer episodio y la fecha real de publicación.
+  try {
+    const { data: directoryHtml } = await getPage(DBS_DIRECTORY_URL, { headers: HEADERS })
+    const $directory = cheerio.load(directoryHtml)
+    const series = []
+    $directory('.listupd .bs').each((_, el) => {
+      const $el = $directory(el)
+      const href = $el.find('a[href]').first().attr('href') || ''
+      if (!href) return
+      const label = $el.text().replace(/\s+/g, ' ').trim()
+      series.push({ href, label, title: $el.find('.tite1').text().trim() || $el.find('h2').text().trim() })
+    })
+    const concurrency = 5
+    for (let i = 0; i < series.length; i += concurrency) {
+      await Promise.all(series.slice(i, i + concurrency).map(async item => {
+        try {
+          const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
+          const { data: seriesHtml } = await getPage(seriesUrl, { headers: { ...HEADERS, Referer: DBS_DIRECTORY_URL } })
+          const $series = cheerio.load(seriesHtml)
+          const first = $series('.eplister a[href]').first()
+          const episodeHref = first.attr('href') || ''
+          if (!episodeHref) return
+          const episodeUrl = absoluteUrl(episodeHref, seriesUrl)
+          const epNum = first.text().match(/\d+/)?.[0] || episodeUrl.match(/episodio[- _]?(\d+)/i)?.[1]
+          if (!epNum) return
+          const { data: episodeHtml } = await getPage(episodeUrl, { headers: { ...HEADERS, Referer: seriesUrl } })
+          const $episode = cheerio.load(episodeHtml)
+          const publishedAt = parsePublishedAt($episode('.year').first().text())
+          const title = $series('h1').first().text().trim() || item.title
+          const img = $series('.thumb img, .thumbook img').first()
+          const rawImg = img.attr('data-src') || img.attr('src') || ''
+          const imgUrl = rawImg.startsWith('data:') ? '' : absoluteUrl(rawImg, seriesUrl)
+          const hasLat = /\b(?:lat|latino)\b/i.test(item.label)
+          const hasSub = /\b(?:sub|subtitulado)\b/i.test(item.label)
+          const variants = hasLat || hasSub ? { latino: hasLat, sub: hasSub } : { sub: true }
+          if (variants.sub) addEpisode({ href: episodeUrl, title, epNum, imgUrl, latino: false, publishedAt })
+          if (variants.latino) addEpisode({ href: episodeUrl, title, epNum, imgUrl, latino: true, publishedAt })
+        } catch (error) {
+          console.error(`[dbs-notify] No se pudo revisar una serie del directorio (${item.href}): ${error.message}`)
+        }
+      }))
+    }
+  } catch (error) {
+    console.error(`[dbs-notify] Directorio de AnimeDBS no disponible: ${error.message}`)
+  }
+
   // La portada general ya mezcla SUB y LAT y está ordenada por actualización.
   // No usamos el catálogo /anime/?sub=lat como fuente principal: puede poner
   // doblajes recientes de temporadas antiguas por delante de la temporada vigente.
@@ -352,10 +415,14 @@ async function fetchLatestEpisodesDBS() {
   }
   const priorizados = [...gruposPorEpisodio.values()]
     .sort((a, b) => {
+      const publishedA = Math.max(...a.map(ep => ep.publishedAt || 0))
+      const publishedB = Math.max(...b.map(ep => ep.publishedAt || 0))
+      if (publishedA && publishedB && publishedA !== publishedB) return publishedB - publishedA
+      if (publishedA !== publishedB) return publishedA ? -1 : 1
       const ageA = Math.min(...a.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
       const ageB = Math.min(...b.map(ep => ep.ageSeconds ?? Number.POSITIVE_INFINITY))
       if (ageA !== ageB) return ageA - ageB
-      return Math.max(...a.map(ep => ep.epNum)) - Math.max(...b.map(ep => ep.epNum))
+      return Math.max(...b.map(ep => ep.epNum)) - Math.max(...a.map(ep => ep.epNum))
     })
     .flatMap(grupo => grupo.sort((a, b) => (a.idioma === 'latino' ? 0 : 1) - (b.idioma === 'latino' ? 0 : 1)))
   lista.splice(0, lista.length, ...priorizados)
