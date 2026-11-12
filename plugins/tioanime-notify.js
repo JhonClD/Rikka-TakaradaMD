@@ -1157,7 +1157,11 @@ async function enviarEpisodio(chatIds, ep, conn) {
       }
       if (coverBuffer && recipients.includes(CENTRAL_CHAT_ID)) {
         try {
-          await conn.sendMessage(CENTRAL_CHAT_ID, { image: coverBuffer })
+          await conn.sendMessage(CENTRAL_CHAT_ID, {
+            document: coverBuffer,
+            fileName: `${safeFile(cleanTitle(titulo, epNum))}.jpg`,
+            mimetype: 'image/jpeg',
+          })
           centralCoverSent = true
         } catch (error) {
           console.error(`[tioanime-notify] No se pudo enviar la portada inicial al grupo central: ${error.message}`)
@@ -1227,9 +1231,15 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
       // El central ya recibió la portada al inicio; los demás la reciben solo cuando ambos videos están listos.
       let originalBuffer = fs.readFileSync(videoPath)
+      const coverFileName = `${safeFile(cleanTitle(titulo, epNum))}.jpg`
       for (const chatId of recipients) {
         if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
-          await conn.sendMessage(chatId, { image: coverBuffer })
+          // Como documento se conserva el JPG original y WhatsApp no lo recomprime.
+          await conn.sendMessage(chatId, {
+            document: coverBuffer,
+            fileName: coverFileName,
+            mimetype: 'image/jpeg',
+          })
         }
         await conn.sendMessage(chatId, {
           document : originalBuffer,
