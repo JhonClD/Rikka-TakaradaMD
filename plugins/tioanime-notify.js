@@ -1158,9 +1158,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       if (coverBuffer && recipients.includes(CENTRAL_CHAT_ID)) {
         try {
           await conn.sendMessage(CENTRAL_CHAT_ID, {
-            document: coverBuffer,
-            fileName: `${safeFile(cleanTitle(titulo, epNum))}.jpg`,
-            mimetype: 'image/jpeg',
+            image: coverBuffer,
           })
           centralCoverSent = true
         } catch (error) {
@@ -1233,11 +1231,8 @@ async function enviarEpisodio(chatIds, ep, conn) {
       let originalBuffer = fs.readFileSync(videoPath)
       for (const chatId of recipients) {
         if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
-          // Como documento se conserva el JPG original y WhatsApp no lo recomprime.
           await conn.sendMessage(chatId, {
-            document: coverBuffer,
-            fileName: `${safeFile(cleanTitle(titulo, epNum))}.jpg`,
-            mimetype: 'image/jpeg',
+            image: coverBuffer,
           })
         }
         await conn.sendMessage(chatId, {
