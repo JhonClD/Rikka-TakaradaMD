@@ -11,6 +11,7 @@ import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
 import { File as MegaFile } from 'megajs'
+import { listFiles, getFile } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
@@ -19,9 +20,7 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 const TIOANIME_URL           = 'https://tioanime.com'
 const LATANIME_URL            = 'https://latanime.org'
 const ANILIST_URL             = 'https://graphql.anilist.co'
-const DRIVE_FILES_URL         = 'https://www.googleapis.com/drive/v3/files'
-const GOOGLE_DRIVE_FOLDER_ID  = String(process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim()
-const GOOGLE_DRIVE_TOKEN      = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN || '').trim()
+const GOOGLE_DRIVE_PUBLIC_FOLDER = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDER || '').trim()
 const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
 const ERROR_OWNER_JID         = process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 const httpCache = new Map()
@@ -78,6 +77,8 @@ global.tioCheckingChats = global.tioCheckingChats || new Set()
 global.tioCentralTimer  = global.tioCentralTimer  || null
 global.tioAnimeCoverCache = global.tioAnimeCoverCache || new Map()
 global.tioAnimeCoverNegTime = global.tioAnimeCoverNegTime || new Map()
+global.tioDriveCoverFiles = global.tioDriveCoverFiles || null
+global.tioDriveCoverFilesAt = global.tioDriveCoverFilesAt || 0
 global.tioDriveCoverWarned = global.tioDriveCoverWarned || false
 
 async function reportTioError(conn, context, error) {
@@ -266,62 +267,53 @@ async function queryAniList(searchTerm) {
   return null
 }
 
-function driveQueryText(value) {
-  return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").trim()
-}
+const DRIVE_FILE_CACHE_TTL_MS = 30 * 60 * 1000
 
-async function queryDriveCover(searchTerm) {
-  if (!GOOGLE_DRIVE_TOKEN || !searchTerm) return null
-
-  const safeTerm = driveQueryText(searchTerm)
-  const clauses = [
-    `mimeType contains 'image/'`,
-    'trashed = false',
-    `name contains '${safeTerm}'`,
-  ]
-  if (GOOGLE_DRIVE_FOLDER_ID) {
-    clauses.push(`'${driveQueryText(GOOGLE_DRIVE_FOLDER_ID)}' in parents`)
+async function getDriveFiles() {
+  if (!GOOGLE_DRIVE_PUBLIC_FOLDER) return []
+  const now = Date.now()
+  if (Array.isArray(global.tioDriveCoverFiles)
+    && now - global.tioDriveCoverFilesAt < DRIVE_FILE_CACHE_TTL_MS) {
+    return global.tioDriveCoverFiles
   }
 
   try {
-    const response = await axios.get(DRIVE_FILES_URL, {
-      headers: { Authorization: `Bearer ${GOOGLE_DRIVE_TOKEN}` },
-      params: {
-        q: clauses.join(' and '),
-        pageSize: 10,
-        orderBy: 'modifiedTime desc',
-        spaces: 'drive',
-        fields: 'files(id,name,mimeType,modifiedTime)',
-      },
-      timeout: 10000,
-    })
-    const file = response.data?.files?.[0]
-    if (!file?.id) return null
-    return {
-      url: `${DRIVE_FILES_URL}/${encodeURIComponent(file.id)}?alt=media`,
-      headers: { Authorization: `Bearer ${GOOGLE_DRIVE_TOKEN}` },
-      name: file.name,
-    }
+    const files = await listFiles(GOOGLE_DRIVE_PUBLIC_FOLDER)
+    global.tioDriveCoverFiles = Array.isArray(files)
+      ? files.filter(file => file?.id && /\.(?:jpe?g|png|webp|gif)$/i.test(file.name || ''))
+      : []
+    global.tioDriveCoverFilesAt = now
+    console.log(`[tioanime-notify] Google Drive público: ${global.tioDriveCoverFiles.length} imágenes indexadas`)
+    return global.tioDriveCoverFiles
   } catch (error) {
     if (!global.tioDriveCoverWarned) {
       global.tioDriveCoverWarned = true
-      console.warn(`[tioanime-notify] Google Drive no disponible: ${error.response?.data?.error?.message || error.message}`)
+      console.warn(`[tioanime-notify] Google Drive público no disponible: ${error.message}`)
     }
-    return null
+    return []
   }
 }
 
 async function getDriveCover(titulo, slug = '', epNum = 0) {
-  if (!GOOGLE_DRIVE_TOKEN) return null
-  const searchTitles = buildAniListSearchTitles(cleanTitle(titulo, epNum), slug, epNum)
-  for (const searchTitle of searchTitles) {
-    const cover = await queryDriveCover(searchTitle)
-    if (cover) {
-      console.log(`[tioanime-notify] 🖼️ Portada encontrada en Google Drive: ${cover.name}`)
-      return cover
-    }
+  if (!GOOGLE_DRIVE_PUBLIC_FOLDER) return null
+  const files = await getDriveFiles()
+  const searchKeys = buildAniListSearchTitles(cleanTitle(titulo, epNum), slug, epNum)
+    .map(normalizeAnimeTitle)
+    .filter(Boolean)
+  const file = files.find(candidate => {
+    const fileName = normalizeAnimeTitle(String(candidate.name || '').replace(/\.[^.]+$/, ''))
+    return searchKeys.some(key => fileName.includes(key) || key.includes(fileName))
+  })
+  if (!file) return null
+
+  try {
+    const buffer = await getFile(file.id, 'buffer')
+    console.log(`[tioanime-notify] 🖼️ Portada encontrada en Google Drive: ${file.name}`)
+    return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer)
+  } catch (error) {
+    console.warn(`[tioanime-notify] No se pudo descargar la portada de Drive (${file.name}): ${error.message}`)
+    return null
   }
-  return null
 }
 
 async function getAniListCover(titulo, slug = '', epNum = 0) {
@@ -1133,12 +1125,15 @@ async function enviarEpisodio(chatIds, ep, conn) {
     // Avisar al central solo después de confirmar que existe un servidor compatible.
     try {
       const driveCover = await getDriveCover(titulo, slug, epNum)
-      const anilistCover = driveCover ? null : await getAniListCover(titulo, slug, epNum)
-      const coverUrl = driveCover?.url || anilistCover || imgUrl
-      const coverHeaders = driveCover?.headers || HEADERS
-      if (coverUrl) {
-        const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: coverHeaders, timeout: 10000 })
-        coverBuffer = Buffer.from(imgRes.data)
+      if (driveCover) {
+        coverBuffer = driveCover
+      } else {
+        const anilistCover = await getAniListCover(titulo, slug, epNum)
+        const coverUrl = anilistCover || imgUrl
+        if (coverUrl) {
+          const imgRes = await axios.get(coverUrl, { responseType: 'arraybuffer', headers: HEADERS, timeout: 10000 })
+          coverBuffer = Buffer.from(imgRes.data)
+        }
       }
       if (coverBuffer && recipients.includes(CENTRAL_CHAT_ID)) {
         try {
