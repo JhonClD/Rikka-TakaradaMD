@@ -20,7 +20,11 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 const TIOANIME_URL           = 'https://tioanime.com'
 const LATANIME_URL            = 'https://latanime.org'
 const ANILIST_URL             = 'https://graphql.anilist.co'
-const GOOGLE_DRIVE_PUBLIC_FOLDERS = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDER || '')
+const DEFAULT_GOOGLE_DRIVE_PUBLIC_FOLDERS = [
+  'https://drive.google.com/drive/folders/16P6jS_Ibr9FoEdYP2tEfxu7pLDWvLhFV',
+  'https://drive.google.com/drive/folders/1Gk2Z2HFS5m8hY8GgFDQUzgl0jTI0oIrJ',
+]
+const GOOGLE_DRIVE_PUBLIC_FOLDERS = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDER || DEFAULT_GOOGLE_DRIVE_PUBLIC_FOLDERS.join(','))
   .split(',')
   .map(value => value.trim())
   .filter(Boolean)
