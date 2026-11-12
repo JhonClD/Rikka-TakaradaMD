@@ -1170,6 +1170,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
         try {
           await conn.sendMessage(CENTRAL_CHAT_ID, {
             image: coverBuffer,
+            hd: true,
           })
           centralCoverSent = true
         } catch (error) {
@@ -1244,6 +1245,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
         if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
           await conn.sendMessage(chatId, {
             image: coverBuffer,
+            hd: true,
           })
         }
         await conn.sendMessage(chatId, {
