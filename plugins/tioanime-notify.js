@@ -11,7 +11,7 @@ import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
 import { File as MegaFile } from 'megajs'
-import { listFiles, getFile, getFileMetadata } from 'better-gdrive'
+import { listFiles, getFileMetadata } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
@@ -276,6 +276,16 @@ async function queryAniList(searchTerm) {
 
 const DRIVE_FILE_CACHE_TTL_MS = 30 * 60 * 1000
 
+async function downloadDriveImage(fileId) {
+  const response = await fetch(`https://drive.google.com/uc?id=${encodeURIComponent(fileId)}&export=download`, {
+    redirect: 'follow',
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status} al descargar desde Drive`)
+  const contentType = response.headers.get('content-type') || ''
+  if (!/^image\//i.test(contentType)) throw new Error(`Drive devolvió ${contentType || 'un contenido no válido'}`)
+  return Buffer.from(await response.arrayBuffer())
+}
+
 async function getDriveFiles() {
   if (!GOOGLE_DRIVE_PUBLIC_FOLDERS.length) return []
   const now = Date.now()
@@ -327,9 +337,10 @@ async function getDriveCover(titulo, slug = '', epNum = 0) {
   if (!file) return null
 
   try {
-    const buffer = await getFile(file.id, 'buffer')
+    // Descarga binaria directa: evita que better-gdrive convierta bytes de imágenes a texto.
+    const buffer = await downloadDriveImage(file.id)
     console.log(`[tioanime-notify] 🖼️ Portada encontrada en Google Drive: ${file.name}`)
-    return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer)
+    return buffer
   } catch (error) {
     console.warn(`[tioanime-notify] No se pudo descargar la portada de Drive (${file.name}): ${error.message}`)
     return null
