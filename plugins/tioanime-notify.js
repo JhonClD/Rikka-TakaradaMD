@@ -1158,8 +1158,9 @@ async function enviarEpisodio(chatIds, ep, conn) {
       if (coverBuffer && recipients.includes(CENTRAL_CHAT_ID)) {
         try {
           await conn.sendMessage(CENTRAL_CHAT_ID, {
-            image: coverBuffer,
-            hd: true,
+            document: coverBuffer,
+            fileName: `${safeFile(cleanTitle(titulo, epNum))}.jpg`,
+            mimetype: 'image/jpeg',
           })
           centralCoverSent = true
         } catch (error) {
@@ -1232,10 +1233,11 @@ async function enviarEpisodio(chatIds, ep, conn) {
       let originalBuffer = fs.readFileSync(videoPath)
       for (const chatId of recipients) {
         if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
-          // Prueba de calidad HD; si el fork no reconoce hd, WhatsApp usará su valor estándar.
+          // Como documento se conserva el JPG original y WhatsApp no lo recomprime.
           await conn.sendMessage(chatId, {
-            image: coverBuffer,
-            hd: true,
+            document: coverBuffer,
+            fileName: `${safeFile(cleanTitle(titulo, epNum))}.jpg`,
+            mimetype: 'image/jpeg',
           })
         }
         await conn.sendMessage(chatId, {
