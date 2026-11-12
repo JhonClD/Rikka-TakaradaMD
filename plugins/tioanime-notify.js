@@ -11,7 +11,7 @@ import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
 import { File as MegaFile } from 'megajs'
-import { listFiles, getFile } from 'better-gdrive'
+import { listFiles, getFile, getFileMetadata } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
@@ -20,7 +20,10 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 const TIOANIME_URL           = 'https://tioanime.com'
 const LATANIME_URL            = 'https://latanime.org'
 const ANILIST_URL             = 'https://graphql.anilist.co'
-const GOOGLE_DRIVE_PUBLIC_FOLDER = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDER || '').trim()
+const GOOGLE_DRIVE_PUBLIC_FOLDERS = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDER || '')
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean)
 const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
 const ERROR_OWNER_JID         = process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 const httpCache = new Map()
@@ -270,7 +273,7 @@ async function queryAniList(searchTerm) {
 const DRIVE_FILE_CACHE_TTL_MS = 30 * 60 * 1000
 
 async function getDriveFiles() {
-  if (!GOOGLE_DRIVE_PUBLIC_FOLDER) return []
+  if (!GOOGLE_DRIVE_PUBLIC_FOLDERS.length) return []
   const now = Date.now()
   if (Array.isArray(global.tioDriveCoverFiles)
     && now - global.tioDriveCoverFilesAt < DRIVE_FILE_CACHE_TTL_MS) {
@@ -278,12 +281,25 @@ async function getDriveFiles() {
   }
 
   try {
-    const files = await listFiles(GOOGLE_DRIVE_PUBLIC_FOLDER)
-    global.tioDriveCoverFiles = Array.isArray(files)
-      ? files.filter(file => file?.id && /\.(?:jpe?g|png|webp|gif)$/i.test(file.name || ''))
-      : []
+    const listed = (await Promise.all(GOOGLE_DRIVE_PUBLIC_FOLDERS.map(folder => listFiles(folder))))
+      .flat()
+      .filter(file => file?.id)
+    const uniqueFiles = [...new Map(listed.map(file => [file.id, file])).values()]
+    const withMetadata = await Promise.all(uniqueFiles.map(async file => {
+      if (file.name && /\.(?:jpe?g|png|webp|gif)$/i.test(file.name)) return file
+      try {
+        const metadata = await getFileMetadata(file.id)
+        return { ...file, name: metadata.filename, mimeType: metadata.mimeType }
+      } catch (_) {
+        return null
+      }
+    }))
+    global.tioDriveCoverFiles = withMetadata.filter(file =>
+      file?.id && /^image\//i.test(file.mimeType || '')
+      && /\.(?:jpe?g|png|webp|gif)$/i.test(file.name || '')
+    )
     global.tioDriveCoverFilesAt = now
-    console.log(`[tioanime-notify] Google Drive público: ${global.tioDriveCoverFiles.length} imágenes indexadas`)
+    console.log(`[tioanime-notify] Google Drive público: ${global.tioDriveCoverFiles.length} imágenes indexadas en ${GOOGLE_DRIVE_PUBLIC_FOLDERS.length} carpeta(s)`)
     return global.tioDriveCoverFiles
   } catch (error) {
     if (!global.tioDriveCoverWarned) {
@@ -295,7 +311,7 @@ async function getDriveFiles() {
 }
 
 async function getDriveCover(titulo, slug = '', epNum = 0) {
-  if (!GOOGLE_DRIVE_PUBLIC_FOLDER) return null
+  if (!GOOGLE_DRIVE_PUBLIC_FOLDERS.length) return null
   const files = await getDriveFiles()
   const searchKeys = buildAniListSearchTitles(cleanTitle(titulo, epNum), slug, epNum)
     .map(normalizeAnimeTitle)
