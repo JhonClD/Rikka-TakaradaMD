@@ -7,6 +7,7 @@ import { pipeline } from 'stream/promises'
 import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 import animeInfoHandler from './search-animeinfo.js'
+import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
 async function compatibleDriveFetch(...args) {
   const response = await driveFetch(...args)
@@ -111,6 +112,32 @@ function deriveAnimeTitle(files) {
     else current.count++
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || b.title.length - a.title.length)[0].title
+}
+
+async function getDriveFolderTitle(url, signal) {
+  try {
+    const response = await fetch(url, {
+      signal,
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; RikkaTakaradaMD/1.0)' },
+    })
+    if (!response.ok) return ''
+    const html = await response.text()
+    const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+    if (!match) return ''
+    const title = match[1]
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+      .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+      .replace(/\s*[-–—|]\s*Google Drive\s*$/i, '')
+      .trim()
+    return /^(?:google drive|drive)$/i.test(title) ? '' : title
+  } catch {
+    return ''
+  }
 }
 
 function isAbort(e) {
@@ -271,7 +298,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         throw parseGDriveError(err)
       }
       if (animeDriveCommand) {
-        const animeTitle = deriveAnimeTitle(files)
+        const animeTitle = await getDriveFolderTitle(args[0], signal) || deriveAnimeTitle(files)
+        console.log(`[aniD] 🔎 Buscando ficha de anime: ${animeTitle || 'título no detectado'}`)
         await animeInfoHandler(m, {
           conn,
           text: animeTitle,
@@ -299,15 +327,27 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         const folderPath = path.join(os.tmpdir(), `gdrive_folder_${Date.now()}_${sanitize(file.fileName)}`)
         try {
           await editStatus(`📥 *${index + 1}/${details.length}* — ${file.fileName}\n_Descargando desde Google Drive..._`)
+          const downloadStartedAt = Date.now()
+          const logPrefix = animeDriveCommand ? '[aniD]' : '[GDrive]'
+          console.log(`\n${logPrefix} 📥 Descargando ${index + 1}/${details.length}: ${file.fileName}`)
           await downloadFile(file.id, folderPath, { signal, fetch: compatibleDriveFetch })
           const realSize = fs.statSync(folderPath).size
+          console.log(`${logPrefix} ✅ Descarga completa: ${file.fileName} | ${fmtBytes(realSize)} | ${((Date.now() - downloadStartedAt) / 1000).toFixed(1)} s`)
           if (realSize > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
+          const jpegThumbnail = animeDriveCommand
+            ? await animeV1Downloader.createJpegThumbnail(folderPath)
+            : null
+          if (animeDriveCommand) console.log(`${logPrefix} 🖼️ Miniatura JPEG ${jpegThumbnail ? 'generada' : 'no disponible'}: ${file.fileName}`)
+          console.log(`${logPrefix} 📤 Enviando ${index + 1}/${details.length} a WhatsApp: ${file.fileName}`)
+          const uploadStartedAt = Date.now()
           await conn.sendMessage(m.chat, {
             document: { url: folderPath },
             fileName: file.fileName,
             mimetype: file.mimetype,
+            ...(jpegThumbnail ? { jpegThumbnail } : {}),
           })
+          console.log(`${logPrefix} ✅ Envío completo: ${file.fileName} | ${((Date.now() - uploadStartedAt) / 1000).toFixed(1)} s`)
         } finally {
           try { if (fs.existsSync(folderPath)) fs.unlinkSync(folderPath) } catch {}
         }
