@@ -96,8 +96,10 @@ function deriveAnimeTitle(files) {
   const candidates = files.map(file => sanitize(file.fileName)
     .replace(/\.(?:mp4|mkv|avi|mov|webm|m4v)$/i, '')
     .replace(/^\s*(?:\d{1,3}|s\d{1,2}e\d{1,3})[\s._-]*/, '')
+    .replace(/^\s*(?:\[[A-Z0-9_-]{2,16}\]\s*)+/i, '')
     .replace(/\s+(?:s\d{1,2}e\d{1,3}|(?:ep|episodio|cap[ií]tulo)\s*\d{1,3})\b.*$/i, '')
     .replace(/\s*(?:[-|_[({]+\s*)?\b(?:sub(?:t[ií]tulos?)?|dub|espa[nñ]ol|latino|castellano|480p|720p|1080p|2160p|4k)\b.*$/i, '')
+    .replace(/\s+\[{1,2}[^\]]{1,80}\]{1,2}\s*$/, '')
     .replace(/[._]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim())
@@ -134,7 +136,17 @@ async function getDriveFolderTitle(url, signal) {
       .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
       .replace(/\s*[-–—|]\s*Google Drive\s*$/i, '')
       .trim()
-    return /^(?:google drive|drive)$/i.test(title) ? '' : title
+    const normalizedTitle = title.normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLocaleLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+    const genericTitles = new Set([
+      'google drive', 'drive', 'especial', 'especiales', 'anime', 'animes',
+      'series', 'peliculas', 'movies', 'videos', 'descargas', 'downloads',
+      'carpeta', 'folder', 'shared folder', 'shared with me',
+    ])
+    return genericTitles.has(normalizedTitle) ? '' : title
   } catch {
     return ''
   }
