@@ -8,52 +8,8 @@ const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
 const ANILIST_URL = 'https://graphql.anilist.co';
 
-// Pedimos varios resultados y campos extra para poder puntuar mejor
-const ANILIST_QUERY = `
-  query ($search: String!) {
-    Page(page: 1, perPage: 15) {
-      media(
-        search: $search,
-        type: ANIME,
-        sort: [SEARCH_MATCH, POPULARITY_DESC]
-      ) {
-        id
-        title {
-          romaji
-          english
-          native
-          userPreferred
-        }
-        description
-        episodes
-        duration
-        status
-        season
-        seasonYear
-        averageScore
-        popularity
-        favourites
-        genres
-        format
-        studios {
-          edges {
-            node {
-              name
-              isAnimationStudio
-            }
-          }
-        }
-        coverImage {
-          extraLarge
-          large
-          medium
-        }
-      }
-    }
-  }
-`;
-
-const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = false }) => {
+// ====================== HANDLER ======================
+const handler = async (m, { conn, text, usedPrefix, command }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
 
@@ -69,12 +25,12 @@ const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = fa
     };
   }
 
-  if (!text) return silentNotFound ? null : m.reply(`*${tradutor.texto1}*`);
+  if (!text) return m.reply(`*${tradutor.texto1}*`);
 
   try {
     const result = await fetchFromAniList(text);
 
-    if (!result) return silentNotFound ? null : m.reply(`*${tradutor.texto3}*`);
+    if (!result) return m.reply(`*${tradutor.texto3}*`);
 
     const TRADUCCIONES = {
       estados: {
@@ -146,7 +102,7 @@ const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = fa
       }
     };
 
-    // Limpieza robusta de la sinopsis (HTML + entidades)
+    // ---- Limpieza robusta de sinopsis ----
     let cleanDesc = result.description
       ? result.description
           .replace(/<br\s*\/?>/gi, '\n')
@@ -192,13 +148,15 @@ const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = fa
       ? result.studios.map(s => s.name).join(', ')
       : 'Desconocido';
 
-    const generosEsp = result.genres?.length
+    const generosEsp = Array.isArray(result.genres) && result.genres.length
       ? result.genres.map(g => TRADUCCIONES.generos[g] || g).join(', ')
       : 'N/A';
 
     const puntuacion = result.averageScore
       ? `\n⭐ *Puntuación:* ${(result.averageScore / 10).toFixed(1)}/10`
       : '';
+
+    const temporadaEsp = formatTemporada(result, TRADUCCIONES.temporadas);
 
     const AnimeInfo = `✨*INFORMACIÓN DEL ANIME*✨
 
@@ -211,7 +169,7 @@ const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = fa
 🏷 *Géneros:* ${generosEsp}
 ⏱ *Duración:* ${result.duration ? `${result.duration} min` : 'N/A'}${puntuacion}
 💽 *Formato:* ${TRADUCCIONES.formatos[result.format] || result.format || 'N/A'}
-🔅 *Temporada:* ${TRADUCCIONES.temporadas[result.season] || 'N/A'}
+🔅 *Temporada:* ${temporadaEsp}
 ⏳ *Estado:* ${TRADUCCIONES.estados[result.status] || result.status || 'N/A'}
 
 📜 *Sinopsis:*
@@ -225,13 +183,7 @@ ${sinopsisFormateada}`;
 
     let imageBuffer;
     try {
-      const { data } = await axios.get(imageUrl, {
-        responseType: 'arraybuffer',
-        timeout: 15000,
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        httpsAgent
-      });
-      imageBuffer = Buffer.from(data);
+      imageBuffer = await downloadImage(imageUrl);
     } catch (imgErr) {
       console.warn('[animeinfo] Descarga de imagen falló:', imgErr.message);
       return conn.sendMessage(
@@ -280,7 +232,7 @@ ${sinopsisFormateada}`;
   }
 };
 
-// ================= BÚSQUEDA =================
+// ====================== BÚSQUEDA ======================
 
 // Genera variantes de la query por si la original no encuentra nada
 function normalizeQueries(raw) {
@@ -313,33 +265,104 @@ async function fetchFromAniList(queryText) {
 }
 
 async function trySearchAniList(query) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'User-Agent': 'Mozilla/5.0'
+  };
+
   try {
-    const response = await axios.post(
+    // ---------- FASE 1: búsqueda ligera ----------
+    const searchResponse = await axios.post(
       ANILIST_URL,
-      { query: ANILIST_QUERY, variables: { search: query } },
       {
-        timeout: 25000,
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0'
-        },
-        httpsAgent
-      }
+        query: `
+          query ($search: String!) {
+            Page(page: 1, perPage: 20) {
+              media(search: $search, type: ANIME) {
+                id
+                title { romaji english native userPreferred }
+                format
+                status
+                popularity
+                seasonYear
+              }
+            }
+          }
+        `,
+        variables: { search: query }
+      },
+      { timeout: 25000, headers, httpsAgent }
     );
 
-    const mediaList = response.data?.data?.Page?.media || [];
+    const mediaList = searchResponse.data?.data?.Page?.media || [];
     if (!mediaList.length) return null;
 
     const best = pickBestMatch(mediaList, query);
-    return best ? formatAniListResult(best) : null;
+    if (!best?.id) return null;
+
+    // ---------- FASE 2: detalle completo por ID ----------
+    const detailResponse = await axios.post(
+      ANILIST_URL,
+      {
+        query: `
+          query ($id: Int!) {
+            Media(id: $id, type: ANIME) {
+              id
+              title { romaji english native }
+              description
+              episodes
+              duration
+              status
+              season
+              seasonYear
+              startDate { year month day }
+              averageScore
+              genres
+              format
+              studios {
+                edges {
+                  isMain
+                  node { name isAnimationStudio }
+                }
+              }
+              relations {
+                edges {
+                  relationType
+                  node {
+                    id
+                    type
+                    format
+                    title { romaji english native }
+                    startDate { year month day }
+                  }
+                }
+              }
+              coverImage { extraLarge large medium }
+            }
+          }
+        `,
+        variables: { id: best.id }
+      },
+      { timeout: 25000, headers, httpsAgent }
+    );
+
+    const media = detailResponse.data?.data?.Media;
+    if (!media) {
+      // Fallback: al menos devolvemos lo de la fase 1
+      return formatAniListResult(best);
+    }
+
+    return formatAniListResult(media);
   } catch (error) {
     console.warn(`[animeinfo] AniList falló para "${query}":`, error.message);
+    if (error.response?.data) {
+      console.warn('[animeinfo] AniList error:', JSON.stringify(error.response.data));
+    }
     return null;
   }
 }
 
-// Puntúa cada resultado según qué tan bien coincide con la query
 function scoreMatch(media, query) {
   const q = query.toLowerCase().trim();
   const titles = [
@@ -351,33 +374,22 @@ function scoreMatch(media, query) {
 
   let score = 0;
 
-  // Coincidencia exacta = prioridad máxima
   if (titles.some(t => t === q)) score += 100000;
-
-  // Empieza con la query
   if (titles.some(t => t.startsWith(q))) score += 5000;
-
-  // Contiene la query
   if (titles.some(t => t.includes(q))) score += 1000;
-
-  // La query contiene el título (ej. "naruto shippuden" cuando hay entrada "naruto")
   if (titles.some(t => t.length > 3 && q.includes(t))) score += 500;
 
-  // Popularidad / favoritos como desempate
   score += Math.min(media.popularity || 0, 2000000) / 100;
   score += (media.favourites || 0) / 50;
 
-  // Preferir formatos "normales"
   if (media.format === 'TV') score += 600;
   else if (media.format === 'TV_SHORT') score += 150;
   else if (media.format === 'MOVIE') score += 100;
   else if (media.format === 'ONA' || media.format === 'OVA') score += 50;
 
-  // Preferir ya emitidos / en emisión
   if (media.status === 'FINISHED' || media.status === 'RELEASING') score += 300;
   else if (media.status === 'NOT_YET_RELEASED') score -= 100;
 
-  // Ligero bonus si tiene sinopsis
   if (media.description) score += 20;
 
   return score;
@@ -396,11 +408,28 @@ function pickBestMatch(mediaList, query) {
   return best;
 }
 
-// Convierte el resultado crudo de AniList a la estructura que espera el handler
 function formatAniListResult(media) {
-  const studios = (media.studios?.edges || [])
+  const edges = media.studios?.edges || [];
+
+  // ---- Estudios (3 niveles de fallback) ----
+  let studios = edges
+    .filter(e => e.isMain === true)
     .map(e => e.node)
-    .filter(s => s && s.isAnimationStudio !== false);
+    .filter(s => s && s.name);
+
+  if (!studios.length) {
+    studios = edges
+      .map(e => e.node)
+      .filter(s => s && s.name && s.isAnimationStudio !== false);
+  }
+
+  if (!studios.length) {
+    studios = edges.map(e => e.node).filter(s => s && s.name);
+  }
+
+  const season = resolveSeason(media);
+  const seasonYear = media.seasonYear || media.startDate?.year || null;
+  const seasonNumber = resolveSeasonNumber(media);
 
   return {
     title: {
@@ -412,10 +441,11 @@ function formatAniListResult(media) {
     episodes: media.episodes,
     duration: media.duration,
     status: media.status,
-    season: media.season,
-    seasonYear: media.seasonYear,
+    season,
+    seasonYear,
+    seasonNumber,
     averageScore: media.averageScore,
-    genres: media.genres || [],
+    genres: Array.isArray(media.genres) ? media.genres : [],
     studios,
     format: media.format,
     images: {
@@ -427,7 +457,98 @@ function formatAniListResult(media) {
   };
 }
 
-// ================= TRADUCCIÓN =================
+// Deriva la temporada desde season o startDate.month
+function resolveSeason(media) {
+  if (media.season) return String(media.season).toUpperCase();
+  const month = media.startDate?.month;
+  if (month && month >= 1 && month <= 12) {
+    if (month <= 3)  return 'WINTER';
+    if (month <= 6)  return 'SPRING';
+    if (month <= 9)  return 'SUMMER';
+    return 'FALL';
+  }
+  return null;
+}
+
+// Detecta el número de temporada (T1, T2, T3...)
+function resolveSeasonNumber(media) {
+  const titles = [
+    media.title?.romaji,
+    media.title?.english,
+    media.title?.native
+  ].filter(Boolean);
+
+  const romanMap = { II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 };
+
+  // 1) Detección directa por título
+  for (const t of titles) {
+    let m;
+
+    if ((m = t.match(/(\d+)(?:st|nd|rd|th)\s+season/i))) return parseInt(m[1]);
+    if ((m = t.match(/season\s+(\d+)/i)))               return parseInt(m[1]);
+    if ((m = t.match(/temporada\s+(\d+)/i)))            return parseInt(m[1]);
+    if ((m = t.match(/part\s+(\d+)/i)) && media.format === 'TV') return parseInt(m[1]) + 1;
+    if ((m = t.match(/\b(II|III|IV|V|VI|VII|VIII|IX|X)\b/))) return romanMap[m[1]];
+  }
+
+  // 2) Conteo de precuelas TV directas
+  const edges = media.relations?.edges || [];
+  const tvPrequels = edges.filter(e =>
+    (e.relationType === 'PREQUEL' || e.relationType === 'PARENT') &&
+    e.node?.type === 'ANIME' &&
+    (e.node?.format === 'TV' || e.node?.format === 'TV_SHORT')
+  );
+
+  if (tvPrequels.length > 0) return tvPrequels.length + 1;
+
+  // 3) Si es TV sin precuelas, es T1
+  if (media.format === 'TV' || media.format === 'TV_SHORT') return 1;
+
+  return null;
+}
+
+// Formatea la temporada: "Temporada 2 (Verano)" / "Verano" / "Temporada 2"
+function formatTemporada(result, traducciones) {
+  const estacion = result.season
+    ? (traducciones[result.season] ||
+       traducciones[String(result.season).toUpperCase()] ||
+       result.season)
+    : null;
+
+  const num = result.seasonNumber;
+
+  if (num && estacion) return `Temporada ${num} (${estacion})`;
+  if (num)             return `Temporada ${num}`;
+  if (estacion)        return estacion;
+  return 'N/A';
+}
+
+// ====================== IMAGEN ======================
+
+async function downloadImage(url, retries = 3) {
+  let lastErr;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const { data } = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 20000,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        httpsAgent,
+        maxRedirects: 5
+      });
+      return Buffer.from(data);
+    } catch (err) {
+      lastErr = err;
+      const wait = /TLS|socket|ECONNRESET|ETIMEDOUT/.test(err.message || '')
+        ? 1500 * Math.pow(2, i)
+        : 500;
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
+// ====================== TRADUCCIÓN ======================
 
 async function traducirTexto(texto) {
   if (!texto || texto === 'No disponible') return texto || 'No disponible';
