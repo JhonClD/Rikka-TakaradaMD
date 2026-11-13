@@ -43,6 +43,64 @@ function cacheTranslation(key, value) {
   translateCache.set(key, value);
 }
 
+function truncateToLength(text, maxLength) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (maxLength <= 0) return '';
+  if (normalized.length <= maxLength) return normalized;
+  if (maxLength === 1) return '…';
+
+  let clipped = normalized.slice(0, maxLength - 1);
+  const wordBoundary = clipped.lastIndexOf(' ');
+  if (wordBoundary >= Math.floor(maxLength * 0.6)) clipped = clipped.slice(0, wordBoundary);
+  return `${clipped.trimEnd()}…`;
+}
+
+async function resumirSinopsisGemini(texto, maxCaracteres) {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const sinopsis = String(texto || '').replace(/^>\s?/gm, '').trim();
+  if (!apiKey || !sinopsis || maxCaracteres < 40 || Date.now() < translateCooldowns.gemini) return null;
+
+  try {
+    const response = await scheduleTranslateRequest(() => {
+      if (Date.now() < translateCooldowns.gemini) return null;
+      return axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+        {
+          systemInstruction: {
+            parts: [{
+              text: `Resume la sinopsis en español en un solo párrafo de máximo ${maxCaracteres} caracteres, contando espacios. Conserva el argumento principal y los datos importantes. No inventes información ni agregues introducciones, explicaciones o comillas; devuelve únicamente el resumen.`,
+            }],
+          },
+          contents: [{ role: 'user', parts: [{ text: sinopsis }] }],
+          generationConfig: { maxOutputTokens: 300 },
+        },
+        {
+          timeout: 15000,
+          headers: {
+            'x-goog-api-key': apiKey,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+    });
+    const resumen = response?.data?.candidates?.[0]?.content?.parts
+      ?.map(part => part?.text || '')
+      .join('')
+      .replace(/^\s*["'“”]+|["'“”]+\s*$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return resumen || null;
+  } catch (error) {
+    if (isTranslationRateLimit(error)) {
+      translateCooldowns.gemini = Date.now() + TRANSLATE_COOLDOWN_MS;
+      console.info('[animeinfo] Gemini limitó el resumen; se usará un recorte local.');
+    } else {
+      console.warn('[animeinfo] No se pudo resumir la sinopsis con Gemini:', error.message);
+    }
+    return null;
+  }
+}
+
 // ====================== HANDLER ======================
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const datas = global;
@@ -229,28 +287,25 @@ ${sinopsisFormateada}`;
     }
 
     const MAX_CAPTION = 950;
-    const caption = AnimeInfo.length > MAX_CAPTION
-      ? AnimeInfo.slice(0, MAX_CAPTION - 3) + '...'
-      : AnimeInfo;
+    let captionText = AnimeInfo;
+    if (captionText.length > MAX_CAPTION) {
+      const synopsisPrefixLength = AnimeInfo.length - sinopsisFormateada.length;
+      const synopsisBudget = MAX_CAPTION - synopsisPrefixLength - 2;
+      let synopsis = await resumirSinopsisGemini(sinopsisFormateada, synopsisBudget);
+      if (!synopsis) synopsis = sinopsisFormateada.replace(/^>\s?/gm, '').replace(/\s+/g, ' ').trim();
+      synopsis = truncateToLength(synopsis, synopsisBudget);
+      captionText = `${AnimeInfo.slice(0, synopsisPrefixLength)}${synopsis ? `> ${synopsis}` : ''}`;
+    }
 
-    const fueTruncado = AnimeInfo.length > MAX_CAPTION;
+    const caption = captionText.length > MAX_CAPTION
+      ? captionText.slice(0, MAX_CAPTION - 3) + '...'
+      : captionText;
 
     await conn.sendMessage(
       m.chat,
       { image: imageBuffer, caption },
       { quoted: m }
     );
-
-    if (fueTruncado) {
-      const restante = AnimeInfo.slice(MAX_CAPTION - 3);
-      for (let i = 0; i < restante.length; i += 4000) {
-        await conn.sendMessage(
-          m.chat,
-          { text: restante.slice(i, i + 4000) },
-          { quoted: m }
-        );
-      }
-    }
 
   } catch (e) {
     let errorMsg = `*${tradutor.texto3}*`;
