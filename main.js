@@ -92,7 +92,7 @@ global.loadDatabase = async function loadDatabase() {
 };
 loadDatabase();
 
-const { state, saveCreds } = await useMultiFileAuthState(global.authFile);
+let { state, saveCreds } = await useMultiFileAuthState(global.authFile);
 const version22 = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1033893291] }));
 console.log(version22)
 const version = version22?.version || [2, 3000, 1033893291]; 
@@ -469,6 +469,16 @@ process.on('uncaughtException', console.error);
 let isInit = true;
 let handler = await import('./handler.js');
 
+async function refreshAuthState() {
+  const freshAuth = await useMultiFileAuthState(global.authFile)
+  state = freshAuth.state
+  saveCreds = freshAuth.saveCreds
+  connectionOptions.auth = {
+    creds: state.creds,
+    keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: 'fatal' }).child({ level: 'fatal' })),
+  }
+}
+
 global.reloadHandler = async function (restatConn) {
   try {
     const Handler = await import(`./handler.js?update=${Date.now()}`).catch(console.error);
@@ -489,6 +499,9 @@ global.reloadHandler = async function (restatConn) {
       try { oldConn?.end?.(new Error('socket-replaced')); } catch {}
 
       stopped = 'connecting';
+      // Recargar la sesión en cada intento, como AlyaBot, para no reutilizar
+      // creds/keys obsoletos después de un cierre prolongado.
+      await refreshAuthState();
       global.conn = makeWASocket(connectionOptions);
       store?.bind(global.conn);
       isInit = true;
