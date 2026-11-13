@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { pipeline } from 'stream/promises'
-import { Transform, PassThrough } from 'stream'
+import { Transform, PassThrough, Readable } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 
 global.gdActiveDownloads = global.gdActiveDownloads || new Map()
@@ -246,7 +246,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
           if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
           await conn.sendMessage(m.chat, {
-            document: { stream: fs.createReadStream(folderPath) },
+            document: { stream: Readable.toWeb(fs.createReadStream(folderPath)) },
             fileName: file.fileName,
             mimetype: file.mimetype,
             caption: `📁 *${file.fileName}*\n📄 ${index + 1}/${details.length}\n⚖️ ${fmtBytes(realSize)}`,
@@ -357,7 +357,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     await conn.sendMessage(
       m.chat,
       {
-        document: { stream: pass },
+        document: { stream: Readable.toWeb(pass) },
         fileName: info.fileName,
         mimetype: info.mimetype,
         caption:
