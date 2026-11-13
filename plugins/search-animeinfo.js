@@ -6,6 +6,46 @@ import fs from 'fs';
 
 const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
+// Endpoint único de AniList
+const ANILIST_URL = 'https://graphql.anilist.co';
+
+// Consulta GraphQL para buscar un anime por título
+const ANILIST_QUERY = `
+  query ($search: String!) {
+    Page {
+      media(search: $search, type: ANIME) {
+        id
+        title {
+          romaji
+          english
+          native
+        }
+        description
+        episodes
+        duration
+        status
+        season
+        seasonYear
+        averageScore
+        genres
+        studios {
+          edges {
+            node {
+              name
+            }
+          }
+        }
+        format
+        coverImage {
+          extraLarge
+          large
+          medium
+        }
+      }
+    }
+  }
+`;
+
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
@@ -25,52 +65,35 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) return m.reply(`*${tradutor.texto1}*`);
 
   try {
-    let result = null;
-
-    try {
-      const response = await fetchJikanWithRetry(text);
-      result = response.data?.data?.[0];
-    } catch (jikanErr) {
-      console.warn('[animeinfo] Jikan falló, intentando Kitsu:', jikanErr.message);
-    }
-
-    if (!result) {
-      try {
-        result = await fetchFromKitsu(text);
-      } catch (kitsuErr) {
-        console.warn('[animeinfo] Kitsu también falló:', kitsuErr.message);
-      }
-    }
+    // Búsqueda exclusiva en AniList
+    const result = await fetchFromAniList(text);
 
     if (!result) return m.reply(`*${tradutor.texto3}*`);
 
     const TRADUCCIONES = {
       estados: {
-        'Finished Airing': 'Finalizado',
-        'Currently Airing': 'En emisión',
-        'Not yet aired': 'Próximamente',
-        'finished': 'Finalizado',
-        'current': 'En emisión',
-        'tba': 'Próximamente',
-        'unreleased': 'Próximamente',
-        'upcoming': 'Próximamente'
+        'FINISHED': 'Finalizado',
+        'RELEASING': 'En emisión',
+        'NOT_YET_RELEASED': 'Próximamente',
+        'CANCELLED': 'Cancelado'
       },
       temporadas: {
-        'winter': 'Invierno',
-        'spring': 'Primavera',
-        'summer': 'Verano',
-        'fall': 'Otoño'
+        'WINTER': 'Invierno',
+        'SPRING': 'Primavera',
+        'SUMMER': 'Verano',
+        'FALL': 'Otoño'
       },
       formatos: {
         'TV': 'Serie de TV',
-        'Movie': 'Película',
+        'TV_SHORT': 'Serie de TV (corta)',
+        'MOVIE': 'Película',
+        'SPECIAL': 'Especial',
         'OVA': 'OVA',
         'ONA': 'ONA',
-        'Special': 'Especial',
-        'Music': 'Musical',
-        'TV Special': 'Especial de TV',
-        'CM': 'Comercial',
-        'PV': 'Video Promocional'
+        'MUSIC': 'Musical',
+        'MANGA': 'Manga',
+        'NOVEL': 'Novela',
+        'ONE_SHOT': 'One-shot'
       },
       generos: {
         'Action': 'Acción',
@@ -116,8 +139,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
     };
 
-    let cleanDesc = result.synopsis
-      ? result.synopsis.replace(/\[Written by MAL Rewrite\]/gi, '').trim()
+    let cleanDesc = result.description
+      ? result.description.replace(/<[^>]*>/g, '').replace(/\[Written by MAL Rewrite\]/gi, '').trim()
       : '';
 
     let sinopsisFormateada = '> No disponible';
@@ -137,12 +160,12 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         .join('\n');
     }
 
-    const titulo = result.title || result.title_english || result.title_japanese || 'Desconocido';
-    const tituloIngles = result.title_english && result.title_english !== result.title
-      ? `\n🔤 *Título en inglés:* ${result.title_english}`
+    const titulo = result.title?.romaji || result.title?.english || result.title?.native || 'Desconocido';
+    const tituloIngles = result.title?.english && result.title.english !== titulo
+      ? `\n🔤 *Título en inglés:* ${result.title.english}`
       : '';
-    const tituloNativo = result.title_japanese && result.title_japanese !== result.title
-      ? ` (${result.title_japanese})`
+    const tituloNativo = result.title?.native && result.title.native !== titulo
+      ? ` (${result.title.native})`
       : '';
 
     const estudios = result.studios?.length
@@ -150,23 +173,25 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       : 'Desconocido';
 
     const generosEsp = result.genres?.length
-      ? result.genres.map(g => TRADUCCIONES.generos[g.name] || g.name).join(', ')
+      ? result.genres.map(g => TRADUCCIONES.generos[g] || g).join(', ')
       : 'N/A';
 
-    const puntuacion = result.score ? `\n⭐ *Puntuación:* ${result.score}/10` : '';
+    const puntuacion = result.averageScore
+      ? `\n⭐ *Puntuación:* ${(result.averageScore / 10).toFixed(1)}/10`
+      : '';
 
     const AnimeInfo = `✨*INFORMACIÓN DEL ANIME*✨
 
 🈺 *Título:* ${titulo}${tituloIngles}${tituloNativo}
 🏦 *Estudio:* ${estudios}
-📆 *Año:* ${result.year || 'N/A'}
+📆 *Año:* ${result.seasonYear || 'N/A'}
 🗂 *Episodios:* ${result.episodes || 'En emisión'}
 🎧 *Audio:* Japonés
 💬 *Subtítulos:* Español
 🏷 *Géneros:* ${generosEsp}
-⏱ *Duración:* ${result.duration || 'N/A'}${puntuacion}
-💽 *Formato:* ${TRADUCCIONES.formatos[result.type] || result.type || 'N/A'}
-🔅 *Temporada:* ${TRADUCCIONES.temporadas[result.season?.toLowerCase()] || 'N/A'}
+⏱ *Duración:* ${result.duration ? `${result.duration} min` : 'N/A'}${puntuacion}
+💽 *Formato:* ${TRADUCCIONES.formatos[result.format] || result.format || 'N/A'}
+🔅 *Temporada:* ${TRADUCCIONES.temporadas[result.season] || 'N/A'}
 ⏳ *Estado:* ${TRADUCCIONES.estados[result.status] || result.status || 'N/A'}
 
 📜 *Sinopsis:*
@@ -235,67 +260,60 @@ ${sinopsisFormateada}`;
   }
 };
 
-async function fetchJikanWithRetry(queryText, maxRetries = 3) {
-  let lastError;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const response = await axios.get('https://api.jikan.moe/v4/anime', {
-        params: { q: queryText, limit: 1 },
+// ---------- Búsqueda exclusiva en AniList ----------
+async function fetchFromAniList(queryText) {
+  try {
+    const response = await axios.post(
+      ANILIST_URL,
+      {
+        query: ANILIST_QUERY,
+        variables: { search: queryText }
+      },
+      {
         timeout: 25000,
-        headers: { 'User-Agent': 'Mozilla/5.0' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0'
+        },
         httpsAgent
-      });
-      return response;
-    } catch (err) {
-      lastError = err;
-      console.warn(`[animeinfo] Jikan intento ${i + 1} falló: ${err.message}`);
-      if (i < maxRetries - 1) {
-        await new Promise(res => setTimeout(res, 1000 * Math.pow(2, i)));
       }
-    }
+    );
+
+    const media = response.data?.data?.Page?.media?.[0];
+    if (!media) return null;
+
+    // Mapeo de la respuesta de AniList a la estructura que espera el comando
+    return {
+      title: {
+        romaji: media.title?.romaji,
+        english: media.title?.english,
+        native: media.title?.native
+      },
+      description: media.description,
+      episodes: media.episodes,
+      duration: media.duration,
+      status: media.status,
+      season: media.season,
+      seasonYear: media.seasonYear,
+      averageScore: media.averageScore,
+      genres: media.genres || [],
+      studios: media.studios?.edges?.map(edge => edge.node) || [],
+      format: media.format,
+      images: {
+        jpg: {
+          large_image_url: media.coverImage?.extraLarge || media.coverImage?.large,
+          image_url: media.coverImage?.medium
+        }
+      }
+    };
+  } catch (error) {
+    console.error('[animeinfo] AniList falló:', error.message);
+    return null;
   }
-  throw lastError;
 }
 
-async function fetchFromKitsu(queryText) {
-  const res = await axios.get('https://kitsu.io/api/edge/anime', {
-    params: { 'filter[text]': queryText, 'page[limit]': 1 },
-    timeout: 20000,
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.api+json' },
-    httpsAgent
-  });
-
-  const item = res.data?.data?.[0];
-  if (!item) return null;
-
-  const attrs = item.attributes;
-
-  return {
-    title: attrs.canonicalTitle || attrs.titles?.en || attrs.titles?.en_jp || 'Desconocido',
-    title_english: attrs.titles?.en || null,
-    title_japanese: attrs.titles?.ja_jp || null,
-    synopsis: attrs.synopsis || null,
-    year: attrs.startDate ? new Date(attrs.startDate).getFullYear() : null,
-    episodes: attrs.episodeCount || null,
-    duration: attrs.episodeLength ? `${attrs.episodeLength} min` : null,
-    type: attrs.subtype === 'TV' ? 'TV' : (attrs.subtype === 'movie' ? 'Movie' : attrs.subtype),
-    status: attrs.status === 'finished' ? 'Finished Airing'
-          : attrs.status === 'current' ? 'Currently Airing'
-          : attrs.status === 'tba' ? 'Not yet aired'
-          : attrs.status,
-    season: attrs.season || null,
-    score: attrs.averageRating ? (parseFloat(attrs.averageRating) / 10).toFixed(1) : null,
-    studios: [],
-    genres: [],
-    images: {
-      jpg: {
-        large_image_url: attrs.posterImage?.large || attrs.posterImage?.original || attrs.posterImage?.medium,
-        image_url: attrs.posterImage?.medium
-      }
-    }
-  };
-}
-
+// ---------- Traducción de sinopsis (se mantiene igual) ----------
 async function traducirTexto(texto) {
   if (!texto || texto === 'No disponible') return texto || 'No disponible';
 
