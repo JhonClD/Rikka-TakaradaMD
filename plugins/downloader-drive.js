@@ -28,6 +28,10 @@ const MAX_FOLDER_FILES = 25
 const MAX_FOLDER_TOTAL = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
 const EDIT_INTERVAL = 3000
+const SIZE_LIMIT_MESSAGE =
+  '⚠️ ʟíᴍɪᴛᴇ ᴅᴇ ᴛᴀᴍᴀñᴏ sᴜᴘᴇʀᴀᴅᴏ 🧸\n\n' +
+  'ᴇʟ *ᴀʀᴄʜɪᴠᴏ* sᴜᴘᴇʀó ᴇʟ ʟíᴍɪᴛᴇ ᴅᴇ `2 ɢʙ` ᴅᴇ ᴡʜᴀᴛsᴀᴘᴘ.\n' +
+  '*ᴇsᴛᴀᴅᴏ:* 🚫 ɴᴏ sᴇ ᴇɴᴠɪó.'
 const RESTRICTED_ACCESS_MESSAGE =
   '🔒 ᴀᴄᴄᴇsᴏ ʀᴇsᴛʀɪɴɢɪᴅᴏ 🧸\n\n' +
   'ʟᴀ *ᴄᴀʀᴘᴇᴛᴀ* ᴏ ᴇʟ *ᴀʀᴄʜɪᴠᴏ* ɴᴏ ᴇs ᴘúʙʟɪᴄᴏ.\n' +
@@ -246,7 +250,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         const meta = await getFileMetadata(file.id, { signal, fetch: compatibleDriveFetch }).catch(() => ({}))
         const size = Number(meta.size) || 0
         totalBytes += size
-        if (size > MAX_SIZE) throw new Error(`El archivo ${file.fileName} supera el límite de 2 GB.`)
+        if (size > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
         if (totalBytes > MAX_FOLDER_TOTAL) throw new Error(`La carpeta supera el límite total de ${fmtBytes(MAX_FOLDER_TOTAL)}.`)
         details.push({ ...file, fileName: sanitize(repairMojibake(meta.filename || file.fileName)), mimetype: meta.mimeType || 'application/octet-stream' })
       }
@@ -259,7 +263,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
           await editStatus(`📥 *${index + 1}/${details.length}* — ${file.fileName}\n_Descargando desde Google Drive..._`)
           await downloadFile(file.id, folderPath, { signal, fetch: compatibleDriveFetch })
           const realSize = fs.statSync(folderPath).size
-          if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
+          if (realSize > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
           await conn.sendMessage(m.chat, {
             document: { url: folderPath },
@@ -283,7 +287,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     }
 
     if (info.sizeBytes > MAX_SIZE) {
-      await editStatus(`❌ El archivo (${fmtBytes(info.sizeBytes)}) supera el límite de WhatsApp (2 GB).`)
+      await editStatus(SIZE_LIMIT_MESSAGE)
       return
     }
 
