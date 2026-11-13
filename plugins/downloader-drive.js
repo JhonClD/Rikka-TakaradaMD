@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { pipeline } from 'stream/promises'
-import { Transform, PassThrough, Readable } from 'stream'
+import { Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 
 global.gdActiveDownloads = global.gdActiveDownloads || new Map()
@@ -246,7 +246,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
           if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
           await conn.sendMessage(m.chat, {
-            document: { stream: Readable.toWeb(fs.createReadStream(folderPath)) },
+            document: { url: folderPath },
             fileName: file.fileName,
             mimetype: file.mimetype,
             caption: `📁 *${file.fileName}*\n📄 ${index + 1}/${details.length}\n⚖️ ${fmtBytes(realSize)}`,
@@ -327,37 +327,12 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
 
     const realSize = fs.statSync(tempPath).size
-    let upBytes = 0
-    const upStart = Date.now()
-    let lastUpWA = 0
-    const upSampler = createSpeedSampler()
-
-    const upStream = new Transform({
-      transform(chunk, _, cb) {
-        upBytes += chunk.length
-        const now = Date.now()
-        const speed = upSampler.sample(upBytes, now - upStart)
-        const pct = realSize > 0 ? (upBytes / realSize) * 100 : 0
-
-        process.stdout.write(
-          `\r[GDrive] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(realSize)} | ${fmtBytes(speed)}/s`
-        )
-
-        if (now - lastUpWA > EDIT_INTERVAL) {
-          lastUpWA = now
-          editStatus(buildStatus('📤', 'Subiendo a WhatsApp', pct, upBytes, realSize, speed))
-        }
-        cb(null, chunk)
-      },
-    })
-
-    const pass = new PassThrough()
-    pipeline(fs.createReadStream(tempPath), upStream, pass).catch(err => pass.destroy(err))
-
+    await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
     await conn.sendMessage(
       m.chat,
       {
-        document: { stream: Readable.toWeb(pass) },
+        // Baileys abre esta ruta internamente y evita el choque Node/Web stream.
+        document: { url: tempPath },
         fileName: info.fileName,
         mimetype: info.mimetype,
         caption:
@@ -367,7 +342,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       },
       { quoted: m }
     )
-
     console.log(`\n[GDrive] 🚀 Enviado a ${m.sender}`)
     await editStatus('✅ *¡Listo!* Archivo enviado correctamente.')
   } catch (e) {
