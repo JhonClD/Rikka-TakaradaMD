@@ -4,8 +4,21 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { pipeline } from 'stream/promises'
-import { Transform } from 'stream'
+import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
+
+async function compatibleDriveFetch(...args) {
+  const response = await driveFetch(...args)
+  const body = response.body
+  if (body && typeof body.getReader !== 'function' && typeof body.pipe === 'function') {
+    return new Response(Readable.toWeb(body), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    })
+  }
+  return response
+}
 
 global.gdActiveDownloads = global.gdActiveDownloads || new Map()
 global.gdUserDownloads = global.gdUserDownloads || new Map()
@@ -15,6 +28,10 @@ const MAX_FOLDER_FILES = 25
 const MAX_FOLDER_TOTAL = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
 const EDIT_INTERVAL = 3000
+const RESTRICTED_ACCESS_MESSAGE =
+  '🔒 ᴀᴄᴄᴇsᴏ ʀᴇsᴛʀɪɴɢɪᴅᴏ 🧸\n\n' +
+  'ʟᴀ *ᴄᴀʀᴘᴇᴛᴀ* ᴏ ᴇʟ *ᴀʀᴄʜɪᴠᴏ* ɴᴏ ᴇs ᴘúʙʟɪᴄᴏ.\n' +
+  '*sᴏʟᴜᴄɪóɴ:* ᴄᴀᴍʙɪᴀ ʟᴏs ᴘᴇʀᴍɪsᴏs ᴇɴ ᴅʀɪᴠᴇ ᴀ "ᴄᴜᴀʟǫᴜɪᴇʀ ᴘᴇʀsᴏɴᴀ ᴄᴏɴ ᴇʟ ᴇɴʟᴀᴄᴇ".'
 
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
@@ -111,7 +128,7 @@ function parseGDriveError(e) {
   const msg = e?.message || String(e)
   if (msg.includes('quota') || msg.includes('Too many')) return '❌ Límite de descarga de Google Drive alcanzado. Intenta más tarde.'
   if (msg.includes('404') || msg.includes('notFound')) return '❌ Archivo no encontrado en Google Drive.'
-  if (msg.includes('403') || msg.includes('private') || msg.includes('permission')) return '❌ El archivo es privado o no tienes permiso.'
+  if (msg.includes('403') || msg.includes('private') || msg.includes('permission')) return RESTRICTED_ACCESS_MESSAGE
   return `❌ Error de Google Drive: ${msg}`
 }
 
@@ -119,7 +136,7 @@ function isGDriveFolderUrl(url) {
   return /drive\.google\.com\/drive\/folders\//i.test(String(url || ''))
 }
 async function gdriveFolderList(url, signal) {
-  const entries = await listFiles(url, { signal, fetch: driveFetch })
+  const entries = await listFiles(url, { signal, fetch: compatibleDriveFetch })
   const files = entries.filter(entry => entry?.id).map((entry, index) => ({
     id: entry.id,
     fileName: sanitize(repairMojibake(entry.name || `archivo_${index + 1}`)),
@@ -183,11 +200,9 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
   if (!args[0]) {
     throw (
-      `📁 *Google Drive Downloader*\n\n` +
-      `Envía el enlace de un archivo o carpeta pública de Google Drive.\n` +
-      `_Archivo:_ ${usedPrefix + command} https://drive.google.com/file/d/XXXXX/view_\n` +
-      `_Carpeta:_ ${usedPrefix + command} https://drive.google.com/drive/folders/XXXXX\n\n` +
-      `Para cancelar, envía *.cancelar*`
+      `🔮 ʀɪᴋᴋᴀ ᴅʀɪᴠᴇ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ 🧸\n\n` +
+      `ᴇɴᴠíᴀ ᴇʟ ᴇɴʟᴀᴄᴇ ᴅᴇ ᴜɴ *ᴀʀᴄʜɪᴠᴏ* ᴏ *ᴄᴀʀᴘᴇᴛᴀ* ᴘúʙʟɪᴄᴀ ᴅᴇ ɢᴏᴏɢʟᴇ ᴅʀɪᴠᴇ.\n` +
+      `*ᴀʀᴄʜɪᴠᴏ:* \`${usedPrefix + command} <enlace>\``
     )
   }
 
@@ -228,7 +243,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       const details = []
       let totalBytes = 0
       for (const file of files) {
-        const meta = await getFileMetadata(file.id, { signal, fetch: driveFetch }).catch(() => ({}))
+        const meta = await getFileMetadata(file.id, { signal, fetch: compatibleDriveFetch }).catch(() => ({}))
         const size = Number(meta.size) || 0
         totalBytes += size
         if (size > MAX_SIZE) throw new Error(`El archivo ${file.fileName} supera el límite de 2 GB.`)
@@ -242,7 +257,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         const folderPath = path.join(os.tmpdir(), `gdrive_folder_${Date.now()}_${sanitize(file.fileName)}`)
         try {
           await editStatus(`📥 *${index + 1}/${details.length}* — ${file.fileName}\n_Descargando desde Google Drive..._`)
-          await downloadFile(file.id, folderPath, { signal, fetch: driveFetch })
+          await downloadFile(file.id, folderPath, { signal, fetch: compatibleDriveFetch })
           const realSize = fs.statSync(folderPath).size
           if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
@@ -250,8 +265,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
             document: { url: folderPath },
             fileName: file.fileName,
             mimetype: file.mimetype,
-            caption: `📁 *${file.fileName}*\n📄 ${index + 1}/${details.length}\n⚖️ ${fmtBytes(realSize)}`,
-          }, { quoted: m })
+          })
         } finally {
           try { if (fs.existsSync(folderPath)) fs.unlinkSync(folderPath) } catch {}
         }
