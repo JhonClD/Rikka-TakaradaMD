@@ -53,7 +53,7 @@ const ANILIST_QUERY = `
   }
 `;
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = false }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
 
@@ -69,12 +69,12 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     };
   }
 
-  if (!text) return m.reply(`*${tradutor.texto1}*`);
+  if (!text) return silentNotFound ? null : m.reply(`*${tradutor.texto1}*`);
 
   try {
     const result = await fetchFromAniList(text);
 
-    if (!result) return m.reply(`*${tradutor.texto3}*`);
+    if (!result) return silentNotFound ? null : m.reply(`*${tradutor.texto3}*`);
 
     const TRADUCCIONES = {
       estados: {

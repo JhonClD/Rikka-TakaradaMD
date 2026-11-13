@@ -101,7 +101,7 @@ function deriveAnimeTitle(files) {
     .replace(/[._]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim())
-    .filter(Boolean)
+    .filter(candidate => candidate && !/^(?:archivo|file)(?:[_ -]?\d+)?$/i.test(candidate))
   if (!candidates.length) return ''
 
   const counts = new Map()
@@ -243,7 +243,7 @@ async function gdriveDl(url, signal) {
   }
 }
 
-const handler = async (m, { conn, args, usedPrefix, command }) => {
+const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
   const animeDriveCommand = /^anid$/i.test(command)
   if (/^(cancelar|stop)$/i.test(command)) {
     const userKey = m.chat + ':' + m.sender
@@ -262,7 +262,12 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     )
   }
 
-  if (animeDriveCommand && !isGDriveFolderUrl(args[0])) {
+  const folderUrl = isGDriveFolderUrl(args[0])
+  if ((animeDriveCommand || folderUrl) && !isOwner) {
+    return conn.sendMessage(m.chat, { text: '⛔ Solo el owner puede usar /aniD o descargar carpetas de Google Drive.' })
+  }
+
+  if (animeDriveCommand && !folderUrl) {
     return conn.sendMessage(m.chat, { text: 'Usa /aniD con el enlace de una carpeta pública de Google Drive.' })
   }
 
@@ -297,16 +302,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         if (isAbort(err)) throw err
         throw parseGDriveError(err)
       }
-      if (animeDriveCommand) {
-        const animeTitle = await getDriveFolderTitle(args[0], signal) || deriveAnimeTitle(files)
-        console.log(`[aniD] 🔎 Buscando ficha de anime: ${animeTitle || 'título no detectado'}`)
-        await animeInfoHandler(m, {
-          conn,
-          text: animeTitle,
-          usedPrefix,
-          command: 'animeinfo',
-        })
-      }
       global.gdActiveDownloads.set(userKey, { controller })
       global.gdUserDownloads.set(userKey, true)
       await editStatus(`📁 *Carpeta encontrada*\n📄 ${files.length} archivo(s)\n🔄 _Calculando tamaños..._`)
@@ -319,6 +314,21 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         if (size > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
         if (totalBytes > MAX_FOLDER_TOTAL) throw new Error(`La carpeta supera el límite total de ${fmtBytes(MAX_FOLDER_TOTAL)}.`)
         details.push({ ...file, fileName: sanitize(repairMojibake(meta.filename || file.fileName)), mimetype: meta.mimeType || 'application/octet-stream' })
+      }
+      if (animeDriveCommand) {
+        const animeTitle = await getDriveFolderTitle(args[0], signal) || deriveAnimeTitle(details)
+        if (animeTitle) {
+          console.log(`[aniD] 🔎 Buscando ficha de anime: ${animeTitle}`)
+          await animeInfoHandler(m, {
+            conn,
+            text: animeTitle,
+            usedPrefix,
+            command: 'animeinfo',
+            silentNotFound: true,
+          })
+        } else {
+          console.log('[aniD] ℹ️ No se detectó título en carpeta ni archivos; se omite la ficha del anime.')
+        }
       }
       await editStatus(`📁 *Descargando carpeta*\n📄 ${details.length} archivo(s)\n⚖️ ${fmtBytes(totalBytes)}\n_Se enviará archivo por archivo._`)
       for (let index = 0; index < details.length; index++) {
