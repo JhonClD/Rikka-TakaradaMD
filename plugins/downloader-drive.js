@@ -27,7 +27,6 @@ global.gdUserDownloads = global.gdUserDownloads || new Map()
 
 const MAX_SIZE = 2 * 1024 ** 3
 const MAX_FOLDER_FILES = 25
-const MAX_FOLDER_TOTAL = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
 const EDIT_INTERVAL = 3000
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
@@ -385,7 +384,6 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
         const size = Number(meta.size) || 0
         totalBytes += size
         if (size > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
-        if (totalBytes > MAX_FOLDER_TOTAL) throw new Error(`La carpeta supera el límite total de ${fmtBytes(MAX_FOLDER_TOTAL)}.`)
         details.push({ ...file, fileName: sanitize(repairMojibake(meta.filename || file.fileName)), mimetype: meta.mimeType || 'application/octet-stream' })
       }
       if (animeDriveCommand) {
