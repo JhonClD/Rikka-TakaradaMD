@@ -4,11 +4,14 @@ import path from 'path'
 import os from 'os'
 import { pipeline } from 'stream/promises'
 import { Transform, PassThrough } from 'stream'
+import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 
 global.gdActiveDownloads = global.gdActiveDownloads || new Map()
 global.gdUserDownloads = global.gdUserDownloads || new Map()
 
 const MAX_SIZE = 2 * 1024 ** 3
+const MAX_FOLDER_FILES = 25
+const MAX_FOLDER_TOTAL = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
 const EDIT_INTERVAL = 3000
 
@@ -89,6 +92,20 @@ function parseGDriveError(e) {
   return `❌ Error de Google Drive: ${msg}`
 }
 
+function isGDriveFolderUrl(url) {
+  return /drive\.google\.com\/drive\/folders\//i.test(String(url || ''))
+}
+async function gdriveFolderList(url, signal) {
+  const entries = await listFiles(url, { signal })
+  const files = entries.filter(entry => entry?.id).map((entry, index) => ({
+    id: entry.id,
+    fileName: sanitize(entry.name || `archivo_${index + 1}`),
+  }))
+  if (!files.length) throw new Error('La carpeta está vacía, es privada o no contiene archivos compatibles.')
+  if (files.length > MAX_FOLDER_FILES) throw new Error(`La carpeta contiene ${files.length} archivos. El límite es ${MAX_FOLDER_FILES}.`)
+  return files
+}
+
 async function gdriveDl(url, signal) {
   if (!url?.match(/drive\.google/i)) throw new Error('URL no válida de Google Drive.')
 
@@ -144,8 +161,9 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   if (!args[0]) {
     throw (
       `📁 *Google Drive Downloader*\n\n` +
-      `Envía el enlace del archivo de Google Drive.\n` +
-      `_Ej: ${usedPrefix + command} https://drive.google.com/file/d/XXXXX/view_\n\n` +
+      `Envía el enlace de un archivo o carpeta pública de Google Drive.\n` +
+      `_Archivo:_ ${usedPrefix + command} https://drive.google.com/file/d/XXXXX/view_\n` +
+      `_Carpeta:_ ${usedPrefix + command} https://drive.google.com/drive/folders/XXXXX\n\n` +
       `Para cancelar, envía *.cancelar*`
     )
   }
@@ -173,6 +191,52 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   }
 
   try {
+    if (isGDriveFolderUrl(args[0])) {
+      let files
+      try {
+        files = await gdriveFolderList(args[0], signal)
+      } catch (err) {
+        if (isAbort(err)) throw err
+        throw parseGDriveError(err)
+      }
+      global.gdActiveDownloads.set(userKey, { controller })
+      global.gdUserDownloads.set(userKey, true)
+      await editStatus(`📁 *Carpeta encontrada*\n📄 ${files.length} archivo(s)\n🔄 _Calculando tamaños..._`)
+      const details = []
+      let totalBytes = 0
+      for (const file of files) {
+        const meta = await getFileMetadata(file.id, { signal }).catch(() => ({}))
+        const size = Number(meta.size) || 0
+        totalBytes += size
+        if (size > MAX_SIZE) throw new Error(`El archivo ${file.fileName} supera el límite de 2 GB.`)
+        if (totalBytes > MAX_FOLDER_TOTAL) throw new Error(`La carpeta supera el límite total de ${fmtBytes(MAX_FOLDER_TOTAL)}.`)
+        details.push({ ...file, fileName: sanitize(meta.filename || file.fileName), mimetype: meta.mimeType || 'application/octet-stream' })
+      }
+      await editStatus(`📁 *Descargando carpeta*\n📄 ${details.length} archivo(s)\n⚖️ ${fmtBytes(totalBytes)}\n_Se enviará archivo por archivo._`)
+      for (let index = 0; index < details.length; index++) {
+        const file = details[index]
+        if (signal.aborted) throw new Error('Aborted')
+        const folderPath = path.join(os.tmpdir(), `gdrive_folder_${Date.now()}_${sanitize(file.fileName)}`)
+        try {
+          await editStatus(`📥 *${index + 1}/${details.length}* — ${file.fileName}\n_Descargando desde Google Drive..._`)
+          await downloadFile(file.id, folderPath, { signal })
+          const realSize = fs.statSync(folderPath).size
+          if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
+          await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
+          await conn.sendMessage(m.chat, {
+            document: { stream: fs.createReadStream(folderPath) },
+            fileName: file.fileName,
+            mimetype: file.mimetype,
+            caption: `📁 *${file.fileName}*\n📄 ${index + 1}/${details.length}\n⚖️ ${fmtBytes(realSize)}`,
+          }, { quoted: m })
+        } finally {
+          try { if (fs.existsSync(folderPath)) fs.unlinkSync(folderPath) } catch {}
+        }
+      }
+      await editStatus(`✅ *Carpeta enviada correctamente.*\n📄 ${details.length} archivo(s)`)
+      return
+    }
+
     let info
     try {
       info = await gdriveDl(args[0], signal)
@@ -303,7 +367,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   }
 }
 
-handler.help = ['gdrive <enlace>']
+handler.help = ['gdrive <enlace archivo|carpeta>']
 handler.tags = ['downloader']
 handler.command = /^(gdrive|gd|drive|cancelar|stop)$/i
 
