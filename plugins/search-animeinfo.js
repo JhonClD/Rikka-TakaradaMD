@@ -7,6 +7,36 @@ import fs from 'fs';
 const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
 const ANILIST_URL = 'https://graphql.anilist.co';
+const TRANSLATE_CACHE_MAX = 300;
+const TRANSLATE_MIN_GAP_MS = 250;
+const TRANSLATE_COOLDOWN_MS = 15 * 60 * 1000;
+const translateCache = new Map();
+let translateQueue = Promise.resolve();
+let lastTranslateRequestAt = 0;
+const translateCooldowns = { google: 0, mymemory: 0 };
+
+function scheduleTranslateRequest(request) {
+  const operation = translateQueue.then(async () => {
+    const wait = TRANSLATE_MIN_GAP_MS - (Date.now() - lastTranslateRequestAt);
+    if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+    lastTranslateRequestAt = Date.now();
+    return request();
+  });
+  translateQueue = operation.catch(() => {});
+  return operation;
+}
+
+function isTranslationRateLimit(error) {
+  return error?.response?.status === 429 || error?.status === 429 ||
+    /too many requests|rate.?limit|quota/i.test(error?.message || '');
+}
+
+function cacheTranslation(key, value) {
+  if (translateCache.size >= TRANSLATE_CACHE_MAX) {
+    translateCache.delete(translateCache.keys().next().value);
+  }
+  translateCache.set(key, value);
+}
 
 // ====================== HANDLER ======================
 const handler = async (m, { conn, text, usedPrefix, command }) => {
@@ -576,26 +606,70 @@ async function traducirTexto(texto) {
 
   const traducidos = [];
   for (const fragmento of fragmentos) {
-    try {
-      const res = await translate(fragmento, { to: 'es', from: 'auto' });
-      traducidos.push(res.text);
-    } catch (err1) {
-      console.warn('[translate] Google falló, probando MyMemory:', err1.message);
+    const cacheKey = fragmento.trim();
+    if (translateCache.has(cacheKey)) {
+      traducidos.push(translateCache.get(cacheKey));
+      continue;
+    }
+
+    let resultado = null;
+
+    if (Date.now() >= translateCooldowns.google) {
       try {
-        const res = await axios.get('https://api.mymemory.translated.net/get', {
-          params: { q: fragmento, langpair: 'en|es' },
-          timeout: 8000,
-          httpsAgent
+        const res = await scheduleTranslateRequest(() => {
+          if (Date.now() < translateCooldowns.google) return null;
+          return translate(fragmento, { to: 'es', from: 'auto' });
         });
+        resultado = res?.text || null;
+      } catch (err1) {
+        if (isTranslationRateLimit(err1)) {
+          translateCooldowns.google = Date.now() + TRANSLATE_COOLDOWN_MS;
+          console.info('[animeinfo] Google Translate limitó las consultas; se pausará temporalmente.');
+        } else {
+          console.warn('[animeinfo] Google Translate falló:', err1.message);
+        }
+      }
+    }
+
+    if (!resultado && Date.now() >= translateCooldowns.mymemory) {
+      try {
+        const res = await scheduleTranslateRequest(() => {
+          if (Date.now() < translateCooldowns.mymemory) return null;
+          return axios.get('https://api.mymemory.translated.net/get', {
+            params: { q: fragmento, langpair: 'en|es' },
+            timeout: 8000,
+            httpsAgent
+          });
+        });
+        if (!res) {
+          traducidos.push(fragmento);
+          continue;
+        }
         if (res.data?.responseStatus === 200 && res.data?.responseData?.translatedText) {
-          traducidos.push(res.data.responseData.translatedText);
+          resultado = res.data.responseData.translatedText;
+        } else if (Number(res.data?.responseStatus) === 429) {
+          const error = new Error('MyMemory respondió HTTP 429');
+          error.status = 429;
+          throw error;
         } else {
           throw new Error('MyMemory no disponible');
         }
       } catch (err2) {
-        console.warn('[translate] MyMemory falló:', err2.message);
-        traducidos.push(fragmento);
+        if (isTranslationRateLimit(err2)) {
+          translateCooldowns.mymemory = Date.now() + TRANSLATE_COOLDOWN_MS;
+          console.info('[animeinfo] MyMemory limitó las consultas; se pausará temporalmente.');
+        } else {
+          console.warn('[animeinfo] MyMemory falló:', err2.message);
+        }
       }
+    }
+
+    if (resultado) {
+      cacheTranslation(cacheKey, resultado);
+      traducidos.push(resultado);
+    } else {
+      // La ficha debe seguir disponible aunque los traductores externos estén limitados.
+      traducidos.push(fragmento);
     }
   }
 
