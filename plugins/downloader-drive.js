@@ -6,6 +6,7 @@ import os from 'os'
 import { pipeline } from 'stream/promises'
 import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
+import animeInfoHandler from './search-animeinfo.js'
 
 async function compatibleDriveFetch(...args) {
   const response = await driveFetch(...args)
@@ -88,6 +89,28 @@ function repairMojibake(value) {
 
 function sanitize(name) {
   return repairMojibake(name).replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
+}
+
+function deriveAnimeTitle(files) {
+  const candidates = files.map(file => sanitize(file.fileName)
+    .replace(/\.(?:mp4|mkv|avi|mov|webm|m4v)$/i, '')
+    .replace(/^\s*(?:\d{1,3}|s\d{1,2}e\d{1,3})[\s._-]*/, '')
+    .replace(/\s+(?:s\d{1,2}e\d{1,3}|(?:ep|episodio|cap[ií]tulo)\s*\d{1,3})\b.*$/i, '')
+    .replace(/\s*(?:[-|_[({]+\s*)?\b(?:sub(?:t[ií]tulos?)?|dub|espa[nñ]ol|latino|castellano|480p|720p|1080p|2160p|4k)\b.*$/i, '')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim())
+    .filter(Boolean)
+  if (!candidates.length) return ''
+
+  const counts = new Map()
+  for (const candidate of candidates) {
+    const key = candidate.toLocaleLowerCase()
+    const current = counts.get(key)
+    if (!current || candidate.length > current.title.length) counts.set(key, { title: candidate, count: 1 })
+    else current.count++
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || b.title.length - a.title.length)[0].title
 }
 
 function isAbort(e) {
@@ -194,6 +217,7 @@ async function gdriveDl(url, signal) {
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
+  const animeDriveCommand = /^anid$/i.test(command)
   if (/^(cancelar|stop)$/i.test(command)) {
     const userKey = m.chat + ':' + m.sender
     const dl = global.gdActiveDownloads.get(userKey)
@@ -206,8 +230,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     throw (
       `🔮 ʀɪᴋᴋᴀ ᴅʀɪᴠᴇ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ 🧸\n\n` +
       `ᴇɴᴠíᴀ ᴇʟ ᴇɴʟᴀᴄᴇ ᴅᴇ ᴜɴ *ᴀʀᴄʜɪᴠᴏ* ᴏ *ᴄᴀʀᴘᴇᴛᴀ* ᴘúʙʟɪᴄᴀ ᴅᴇ ɢᴏᴏɢʟᴇ ᴅʀɪᴠᴇ.\n` +
-      `*ᴀʀᴄʜɪᴠᴏ:* \`${usedPrefix + command} <enlace>\``
+      `*ᴀʀᴄʜɪᴠᴏ:* \`${usedPrefix + command} <enlace>\`\n` +
+      `*ᴀɴɪᴍᴇ + ᴅᴇsᴄᴀʀɢᴀs:* \`${usedPrefix}aniD <enlace-carpeta>\``
     )
+  }
+
+  if (animeDriveCommand && !isGDriveFolderUrl(args[0])) {
+    return conn.sendMessage(m.chat, { text: 'Usa /aniD con el enlace de una carpeta pública de Google Drive.' })
   }
 
   const userKey = m.chat + ':' + m.sender
@@ -240,6 +269,15 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       } catch (err) {
         if (isAbort(err)) throw err
         throw parseGDriveError(err)
+      }
+      if (animeDriveCommand) {
+        const animeTitle = deriveAnimeTitle(files)
+        await animeInfoHandler(m, {
+          conn,
+          text: animeTitle,
+          usedPrefix,
+          command: 'animeinfo',
+        })
       }
       global.gdActiveDownloads.set(userKey, { controller })
       global.gdUserDownloads.set(userKey, true)
@@ -375,8 +413,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   }
 }
 
-handler.help = ['gdrive <enlace archivo|carpeta>']
+handler.help = ['gdrive <enlace archivo|carpeta>', 'aniD <enlace-carpeta>']
 handler.tags = ['downloader']
-handler.command = /^(gdrive|gd|drive|cancelar|stop)$/i
+handler.command = /^(gdrive|gd|drive|anid|cancelar|stop)$/i
 
 export default handler
