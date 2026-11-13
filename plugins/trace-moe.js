@@ -15,6 +15,17 @@ const fmtTime = (seconds = 0) => {
   return hours ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${pad(minutes)}:${pad(secs)}`
 }
 
+function previewUrl(url) {
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+    parsed.searchParams.set('size', 'l')
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
 const handler = async (m, { conn, usedPrefix, command }) => {
   const quoted = m.quoted ? m.quoted : m
   const mime = String((quoted.msg || quoted).mimetype || quoted.mediaType || '').toLowerCase()
@@ -73,11 +84,13 @@ const handler = async (m, { conn, usedPrefix, command }) => {
     }
 
     let previewSent = false
-    if (best.video) {
+    const videoUrl = previewUrl(best.video)
+    const imageUrl = previewUrl(best.image)
+    if (videoUrl) {
       try {
         await conn.sendMessage(
           m.chat,
-          { video: { url: `${best.video}&size=l` }, caption, gifPlayback: true },
+          { video: { url: videoUrl }, caption, gifPlayback: true },
           { quoted: m }
         )
         previewSent = true
@@ -86,7 +99,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
         try {
           await conn.sendMessage(
             m.chat,
-            { video: { url: `${best.video}&size=l` }, caption, gifPlayback: false },
+            { video: { url: videoUrl }, caption, gifPlayback: false },
             { quoted: m }
           )
           previewSent = true
@@ -96,9 +109,9 @@ const handler = async (m, { conn, usedPrefix, command }) => {
       }
     }
 
-    if (!previewSent && best.image) {
+    if (!previewSent && imageUrl) {
       try {
-        await conn.sendMessage(m.chat, { image: { url: `${best.image}&size=l` }, caption }, { quoted: m })
+        await conn.sendMessage(m.chat, { image: { url: imageUrl }, caption }, { quoted: m })
         previewSent = true
       } catch (imageError) {
         console.warn('[trace-moe] No se pudo enviar la imagen:', imageError.message)
