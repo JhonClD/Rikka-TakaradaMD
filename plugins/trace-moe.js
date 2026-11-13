@@ -72,21 +72,40 @@ const handler = async (m, { conn, usedPrefix, command }) => {
       return conn.sendMessage(m.chat, { text: `${caption}\n\n🔞 Vista previa omitida.` }, { quoted: m })
     }
 
-    try {
-      if (!best.video) throw new Error('trace.moe no devolvió vista previa de video.')
-      await conn.sendMessage(
-        m.chat,
-        { video: { url: `${best.video}&size=l` }, caption, gifPlayback: false },
-        { quoted: m }
-      )
-    } catch {
+    let previewSent = false
+    if (best.video) {
       try {
-        if (!best.image) throw new Error('trace.moe no devolvió imagen de vista previa.')
-        await conn.sendMessage(m.chat, { image: { url: `${best.image}&size=l` }, caption }, { quoted: m })
-      } catch {
-        await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+        await conn.sendMessage(
+          m.chat,
+          { video: { url: `${best.video}&size=l` }, caption, gifPlayback: true },
+          { quoted: m }
+        )
+        previewSent = true
+      } catch (gifError) {
+        console.warn('[trace-moe] No se pudo enviar el clip en modo GIF:', gifError.message)
+        try {
+          await conn.sendMessage(
+            m.chat,
+            { video: { url: `${best.video}&size=l` }, caption, gifPlayback: false },
+            { quoted: m }
+          )
+          previewSent = true
+        } catch (videoError) {
+          console.warn('[trace-moe] No se pudo enviar el video:', videoError.message)
+        }
       }
     }
+
+    if (!previewSent && best.image) {
+      try {
+        await conn.sendMessage(m.chat, { image: { url: `${best.image}&size=l` }, caption }, { quoted: m })
+        previewSent = true
+      } catch (imageError) {
+        console.warn('[trace-moe] No se pudo enviar la imagen:', imageError.message)
+      }
+    }
+
+    if (!previewSent) await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
   } catch (error) {
     console.error('[trace-moe]', error)
     await m.reply(`❌ ${error.message || 'Error al buscar la escena.'}`)
