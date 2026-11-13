@@ -341,8 +341,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
     await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
 
-    const realSize = fs.statSync(tempPath).size
-    await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
     await conn.sendMessage(
       m.chat,
       {
@@ -350,12 +348,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         document: { url: tempPath },
         fileName: info.fileName,
         mimetype: info.mimetype,
-        caption:
-          `✅ *${info.fileName}*\n` +
-          `⚖️ *Tamaño:* ${fmtBytes(realSize)}\n` +
-          `🚀 _Enviado con éxito._`,
-      },
-      { quoted: m }
+      }
     )
     console.log(`\n[GDrive] 🚀 Enviado a ${m.sender}`)
     await editStatus('✅ *¡Listo!* Archivo enviado correctamente.')
