@@ -10,10 +10,11 @@ const ANILIST_URL = 'https://graphql.anilist.co';
 const TRANSLATE_CACHE_MAX = 300;
 const TRANSLATE_MIN_GAP_MS = 250;
 const TRANSLATE_COOLDOWN_MS = 15 * 60 * 1000;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 const translateCache = new Map();
 let translateQueue = Promise.resolve();
 let lastTranslateRequestAt = 0;
-const translateCooldowns = { google: 0, mymemory: 0 };
+const translateCooldowns = { gemini: 0, google: 0, mymemory: 0 };
 
 function scheduleTranslateRequest(request) {
   const operation = translateQueue.then(async () => {
@@ -27,8 +28,12 @@ function scheduleTranslateRequest(request) {
 }
 
 function isTranslationRateLimit(error) {
+  const responseError = error?.response?.data?.error;
   return error?.response?.status === 429 || error?.status === 429 ||
-    /too many requests|rate.?limit|quota/i.test(error?.message || '');
+    responseError?.status === 'RESOURCE_EXHAUSTED' ||
+    /too many requests|rate.?limit|quota|resource.?exhausted/i.test(
+      `${error?.message || ''} ${responseError?.message || ''}`
+    );
 }
 
 function cacheTranslation(key, value) {
@@ -614,7 +619,45 @@ async function traducirTexto(texto) {
 
     let resultado = null;
 
-    if (Date.now() >= translateCooldowns.google) {
+    const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+    if (geminiApiKey && Date.now() >= translateCooldowns.gemini) {
+      try {
+        const res = await scheduleTranslateRequest(() => {
+          if (Date.now() < translateCooldowns.gemini) return null;
+          return axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+            {
+              systemInstruction: {
+                parts: [{ text: 'Traduce al español el texto recibido. Detecta automáticamente el idioma de origen. Devuelve únicamente la traducción, sin explicaciones, comillas ni texto adicional.' }]
+              },
+              contents: [{ role: 'user', parts: [{ text: fragmento }] }],
+              generationConfig: { maxOutputTokens: 1200 }
+            },
+            {
+              timeout: 15000,
+              headers: {
+                'x-goog-api-key': geminiApiKey,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+        });
+        resultado = res?.data?.candidates?.[0]?.content?.parts
+          ?.map(part => part?.text || '')
+          .join('')
+          .trim() || null;
+        if (!resultado && res) throw new Error('Gemini devolvió una respuesta vacía');
+      } catch (err) {
+        if (isTranslationRateLimit(err)) {
+          translateCooldowns.gemini = Date.now() + TRANSLATE_COOLDOWN_MS;
+          console.info('[animeinfo] Gemini limitó las consultas; se pausará temporalmente.');
+        } else {
+          console.warn('[animeinfo] Gemini falló:', err.message);
+        }
+      }
+    }
+
+    if (!resultado && Date.now() >= translateCooldowns.google) {
       try {
         const res = await scheduleTranslateRequest(() => {
           if (Date.now() < translateCooldowns.google) return null;
