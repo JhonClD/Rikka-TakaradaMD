@@ -42,8 +42,30 @@ function buildStatus(emoji, label, pct, done, total, speed) {
   )
 }
 
+const CP1252_BYTES = new Map(Object.entries({
+  '€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87,
+  'ˆ': 0x88, '‰': 0x89, 'Š': 0x8a, '‹': 0x8b, 'Œ': 0x8c, 'Ž': 0x8e,
+  '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97,
+  '˜': 0x98, '™': 0x99, 'š': 0x9a, '›': 0x9b, 'œ': 0x9c, 'ž': 0x9e, 'Ÿ': 0x9f,
+}))
+function repairMojibake(value) {
+  const text = String(value ?? '')
+  if (!/[ÃÂâð�]/u.test(text)) return text.normalize('NFC')
+  try {
+    const bytes = []
+    for (const char of text) {
+      const code = CP1252_BYTES.get(char) ?? char.codePointAt(0)
+      if (code > 0xff) return text.normalize('NFC')
+      bytes.push(code)
+    }
+    const repaired = Buffer.from(bytes).toString('utf8')
+    if (!repaired.includes('�')) return repaired.normalize('NFC')
+  } catch {}
+  return text.normalize('NFC')
+}
+
 function sanitize(name) {
-  return name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
+  return repairMojibake(name).replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
 }
 
 function isAbort(e) {
@@ -99,7 +121,7 @@ async function gdriveFolderList(url, signal) {
   const entries = await listFiles(url, { signal })
   const files = entries.filter(entry => entry?.id).map((entry, index) => ({
     id: entry.id,
-    fileName: sanitize(entry.name || `archivo_${index + 1}`),
+    fileName: sanitize(repairMojibake(entry.name || `archivo_${index + 1}`)),
   }))
   if (!files.length) throw new Error('La carpeta está vacía, es privada o no contiene archivos compatibles.')
   if (files.length > MAX_FOLDER_FILES) throw new Error(`La carpeta contiene ${files.length} archivos. El límite es ${MAX_FOLDER_FILES}.`)
@@ -143,7 +165,7 @@ async function gdriveDl(url, signal) {
 
   return {
     downloadUrl,
-    fileName: fileName || 'archivo',
+    fileName: repairMojibake(fileName || 'archivo'),
     sizeBytes: Number(sizeBytes) || 0,
     mimetype: head.headers.get('content-type') || 'application/octet-stream',
   }
@@ -210,7 +232,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         totalBytes += size
         if (size > MAX_SIZE) throw new Error(`El archivo ${file.fileName} supera el límite de 2 GB.`)
         if (totalBytes > MAX_FOLDER_TOTAL) throw new Error(`La carpeta supera el límite total de ${fmtBytes(MAX_FOLDER_TOTAL)}.`)
-        details.push({ ...file, fileName: sanitize(meta.filename || file.fileName), mimetype: meta.mimeType || 'application/octet-stream' })
+        details.push({ ...file, fileName: sanitize(repairMojibake(meta.filename || file.fileName)), mimetype: meta.mimeType || 'application/octet-stream' })
       }
       await editStatus(`📁 *Descargando carpeta*\n📄 ${details.length} archivo(s)\n⚖️ ${fmtBytes(totalBytes)}\n_Se enviará archivo por archivo._`)
       for (let index = 0; index < details.length; index++) {
