@@ -102,7 +102,7 @@ async function resumirSinopsisGemini(texto, maxCaracteres) {
 }
 
 // ====================== HANDLER ======================
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummary = false }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
 
@@ -215,18 +215,33 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     let sinopsisFormateada = '> No disponible';
 
     if (cleanDesc) {
-      const parrafos = cleanDesc.split(/\n+/).map(p => p.trim()).filter(Boolean);
-      const traducidos = [];
-      for (const p of parrafos) {
-        traducidos.push(await traducirTexto(p));
+      let resumenAniD = null;
+      if (forceSynopsisSummary && cleanDesc.length > 420) {
+        console.info('[animeinfo] /aniD: intentando resumir la sinopsis larga con Gemini.');
+        resumenAniD = await resumirSinopsisGemini(cleanDesc, 420);
+        if (resumenAniD) {
+          console.info(`[animeinfo] /aniD: sinopsis resumida a ${resumenAniD.length} caracteres.`);
+        } else {
+          console.info('[animeinfo] /aniD: Gemini no resumió; se usará la traducción de respaldo.');
+        }
       }
-      sinopsisFormateada = traducidos
-        .join('\n\n')
-        .split('\n')
-        .map(l => l.trim())
-        .filter(Boolean)
-        .map(l => `> ${l}`)
-        .join('\n');
+
+      if (resumenAniD) {
+        sinopsisFormateada = `> ${resumenAniD}`;
+      } else {
+        const parrafos = cleanDesc.split(/\n+/).map(p => p.trim()).filter(Boolean);
+        const traducidos = [];
+        for (const p of parrafos) {
+          traducidos.push(await traducirTexto(p));
+        }
+        sinopsisFormateada = traducidos
+          .join('\n\n')
+          .split('\n')
+          .map(l => l.trim())
+          .filter(Boolean)
+          .map(l => `> ${l}`)
+          .join('\n');
+      }
     }
 
     const titulo = result.title?.romaji || result.title?.english || result.title?.native || 'Desconocido';

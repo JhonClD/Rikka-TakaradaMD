@@ -398,6 +398,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
             usedPrefix,
             command: 'animeinfo',
             silentNotFound: true,
+            forceSynopsisSummary: true,
           })
         } else {
           console.log('[aniD] ℹ️ No se detectó título en carpeta ni archivos; se omite la ficha del anime.')
