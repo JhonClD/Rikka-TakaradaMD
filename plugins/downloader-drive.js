@@ -1,4 +1,5 @@
 import fetch from 'node-fetch'
+import { fetch as driveFetch } from 'undici'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
@@ -118,7 +119,7 @@ function isGDriveFolderUrl(url) {
   return /drive\.google\.com\/drive\/folders\//i.test(String(url || ''))
 }
 async function gdriveFolderList(url, signal) {
-  const entries = await listFiles(url, { signal })
+  const entries = await listFiles(url, { signal, fetch: driveFetch })
   const files = entries.filter(entry => entry?.id).map((entry, index) => ({
     id: entry.id,
     fileName: sanitize(repairMojibake(entry.name || `archivo_${index + 1}`)),
@@ -227,7 +228,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       const details = []
       let totalBytes = 0
       for (const file of files) {
-        const meta = await getFileMetadata(file.id, { signal }).catch(() => ({}))
+        const meta = await getFileMetadata(file.id, { signal, fetch: driveFetch }).catch(() => ({}))
         const size = Number(meta.size) || 0
         totalBytes += size
         if (size > MAX_SIZE) throw new Error(`El archivo ${file.fileName} supera el límite de 2 GB.`)
@@ -241,7 +242,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         const folderPath = path.join(os.tmpdir(), `gdrive_folder_${Date.now()}_${sanitize(file.fileName)}`)
         try {
           await editStatus(`📥 *${index + 1}/${details.length}* — ${file.fileName}\n_Descargando desde Google Drive..._`)
-          await downloadFile(file.id, folderPath, { signal })
+          await downloadFile(file.id, folderPath, { signal, fetch: driveFetch })
           const realSize = fs.statSync(folderPath).size
           if (realSize > MAX_SIZE) throw new Error('El archivo supera el límite de 2 GB.')
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
