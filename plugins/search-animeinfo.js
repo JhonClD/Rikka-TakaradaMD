@@ -6,19 +6,23 @@ import fs from 'fs';
 
 const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
-// Endpoint único de AniList
 const ANILIST_URL = 'https://graphql.anilist.co';
 
-// Consulta GraphQL para buscar un anime por título
+// Pedimos varios resultados y campos extra para poder puntuar mejor
 const ANILIST_QUERY = `
   query ($search: String!) {
-    Page {
-      media(search: $search, type: ANIME) {
+    Page(page: 1, perPage: 15) {
+      media(
+        search: $search,
+        type: ANIME,
+        sort: [SEARCH_MATCH, POPULARITY_DESC]
+      ) {
         id
         title {
           romaji
           english
           native
+          userPreferred
         }
         description
         episodes
@@ -27,15 +31,18 @@ const ANILIST_QUERY = `
         season
         seasonYear
         averageScore
+        popularity
+        favourites
         genres
+        format
         studios {
           edges {
             node {
               name
+              isAnimationStudio
             }
           }
         }
-        format
         coverImage {
           extraLarge
           large
@@ -65,7 +72,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) return m.reply(`*${tradutor.texto1}*`);
 
   try {
-    // Búsqueda exclusiva en AniList
     const result = await fetchFromAniList(text);
 
     if (!result) return m.reply(`*${tradutor.texto3}*`);
@@ -75,7 +81,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         'FINISHED': 'Finalizado',
         'RELEASING': 'En emisión',
         'NOT_YET_RELEASED': 'Próximamente',
-        'CANCELLED': 'Cancelado'
+        'CANCELLED': 'Cancelado',
+        'HIATUS': 'En pausa'
       },
       temporadas: {
         'WINTER': 'Invierno',
@@ -139,8 +146,21 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
     };
 
+    // Limpieza robusta de la sinopsis (HTML + entidades)
     let cleanDesc = result.description
-      ? result.description.replace(/<[^>]*>/g, '').replace(/\[Written by MAL Rewrite\]/gi, '').trim()
+      ? result.description
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<\/p>/gi, '\n')
+          .replace(/<[^>]*>/g, '')
+          .replace(/\[Written by MAL Rewrite\]/gi, '')
+          .replace(/&quot;/g, '"')
+          .replace(/&#0?39;/g, "'")
+          .replace(/&apos;/g, "'")
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&nbsp;/g, ' ')
+          .trim()
       : '';
 
     let sinopsisFormateada = '> No disponible';
@@ -260,15 +280,43 @@ ${sinopsisFormateada}`;
   }
 };
 
-// ---------- Búsqueda exclusiva en AniList ----------
+// ================= BÚSQUEDA =================
+
+// Genera variantes de la query por si la original no encuentra nada
+function normalizeQueries(raw) {
+  const base = raw.trim();
+  const list = [base];
+
+  const sinTipo = base
+    .replace(/\b(anime|manga|serie|series|pelicula|película|movie)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (sinTipo && sinTipo !== base) list.push(sinTipo);
+
+  const sinAnio = sinTipo.replace(/[\(\[]?\b(19|20)\d{2}\b[\)\]]?/g, '').replace(/\s+/g, ' ').trim();
+  if (sinAnio && !list.includes(sinAnio)) list.push(sinAnio);
+
+  const limpia = sinAnio.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (limpia && !list.includes(limpia)) list.push(limpia);
+
+  return [...new Set(list)].filter(Boolean);
+}
+
 async function fetchFromAniList(queryText) {
+  const queries = normalizeQueries(queryText);
+
+  for (const q of queries) {
+    const result = await trySearchAniList(q);
+    if (result) return result;
+  }
+  return null;
+}
+
+async function trySearchAniList(query) {
   try {
     const response = await axios.post(
       ANILIST_URL,
-      {
-        query: ANILIST_QUERY,
-        variables: { search: queryText }
-      },
+      { query: ANILIST_QUERY, variables: { search: query } },
       {
         timeout: 25000,
         headers: {
@@ -280,40 +328,107 @@ async function fetchFromAniList(queryText) {
       }
     );
 
-    const media = response.data?.data?.Page?.media?.[0];
-    if (!media) return null;
+    const mediaList = response.data?.data?.Page?.media || [];
+    if (!mediaList.length) return null;
 
-    // Mapeo de la respuesta de AniList a la estructura que espera el comando
-    return {
-      title: {
-        romaji: media.title?.romaji,
-        english: media.title?.english,
-        native: media.title?.native
-      },
-      description: media.description,
-      episodes: media.episodes,
-      duration: media.duration,
-      status: media.status,
-      season: media.season,
-      seasonYear: media.seasonYear,
-      averageScore: media.averageScore,
-      genres: media.genres || [],
-      studios: media.studios?.edges?.map(edge => edge.node) || [],
-      format: media.format,
-      images: {
-        jpg: {
-          large_image_url: media.coverImage?.extraLarge || media.coverImage?.large,
-          image_url: media.coverImage?.medium
-        }
-      }
-    };
+    const best = pickBestMatch(mediaList, query);
+    return best ? formatAniListResult(best) : null;
   } catch (error) {
-    console.error('[animeinfo] AniList falló:', error.message);
+    console.warn(`[animeinfo] AniList falló para "${query}":`, error.message);
     return null;
   }
 }
 
-// ---------- Traducción de sinopsis (se mantiene igual) ----------
+// Puntúa cada resultado según qué tan bien coincide con la query
+function scoreMatch(media, query) {
+  const q = query.toLowerCase().trim();
+  const titles = [
+    media.title?.romaji,
+    media.title?.english,
+    media.title?.native,
+    media.title?.userPreferred
+  ].filter(Boolean).map(t => t.toLowerCase());
+
+  let score = 0;
+
+  // Coincidencia exacta = prioridad máxima
+  if (titles.some(t => t === q)) score += 100000;
+
+  // Empieza con la query
+  if (titles.some(t => t.startsWith(q))) score += 5000;
+
+  // Contiene la query
+  if (titles.some(t => t.includes(q))) score += 1000;
+
+  // La query contiene el título (ej. "naruto shippuden" cuando hay entrada "naruto")
+  if (titles.some(t => t.length > 3 && q.includes(t))) score += 500;
+
+  // Popularidad / favoritos como desempate
+  score += Math.min(media.popularity || 0, 2000000) / 100;
+  score += (media.favourites || 0) / 50;
+
+  // Preferir formatos "normales"
+  if (media.format === 'TV') score += 600;
+  else if (media.format === 'TV_SHORT') score += 150;
+  else if (media.format === 'MOVIE') score += 100;
+  else if (media.format === 'ONA' || media.format === 'OVA') score += 50;
+
+  // Preferir ya emitidos / en emisión
+  if (media.status === 'FINISHED' || media.status === 'RELEASING') score += 300;
+  else if (media.status === 'NOT_YET_RELEASED') score -= 100;
+
+  // Ligero bonus si tiene sinopsis
+  if (media.description) score += 20;
+
+  return score;
+}
+
+function pickBestMatch(mediaList, query) {
+  let best = mediaList[0];
+  let bestScore = -Infinity;
+  for (const media of mediaList) {
+    const s = scoreMatch(media, query);
+    if (s > bestScore) {
+      bestScore = s;
+      best = media;
+    }
+  }
+  return best;
+}
+
+// Convierte el resultado crudo de AniList a la estructura que espera el handler
+function formatAniListResult(media) {
+  const studios = (media.studios?.edges || [])
+    .map(e => e.node)
+    .filter(s => s && s.isAnimationStudio !== false);
+
+  return {
+    title: {
+      romaji: media.title?.romaji,
+      english: media.title?.english,
+      native: media.title?.native
+    },
+    description: media.description,
+    episodes: media.episodes,
+    duration: media.duration,
+    status: media.status,
+    season: media.season,
+    seasonYear: media.seasonYear,
+    averageScore: media.averageScore,
+    genres: media.genres || [],
+    studios,
+    format: media.format,
+    images: {
+      jpg: {
+        large_image_url: media.coverImage?.extraLarge || media.coverImage?.large,
+        image_url: media.coverImage?.medium
+      }
+    }
+  };
+}
+
+// ================= TRADUCCIÓN =================
+
 async function traducirTexto(texto) {
   if (!texto || texto === 'No disponible') return texto || 'No disponible';
 
