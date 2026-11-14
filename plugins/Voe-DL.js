@@ -354,7 +354,10 @@ async function fetchVoePageWithFallback(voe) {
         return {
           html: data.html,
           finalUrl: data.finalUrl,
-          streamUrl: manifestUrl || directMp4,
+          // El MP4 firmado evita los fallos intermitentes de segmentos HLS en algunas CDN.
+          // HLS queda como fallback cuando Voe no ofrece direct_access_url.
+          streamUrl: directMp4 || manifestUrl,
+          streamType: directMp4 ? 'mp4' : 'hls',
           cookieHeader: data.cookieHeader || '',
           referer: voe.pageUrl
         }
