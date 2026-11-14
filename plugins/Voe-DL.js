@@ -57,7 +57,8 @@ function decodeUrl(value) {
 
 export function extractVoeManifest(pageHtml) {
   const candidates = []
-  const hls = pageHtml.match(/["']hls["']\s*:\s*["']([^"']+)["']/i)?.[1]
+  const hlsMatch = pageHtml.match(/["']hls["']\s*:\s*["']([^"']+)["']/i)
+  const hls = hlsMatch ? hlsMatch[1] : null
   if (hls) candidates.push(decodeUrl(hls))
 
   const rawManifests = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/gi) || []
@@ -78,7 +79,8 @@ export function extractVoeManifest(pageHtml) {
 
 function getVoeUrl(text, args = []) {
   const input = String(text || args[0] || '')
-  const candidate = input.match(/https?:\/\/[^\s<>]+/i)?.[0] || String(args[0] || '')
+  const match = input.match(/https?:\/\/[^\s<>]+/i)
+  const candidate = (match ? match[0] : '') || String(args[0] || '')
   return candidate.replace(/[),.!?;:'"\]}>]+$/g, '')
 }
 
@@ -95,7 +97,10 @@ const handler = async (m, { conn, args, text }) => {
     return m.reply(`❌ ${error.message}`)
   }
 
-  global.voeActiveDownloads ||= new Set()
+  if (!global.voeActiveDownloads) {
+    global.voeActiveDownloads = new Set()
+  }
+
   const downloadKey = `${m.chat}:${m.sender}`
   if (global.voeActiveDownloads.has(downloadKey)) {
     return m.reply('⚠️ Ya tienes una descarga de Voe en curso en este chat.')
@@ -163,8 +168,9 @@ const handler = async (m, { conn, args, text }) => {
       caption: `✅ Video descargado de Voe (${(file.size / 1024 ** 2).toFixed(1)} MB)`,
     }, { quoted: m })
   } catch (error) {
-    console.error('[Voe-DL]', error?.message || error)
-    await m.reply(`❌ ${error?.message || 'No se pudo descargar el video de Voe.'}`)
+    const errMsg = (error && error.message) ? error.message : error
+    console.error('[Voe-DL]', errMsg)
+    await m.reply(`❌ ${errMsg || 'No se pudo descargar el video de Voe.'}`)
   } finally {
     global.voeActiveDownloads.delete(downloadKey)
     if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {})
@@ -176,3 +182,4 @@ handler.tags = ['downloader']
 handler.command = /^(voe|voedl|voedownload)$/i
 
 export default handler
+      
