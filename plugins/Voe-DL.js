@@ -1,8 +1,9 @@
 import { execFile } from 'child_process'
 import { createWriteStream } from 'fs'
-import { mkdtemp, open, rm, stat } from 'fs/promises'
+import { mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { isIP } from 'net'
 import { Readable, Transform } from 'stream'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
@@ -21,6 +22,9 @@ const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
 const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
+const VOE_MIRROR_CACHE_PATH = join(tmpdir(), 'rikka-voe-mirrors.json')
+const VOE_MIRROR_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const MAX_LEARNED_VOE_MIRRORS = 20
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 1024) return `${Math.max(0, bytes || 0)} B`
@@ -52,6 +56,99 @@ const VOE_MIRRORS = [
   'lukecomparetwo.com',
   'jilliandescribecompany.com'
 ]
+const KNOWN_VOE_MIRRORS = new Set(['voe.sx', ...VOE_MIRRORS])
+let learnedVoeMirrors = null
+let mirrorCacheWriteQueue = Promise.resolve()
+
+function normalizeVoeMirrorHost(value) {
+  try {
+    const raw = String(value || '')
+    const url = new URL(raw.includes('://') ? raw : `https://${raw}`)
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return ''
+    const host = url.hostname.toLowerCase().replace(/\.$/, '')
+    if (!host || isIP(host) || !host.includes('.') || /(?:^|\.)(?:localhost|local|internal|test|invalid|example)$/.test(host)) return ''
+    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(host)) return ''
+    return host
+  } catch (_) {
+    return ''
+  }
+}
+
+function safeVoeRedirectUrl(value, baseUrl) {
+  try {
+    const url = new URL(value, baseUrl)
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return null
+    if (!normalizeVoeMirrorHost(url.hostname)) return null
+    return url
+  } catch (_) {
+    return null
+  }
+}
+
+function createTimeoutSignal(parentSignal, timeoutMs) {
+  const controller = new AbortController()
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) controller.abort(parentSignal.reason)
+  }
+  if (parentSignal?.aborted) abortFromParent()
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true })
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(new Error(`La solicitud superó ${Math.round(timeoutMs / 60000)} min`))
+  }, timeoutMs)
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer)
+      parentSignal?.removeEventListener('abort', abortFromParent)
+    }
+  }
+}
+
+async function loadLearnedVoeMirrorEntries() {
+  const now = Date.now()
+  if (learnedVoeMirrors) {
+    learnedVoeMirrors = learnedVoeMirrors.filter(entry => entry.expiresAt > now)
+    return learnedVoeMirrors
+  }
+  let entries = []
+  try {
+    const cached = JSON.parse(await readFile(VOE_MIRROR_CACHE_PATH, 'utf8'))
+    entries = (Array.isArray(cached.mirrors) ? cached.mirrors : [])
+      .map(entry => ({ host: normalizeVoeMirrorHost(entry?.host), expiresAt: Number(entry?.expiresAt) }))
+      .filter(entry => entry.host && entry.expiresAt > now && !KNOWN_VOE_MIRRORS.has(entry.host))
+  } catch (_) {}
+  learnedVoeMirrors = entries
+  return entries
+}
+
+async function loadLearnedVoeMirrors() {
+  return (await loadLearnedVoeMirrorEntries()).map(entry => entry.host)
+}
+
+function rememberVoeMirror(value) {
+  const host = normalizeVoeMirrorHost(value)
+  if (!host || KNOWN_VOE_MIRRORS.has(host)) return Promise.resolve()
+  mirrorCacheWriteQueue = mirrorCacheWriteQueue.then(async () => {
+    const current = await loadLearnedVoeMirrorEntries()
+    const entries = [
+      { host, expiresAt: Date.now() + VOE_MIRROR_CACHE_TTL_MS },
+      ...current.filter(existing => existing.host !== host)
+    ].slice(0, MAX_LEARNED_VOE_MIRRORS)
+    learnedVoeMirrors = entries
+    const tempPath = `${VOE_MIRROR_CACHE_PATH}.${process.pid}.tmp`
+    try {
+      await writeFile(tempPath, JSON.stringify({ mirrors: entries }), { mode: 0o600 })
+      await rename(tempPath, VOE_MIRROR_CACHE_PATH)
+      logVoe(`Mirror aprendido temporalmente: ${host} (TTL 6 h)`)
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => {})
+      logVoe(`No se pudo guardar el mirror ${host}: ${error.message}`)
+    }
+  }).catch(error => {
+    logVoe(`Error al actualizar el caché de mirrors: ${error.message}`)
+  })
+  return mirrorCacheWriteQueue
+}
 
 export function parseVoeUrl(value) {
   let url
@@ -278,13 +375,17 @@ function getVoeUrl(m, text, args) {
 
 // Navegador con control manual de redirecciones y cookies para evitar el error "maximum redirect reached"
 async function fetchSingleCandidate(startUrl) {
-  let currentUrl = startUrl
-  const visited = new Set([startUrl])
+  const safeStartUrl = safeVoeRedirectUrl(startUrl)
+  if (!safeStartUrl) throw new Error('La URL inicial del mirror no es HTTPS segura.')
+  let currentUrl = safeStartUrl.toString()
+  const visited = new Set([currentUrl])
   let cookieHeader = ''
+  let cookieHost = safeStartUrl.hostname
 
   for (let hop = 0; hop < 12; hop++) {
+    const currentHost = new URL(currentUrl).hostname
     const reqHeaders = {}
-    if (cookieHeader) reqHeaders['Cookie'] = cookieHeader
+    if (cookieHeader && cookieHost === currentHost) reqHeaders['Cookie'] = cookieHeader
     reqHeaders['Referer'] = hop === 0 ? 'https://tioanime.com/' : startUrl
     reqHeaders['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 
@@ -302,6 +403,10 @@ async function fetchSingleCandidate(startUrl) {
     }
 
     // Guardar cookies si el servidor las envía
+    if (cookieHost !== currentHost) {
+      cookieHeader = ''
+      cookieHost = currentHost
+    }
     const setCookie = response.headers && response.headers.get ? response.headers.get('set-cookie') : null
     if (setCookie) {
       const cookiePair = setCookie.split(';')[0].trim()
@@ -316,18 +421,15 @@ async function fetchSingleCandidate(startUrl) {
       if (!location) {
         throw new Error('Redirección HTTP ' + response.status + ' sin cabecera Location')
       }
-      const nextUrl = new URL(location, currentUrl).toString()
+      const safeNextUrl = safeVoeRedirectUrl(location, currentUrl)
+      if (!safeNextUrl) throw new Error('Redirección HTTP bloqueada: destino no HTTPS o host no válido.')
+      const nextUrl = safeNextUrl.toString()
       if (visited.has(nextUrl)) {
-        // Si redirige a una URL ya visitada, hacemos una petición directa con follow
-        const finalRes = await wreqFetch(nextUrl, {
-          browser: 'chrome_136',
-          os: 'windows',
-          redirect: 'follow',
-          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
-        })
-        if (!finalRes.ok) throw new Error('HTTP ' + finalRes.status + ' en ' + new URL(nextUrl).hostname)
-        const finalHtml = await finalRes.text()
-        return { html: finalHtml, finalUrl: finalRes.url || nextUrl, cookieHeader }
+        throw new Error('Bucle de redirección detectado en ' + safeNextUrl.hostname)
+      }
+      if (safeNextUrl.hostname !== currentHost) {
+        cookieHeader = ''
+        cookieHost = safeNextUrl.hostname
       }
       visited.add(nextUrl)
       currentUrl = nextUrl
@@ -350,9 +452,17 @@ async function fetchSingleCandidate(startUrl) {
 
     // Manejar redirección en JavaScript (window.location.href = '...')
     const jsRedirect = extractJsRedirect(html, currentUrl)
-    if (jsRedirect && jsRedirect !== currentUrl && !visited.has(jsRedirect)) {
-      visited.add(jsRedirect)
-      currentUrl = jsRedirect
+    if (jsRedirect && jsRedirect !== currentUrl) {
+      const safeJsRedirect = safeVoeRedirectUrl(jsRedirect, currentUrl)
+      if (!safeJsRedirect) throw new Error('Redirección JavaScript bloqueada: destino no HTTPS o host no válido.')
+      const nextUrl = safeJsRedirect.toString()
+      if (visited.has(nextUrl)) throw new Error('Bucle de redirección JavaScript detectado en ' + safeJsRedirect.hostname)
+      if (safeJsRedirect.hostname !== currentHost) {
+        cookieHeader = ''
+        cookieHost = safeJsRedirect.hostname
+      }
+      visited.add(nextUrl)
+      currentUrl = nextUrl
       continue
     }
 
@@ -362,31 +472,58 @@ async function fetchSingleCandidate(startUrl) {
   throw new Error('Demasiados saltos de redirección en ' + new URL(currentUrl).hostname)
 }
 
-async function fetchVoePageWithFallback(voe) {
+async function fetchVoePageWithFallback(voe, triedMirrors = new Set()) {
   const errors = []
-  // El host recibido y voe.sx son las fuentes prioritarias; los espejos se usan
-  // únicamente como fallback porque cambian con frecuencia y algunos entran en bucles.
-  const mirrors = [voe.originalHost, 'voe.sx'].concat(VOE_MIRRORS).filter(function (v, idx, arr) {
-    return v && arr.indexOf(v) === idx
-  })
+  const learnedMirrors = await loadLearnedVoeMirrors()
+  const knownHosts = new Set([...learnedMirrors, ...KNOWN_VOE_MIRRORS]
+    .map(normalizeVoeMirrorHost).filter(Boolean))
+  const originalHost = normalizeVoeMirrorHost(voe.originalHost)
+  if (originalHost && !knownHosts.has(originalHost)) {
+    errors.push(`${originalHost}: host inicial desconocido; se omitió por seguridad`)
+  }
+  const mirrors = [...new Set([
+    ...(originalHost && knownHosts.has(originalHost) ? [originalHost] : []),
+    ...learnedMirrors,
+    'voe.sx',
+    ...VOE_MIRRORS
+  ].map(normalizeVoeMirrorHost).filter(Boolean))]
 
   for (let i = 0; i < mirrors.length; i++) {
-    const mirrorUrl = 'https://' + mirrors[i] + '/e/' + voe.id
+    const mirror = mirrors[i]
+    if (triedMirrors.has(mirror)) continue
+    const mirrorUrl = 'https://' + mirror + '/e/' + voe.id
     try {
       const data = await fetchSingleCandidate(mirrorUrl)
+      const finalUrl = safeVoeRedirectUrl(data.finalUrl, mirrorUrl)
+      if (!finalUrl) throw new Error('La URL final del mirror no es HTTPS segura.')
+      const finalHost = normalizeVoeMirrorHost(finalUrl.hostname)
+      if (finalHost && finalHost !== mirror && triedMirrors.has(finalHost)) {
+        errors.push(`${mirror}: redirige al mirror ya probado ${finalHost}`)
+        continue
+      }
       const manifestUrl = extractVoeManifest(data.html)
-      const directMp4 = extractVoeDirectMp4(data.html)
+      const rawDirectMp4 = extractVoeDirectMp4(data.html)
+      const safeDirectMp4 = rawDirectMp4 && safeVoeRedirectUrl(rawDirectMp4, finalUrl.toString())
+      if (rawDirectMp4 && !safeDirectMp4) {
+        errors.push(`${mirror}: URL MP4 rechazada por no ser HTTPS segura`)
+        continue
+      }
+      const directMp4 = safeDirectMp4 ? safeDirectMp4.toString() : null
 
       if (manifestUrl || directMp4) {
+        await rememberVoeMirror(mirror)
+        await rememberVoeMirror(finalHost)
         return {
           html: data.html,
-          finalUrl: data.finalUrl,
+          finalUrl: finalUrl.toString(),
+          sourceMirror: mirror,
+          mirrorHost: finalHost,
           // El MP4 firmado evita los fallos intermitentes de segmentos HLS en algunas CDN.
           // HLS queda como fallback cuando Voe no ofrece direct_access_url.
           streamUrl: directMp4 || manifestUrl,
           streamType: directMp4 ? 'mp4' : 'hls',
           cookieHeader: data.cookieHeader || '',
-          referer: voe.pageUrl
+          referer: finalUrl.toString() || voe.pageUrl
         }
       }
 
@@ -426,6 +563,12 @@ async function downloadDirectMp4Sequential(streamUrl, pageData, outputPath, resp
   const progress = new Transform({
     transform(chunk, encoding, callback) {
       downloaded += chunk.length
+      if (downloaded > MAX_VIDEO_SIZE) {
+        const error = new Error('El video supera el límite máximo permitido de 1.5 GB.')
+        error.nonRetryable = true
+        callback(error)
+        return
+      }
       const now = Date.now()
       if (now - lastLog >= 1000) {
         const elapsed = (now - startedAt) / 1000
@@ -443,120 +586,172 @@ async function downloadDirectMp4Sequential(streamUrl, pageData, outputPath, resp
   logVoe(`MP4 terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
 }
 
-async function downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers) {
+async function downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers, attemptSignal) {
   const file = await open(outputPath, 'w')
-  await file.truncate(total)
   const parts = Math.ceil(total / RANGE_CHUNK_SIZE)
+  const abortController = new AbortController()
+  const abortFromAttempt = () => {
+    if (!abortController.signal.aborted) abortController.abort(attemptSignal.reason)
+  }
+  if (attemptSignal?.aborted) abortFromAttempt()
+  else attemptSignal?.addEventListener('abort', abortFromAttempt, { once: true })
   let nextPart = 0
   let completed = 0
   let downloaded = 0
   let lastLog = Date.now()
   let lastBytes = 0
   const startedAt = Date.now()
-  const report = setInterval(() => {
-    const now = Date.now()
-    const speed = (downloaded - lastBytes) / Math.max((now - lastLog) / 1000, 0.001)
-    const elapsed = (now - startedAt) / 1000
-    const eta = speed > 0 ? ` ETA ${formatDuration((total - downloaded) / speed)}` : ''
-    logVoe(`Descarga MP4 paralela: ${completed}/${parts} bloques · ${formatBytes(downloaded)} / ${formatBytes(total)} ${(downloaded / total * 100).toFixed(1)}% · ${formatBytes(speed)}/s · ${formatDuration(elapsed)}${eta}`)
-    lastLog = now
-    lastBytes = downloaded
-  }, 1000)
-
-  const downloadPart = async part => {
-    const start = part * RANGE_CHUNK_SIZE
-    const end = Math.min(total - 1, start + RANGE_CHUNK_SIZE - 1)
-    let lastError
-    for (let retry = 1; retry <= RANGE_RETRIES; retry++) {
-      try {
-        const response = await fetch(streamUrl, {
-          headers: { ...headers, Range: `bytes=${start}-${end}` },
-          redirect: 'follow',
-          signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
-        })
-        const range = parseContentRange(response.headers.get('content-range'))
-        if (response.status !== 206 || !range || range.start !== start || range.end !== end) {
-          throw new Error(`respuesta Range inválida (HTTP ${response.status})`)
-        }
-        const buffer = Buffer.from(await response.arrayBuffer())
-        if (buffer.length !== end - start + 1) throw new Error(`bloque incompleto (${buffer.length} bytes)`)
-        await file.write(buffer, 0, buffer.length, start)
-        downloaded += buffer.length
-        completed++
-        return
-      } catch (error) {
-        lastError = error
-        if (retry < RANGE_RETRIES) await new Promise(resolve => setTimeout(resolve, retry * 1000))
-      }
-    }
-    throw new Error(`bloque ${part + 1}/${parts}: ${lastError?.message || 'fallo desconocido'}`)
-  }
-
+  let report
   try {
-    await Promise.all(Array.from({ length: Math.min(RANGE_CONNECTIONS, parts) }, async () => {
-      while (true) {
-        const part = nextPart++
-        if (part >= parts) return
-        await downloadPart(part)
+    await file.truncate(total)
+    report = setInterval(() => {
+      const now = Date.now()
+      const speed = (downloaded - lastBytes) / Math.max((now - lastLog) / 1000, 0.001)
+      const elapsed = (now - startedAt) / 1000
+      const eta = speed > 0 ? ` ETA ${formatDuration((total - downloaded) / speed)}` : ''
+      logVoe(`Descarga MP4 paralela: ${completed}/${parts} bloques · ${formatBytes(downloaded)} / ${formatBytes(total)} ${(downloaded / total * 100).toFixed(1)}% · ${formatBytes(speed)}/s · ${formatDuration(elapsed)}${eta}`)
+      lastLog = now
+      lastBytes = downloaded
+    }, 1000)
+
+    const downloadPart = async part => {
+      const start = part * RANGE_CHUNK_SIZE
+      const end = Math.min(total - 1, start + RANGE_CHUNK_SIZE - 1)
+      let lastError
+      for (let retry = 1; retry <= RANGE_RETRIES; retry++) {
+        const requestTimeout = createTimeoutSignal(abortController.signal, DIRECT_DOWNLOAD_TIMEOUT_MS)
+        try {
+          const response = await fetch(streamUrl, {
+            headers: { ...headers, Range: `bytes=${start}-${end}` },
+            redirect: 'follow',
+            signal: requestTimeout.signal
+          })
+          const range = parseContentRange(response.headers.get('content-range'))
+          const contentType = String(response.headers.get('content-type') || '').toLowerCase()
+          if (response.status !== 206 || !range || range.start !== start || range.end !== end || range.total !== total || contentType.includes('text/html') || contentType.includes('application/json')) {
+            await response.body?.cancel().catch(() => {})
+            throw new Error(`respuesta Range inválida (HTTP ${response.status})`)
+          }
+          const buffer = Buffer.from(await response.arrayBuffer())
+          if (buffer.length !== end - start + 1) throw new Error(`bloque incompleto (${buffer.length} bytes)`)
+          let written = 0
+          while (written < buffer.length) {
+            const result = await file.write(buffer, written, buffer.length - written, start + written)
+            if (!result.bytesWritten) throw new Error('No se pudo escribir el bloque completo en disco')
+            written += result.bytesWritten
+          }
+          downloaded += buffer.length
+          completed++
+          return
+        } catch (error) {
+          lastError = error
+          if (abortController.signal.aborted) throw abortController.signal.reason || error
+          if (retry < RANGE_RETRIES) await new Promise(resolve => setTimeout(resolve, retry * 1000))
+        } finally {
+          requestTimeout.cleanup()
+        }
       }
-    }))
+      throw new Error(`bloque ${part + 1}/${parts}: ${lastError?.message || 'fallo desconocido'}`)
+    }
+
+    const workers = Array.from({ length: Math.min(RANGE_CONNECTIONS, parts) }, async () => {
+      try {
+        while (true) {
+          const part = nextPart++
+          if (part >= parts) return
+          await downloadPart(part)
+        }
+      } catch (error) {
+        if (!abortController.signal.aborted) abortController.abort(error)
+        throw error
+      }
+    })
+    const results = await Promise.allSettled(workers)
+    const failed = results.find(result => result.status === 'rejected')
+    if (failed) throw failed.reason
   } finally {
-    clearInterval(report)
+    if (report) clearInterval(report)
+    attemptSignal?.removeEventListener('abort', abortFromAttempt)
     await file.close()
   }
   logVoe(`MP4 paralelo terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
 }
 
-async function downloadDirectMp4(streamUrl, pageData, outputPath) {
+async function downloadDirectMp4(streamUrl, pageData, outputPath, attemptSignal) {
   const headers = getDownloadHeaders(pageData)
 
   // wreq-js tiene un timeout interno para el cuerpo de la respuesta; para
   // archivos grandes usamos el fetch nativo de Node y conservamos sus headers.
-  const probe = await fetch(streamUrl, {
-    headers: { ...headers, Range: 'bytes=0-0' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
-  })
+  const probeTimeout = createTimeoutSignal(attemptSignal, PAGE_TIMEOUT_MS)
+  let probe
+  try {
+    probe = await fetch(streamUrl, {
+      headers: { ...headers, Range: 'bytes=0-0' },
+      redirect: 'follow',
+      signal: probeTimeout.signal
+    })
+  } finally {
+    probeTimeout.cleanup()
+  }
   const probeRange = parseContentRange(probe.headers.get('content-range'))
   const probeLength = Number(probe.headers.get('content-length') || 0)
+  const probeContentType = String(probe.headers.get('content-type') || '').toLowerCase()
   try { await probe.body?.cancel() } catch (_) {}
 
+  if (probeContentType.includes('text/html') || probeContentType.includes('application/json')) {
+    throw new Error(`La CDN devolvió ${probeContentType} en lugar de MP4`)
+  }
   const total = probeRange?.total || probeLength
-  if (probe.status === 206 && probeRange && total > 0) {
+  if (total > MAX_VIDEO_SIZE) {
+    const error = new Error('El video supera el límite máximo permitido de 1.5 GB.')
+    error.nonRetryable = true
+    throw error
+  }
+  if (probe.status === 206 && probeRange && probeRange.start === 0 && probeRange.end === 0 && total > 0) {
     logVoe(`Iniciando MP4 paralelo: ${formatBytes(total)} · ${RANGE_CONNECTIONS} conexiones · bloques de ${formatBytes(RANGE_CHUNK_SIZE)}`)
-    await downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers)
+    await downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers, attemptSignal)
     return
   }
 
-  const response = await fetch(streamUrl, {
-    headers,
-    redirect: 'follow',
-    signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
-  })
-  if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
+  const downloadTimeout = createTimeoutSignal(attemptSignal, DIRECT_DOWNLOAD_TIMEOUT_MS)
+  try {
+    const response = await fetch(streamUrl, {
+      headers,
+      redirect: 'follow',
+      signal: downloadTimeout.signal
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
 
-  const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
-  if (contentType.includes('text/html') || contentType.includes('application/json')) {
-    throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
-  }
-  if (!response.body || typeof response.body.getReader !== 'function') {
-    throw new Error('La respuesta MP4 no permite descarga por stream')
-  }
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
+    if (contentType.includes('text/html') || contentType.includes('application/json')) {
+      throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
+    }
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      throw new Error('La respuesta MP4 no permite descarga por stream')
+    }
 
-  const sequentialTotal = Number(response.headers?.get?.('content-length') || 0)
-  logVoe(`Iniciando MP4 directo${sequentialTotal ? ` (${formatBytes(sequentialTotal)})` : ''}`)
-  await downloadDirectMp4Sequential(streamUrl, pageData, outputPath, sequentialTotal, response)
+    const sequentialTotal = Number(response.headers?.get?.('content-length') || 0)
+    logVoe(`Iniciando MP4 directo${sequentialTotal ? ` (${formatBytes(sequentialTotal)})` : ''}`)
+    await downloadDirectMp4Sequential(streamUrl, pageData, outputPath, sequentialTotal, response)
+  } finally {
+    downloadTimeout.cleanup()
+  }
 }
 
-function runFfmpegWithProgress(args) {
+function runFfmpegWithProgress(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     let lastProgress = 0
     let outTime = '00:00:00'
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      child.kill(options.killSignal || 'SIGKILL')
+    }, options.timeout || FFMPEG_TIMEOUT_MS)
     child.stderr.on('data', chunk => {
       const text = chunk.toString()
-      stderr += text
+      stderr = (stderr + text).slice(-4 * 1024 * 1024)
       const now = Date.now()
       const timeMatch = text.match(/out_time=([^\r\n]+)/)
       if (timeMatch) outTime = timeMatch[1]
@@ -566,12 +761,104 @@ function runFfmpegWithProgress(args) {
         lastProgress = now
       }
     })
-    child.on('error', reject)
+    child.on('error', error => {
+      clearTimeout(timeout)
+      reject(error)
+    })
     child.on('close', code => {
-      if (code === 0) resolve()
+      clearTimeout(timeout)
+      if (timedOut) reject(Object.assign(new Error(`FFmpeg superó el límite de ${Math.round((options.timeout || FFMPEG_TIMEOUT_MS) / 60000)} minutos`), { stderr }))
+      else if (code === 0) resolve()
       else reject(Object.assign(new Error(`FFmpeg terminó con código ${code}`), { stderr }))
     })
   })
+}
+
+async function downloadVoeStream(pageData, outputPath, voe, attemptSignal) {
+  if (pageData.streamType === 'mp4') {
+    await downloadDirectMp4(pageData.streamUrl, pageData, outputPath, attemptSignal)
+    return
+  }
+
+  const headers = [
+    'Referer: ' + (pageData.referer || voe.pageUrl),
+    pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
+  ].filter(Boolean).join('\r\n') + '\r\n'
+
+  try {
+    await runFfmpegWithProgress([
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
+      '-user_agent', FFMPEG_USER_AGENT,
+      '-headers', headers,
+      '-rw_timeout', '20000000',
+      '-http_persistent', '0',
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_on_network_error', '1',
+      '-reconnect_on_http_error', '403,408,429,500,502,503,504',
+      '-reconnect_delay_max', '5',
+      '-progress', 'pipe:2',
+      '-stats_period', '1',
+      '-i', pageData.streamUrl,
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',
+      '-movflags', '+faststart',
+      '-f', 'mp4',
+      outputPath
+    ], { timeout: FFMPEG_TIMEOUT_MS, killSignal: 'SIGKILL' })
+  } catch (error) {
+    const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
+    throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
+  }
+}
+
+async function downloadVoeWithMirrorFailover(voe, tempDir) {
+  const triedMirrors = new Set()
+  const errors = []
+  const outputPath = join(tempDir, 'voe_' + voe.id + '.mp4')
+
+  while (true) {
+    let pageData
+    try {
+      pageData = await fetchVoePageWithFallback(voe, triedMirrors)
+    } catch (error) {
+      errors.push(error.message)
+      break
+    }
+
+    if (pageData.sourceMirror) triedMirrors.add(pageData.sourceMirror)
+    if (pageData.mirrorHost) triedMirrors.add(pageData.mirrorHost)
+    await rm(outputPath, { force: true }).catch(() => {})
+
+    try {
+      const attemptTimeout = createTimeoutSignal(null, DIRECT_DOWNLOAD_TIMEOUT_MS)
+      try {
+        await downloadVoeStream(pageData, outputPath, voe, attemptTimeout.signal)
+      } finally {
+        attemptTimeout.cleanup()
+      }
+      const file = await stat(outputPath)
+      if (!file.size) throw new Error('El mirror no generó un archivo de video válido.')
+      if (file.size > MAX_VIDEO_SIZE) {
+        const error = new Error('El video supera el límite máximo permitido de 1.5 GB.')
+        error.nonRetryable = true
+        throw error
+      }
+      logVoe(`Descarga completada usando mirror ${pageData.sourceMirror} → ${pageData.mirrorHost}`)
+      return { pageData, outputPath, file }
+    } catch (error) {
+      await rm(outputPath, { force: true }).catch(() => {})
+      if (error.nonRetryable) throw error
+      const mirrorLabel = `${pageData.sourceMirror}${pageData.mirrorHost && pageData.mirrorHost !== pageData.sourceMirror ? ` → ${pageData.mirrorHost}` : ''}`
+      errors.push(`${mirrorLabel}: ${error.message}`)
+      logVoe(`Falló la descarga desde ${mirrorLabel}; probando el siguiente mirror.`)
+    }
+  }
+
+  throw new Error('No se pudo descargar desde los mirrors disponibles. ' + errors.slice(-8).join(' | '))
 }
 
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
@@ -604,61 +891,10 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
     if (m.react) await m.react('⏳').catch(function () {})
     await m.reply('🔎 Obteniendo y procesando el video de Voe...')
 
-    const pageData = await fetchVoePageWithFallback(voe)
-    const streamUrl = pageData.streamUrl
+    tempDir = await mkdtemp(join(tmpdir(), 'rikka-voe-'))
+    const { pageData, outputPath, file } = await downloadVoeWithMirrorFailover(voe, tempDir)
     const videoTitle = extractVoeTitle(pageData.html, voe.id)
     const cleanFileName = videoTitle.endsWith('.mp4') ? videoTitle : (videoTitle + '.mp4')
-
-    tempDir = await mkdtemp(join(tmpdir(), 'rikka-voe-'))
-    const outputPath = join(tempDir, 'voe_' + voe.id + '.mp4')
-
-    if (pageData.streamType === 'mp4') {
-      await downloadDirectMp4(pageData.streamUrl, pageData, outputPath)
-    } else {
-      const headers = [
-        'Referer: ' + (pageData.referer || voe.pageUrl),
-        pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
-      ].filter(Boolean).join('\r\n') + '\r\n'
-
-      try {
-        await runFfmpegWithProgress([
-          '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-        '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
-        '-user_agent', FFMPEG_USER_AGENT,
-        '-headers', headers,
-        '-rw_timeout', '20000000',
-        '-http_persistent', '0',
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_at_eof', '1',
-        '-reconnect_on_network_error', '1',
-          '-reconnect_on_http_error', '403,408,429,500,502,503,504',
-          '-reconnect_delay_max', '5',
-          '-progress', 'pipe:2',
-          '-stats_period', '1',
-        '-i', streamUrl,
-        '-map', '0:v:0', '-map', '0:a:0?',
-        '-c', 'copy',
-        '-bsf:a', 'aac_adtstoasc',
-        '-movflags', '+faststart',
-        '-f', 'mp4',
-        outputPath
-        ], {
-          timeout: FFMPEG_TIMEOUT_MS,
-          killSignal: 'SIGKILL',
-          maxBuffer: 4 * 1024 * 1024
-        })
-      } catch (error) {
-        const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
-        throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
-      }
-    }
-
-    const file = await stat(outputPath)
-    if (!file.size) throw new Error('FFmpeg no generó un archivo de video válido.')
-    if (file.size > MAX_VIDEO_SIZE) {
-      throw new Error('El video supera el límite máximo permitido de 1.5 GB.')
-    }
 
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1)
 
