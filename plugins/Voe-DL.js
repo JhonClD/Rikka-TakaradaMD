@@ -6,13 +6,13 @@ import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
 
 const execFileAsync = promisify(execFile)
-const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
+const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 25000
 const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
 
-// Espejos oficiales de Voe para saltar bloqueos 403 en el dominio principal
+// Dominios activos de Voe (eliminados los espejos caídos que daban unexpected EOF)
 const VOE_MIRRORS = [
   'voe.sx',
   'walterprettytheir.com',
@@ -20,18 +20,9 @@ const VOE_MIRRORS = [
   'markstyleall.com',
   'lukecomparetwo.com',
   'jilliandescribecompany.com',
-  'christopheruntilpoint.com'
+  'alejandrocenturyoil.com',
+  'richardsignfish.com'
 ]
-
-function isSupportedVoeInputHost(hostname) {
-  const host = hostname.toLowerCase()
-  if (host === 'voe-network.net' || host.endsWith('.voe-network.net')) return true
-  for (let i = 0; i < VOE_MIRRORS.length; i++) {
-    const domain = VOE_MIRRORS[i]
-    if (host === domain || host.endsWith('.' + domain)) return true
-  }
-  return false
-}
 
 export function parseVoeUrl(value) {
   let url
@@ -41,13 +32,13 @@ export function parseVoeUrl(value) {
     throw new Error('El enlace no es una URL válida.')
   }
 
-  if (url.protocol !== 'https:' || !isSupportedVoeInputHost(url.hostname) || url.username || url.password || url.port) {
-    throw new Error('Solo se aceptan enlaces HTTPS válidos de Voe (ej: voe.sx).')
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) {
+    throw new Error('Solo se aceptan enlaces HTTPS válidos de Voe.')
   }
 
   const parts = url.pathname.split('/').filter(Boolean)
   let id = null
-  if (parts.length === 2 && /^(e|v|d)$/i.test(parts[0])) {
+  if (parts.length >= 2 && /^(e|v|d)$/i.test(parts[0])) {
     id = parts[1]
   } else if (parts.length === 1) {
     id = parts[0]
@@ -57,7 +48,7 @@ export function parseVoeUrl(value) {
     throw new Error('No pude reconocer el identificador del video de Voe.')
   }
 
-  return { id: id, pageUrl: 'https://voe.sx/e/' + id }
+  return { id: id, originalHost: url.hostname, pageUrl: 'https://voe.sx/e/' + id }
 }
 
 function decodeUrl(value) {
@@ -70,9 +61,7 @@ function decodeUrl(value) {
   if (!/^https?:\/\//i.test(cleaned) && /^[A-Za-z0-9+/=]{16,}$/.test(cleaned)) {
     try {
       const decoded = Buffer.from(cleaned, 'base64').toString('utf8').trim()
-      if (/^https?:\/\//i.test(decoded)) {
-        return decoded
-      }
+      if (/^https?:\/\//i.test(decoded)) return decoded
     } catch (e) {}
   }
 
@@ -82,6 +71,7 @@ function decodeUrl(value) {
 function extractJsRedirect(pageHtml) {
   const patterns = [
     /window\.location\.href\s*=\s*["'](https:\/\/[^"']+)["']/i,
+    /window\.location\s*=\s*["'](https:\/\/[^"']+)["']/i,
     /location\.replace\(\s*["'](https:\/\/[^"']+)["']\s*\)/i,
     /<meta[^>]+http-equiv=["']refresh["'][^>]+url=(https:\/\/[^"'\s>]+)/i
   ]
@@ -93,41 +83,89 @@ function extractJsRedirect(pageHtml) {
   return null
 }
 
-function decodeRot13(str) {
+function rot13(str) {
   return str.replace(/[a-zA-Z]/g, function (c) {
     const base = c <= 'Z' ? 65 : 97
     return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base)
   })
 }
 
+// Nuevo desofuscador oficial para el cifrado de Voe (2025-2026)
+function deobfuscateVoePayload(rawStr) {
+  try {
+    // Paso 1: ROT13
+    let step1 = rot13(rawStr)
+    // Paso 2: Eliminar tokens basura que Voe inyecta
+    const junkPatterns = ['@$', '^^', '~@', '%?', '*~', '!!', '#&']
+    for (let i = 0; i < junkPatterns.length; i++) {
+      step1 = step1.split(junkPatterns[i]).join('')
+    }
+    step1 = step1.replace(/_/g, '')
+
+    // Paso 3: Base64 decode #1
+    const step2 = Buffer.from(step1, 'base64').toString('utf8')
+
+    // Paso 4: Shift de caracteres (-3 en código ASCII)
+    let step3 = ''
+    for (let i = 0; i < step2.length; i++) {
+      step3 += String.fromCharCode(step2.charCodeAt(i) - 3)
+    }
+
+    // Paso 5: Invertir cadena y Base64 decode #2
+    const reversed = step3.split('').reverse().join('')
+    const finalJson = Buffer.from(reversed, 'base64').toString('utf8')
+    return JSON.parse(finalJson)
+  } catch (e) {
+    return null
+  }
+}
+
 export function extractVoeManifest(pageHtml) {
   const candidates = []
   let match
 
-  // 1. Propiedad 'hls' directa o en Base64
-  const hlsRegex = /["']hls["']\s*:\s*["']([^"']+)["']/gi
+  // 1. Nuevo formato Voe: <script type="application/json">["..."]</script>
+  const jsonScriptRegex = /<script[^>]+type=["']application\/json["'][^>]*>\s*\[\s*["']([^"']+)["']\s*\]\s*<\/script>/gi
+  while ((match = jsonScriptRegex.exec(pageHtml)) !== null) {
+    const decodedObj = deobfuscateVoePayload(match[1])
+    if (decodedObj) {
+      if (decodedObj.source) candidates.push(decodeUrl(decodedObj.source))
+      if (decodedObj.file) candidates.push(decodeUrl(decodedObj.file))
+      if (decodedObj.hls) candidates.push(decodeUrl(decodedObj.hls))
+      if (Array.isArray(decodedObj.sources)) {
+        for (let j = 0; j < decodedObj.sources.length; j++) {
+          const s = decodedObj.sources[j]
+          if (s && (s.hls || s.file || s.src)) {
+            candidates.push(decodeUrl(s.hls || s.file || s.src))
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Probar cualquier string largo potencialmente cifrado con el algoritmo de Voe
+  const longStrings = pageHtml.match(/["']([A-Za-z0-9+/=@$^~%*!#&_]{80,})["']/g) || []
+  for (let i = 0; i < longStrings.length; i++) {
+    const raw = longStrings[i].slice(1, -1)
+    const decodedObj = deobfuscateVoePayload(raw)
+    if (decodedObj && (decodedObj.source || decodedObj.hls || decodedObj.file)) {
+      candidates.push(decodeUrl(decodedObj.source || decodedObj.hls || decodedObj.file))
+    }
+  }
+
+  // 3. Propiedad 'hls' o 'source' en texto plano o Base64
+  const hlsRegex = /["'](?:hls|source|file)["']\s*:\s*["']([^"']+)["']/gi
   while ((match = hlsRegex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
 
-  // 2. Variables codificadas en atob(...)
+  // 4. Variables en atob(...)
   const b64Regex = /atob\(\s*["']([A-Za-z0-9+/=]{24,})["']\s*\)/gi
   while ((match = b64Regex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
 
-  // 3. Ofuscación ROT13 + Base64 usada en nuevos reproductores de Voe
-  const scriptTokens = pageHtml.match(/["'][A-Za-z0-9+/=]{40,}["']/g) || []
-  for (let i = 0; i < scriptTokens.length; i++) {
-    const token = scriptTokens[i].slice(1, -1)
-    try {
-      const rotDecoded = Buffer.from(decodeRot13(token), 'base64').toString('utf8')
-      const subMatch = rotDecoded.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/i)
-      if (subMatch) candidates.push(decodeUrl(subMatch[0]))
-    } catch (e) {}
-  }
-
-  // 4. Enlaces .m3u8 directos en el código fuente
+  // 5. Enlaces .m3u8 directos en el HTML
   const rawManifests = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/gi) || []
   for (let i = 0; i < rawManifests.length; i++) {
     candidates.push(decodeUrl(rawManifests[i]))
@@ -136,10 +174,25 @@ export function extractVoeManifest(pageHtml) {
   for (let i = 0; i < candidates.length; i++) {
     try {
       const url = new URL(candidates[i])
-      if (url.protocol === 'https:' && /\.m3u8$/i.test(url.pathname)) {
+      if (url.protocol === 'https:' && /\.m3u8/i.test(url.pathname)) {
         return url.toString()
       }
     } catch (e) {}
+  }
+  return null
+}
+
+function extractVoeDirectMp4(pageHtml) {
+  let match
+  const jsonScriptRegex = /<script[^>]+type=["']application\/json["'][^>]*>\s*\[\s*["']([^"']+)["']\s*\]\s*<\/script>/gi
+  while ((match = jsonScriptRegex.exec(pageHtml)) !== null) {
+    const decodedObj = deobfuscateVoePayload(match[1])
+    if (decodedObj && Array.isArray(decodedObj.direct_access_url)) {
+      return decodeUrl(decodedObj.direct_access_url[0])
+    }
+    if (decodedObj && typeof decodedObj.direct_access_url === 'string') {
+      return decodeUrl(decodedObj.direct_access_url)
+    }
   }
   return null
 }
@@ -168,61 +221,91 @@ function getVoeUrl(m, text, args) {
   return candidate.replace(/[),.!?;:'"\]}>]+$/g, '')
 }
 
-async function fetchSingleCandidate(startUrl) {
-  let currentUrl = startUrl
-
-  for (let hop = 0; hop < 4; hop++) {
-    // No pasamos headers manuales para no romper la firma TLS/HTTP2 de wreq-js
-    const response = await wreqFetch(currentUrl, {
-      browser: 'chrome_149',
+async function fetchHtmlOnce(targetUrl) {
+  // Intentar primero con wreq-js usando perfil Chrome 136 estable
+  try {
+    const response = await wreqFetch(targetUrl, {
+      browser: 'chrome_136',
       os: 'windows',
       redirect: 'follow',
       signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
     })
 
-    if (!response.ok) {
-      const err = new Error('Voe respondió HTTP ' + response.status + '.')
-      err.status = response.status
-      throw err
+    if (response.ok) {
+      const html = await response.text()
+      return { html: html, finalUrl: response.url || targetUrl }
+    }
+  } catch (e) {
+    // Si wreq-js falla o da EOF, probamos con fetch nativo
+  }
+
+  const fallbackRes = await fetch(targetUrl, {
+    headers: {
+      'User-Agent': FFMPEG_USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+  })
+
+  if (!fallbackRes.ok) {
+    throw new Error('HTTP ' + fallbackRes.status + ' en ' + new URL(targetUrl).hostname)
+  }
+
+  const html = await fallbackRes.text()
+  return { html: html, finalUrl: fallbackRes.url || targetUrl }
+}
+
+async function fetchSingleCandidate(startUrl) {
+  let currentUrl = startUrl
+
+  for (let hop = 0; hop < 5; hop++) {
+    const data = await fetchHtmlOnce(currentUrl)
+    if (data.html.length > MAX_PAGE_CHARS) {
+      throw new Error('La página de Voe es demasiado grande.')
     }
 
-    const html = await response.text()
-    if (html.length > MAX_PAGE_CHARS) {
-      throw new Error('La página de Voe es demasiado grande para procesarla.')
-    }
-
-    const jsRedirect = extractJsRedirect(html)
+    const jsRedirect = extractJsRedirect(data.html)
     if (jsRedirect && jsRedirect !== currentUrl) {
       currentUrl = jsRedirect
       continue
     }
 
-    return { html: html, finalUrl: response.url || currentUrl }
+    return data
   }
 
-  throw new Error('Demasiadas redirecciones al abrir el enlace de Voe.')
+  throw new Error('Demasiadas redirecciones en Voe.')
 }
 
-async function fetchVoePageWithFallback(videoId) {
-  let lastError = null
+async function fetchVoePageWithFallback(voe) {
+  const errors = []
+  const mirrors = [voe.originalHost].concat(VOE_MIRRORS).filter(function (v, idx, arr) {
+    return v && arr.indexOf(v) === idx
+  })
 
-  for (let i = 0; i < VOE_MIRRORS.length; i++) {
-    const mirrorUrl = 'https://' + VOE_MIRRORS[i] + '/e/' + videoId
+  for (let i = 0; i < mirrors.length; i++) {
+    const mirrorUrl = 'https://' + mirrors[i] + '/e/' + voe.id
     try {
       const data = await fetchSingleCandidate(mirrorUrl)
-      if (extractVoeManifest(data.html)) {
-        return data
+      const manifestUrl = extractVoeManifest(data.html)
+      const directMp4 = extractVoeDirectMp4(data.html)
+
+      if (manifestUrl || directMp4) {
+        return {
+          html: data.html,
+          finalUrl: data.finalUrl,
+          streamUrl: manifestUrl || directMp4
+        }
       }
-      // Si cargó pero no hay manifiesto, guardamos por si acaso y probamos el siguiente espejo
-      lastError = new Error('No se encontró el stream HLS en ' + VOE_MIRRORS[i])
+      errors.push(mirrors[i] + ': cargó HTML (' + data.html.length + ' chars) pero sin stream reconocible')
     } catch (err) {
-      lastError = err
-      // Si es 403 o error de red, intenta con el siguiente dominio espejo
-      continue
+      const msg = (err && err.message) ? err.message : String(err)
+      errors.push(mirrors[i] + ': ' + msg)
     }
   }
 
-  throw lastError || new Error('No se pudo acceder a Voe desde ningún servidor espejo.')
+  throw new Error('No se pudo extraer el video. Detalles: ' + errors.slice(0, 3).join(' | '))
 }
 
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
@@ -255,13 +338,8 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
     if (m.react) await m.react('⏳').catch(function () {})
     await m.reply('🔎 Obteniendo y procesando el video de Voe...')
 
-    const pageData = await fetchVoePageWithFallback(voe.id)
-    const manifestUrl = extractVoeManifest(pageData.html)
-
-    if (!manifestUrl) {
-      throw new Error('No encontré el stream HLS. El video puede haber sido eliminado.')
-    }
-
+    const pageData = await fetchVoePageWithFallback(voe)
+    const streamUrl = pageData.streamUrl
     const videoTitle = extractVoeTitle(pageData.html, voe.id)
     const cleanFileName = videoTitle.endsWith('.mp4') ? videoTitle : (videoTitle + '.mp4')
 
@@ -280,7 +358,7 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-i', manifestUrl,
+      '-i', streamUrl,
       '-map', '0:v:0', '-map', '0:a:0?',
       '-c', 'copy',
       '-bsf:a', 'aac_adtstoasc',
@@ -327,4 +405,4 @@ handler.tags = ['downloader']
 handler.command = /^(voe|voedl|voedownload)$/i
 
 export default handler
-  
+      
