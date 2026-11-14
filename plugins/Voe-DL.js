@@ -13,6 +13,7 @@ import ffmpegStatic from 'ffmpeg-static'
 const execFileAsync = promisify(execFile)
 const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 25000
+const DIRECT_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000
 const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
@@ -409,7 +410,7 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath) {
     os: 'windows',
     headers,
     redirect: 'follow',
-    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+    signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
   })
   if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
 
