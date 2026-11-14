@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
+import ffmpegStatic from 'ffmpeg-static'
 
 const execFileAsync = promisify(execFile)
 const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
@@ -11,6 +12,7 @@ const PAGE_TIMEOUT_MS = 25000
 const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
+const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
 
 // Dominios activos (incluyendo los espejos actuales detectados en tu servidor)
 const VOE_MIRRORS = [
@@ -65,6 +67,22 @@ function decodeUrl(value) {
   }
 
   return cleaned
+}
+
+function isFakeVideoUrl(value) {
+  return /bigbuckbunny|test[-_]?video|sample[-_]?video|placeholder/i.test(String(value || ''))
+}
+
+function addMediaCandidate(candidates, value) {
+  const decoded = decodeUrl(value)
+  if (!decoded || isFakeVideoUrl(decoded)) return
+  try {
+    const url = new URL(decoded)
+    if (url.protocol !== 'https:') return
+    if (/\.(?:mp4|m3u8)(?:[?#]|$)|\/hls(?:[/?#]|$)/i.test(url.href) && !candidates.includes(url.toString())) {
+      candidates.push(url.toString())
+    }
+  } catch (e) {}
 }
 
 function extractJsRedirect(pageHtml, currentUrl) {
@@ -127,14 +145,15 @@ export function extractVoeManifest(pageHtml) {
   while ((match = jsonScriptRegex.exec(pageHtml)) !== null) {
     const decodedObj = deobfuscateVoePayload(match[1])
     if (decodedObj) {
-      if (decodedObj.source) candidates.push(decodeUrl(decodedObj.source))
-      if (decodedObj.file) candidates.push(decodeUrl(decodedObj.file))
-      if (decodedObj.hls) candidates.push(decodeUrl(decodedObj.hls))
+      if (decodedObj.source) addMediaCandidate(candidates, decodedObj.source)
+      if (decodedObj.file) addMediaCandidate(candidates, decodedObj.file)
+      if (decodedObj.hls) addMediaCandidate(candidates, decodedObj.hls)
+      if (decodedObj.direct_access_url) addMediaCandidate(candidates, decodedObj.direct_access_url)
       if (Array.isArray(decodedObj.sources)) {
         for (let j = 0; j < decodedObj.sources.length; j++) {
           const s = decodedObj.sources[j]
           if (s && (s.hls || s.file || s.src)) {
-            candidates.push(decodeUrl(s.hls || s.file || s.src))
+            addMediaCandidate(candidates, s.hls || s.file || s.src)
           }
         }
       }
@@ -147,32 +166,32 @@ export function extractVoeManifest(pageHtml) {
     const raw = longStrings[i].slice(1, -1)
     const decodedObj = deobfuscateVoePayload(raw)
     if (decodedObj && (decodedObj.source || decodedObj.hls || decodedObj.file)) {
-      candidates.push(decodeUrl(decodedObj.source || decodedObj.hls || decodedObj.file))
+      addMediaCandidate(candidates, decodedObj.source || decodedObj.hls || decodedObj.file)
     }
   }
 
   // 3. Propiedad 'hls' / 'source' / 'file' en texto plano o Base64
   const hlsRegex = /["'](?:hls|source|file)["']\s*:\s*["']([^"']+)["']/gi
   while ((match = hlsRegex.exec(pageHtml)) !== null) {
-    if (match[1]) candidates.push(decodeUrl(match[1]))
+    if (match[1]) addMediaCandidate(candidates, match[1])
   }
 
   // 4. Variables en atob(...)
   const b64Regex = /atob\(\s*["']([A-Za-z0-9+/=]{20,})["']\s*\)/gi
   while ((match = b64Regex.exec(pageHtml)) !== null) {
-    if (match[1]) candidates.push(decodeUrl(match[1]))
+    if (match[1]) addMediaCandidate(candidates, match[1])
   }
 
   // 5. Enlaces .m3u8 directos en el HTML
   const rawManifests = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/gi) || []
   for (let i = 0; i < rawManifests.length; i++) {
-    candidates.push(decodeUrl(rawManifests[i]))
+    addMediaCandidate(candidates, rawManifests[i])
   }
 
   for (let i = 0; i < candidates.length; i++) {
     try {
       const url = new URL(candidates[i])
-      if (url.protocol === 'https:' && /\.m3u8/i.test(url.pathname)) {
+      if (url.protocol === 'https:' && /\.m3u8/i.test(url.pathname) && !isFakeVideoUrl(url.href)) {
         return url.toString()
       }
     } catch (e) {}
@@ -193,8 +212,14 @@ function extractVoeDirectMp4(pageHtml) {
     }
   }
 
+  const directFields = pageHtml.matchAll(/(?:direct_access_url|source|file|src|url|video_url)\s*[:=]\s*["'](https?:\\?\/\\?\/[^"']+\.mp4(?:\?[^"']*)?)["']/gi)
+  for (const field of directFields) {
+    const url = decodeUrl(field[1])
+    if (url && !isFakeVideoUrl(url)) return url
+  }
+
   const mp4Match = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.mp4(?:\?[^\s"'<>]*)?/i)
-  if (mp4Match) return decodeUrl(mp4Match[0])
+  if (mp4Match && !isFakeVideoUrl(mp4Match[0])) return decodeUrl(mp4Match[0])
 
   return null
 }
@@ -267,7 +292,7 @@ async function fetchSingleCandidate(startUrl) {
         })
         if (!finalRes.ok) throw new Error('HTTP ' + finalRes.status + ' en ' + new URL(nextUrl).hostname)
         const finalHtml = await finalRes.text()
-        return { html: finalHtml, finalUrl: finalRes.url || nextUrl }
+        return { html: finalHtml, finalUrl: finalRes.url || nextUrl, cookieHeader }
       }
       visited.add(nextUrl)
       currentUrl = nextUrl
@@ -285,7 +310,7 @@ async function fetchSingleCandidate(startUrl) {
 
     // Comprobar si primero ya tiene el stream antes de seguir redirecciones JS
     if (extractVoeManifest(html) || extractVoeDirectMp4(html)) {
-      return { html: html, finalUrl: currentUrl }
+      return { html: html, finalUrl: currentUrl, cookieHeader }
     }
 
     // Manejar redirección en JavaScript (window.location.href = '...')
@@ -296,7 +321,7 @@ async function fetchSingleCandidate(startUrl) {
       continue
     }
 
-    return { html: html, finalUrl: currentUrl }
+    return { html: html, finalUrl: currentUrl, cookieHeader }
   }
 
   throw new Error('Demasiados saltos de redirección en ' + new URL(currentUrl).hostname)
@@ -319,7 +344,9 @@ async function fetchVoePageWithFallback(voe) {
         return {
           html: data.html,
           finalUrl: data.finalUrl,
-          streamUrl: manifestUrl || directMp4
+          streamUrl: manifestUrl || directMp4,
+          cookieHeader: data.cookieHeader || '',
+          referer: voe.pageUrl
         }
       }
 
@@ -372,10 +399,12 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
     tempDir = await mkdtemp(join(tmpdir(), 'rikka-voe-'))
     const outputPath = join(tempDir, 'voe_' + voe.id + '.mp4')
 
-    const finalOrigin = new URL(pageData.finalUrl).origin
-    const headers = 'Referer: ' + pageData.finalUrl + '\r\nOrigin: ' + finalOrigin + '\r\n'
+    const headers = [
+      'Referer: ' + (pageData.referer || voe.pageUrl),
+      pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
+    ].filter(Boolean).join('\r\n') + '\r\n'
 
-    await execFileAsync('ffmpeg', [
+    await execFileAsync(FFMPEG_BIN, [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
       '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
       '-user_agent', FFMPEG_USER_AGENT,
