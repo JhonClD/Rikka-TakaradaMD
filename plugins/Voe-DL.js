@@ -12,12 +12,12 @@ const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
 
-const KNOWN_VOE_HOSTS = [
+// Espejos oficiales de Voe para saltar bloqueos 403 en el dominio principal
+const VOE_MIRRORS = [
   'voe.sx',
-  'voe-network.net',
   'walterprettytheir.com',
-  'markstyleall.com',
   'shannonpersonalcost.com',
+  'markstyleall.com',
   'lukecomparetwo.com',
   'jilliandescribecompany.com',
   'christopheruntilpoint.com'
@@ -25,8 +25,9 @@ const KNOWN_VOE_HOSTS = [
 
 function isSupportedVoeInputHost(hostname) {
   const host = hostname.toLowerCase()
-  for (let i = 0; i < KNOWN_VOE_HOSTS.length; i++) {
-    const domain = KNOWN_VOE_HOSTS[i]
+  if (host === 'voe-network.net' || host.endsWith('.voe-network.net')) return true
+  for (let i = 0; i < VOE_MIRRORS.length; i++) {
+    const domain = VOE_MIRRORS[i]
     if (host === domain || host.endsWith('.' + domain)) return true
   }
   return false
@@ -66,16 +67,13 @@ function decodeUrl(value) {
     .replace(/&amp;/gi, '&')
     .trim()
 
-  // Si no empieza con http, probar decodificar desde Base64 (Voe codifica 'hls' en Base64 frecuentemente)
   if (!/^https?:\/\//i.test(cleaned) && /^[A-Za-z0-9+/=]{16,}$/.test(cleaned)) {
     try {
       const decoded = Buffer.from(cleaned, 'base64').toString('utf8').trim()
       if (/^https?:\/\//i.test(decoded)) {
         return decoded
       }
-    } catch (e) {
-      // Continuar con el valor original si falla
-    }
+    } catch (e) {}
   }
 
   return cleaned
@@ -95,23 +93,41 @@ function extractJsRedirect(pageHtml) {
   return null
 }
 
+function decodeRot13(str) {
+  return str.replace(/[a-zA-Z]/g, function (c) {
+    const base = c <= 'Z' ? 65 : 97
+    return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base)
+  })
+}
+
 export function extractVoeManifest(pageHtml) {
   const candidates = []
-
-  // 1. Buscar propiedad 'hls' (texto plano o Base64)
-  const hlsRegex = /["']hls["']\s*:\s*["']([^"']+)["']/gi
   let match
+
+  // 1. Propiedad 'hls' directa o en Base64
+  const hlsRegex = /["']hls["']\s*:\s*["']([^"']+)["']/gi
   while ((match = hlsRegex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
 
-  // 2. Buscar funcion prompt("Node", "...") o variables base64 largas
+  // 2. Variables codificadas en atob(...)
   const b64Regex = /atob\(\s*["']([A-Za-z0-9+/=]{24,})["']\s*\)/gi
   while ((match = b64Regex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
 
-  // 3. Buscar URLs .m3u8 directas en el HTML
+  // 3. Ofuscación ROT13 + Base64 usada en nuevos reproductores de Voe
+  const scriptTokens = pageHtml.match(/["'][A-Za-z0-9+/=]{40,}["']/g) || []
+  for (let i = 0; i < scriptTokens.length; i++) {
+    const token = scriptTokens[i].slice(1, -1)
+    try {
+      const rotDecoded = Buffer.from(decodeRot13(token), 'base64').toString('utf8')
+      const subMatch = rotDecoded.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/i)
+      if (subMatch) candidates.push(decodeUrl(subMatch[0]))
+    } catch (e) {}
+  }
+
+  // 4. Enlaces .m3u8 directos en el código fuente
   const rawManifests = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(?:\?[^\s"'<>]*)?/gi) || []
   for (let i = 0; i < rawManifests.length; i++) {
     candidates.push(decodeUrl(rawManifests[i]))
@@ -123,9 +139,7 @@ export function extractVoeManifest(pageHtml) {
       if (url.protocol === 'https:' && /\.m3u8$/i.test(url.pathname)) {
         return url.toString()
       }
-    } catch (e) {
-      // Ignorar candidatos inválidos
-    }
+    } catch (e) {}
   }
   return null
 }
@@ -154,25 +168,22 @@ function getVoeUrl(m, text, args) {
   return candidate.replace(/[),.!?;:'"\]}>]+$/g, '')
 }
 
-async function fetchVoePage(initialUrl) {
-  let currentUrl = initialUrl
+async function fetchSingleCandidate(startUrl) {
+  let currentUrl = startUrl
 
-  // Sigue hasta 3 redirecciones basadas en JS (muy común en Voe)
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let hop = 0; hop < 4; hop++) {
+    // No pasamos headers manuales para no romper la firma TLS/HTTP2 de wreq-js
     const response = await wreqFetch(currentUrl, {
       browser: 'chrome_149',
       os: 'windows',
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-        'Referer': 'https://voe.sx/'
-      },
       redirect: 'follow',
       signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
     })
 
     if (!response.ok) {
-      throw new Error('Voe respondió HTTP ' + response.status + '.')
+      const err = new Error('Voe respondió HTTP ' + response.status + '.')
+      err.status = response.status
+      throw err
     }
 
     const html = await response.text()
@@ -189,7 +200,29 @@ async function fetchVoePage(initialUrl) {
     return { html: html, finalUrl: response.url || currentUrl }
   }
 
-  throw new Error('Demasiadas redirecciones al intentar abrir el enlace de Voe.')
+  throw new Error('Demasiadas redirecciones al abrir el enlace de Voe.')
+}
+
+async function fetchVoePageWithFallback(videoId) {
+  let lastError = null
+
+  for (let i = 0; i < VOE_MIRRORS.length; i++) {
+    const mirrorUrl = 'https://' + VOE_MIRRORS[i] + '/e/' + videoId
+    try {
+      const data = await fetchSingleCandidate(mirrorUrl)
+      if (extractVoeManifest(data.html)) {
+        return data
+      }
+      // Si cargó pero no hay manifiesto, guardamos por si acaso y probamos el siguiente espejo
+      lastError = new Error('No se encontró el stream HLS en ' + VOE_MIRRORS[i])
+    } catch (err) {
+      lastError = err
+      // Si es 403 o error de red, intenta con el siguiente dominio espejo
+      continue
+    }
+  }
+
+  throw lastError || new Error('No se pudo acceder a Voe desde ningún servidor espejo.')
 }
 
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
@@ -197,7 +230,7 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
   if (!inputUrl) {
     const prefix = usedPrefix || '.'
     const cmd = command || 'voe'
-    return m.reply('⚠️ Envía o responde a un enlace de Voe.\nEjemplo: *' + prefix + cmd + ' https://voe.sx/e/abc123xyz789*')
+    return m.reply('⚠️ Envía o responde a un enlace de Voe.\nEjemplo: *' + prefix + cmd + ' https://voe.sx/e/ptbsbbw040gc*')
   }
 
   let voe
@@ -222,11 +255,11 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
     if (m.react) await m.react('⏳').catch(function () {})
     await m.reply('🔎 Obteniendo y procesando el video de Voe...')
 
-    const pageData = await fetchVoePage(voe.pageUrl)
+    const pageData = await fetchVoePageWithFallback(voe.id)
     const manifestUrl = extractVoeManifest(pageData.html)
 
     if (!manifestUrl) {
-      throw new Error('No encontré el stream HLS. El video puede haber sido eliminado o requiere captcha.')
+      throw new Error('No encontré el stream HLS. El video puede haber sido eliminado.')
     }
 
     const videoTitle = extractVoeTitle(pageData.html, voe.id)
@@ -294,4 +327,4 @@ handler.tags = ['downloader']
 handler.command = /^(voe|voedl|voedownload)$/i
 
 export default handler
-                          
+  
