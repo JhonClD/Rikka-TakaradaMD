@@ -37,6 +37,7 @@
 - ▶️ Búsqueda de YouTube — `ytsearch`, `yts`, `searchyt`
 - 🎬 TikTok — `tiktok`, `ttdl`, `tiktokdl`, `tiktoknowm`, `ttnowm`, `tiktokaudio`
 - 📘 Facebook — `fb`, `facebook`, `fbdl`
+- 📺 Voe — `voe`, `voedl`, `voedownload`
 - 𝕏 Twitter/X — `x`, `twitter`, `xdl`, `dlx`, `twdl`, `twt`, `twitterdl`
 - 🎧 Play multimedia — `play`, `play2`, `mp3`, `video`, `mp4`, `playaudio`
 - 🧲 Torrent / leech — `torrent`, `bt`, `tcancel`
@@ -185,6 +186,7 @@ Rikka-TakaradaMD/
 - [`ytdl.js`](./plugins/ytdl.js)
 - [`Tiktok-DL.js`](./plugins/Tiktok-DL.js)
 - [`Facebook-DL.js`](./plugins/Facebook-DL.js)
+- [`Voe-DL.js`](./plugins/Voe-DL.js)
 - [`twitter-x.js`](./plugins/twitter-x.js)
 - [`Play.js`](./plugins/Play.js)
 - [`tool-sticker.js`](./plugins/tool-sticker.js)
