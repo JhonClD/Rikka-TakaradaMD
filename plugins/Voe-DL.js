@@ -3,7 +3,8 @@ import { createWriteStream } from 'fs'
 import { mkdtemp, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { Readable } from 'stream'
+import { Readable, Transform } from 'stream'
+import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
@@ -16,6 +17,25 @@ const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
 const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${Math.max(0, bytes || 0)} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes
+  let unit = -1
+  do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1)
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--:--'
+  const total = Math.floor(seconds)
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+}
+
+function logVoe(message) {
+  console.log(`[Voe-DL ${new Date().toISOString()}] ${message}`)
+}
 
 // Dominios activos (incluyendo los espejos actuales detectados en tu servidor)
 const VOE_MIRRORS = [
@@ -401,7 +421,56 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath) {
     throw new Error('La respuesta MP4 no permite descarga por stream')
   }
 
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(outputPath))
+  const total = Number(response.headers?.get?.('content-length') || 0)
+  let downloaded = 0
+  let lastLog = Date.now()
+  let lastBytes = 0
+  const startedAt = Date.now()
+  const progress = new Transform({
+    transform(chunk, encoding, callback) {
+      downloaded += chunk.length
+      const now = Date.now()
+      if (now - lastLog >= 1000) {
+        const elapsed = (now - startedAt) / 1000
+        const speed = (downloaded - lastBytes) / Math.max((now - lastLog) / 1000, 0.001)
+        const percent = total ? ` ${((downloaded / total) * 100).toFixed(1)}%` : ''
+        const eta = total && speed > 0 ? ` ETA ${formatDuration((total - downloaded) / speed)}` : ''
+        logVoe(`Descarga MP4: ${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ''}${percent} · ${formatBytes(speed)}/s · ${formatDuration(elapsed)}${eta}`)
+        lastLog = now
+        lastBytes = downloaded
+      }
+      callback(null, chunk)
+    }
+  })
+  logVoe(`Iniciando MP4 directo${total ? ` (${formatBytes(total)})` : ''}`)
+  await pipeline(Readable.fromWeb(response.body), progress, createWriteStream(outputPath))
+  logVoe(`MP4 terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
+}
+
+function runFfmpegWithProgress(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    let lastProgress = 0
+    let outTime = '00:00:00'
+    child.stderr.on('data', chunk => {
+      const text = chunk.toString()
+      stderr += text
+      const now = Date.now()
+      const timeMatch = text.match(/out_time=([^\r\n]+)/)
+      if (timeMatch) outTime = timeMatch[1]
+      if (now - lastProgress >= 1000) {
+        const speedMatch = text.match(/speed=([^\s\r\n]+)/)
+        logVoe(`FFmpeg HLS: procesado ${outTime}${speedMatch ? ` · velocidad ${speedMatch[1]}` : ''}`)
+        lastProgress = now
+      }
+    })
+    child.on('error', reject)
+    child.on('close', code => {
+      if (code === 0) resolve()
+      else reject(Object.assign(new Error(`FFmpeg terminó con código ${code}`), { stderr }))
+    })
+  })
 }
 
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
@@ -451,8 +520,8 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
       ].filter(Boolean).join('\r\n') + '\r\n'
 
       try {
-        await execFileAsync(FFMPEG_BIN, [
-        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        await runFfmpegWithProgress([
+          '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
         '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
         '-user_agent', FFMPEG_USER_AGENT,
         '-headers', headers,
@@ -462,8 +531,10 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
         '-reconnect_streamed', '1',
         '-reconnect_at_eof', '1',
         '-reconnect_on_network_error', '1',
-        '-reconnect_on_http_error', '403,408,429,500,502,503,504',
-        '-reconnect_delay_max', '5',
+          '-reconnect_on_http_error', '403,408,429,500,502,503,504',
+          '-reconnect_delay_max', '5',
+          '-progress', 'pipe:2',
+          '-stats_period', '1',
         '-i', streamUrl,
         '-map', '0:v:0', '-map', '0:a:0?',
         '-c', 'copy',
