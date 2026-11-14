@@ -414,27 +414,36 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
       pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
     ].filter(Boolean).join('\r\n') + '\r\n'
 
-    await execFileAsync(FFMPEG_BIN, [
-      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-      '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
-      '-user_agent', FFMPEG_USER_AGENT,
-      '-headers', headers,
-      '-rw_timeout', '20000000',
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-i', streamUrl,
-      '-map', '0:v:0', '-map', '0:a:0?',
-      '-c', 'copy',
-      '-bsf:a', 'aac_adtstoasc',
-      '-movflags', '+faststart',
-      '-f', 'mp4',
-      outputPath
-    ], {
-      timeout: FFMPEG_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      maxBuffer: 4 * 1024 * 1024
-    })
+    try {
+      await execFileAsync(FFMPEG_BIN, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
+        '-user_agent', FFMPEG_USER_AGENT,
+        '-headers', headers,
+        '-rw_timeout', '20000000',
+        '-http_persistent', '0',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_at_eof', '1',
+        '-reconnect_on_network_error', '1',
+        '-reconnect_on_http_error', '403,408,429,500,502,503,504',
+        '-reconnect_delay_max', '5',
+        '-i', streamUrl,
+        '-map', '0:v:0', '-map', '0:a:0?',
+        '-c', 'copy',
+        '-bsf:a', 'aac_adtstoasc',
+        '-movflags', '+faststart',
+        '-f', 'mp4',
+        outputPath
+      ], {
+        timeout: FFMPEG_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        maxBuffer: 4 * 1024 * 1024
+      })
+    } catch (error) {
+      const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
+      throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
+    }
 
     const file = await stat(outputPath)
     if (!file.size) throw new Error('FFmpeg no generó un archivo de video válido.')
