@@ -405,9 +405,9 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath) {
   }
   if (pageData.cookieHeader) headers.Cookie = pageData.cookieHeader
 
-  const response = await wreqFetch(streamUrl, {
-    browser: 'chrome_136',
-    os: 'windows',
+  // wreq-js tiene un timeout interno para el cuerpo de la respuesta; para
+  // archivos grandes usamos el fetch nativo de Node y conservamos sus headers.
+  const response = await fetch(streamUrl, {
     headers,
     redirect: 'follow',
     signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
