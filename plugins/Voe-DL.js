@@ -251,7 +251,7 @@ function getVoeUrl(m, text, args) {
 // Navegador con control manual de redirecciones y cookies para evitar el error "maximum redirect reached"
 async function fetchSingleCandidate(startUrl) {
   let currentUrl = startUrl
-  const visited = new Set()
+  const visited = new Set([startUrl])
   let cookieHeader = ''
 
   for (let hop = 0; hop < 12; hop++) {
@@ -329,7 +329,9 @@ async function fetchSingleCandidate(startUrl) {
 
 async function fetchVoePageWithFallback(voe) {
   const errors = []
-  const mirrors = VOE_MIRRORS.concat([voe.originalHost]).filter(function (v, idx, arr) {
+  // El host recibido y voe.sx son las fuentes prioritarias; los espejos se usan
+  // únicamente como fallback porque cambian con frecuencia y algunos entran en bucles.
+  const mirrors = [voe.originalHost, 'voe.sx'].concat(VOE_MIRRORS).filter(function (v, idx, arr) {
     return v && arr.indexOf(v) === idx
   })
 
@@ -358,7 +360,7 @@ async function fetchVoePageWithFallback(voe) {
     }
   }
 
-  throw new Error('No se pudo extraer el video. Detalles: ' + errors.slice(0, 3).join(' | '))
+  throw new Error('No se pudo extraer el video. Detalles: ' + errors.slice(0, 8).join(' | '))
 }
 
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
