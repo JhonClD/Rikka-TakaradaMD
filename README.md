@@ -7,7 +7,7 @@
 <img src="./src/menu/menu.png" alt="Rikka Takarada" width="720">
 
 <p>
-  <img src="https://img.shields.io/badge/Node.js-18%2B-0ea5e9?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 18+">
+  <img src="https://img.shields.io/badge/Node.js-20%2B-0ea5e9?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 20+">
   <img src="https://img.shields.io/badge/WhatsApp-Baileys-2563eb?style=for-the-badge&logo=whatsapp&logoColor=white" alt="Baileys">
   <img src="https://img.shields.io/github/license/JhonClD/Rikka-TakaradaMD?style=for-the-badge&color=38bdf8" alt="Licencia">
 </p>
@@ -102,7 +102,7 @@
 
 ## ⚙️ Requisitos
 
-- **Node.js** v18 o superior
+- **Node.js** v20 o superior
 - **npm**
 - **FFmpeg** disponible en el sistema
 - **Git**, si quieres clonar o actualizar el repositorio

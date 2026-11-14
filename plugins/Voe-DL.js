@@ -3,9 +3,10 @@ import { mkdtemp, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
+import { fetch as wreqFetch } from 'wreq-js'
 
 const execFileAsync = promisify(execFile)
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
+const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 20_000
 const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
@@ -105,9 +106,10 @@ const handler = async (m, { conn, args, text }) => {
   try {
     await m.reply('🔎 Obteniendo el video de Voe...')
 
-    const pageResponse = await fetch(voe.pageUrl, {
+    const pageResponse = await wreqFetch(voe.pageUrl, {
+      browser: 'chrome_149',
+      os: 'windows',
       headers: {
-        'User-Agent': USER_AGENT,
         Accept: 'text/html,application/xhtml+xml',
       },
       redirect: 'follow',
@@ -135,7 +137,7 @@ const handler = async (m, { conn, args, text }) => {
     await execFileAsync('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
       '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
-      '-user_agent', USER_AGENT,
+      '-user_agent', FFMPEG_USER_AGENT,
       '-headers', headers,
       '-rw_timeout', '20000000',
       '-i', manifestUrl,
