@@ -12,16 +12,15 @@ const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
 
-// Dominios activos de Voe (eliminados los espejos caídos que daban unexpected EOF)
+// Dominios activos (incluyendo los espejos actuales detectados en tu servidor)
 const VOE_MIRRORS = [
-  'voe.sx',
+  'kathyinformationwhether.com',
+  'stevenfamilyedge.com',
   'walterprettytheir.com',
-  'shannonpersonalcost.com',
+  'voe.sx',
   'markstyleall.com',
   'lukecomparetwo.com',
-  'jilliandescribecompany.com',
-  'alejandrocenturyoil.com',
-  'richardsignfish.com'
+  'jilliandescribecompany.com'
 ]
 
 export function parseVoeUrl(value) {
@@ -68,17 +67,22 @@ function decodeUrl(value) {
   return cleaned
 }
 
-function extractJsRedirect(pageHtml) {
+function extractJsRedirect(pageHtml, currentUrl) {
   const patterns = [
-    /window\.location\.href\s*=\s*["'](https:\/\/[^"']+)["']/i,
-    /window\.location\s*=\s*["'](https:\/\/[^"']+)["']/i,
-    /location\.replace\(\s*["'](https:\/\/[^"']+)["']\s*\)/i,
-    /<meta[^>]+http-equiv=["']refresh["'][^>]+url=(https:\/\/[^"'\s>]+)/i
+    /window\.location\.href\s*=\s*["']([^"']+)["']/i,
+    /window\.location\s*=\s*["']([^"']+)["']/i,
+    /location\.replace\(\s*["']([^"']+)["']\s*\)/i,
+    /<meta[^>]+http-equiv=["']refresh["'][^>]+url=([^"'\s>]+)/i
   ]
 
   for (let i = 0; i < patterns.length; i++) {
     const match = pageHtml.match(patterns[i])
-    if (match && match[1]) return decodeUrl(match[1])
+    if (match && match[1]) {
+      try {
+        const resolved = new URL(decodeUrl(match[1]), currentUrl).toString()
+        if (/^https?:\/\//i.test(resolved)) return resolved
+      } catch (e) {}
+    }
   }
   return null
 }
@@ -90,28 +94,22 @@ function rot13(str) {
   })
 }
 
-// Nuevo desofuscador oficial para el cifrado de Voe (2025-2026)
 function deobfuscateVoePayload(rawStr) {
   try {
-    // Paso 1: ROT13
     let step1 = rot13(rawStr)
-    // Paso 2: Eliminar tokens basura que Voe inyecta
     const junkPatterns = ['@$', '^^', '~@', '%?', '*~', '!!', '#&']
     for (let i = 0; i < junkPatterns.length; i++) {
       step1 = step1.split(junkPatterns[i]).join('')
     }
     step1 = step1.replace(/_/g, '')
 
-    // Paso 3: Base64 decode #1
     const step2 = Buffer.from(step1, 'base64').toString('utf8')
 
-    // Paso 4: Shift de caracteres (-3 en código ASCII)
     let step3 = ''
     for (let i = 0; i < step2.length; i++) {
       step3 += String.fromCharCode(step2.charCodeAt(i) - 3)
     }
 
-    // Paso 5: Invertir cadena y Base64 decode #2
     const reversed = step3.split('').reverse().join('')
     const finalJson = Buffer.from(reversed, 'base64').toString('utf8')
     return JSON.parse(finalJson)
@@ -124,7 +122,7 @@ export function extractVoeManifest(pageHtml) {
   const candidates = []
   let match
 
-  // 1. Nuevo formato Voe: <script type="application/json">["..."]</script>
+  // 1. Formato JSON ofuscado <script type="application/json">["..."]</script>
   const jsonScriptRegex = /<script[^>]+type=["']application\/json["'][^>]*>\s*\[\s*["']([^"']+)["']\s*\]\s*<\/script>/gi
   while ((match = jsonScriptRegex.exec(pageHtml)) !== null) {
     const decodedObj = deobfuscateVoePayload(match[1])
@@ -143,8 +141,8 @@ export function extractVoeManifest(pageHtml) {
     }
   }
 
-  // 2. Probar cualquier string largo potencialmente cifrado con el algoritmo de Voe
-  const longStrings = pageHtml.match(/["']([A-Za-z0-9+/=@$^~%*!#&_]{80,})["']/g) || []
+  // 2. Cualquier string largo cifrado con el algoritmo de Voe
+  const longStrings = pageHtml.match(/["']([A-Za-z0-9+/=@$^~%*!#&_]{60,})["']/g) || []
   for (let i = 0; i < longStrings.length; i++) {
     const raw = longStrings[i].slice(1, -1)
     const decodedObj = deobfuscateVoePayload(raw)
@@ -153,14 +151,14 @@ export function extractVoeManifest(pageHtml) {
     }
   }
 
-  // 3. Propiedad 'hls' o 'source' en texto plano o Base64
+  // 3. Propiedad 'hls' / 'source' / 'file' en texto plano o Base64
   const hlsRegex = /["'](?:hls|source|file)["']\s*:\s*["']([^"']+)["']/gi
   while ((match = hlsRegex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
 
   // 4. Variables en atob(...)
-  const b64Regex = /atob\(\s*["']([A-Za-z0-9+/=]{24,})["']\s*\)/gi
+  const b64Regex = /atob\(\s*["']([A-Za-z0-9+/=]{20,})["']\s*\)/gi
   while ((match = b64Regex.exec(pageHtml)) !== null) {
     if (match[1]) candidates.push(decodeUrl(match[1]))
   }
@@ -194,6 +192,10 @@ function extractVoeDirectMp4(pageHtml) {
       return decodeUrl(decodedObj.direct_access_url)
     }
   }
+
+  const mp4Match = pageHtml.match(/https?:\\?\/\\?\/[^\s"'<>]+?\.mp4(?:\?[^\s"'<>]*)?/i)
+  if (mp4Match) return decodeUrl(mp4Match[0])
+
   return null
 }
 
@@ -221,66 +223,88 @@ function getVoeUrl(m, text, args) {
   return candidate.replace(/[),.!?;:'"\]}>]+$/g, '')
 }
 
-async function fetchHtmlOnce(targetUrl) {
-  // Intentar primero con wreq-js usando perfil Chrome 136 estable
-  try {
-    const response = await wreqFetch(targetUrl, {
+// Navegador con control manual de redirecciones y cookies para evitar el error "maximum redirect reached"
+async function fetchSingleCandidate(startUrl) {
+  let currentUrl = startUrl
+  const visited = new Set()
+  let cookieHeader = ''
+
+  for (let hop = 0; hop < 12; hop++) {
+    const reqHeaders = {}
+    if (cookieHeader) reqHeaders['Cookie'] = cookieHeader
+
+    const response = await wreqFetch(currentUrl, {
       browser: 'chrome_136',
       os: 'windows',
-      redirect: 'follow',
+      headers: Object.keys(reqHeaders).length ? reqHeaders : undefined,
+      redirect: 'manual',
       signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
     })
 
-    if (response.ok) {
-      const html = await response.text()
-      return { html: html, finalUrl: response.url || targetUrl }
+    // Guardar cookies si el servidor las envía
+    const setCookie = response.headers && response.headers.get ? response.headers.get('set-cookie') : null
+    if (setCookie) {
+      const cookiePair = setCookie.split(';')[0].trim()
+      if (cookiePair) {
+        cookieHeader = cookieHeader ? (cookieHeader + '; ' + cookiePair) : cookiePair
+      }
     }
-  } catch (e) {
-    // Si wreq-js falla o da EOF, probamos con fetch nativo
-  }
 
-  const fallbackRes = await fetch(targetUrl, {
-    headers: {
-      'User-Agent': FFMPEG_USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
-    },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
-  })
+    // Manejar redirección HTTP (301, 302, 303, 307, 308)
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers && response.headers.get ? response.headers.get('location') : null
+      if (!location) {
+        throw new Error('Redirección HTTP ' + response.status + ' sin cabecera Location')
+      }
+      const nextUrl = new URL(location, currentUrl).toString()
+      if (visited.has(nextUrl)) {
+        // Si redirige a una URL ya visitada, hacemos una petición directa con follow
+        const finalRes = await wreqFetch(nextUrl, {
+          browser: 'chrome_136',
+          os: 'windows',
+          redirect: 'follow',
+          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+        })
+        if (!finalRes.ok) throw new Error('HTTP ' + finalRes.status + ' en ' + new URL(nextUrl).hostname)
+        const finalHtml = await finalRes.text()
+        return { html: finalHtml, finalUrl: finalRes.url || nextUrl }
+      }
+      visited.add(nextUrl)
+      currentUrl = nextUrl
+      continue
+    }
 
-  if (!fallbackRes.ok) {
-    throw new Error('HTTP ' + fallbackRes.status + ' en ' + new URL(targetUrl).hostname)
-  }
+    if (!response.ok) {
+      throw new Error('HTTP ' + response.status + ' en ' + new URL(currentUrl).hostname)
+    }
 
-  const html = await fallbackRes.text()
-  return { html: html, finalUrl: fallbackRes.url || targetUrl }
-}
-
-async function fetchSingleCandidate(startUrl) {
-  let currentUrl = startUrl
-
-  for (let hop = 0; hop < 5; hop++) {
-    const data = await fetchHtmlOnce(currentUrl)
-    if (data.html.length > MAX_PAGE_CHARS) {
+    const html = await response.text()
+    if (html.length > MAX_PAGE_CHARS) {
       throw new Error('La página de Voe es demasiado grande.')
     }
 
-    const jsRedirect = extractJsRedirect(data.html)
-    if (jsRedirect && jsRedirect !== currentUrl) {
+    // Comprobar si primero ya tiene el stream antes de seguir redirecciones JS
+    if (extractVoeManifest(html) || extractVoeDirectMp4(html)) {
+      return { html: html, finalUrl: currentUrl }
+    }
+
+    // Manejar redirección en JavaScript (window.location.href = '...')
+    const jsRedirect = extractJsRedirect(html, currentUrl)
+    if (jsRedirect && jsRedirect !== currentUrl && !visited.has(jsRedirect)) {
+      visited.add(jsRedirect)
       currentUrl = jsRedirect
       continue
     }
 
-    return data
+    return { html: html, finalUrl: currentUrl }
   }
 
-  throw new Error('Demasiadas redirecciones en Voe.')
+  throw new Error('Demasiados saltos de redirección en ' + new URL(currentUrl).hostname)
 }
 
 async function fetchVoePageWithFallback(voe) {
   const errors = []
-  const mirrors = [voe.originalHost].concat(VOE_MIRRORS).filter(function (v, idx, arr) {
+  const mirrors = VOE_MIRRORS.concat([voe.originalHost]).filter(function (v, idx, arr) {
     return v && arr.indexOf(v) === idx
   })
 
@@ -298,7 +322,9 @@ async function fetchVoePageWithFallback(voe) {
           streamUrl: manifestUrl || directMp4
         }
       }
-      errors.push(mirrors[i] + ': cargó HTML (' + data.html.length + ' chars) pero sin stream reconocible')
+
+      const titlePreview = extractVoeTitle(data.html, voe.id)
+      errors.push(new URL(data.finalUrl).hostname + ': sin stream (título: ' + titlePreview.slice(0, 25) + ')')
     } catch (err) {
       const msg = (err && err.message) ? err.message : String(err)
       errors.push(mirrors[i] + ': ' + msg)
@@ -405,4 +431,4 @@ handler.tags = ['downloader']
 handler.command = /^(voe|voedl|voedownload)$/i
 
 export default handler
-      
+                                
