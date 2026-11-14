@@ -257,14 +257,21 @@ async function fetchSingleCandidate(startUrl) {
   for (let hop = 0; hop < 12; hop++) {
     const reqHeaders = {}
     if (cookieHeader) reqHeaders['Cookie'] = cookieHeader
+    reqHeaders['Referer'] = hop === 0 ? 'https://tioanime.com/' : startUrl
+    reqHeaders['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 
-    const response = await wreqFetch(currentUrl, {
-      browser: 'chrome_136',
-      os: 'windows',
-      headers: Object.keys(reqHeaders).length ? reqHeaders : undefined,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
-    })
+    let response
+    for (let retry = 0; retry < 3; retry++) {
+      response = await wreqFetch(currentUrl, {
+        browser: 'chrome_136',
+        os: 'windows',
+        headers: reqHeaders,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+      })
+      if (![403, 429, 500, 502, 503, 504].includes(response.status) || retry === 2) break
+      await new Promise(resolve => setTimeout(resolve, 500 * (retry + 1)))
+    }
 
     // Guardar cookies si el servidor las envía
     const setCookie = response.headers && response.headers.get ? response.headers.get('set-cookie') : null
