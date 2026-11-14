@@ -74,6 +74,14 @@ function normalizeVoeMirrorHost(value) {
   }
 }
 
+export function isKnownVoeMirrorUrl(value) {
+  const host = normalizeVoeMirrorHost(value)
+  if (!host) return false
+  const candidates = host.startsWith('www.') ? [host, host.slice(4)] : [host]
+  return candidates.some(candidate => KNOWN_VOE_MIRRORS.has(candidate)
+    || learnedVoeMirrors?.some(entry => entry.host === candidate && entry.expiresAt > Date.now()))
+}
+
 function safeVoeRedirectUrl(value, baseUrl) {
   try {
     const url = new URL(value, baseUrl)
@@ -815,7 +823,7 @@ async function downloadVoeStream(pageData, outputPath, voe, attemptSignal) {
   }
 }
 
-async function downloadVoeWithMirrorFailover(voe, tempDir) {
+export async function downloadVoeWithMirrorFailover(voe, tempDir) {
   const triedMirrors = new Set()
   const errors = []
   const outputPath = join(tempDir, 'voe_' + voe.id + '.mp4')

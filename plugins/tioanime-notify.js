@@ -14,6 +14,7 @@ import { File as MegaFile } from 'megajs'
 import { listFiles, getFileMetadata } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
+import { downloadVoeWithMirrorFailover, isKnownVoeMirrorUrl, parseVoeUrl } from './Voe-DL.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -61,8 +62,8 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const TIO_SERVIDORES = ['yourupload', 'mega']
-const LAT_SERVIDORES = ['mediafire', 'mega']
+const TIO_SERVIDORES = ['yourupload', 'mega', 'voe']
+const LAT_SERVIDORES = ['mediafire', 'mega', 'voe']
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -464,6 +465,7 @@ async function getPage(url, options = {}, attempts = 3) {
 
 function detectarServidor(url, label = '') {
   const u = `${url} ${label}`.toLowerCase()
+  if (isKnownVoeMirrorUrl(url)) return 'voe'
   if (u.includes('mega.nz') || u.includes('mega.co.nz')) return 'mega'
   if (/\bmega\b/.test(u) && !u.includes('megacloud')) return 'mega'
   if (u.includes('mediafire')) return 'mediafire'
@@ -771,7 +773,11 @@ async function scrapeServidoresLatAnime(epUrl) {
         const match = body.match(new RegExp(`https?://[^"'\\s]*${d.replace('.','\\.')}[^"'\\s]*`))
         if (match) { urlReal = match[0]; break }
       }
-      if (!urlReal && finalUrl && dominios.some(d => finalUrl.includes(d))) urlReal = finalUrl
+      if (!urlReal) {
+        const mirrorsVoe = body.match(/https?:\/\/[^"'\s<>]+/g) || []
+        urlReal = mirrorsVoe.find(url => isKnownVoeMirrorUrl(url)) || null
+      }
+      if (!urlReal && finalUrl && (dominios.some(d => finalUrl.includes(d)) || isKnownVoeMirrorUrl(finalUrl))) urlReal = finalUrl
       if (urlReal) {
         const idx = srvs.findIndex(s => s.url === r.url)
         if (idx !== -1) {
@@ -1086,7 +1092,27 @@ async function descargarYourUpload(serverUrl, outputDir, fileName) {
   return descargarUrlServidor(directUrl, serverUrl, outputDir, fileName, 'YourUpload')
 }
 
+async function descargarVoeTio(voe, outputDir, fileName) {
+  const { outputPath: downloadedPath } = await downloadVoeWithMirrorFailover(voe, outputDir)
+  const destPath = path.join(outputDir, fileName)
+  if (downloadedPath !== destPath) {
+    fs.rmSync(destPath, { force: true })
+    fs.renameSync(downloadedPath, destPath)
+  }
+  if (!fs.existsSync(destPath) || !fs.statSync(destPath).size) {
+    fs.rmSync(destPath, { force: true })
+    throw new Error('Voe: archivo vacío tras la descarga')
+  }
+  return destPath
+}
+
 async function descargarServidorVideo(serverUrl, outputDir, fileName, servidor) {
+  if (servidor === 'voe' && !/\.mp4(?:[?#]|$)/i.test(serverUrl)) {
+    let voe
+    try { voe = parseVoeUrl(serverUrl) } catch (_) {}
+    if (voe) return descargarVoeTio(voe, outputDir, fileName)
+  }
+
   const extraerCandidatos = (html) => {
     const encontrados = []
     const patrones = [
