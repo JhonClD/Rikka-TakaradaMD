@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { createWriteStream } from 'fs'
-import { mkdtemp, rm, stat } from 'fs/promises'
+import { mkdtemp, open, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Readable, Transform } from 'stream'
@@ -14,6 +14,9 @@ const execFileAsync = promisify(execFile)
 const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 25000
 const DIRECT_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000
+const RANGE_CONNECTIONS = 4
+const RANGE_CHUNK_SIZE = 8 * 1024 * 1024
+const RANGE_RETRIES = 3
 const FFMPEG_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const MAX_VIDEO_SIZE = 1500 * 1024 * 1024
@@ -398,31 +401,24 @@ async function fetchVoePageWithFallback(voe) {
   throw new Error('No se pudo extraer el video. Detalles: ' + errors.slice(0, 8).join(' | '))
 }
 
-async function downloadDirectMp4(streamUrl, pageData, outputPath) {
+function getDownloadHeaders(pageData) {
   const headers = {
     Referer: pageData.referer,
     Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.8'
   }
   if (pageData.cookieHeader) headers.Cookie = pageData.cookieHeader
+  return headers
+}
 
-  // wreq-js tiene un timeout interno para el cuerpo de la respuesta; para
-  // archivos grandes usamos el fetch nativo de Node y conservamos sus headers.
-  const response = await fetch(streamUrl, {
-    headers,
-    redirect: 'follow',
-    signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
-  })
-  if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
+function parseContentRange(value) {
+  const match = String(value || '').match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i)
+  return match ? { start: Number(match[1]), end: Number(match[2]), total: Number(match[3]) } : null
+}
 
-  const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
-  if (contentType.includes('text/html') || contentType.includes('application/json')) {
-    throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
-  }
+async function downloadDirectMp4Sequential(streamUrl, pageData, outputPath, response, total) {
   if (!response.body || typeof response.body.getReader !== 'function') {
     throw new Error('La respuesta MP4 no permite descarga por stream')
   }
-
-  const total = Number(response.headers?.get?.('content-length') || 0)
   let downloaded = 0
   let lastLog = Date.now()
   let lastBytes = 0
@@ -443,9 +439,113 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath) {
       callback(null, chunk)
     }
   })
-  logVoe(`Iniciando MP4 directo${total ? ` (${formatBytes(total)})` : ''}`)
   await pipeline(Readable.fromWeb(response.body), progress, createWriteStream(outputPath))
   logVoe(`MP4 terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
+}
+
+async function downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers) {
+  const file = await open(outputPath, 'w')
+  await file.truncate(total)
+  const parts = Math.ceil(total / RANGE_CHUNK_SIZE)
+  let nextPart = 0
+  let completed = 0
+  let downloaded = 0
+  let lastLog = Date.now()
+  let lastBytes = 0
+  const startedAt = Date.now()
+  const report = setInterval(() => {
+    const now = Date.now()
+    const speed = (downloaded - lastBytes) / Math.max((now - lastLog) / 1000, 0.001)
+    const elapsed = (now - startedAt) / 1000
+    const eta = speed > 0 ? ` ETA ${formatDuration((total - downloaded) / speed)}` : ''
+    logVoe(`Descarga MP4 paralela: ${completed}/${parts} bloques · ${formatBytes(downloaded)} / ${formatBytes(total)} ${(downloaded / total * 100).toFixed(1)}% · ${formatBytes(speed)}/s · ${formatDuration(elapsed)}${eta}`)
+    lastLog = now
+    lastBytes = downloaded
+  }, 1000)
+
+  const downloadPart = async part => {
+    const start = part * RANGE_CHUNK_SIZE
+    const end = Math.min(total - 1, start + RANGE_CHUNK_SIZE - 1)
+    let lastError
+    for (let retry = 1; retry <= RANGE_RETRIES; retry++) {
+      try {
+        const response = await fetch(streamUrl, {
+          headers: { ...headers, Range: `bytes=${start}-${end}` },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
+        })
+        const range = parseContentRange(response.headers.get('content-range'))
+        if (response.status !== 206 || !range || range.start !== start || range.end !== end) {
+          throw new Error(`respuesta Range inválida (HTTP ${response.status})`)
+        }
+        const buffer = Buffer.from(await response.arrayBuffer())
+        if (buffer.length !== end - start + 1) throw new Error(`bloque incompleto (${buffer.length} bytes)`)
+        await file.write(buffer, 0, buffer.length, start)
+        downloaded += buffer.length
+        completed++
+        return
+      } catch (error) {
+        lastError = error
+        if (retry < RANGE_RETRIES) await new Promise(resolve => setTimeout(resolve, retry * 1000))
+      }
+    }
+    throw new Error(`bloque ${part + 1}/${parts}: ${lastError?.message || 'fallo desconocido'}`)
+  }
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(RANGE_CONNECTIONS, parts) }, async () => {
+      while (true) {
+        const part = nextPart++
+        if (part >= parts) return
+        await downloadPart(part)
+      }
+    }))
+  } finally {
+    clearInterval(report)
+    await file.close()
+  }
+  logVoe(`MP4 paralelo terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
+}
+
+async function downloadDirectMp4(streamUrl, pageData, outputPath) {
+  const headers = getDownloadHeaders(pageData)
+
+  // wreq-js tiene un timeout interno para el cuerpo de la respuesta; para
+  // archivos grandes usamos el fetch nativo de Node y conservamos sus headers.
+  const probe = await fetch(streamUrl, {
+    headers: { ...headers, Range: 'bytes=0-0' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+  })
+  const probeRange = parseContentRange(probe.headers.get('content-range'))
+  const probeLength = Number(probe.headers.get('content-length') || 0)
+  try { await probe.body?.cancel() } catch (_) {}
+
+  const total = probeRange?.total || probeLength
+  if (probe.status === 206 && probeRange && total > 0) {
+    logVoe(`Iniciando MP4 paralelo: ${formatBytes(total)} · ${RANGE_CONNECTIONS} conexiones · bloques de ${formatBytes(RANGE_CHUNK_SIZE)}`)
+    await downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers)
+    return
+  }
+
+  const response = await fetch(streamUrl, {
+    headers,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(DIRECT_DOWNLOAD_TIMEOUT_MS)
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
+
+  const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
+  }
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new Error('La respuesta MP4 no permite descarga por stream')
+  }
+
+  const sequentialTotal = Number(response.headers?.get?.('content-length') || 0)
+  logVoe(`Iniciando MP4 directo${sequentialTotal ? ` (${formatBytes(sequentialTotal)})` : ''}`)
+  await downloadDirectMp4Sequential(streamUrl, pageData, outputPath, sequentialTotal, response)
 }
 
 function runFfmpegWithProgress(args) {
