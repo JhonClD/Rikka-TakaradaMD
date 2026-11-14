@@ -1,7 +1,10 @@
 import { execFile } from 'child_process'
+import { createWriteStream } from 'fs'
 import { mkdtemp, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
 import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
 import ffmpegStatic from 'ffmpeg-static'
@@ -374,6 +377,33 @@ async function fetchVoePageWithFallback(voe) {
   throw new Error('No se pudo extraer el video. Detalles: ' + errors.slice(0, 8).join(' | '))
 }
 
+async function downloadDirectMp4(streamUrl, pageData, outputPath) {
+  const headers = {
+    Referer: pageData.referer,
+    Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.8'
+  }
+  if (pageData.cookieHeader) headers.Cookie = pageData.cookieHeader
+
+  const response = await wreqFetch(streamUrl, {
+    browser: 'chrome_136',
+    os: 'windows',
+    headers,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status} al descargar MP4 directo`)
+
+  const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
+  }
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new Error('La respuesta MP4 no permite descarga por stream')
+  }
+
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(outputPath))
+}
+
 const handler = async (m, { conn, args, text, usedPrefix, command }) => {
   const inputUrl = getVoeUrl(m, text, args)
   if (!inputUrl) {
@@ -412,13 +442,16 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
     tempDir = await mkdtemp(join(tmpdir(), 'rikka-voe-'))
     const outputPath = join(tempDir, 'voe_' + voe.id + '.mp4')
 
-    const headers = [
-      'Referer: ' + (pageData.referer || voe.pageUrl),
-      pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
-    ].filter(Boolean).join('\r\n') + '\r\n'
+    if (pageData.streamType === 'mp4') {
+      await downloadDirectMp4(pageData.streamUrl, pageData, outputPath)
+    } else {
+      const headers = [
+        'Referer: ' + (pageData.referer || voe.pageUrl),
+        pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
+      ].filter(Boolean).join('\r\n') + '\r\n'
 
-    try {
-      await execFileAsync(FFMPEG_BIN, [
+      try {
+        await execFileAsync(FFMPEG_BIN, [
         '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
         '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
         '-user_agent', FFMPEG_USER_AGENT,
@@ -438,14 +471,15 @@ const handler = async (m, { conn, args, text, usedPrefix, command }) => {
         '-movflags', '+faststart',
         '-f', 'mp4',
         outputPath
-      ], {
-        timeout: FFMPEG_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-        maxBuffer: 4 * 1024 * 1024
-      })
-    } catch (error) {
-      const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
-      throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
+        ], {
+          timeout: FFMPEG_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: 4 * 1024 * 1024
+        })
+      } catch (error) {
+        const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
+        throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
+      }
     }
 
     const file = await stat(outputPath)
