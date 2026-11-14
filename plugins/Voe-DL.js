@@ -16,6 +16,7 @@ const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
 
 // Dominios activos (incluyendo los espejos actuales detectados en tu servidor)
 const VOE_MIRRORS = [
+  'susanexpectcare.com',
   'kathyinformationwhether.com',
   'stevenfamilyedge.com',
   'walterprettytheir.com',
