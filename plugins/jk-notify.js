@@ -6,6 +6,7 @@ import { fetch as wreqFetch } from 'wreq-js'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
+import { extractJkAnimeLinks, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
@@ -396,12 +397,9 @@ async function fetchLatestEpisodesJK() {
     const aTag = $el.find('a').first()
     const href = aTag.attr('href') || ''
     if (!href) return
-
-    const m = href.match(/jkanime\.net\/([^/]+)\/(\d+)\/?$/) || href.match(/^\/([^/]+)\/(\d+)\/?$/)
-    if (!m) return
-
-    const slug = m[1]
-    const epNum = parseInt(m[2])
+    const episodio = parseJkAnimeEpisodeUrl(href, JKANIME_URL)
+    if (!episodio) return
+    const { slug, epNum, epUrl } = episodio
     const tiempo = $el.find('.badge-secondary').text().trim()
 
     if (!tiempo.toLowerCase().includes('hoy') && !tiempo.toLowerCase().includes('ayer')) return
@@ -410,7 +408,6 @@ async function fetchLatestEpisodesJK() {
     const imgEl = $el.find('img').first()
     const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || ''
     const imgUrl = imgSrc.startsWith('http') ? imgSrc : imgSrc ? JKANIME_URL + imgSrc : ''
-    const epUrl = href.startsWith('http') ? href : JKANIME_URL + href
     const id = `jk-${slug.toLowerCase()}-${epNum}`
 
     if (!lista.find(e => e.id === id))
@@ -420,14 +417,12 @@ async function fetchLatestEpisodesJK() {
   if (lista.length === 0) {
     $('a[href]').each((_, el) => {
       const href = $(el).attr('href') || ''
-      const m = href.match(/jkanime\.net\/([^/]+)\/(\d+)\/?$/) || href.match(/^\/([^/]+)\/(\d+)\/?$/)
-      if (!m) return
-      const slug = m[1]
-      const epNum = parseInt(m[2])
+      const episodio = parseJkAnimeEpisodeUrl(href, JKANIME_URL)
+      if (!episodio) return
+      const { slug, epNum, epUrl } = episodio
       const id = `jk-${slug.toLowerCase()}-${epNum}`
       if (lista.find(e => e.id === id)) return
       const titulo = ($(el).attr('title') || $(el).text() || slug.replace(/-/g, ' ')).trim()
-      const epUrl = href.startsWith('http') ? href : JKANIME_URL + href
       lista.push({ id, slug, titulo, epNum, epUrl, imgUrl: '' })
     })
   }
@@ -439,31 +434,26 @@ async function scrapeServidoresJK(epUrl) {
   const { data } = await request(epUrl, { headers: { Referer: JKANIME_URL }, timeout: 15000 })
   const $ = cheerio.load(data)
   const srvs = []
+  const addServer = (url, nombre = '') => {
+    let parsed
+    try { parsed = new URL(url, epUrl) } catch (_) { return }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return
+    const normalizedUrl = parsed.href
+    if (srvs.some(s => s.url === normalizedUrl)) return
+    const host = parsed.hostname.toLowerCase()
+    if (/^(?:www\.)?(?:hqq\.tv|netu\.tv|netu\.ac)$/.test(host)) return
+    const esMega = /(?:^|\.)mega\.(?:nz|co\.nz)$/.test(host)
+    const esMediafire = /(?:^|\.)mediafire\.com$/.test(host)
+    srvs.push({
+      nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : String(nombre || '').toLowerCase() || detectarServNombre(normalizedUrl),
+      url: normalizedUrl,
+      directo: esMega || esMediafire,
+    })
+  }
 
-  $('script').each((_, el) => {
-    const code = $(el).html() || ''
-    const match = code.match(/var\s+servers\s*=\s*(\[[\s\S]*?\]);/)
-    if (!match) return
-    try {
-      const servidores = JSON.parse(match[1])
-      for (const srv of servidores) {
-        if (!srv.remote) continue
-        let url = ''
-        try { url = Buffer.from(srv.remote, 'base64').toString('utf-8').trim() } catch (_) { continue }
-        if (!url.startsWith('http')) continue
-        if (srvs.find(s => s.url === url)) continue
-        const nombre = (srv.server || '').toLowerCase()
-        const esMega = url.includes('mega.nz') || url.includes('mega.co.nz')
-        const esMediafire = url.includes('mediafire.com')
-        if (url.includes('hqq.tv') || url.includes('netu.tv') || url.includes('netu.ac')) continue
-        srvs.push({
-          nombre: esMega ? 'mega' : esMediafire ? 'mediafire' : nombre || detectarServNombre(url),
-          url,
-          directo: esMega || esMediafire,
-        })
-      }
-    } catch (_) {}
-  })
+  // Extractor adaptado de getEpisodeLinks de anime1v-api; su licencia MIT está
+  // incluida en src/libraries/ANIME1V-API-LICENSE.
+  for (const link of extractJkAnimeLinks(data, epUrl)) addServer(link.url, link.server)
 
   let epId = null
   $('script').each((_, el) => {
@@ -495,19 +485,17 @@ async function scrapeServidoresJK(epUrl) {
   }
 
   $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || ''
-    if (!href.startsWith('http')) return
-    const esMega = href.includes('mega.nz') || href.includes('mega.co.nz')
-    const esMediafire = href.includes('mediafire.com')
-    if (!esMega && !esMediafire) return
-    if (srvs.find(s => s.url === href)) return
-    srvs.push({ nombre: esMega ? 'mega' : 'mediafire', url: href, directo: true })
+    const url = $(el).attr('href') || ''
+    if (!url) return
+    let host = ''
+    try { host = new URL(url, epUrl).hostname.toLowerCase() } catch (_) { return }
+    if (/(?:^|\.)mega\.(?:nz|co\.nz)$/.test(host) || /(?:^|\.)mediafire\.com$/.test(host)) addServer(url)
   })
 
   if (srvs.length === 0) {
     $('iframe[src]').each((_, el) => {
-      const src = $(el).attr('src') || ''
-      if (src.startsWith('http')) srvs.push({ nombre: 'iframe', url: src, directo: false })
+      const url = $(el).attr('src') || ''
+      if (url) addServer(url, detectarServNombre(url))
     })
   }
 
