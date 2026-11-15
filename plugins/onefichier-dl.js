@@ -1,13 +1,12 @@
-import axios from 'axios'
 import * as cheerio from 'cheerio'
+import { createSession } from 'wreq-js'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { Transform } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
 const MAX_DOWNLOAD_BYTES = Math.min(4096, Math.max(20, Number(process.env.ONEFICHIER_MAX_MB) || 4096)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ONEFICHIER_TIMEOUT_MS) || 60 * 60_000)
 const MAX_HTML_BYTES = 2 * 1024 * 1024
@@ -73,17 +72,9 @@ function cleanFilename(value, fallback) {
   return safe || fallback
 }
 
-function cookieHeader(cookies) { return cookies.length ? cookies.join('; ') : '' }
-function collectCookies(response, cookies) {
-  for (const line of response.headers['set-cookie'] || []) {
-    const pair = line.split(';', 1)[0]
-    if (pair && !cookies.some(cookie => cookie.split('=', 1)[0] === pair.split('=', 1)[0])) cookies.push(pair)
-    else if (pair) {
-      const name = pair.split('=', 1)[0]
-      const index = cookies.findIndex(cookie => cookie.split('=', 1)[0] === name)
-      if (index >= 0) cookies[index] = pair
-    }
-  }
+function getHeader(headers, name) {
+  if (typeof headers?.get === 'function') return headers.get(name) || ''
+  return headers?.[name.toLowerCase()] || ''
 }
 
 async function readLimitedHtml(stream) {
@@ -161,40 +152,51 @@ function findDirectDownloadLink(html, baseUrl) {
 }
 
 function isHtmlResponse(response) {
-  return /text\/html|application\/xhtml\+xml/i.test(String(response.headers['content-type'] || ''))
+  return /text\/html|application\/xhtml\+xml/i.test(getHeader(response.headers, 'content-type'))
 }
 
-async function requestStream(url, cookies, referer, method = 'GET', fields = null) {
-  const headers = { 'User-Agent': UA, Accept: '*/*', Referer: referer || 'https://1fichier.com/' }
-  if (cookieHeader(cookies)) headers.Cookie = cookieHeader(cookies)
+async function requestStream(url, session, referer, method = 'GET', fields = null) {
+  const headers = { Accept: '*/*', Referer: referer || 'https://1fichier.com/' }
   if (method === 'POST') headers['Content-Type'] = 'application/x-www-form-urlencoded'
-  const response = await axios({
+  let requestUrl = url
+  if (method === 'GET' && fields?.size) {
+    const target = new URL(url)
+    for (const [key, value] of fields) target.searchParams.append(key, value)
+    requestUrl = target.href
+  }
+  const upstream = await session.fetch(requestUrl, {
     method,
-    url,
-    data: method === 'POST' ? fields?.toString() : undefined,
-    params: method === 'GET' ? fields : undefined,
-    responseType: 'stream',
+    body: method === 'POST' ? fields : undefined,
     headers,
     timeout: method === 'GET' ? 30_000 : DOWNLOAD_TIMEOUT_MS,
-    maxRedirects: 8,
-    maxContentLength: MAX_DOWNLOAD_BYTES,
-    validateStatus: status => status >= 200 && status < 400,
+    redirect: 'follow',
   })
-  collectCookies(response, cookies)
-  const finalUrl = response.request?.res?.responseUrl || url
+  const finalUrl = upstream.url || requestUrl
   if (!allowedHost(new URL(finalUrl).hostname)) {
-    response.data.destroy()
+    await upstream.body?.cancel().catch(() => {})
     throw new Error('1fichier redirigió a un dominio no permitido.')
+  }
+  if (!upstream.body) throw new Error('1fichier devolvió una respuesta vacía.')
+  const response = {
+    status: upstream.status,
+    headers: upstream.headers,
+    data: Readable.fromWeb(upstream.body),
   }
   return { response, finalUrl }
 }
 
-async function getDownloadStream(inputUrl, cookies) {
+async function getDownloadStream(inputUrl, session) {
   let currentUrl = inputUrl
   let referer = 'https://1fichier.com/'
   for (let step = 0; step < 5; step++) {
-    const { response, finalUrl } = await requestStream(currentUrl, cookies, referer)
-    if (!isHtmlResponse(response)) return { response, finalUrl }
+    const { response, finalUrl } = await requestStream(currentUrl, session, referer)
+    if (!isHtmlResponse(response)) {
+      if (response.status < 200 || response.status >= 400) {
+        response.data.destroy()
+        throw new Error(`1fichier respondió con HTTP ${response.status}.`)
+      }
+      return { response, finalUrl }
+    }
 
     const html = await readLimitedHtml(response.data)
     const $ = cheerio.load(html)
@@ -224,12 +226,16 @@ async function getDownloadStream(inputUrl, cookies) {
     }
 
     const form = getDownloadForm(html, finalUrl)
-    if (!form) throw new Error('No encontré un enlace directo ni un formulario de descarga reconocible en la página de 1fichier.')
+    if (!form) {
+      const title = $('title').text().replace(/\s+/g, ' ').trim()
+      const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 220)
+      throw new Error(`La respuesta de 1fichier no contiene un formulario de descarga reconocible (${title || excerpt || 'página sin texto visible'}).`)
+    }
     if (form.fields.toString().toLowerCase().includes('captcha')) {
       throw new Error('El formulario de 1fichier requiere CAPTCHA. Complétalo manualmente en el navegador; el plugin no lo evade.')
     }
     console.log(`[1FICHIER] Enviando el formulario de descarga permitido (${form.method})…`)
-    const next = await requestStream(form.url, cookies, finalUrl, form.method, form.fields)
+    const next = await requestStream(form.url, session, finalUrl, form.method, form.fields)
     if (!isHtmlResponse(next.response)) return next
     const returnedHtml = await readLimitedHtml(next.response.data)
     if (detectCaptcha(returnedHtml)) throw new Error('1fichier pidió CAPTCHA al procesar el formulario. Completa la verificación manualmente.')
@@ -252,7 +258,7 @@ function contentDispositionFilename(header) {
 }
 
 async function saveFile(response, outputPath) {
-  const expected = Number(response.headers['content-length'] || 0)
+  const expected = Number(getHeader(response.headers, 'content-length') || 0)
   if (expected > MAX_DOWNLOAD_BYTES) {
     response.data.destroy()
     throw new Error(`El archivo supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`)
@@ -327,6 +333,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const tempDir = path.join(TEMP_ROOT, randomUUID())
   let outputPath = ''
   let statusKey = null
+  let session = null
   const update = async text => {
     if (statusKey) { try { await conn.sendMessage(m.chat, { text, edit: statusKey }) } catch (_) {} }
   }
@@ -335,14 +342,14 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const sent = await conn.sendMessage(m.chat, { text: '🔎 Resolviendo enlace de 1fichier…' }, { quoted: m })
     statusKey = sent?.key || null
     console.log(`[1FICHIER] Inicio · host=${new URL(url).hostname}`)
-    const cookies = []
-    const { response, finalUrl } = await getDownloadStream(url, cookies)
-    const contentType = String(response.headers['content-type'] || '').toLowerCase()
+    session = await createSession({ browser: 'chrome_149', os: 'windows', timeout: 30_000 })
+    const { response, finalUrl } = await getDownloadStream(url, session)
+    const contentType = getHeader(response.headers, 'content-type').toLowerCase()
     if (/text\/html|application\/json|javascript/i.test(contentType)) {
       response.data.destroy()
       throw new Error('1fichier no devolvió un archivo descargable.')
     }
-    const filename = cleanFilename(contentDispositionFilename(response.headers['content-disposition']), `1fichier-${Date.now()}.bin`)
+    const filename = cleanFilename(contentDispositionFilename(getHeader(response.headers, 'content-disposition')), `1fichier-${Date.now()}.bin`)
     outputPath = path.join(tempDir, filename)
     await update('⬇️ Descargando desde 1fichier…')
     const stat = await saveFile(response, outputPath)
@@ -361,6 +368,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     if (statusKey) await update(message)
     else await m.reply(message)
   } finally {
+    if (session) await session.close().catch(() => {})
     global.oneFichierActiveDownloads.delete(lock)
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
   }
