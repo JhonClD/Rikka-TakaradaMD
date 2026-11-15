@@ -219,6 +219,25 @@ async function getDownloadStream(inputUrl, session) {
       await waitWithProgress(waitSeconds)
     }
 
+    const form = getDownloadForm(html, finalUrl)
+    if (form) {
+      if (form.fields.toString().toLowerCase().includes('captcha')) {
+        throw new Error('El formulario de 1fichier requiere CAPTCHA. Complétalo manualmente en el navegador; el plugin no lo evade.')
+      }
+      console.log(`[1FICHIER] Enviando el formulario de descarga permitido (${form.method})…`)
+      const next = await requestStream(form.url, session, finalUrl, form.method, form.fields)
+      if (!isHtmlResponse(next.response)) return next
+      const returnedHtml = await readLimitedHtml(next.response.data)
+      if (detectCaptcha(returnedHtml)) throw new Error('1fichier pidió CAPTCHA al procesar el formulario. Completa la verificación manualmente.')
+      const returnedLink = findDirectDownloadLink(returnedHtml, next.finalUrl)
+      if (returnedLink) {
+        referer = next.finalUrl
+        currentUrl = returnedLink
+        continue
+      }
+      throw new Error('1fichier devolvió otra página HTML en lugar del archivo; puede requerir verificación manual.')
+    }
+
     const direct = findDirectDownloadLink(html, finalUrl)
     if (direct) {
       console.log(`[1FICHIER] Enlace de descarga encontrado en ${new URL(direct).hostname}.`)
@@ -226,28 +245,9 @@ async function getDownloadStream(inputUrl, session) {
       currentUrl = direct
       continue
     }
-
-    const form = getDownloadForm(html, finalUrl)
-    if (!form) {
-      const title = $('title').text().replace(/\s+/g, ' ').trim()
-      const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 220)
-      throw new Error(`La respuesta de 1fichier no contiene un formulario de descarga reconocible (${title || excerpt || 'página sin texto visible'}).`)
-    }
-    if (form.fields.toString().toLowerCase().includes('captcha')) {
-      throw new Error('El formulario de 1fichier requiere CAPTCHA. Complétalo manualmente en el navegador; el plugin no lo evade.')
-    }
-    console.log(`[1FICHIER] Enviando el formulario de descarga permitido (${form.method})…`)
-    const next = await requestStream(form.url, session, finalUrl, form.method, form.fields)
-    if (!isHtmlResponse(next.response)) return next
-    const returnedHtml = await readLimitedHtml(next.response.data)
-    if (detectCaptcha(returnedHtml)) throw new Error('1fichier pidió CAPTCHA al procesar el formulario. Completa la verificación manualmente.')
-    const returnedLink = findDirectDownloadLink(returnedHtml, next.finalUrl)
-    if (returnedLink) {
-      referer = next.finalUrl
-      currentUrl = returnedLink
-      continue
-    }
-    throw new Error('1fichier devolvió otra página HTML en lugar del archivo; puede requerir verificación manual.')
+    const title = $('title').text().replace(/\s+/g, ' ').trim()
+    const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 220)
+    throw new Error(`La respuesta de 1fichier no contiene un formulario de descarga reconocible (${title || excerpt || 'página sin texto visible'}).`)
   }
   throw new Error('Se alcanzó el límite de pasos al resolver la descarga de 1fichier.')
 }
