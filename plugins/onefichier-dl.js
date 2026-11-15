@@ -46,6 +46,27 @@ function formatDuration(seconds) {
   return hours ? `${hours}h ${minutes}m ${secs}s` : `${minutes}m ${secs}s`
 }
 
+async function waitWithProgress(seconds) {
+  const total = Math.max(0, Math.floor(seconds))
+  if (!total) return
+  console.log(`[1FICHIER] Esperando ${total}s, tal como pide el servidor.`)
+  let lastLogged = 0
+  for (let elapsed = 1; elapsed <= total; elapsed += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    const percent = Math.floor(elapsed / total * 100)
+    if (process.stdout.isTTY) {
+      const width = 22
+      const filled = Math.round(width * elapsed / total)
+      const bar = `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
+      process.stdout.write(`\r[1FICHIER] Espera [${bar}] ${String(percent).padStart(3)}% · ${total - elapsed}s restantes   `)
+      if (elapsed === total) process.stdout.write('\n')
+    } else if (elapsed === total || elapsed - lastLogged >= 10) {
+      console.log(`[1FICHIER] Espera ${elapsed}/${total}s (${percent}%)`)
+      lastLogged = elapsed
+    }
+  }
+}
+
 function cleanFilename(value, fallback) {
   const decoded = String(value || '').replace(/&#(?:x([\da-f]+)|(\d+));/gi, (_m, hex, dec) => String.fromCodePoint(parseInt(hex || dec, hex ? 16 : 10)))
   const safe = path.basename(decoded).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/[\r\n]/g, '').trim().slice(0, 180)
@@ -190,9 +211,8 @@ async function getDownloadStream(inputUrl, cookies) {
 
     const waitSeconds = findWaitSeconds(html)
     if (waitSeconds > 0) {
-      if (waitSeconds > 180) throw new Error(`1fichier solicita esperar ${waitSeconds} segundos; supera el máximo automático de 180 segundos.`)
-      console.log(`[1FICHIER] El servidor exige una espera de ${waitSeconds}s; se respetará antes de continuar.`)
-      await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000))
+    if (waitSeconds > 180) throw new Error(`1fichier solicita esperar ${waitSeconds} segundos; supera el máximo automático de 180 segundos.`)
+      await waitWithProgress(waitSeconds)
     }
 
     const direct = findDirectDownloadLink(html, finalUrl)
