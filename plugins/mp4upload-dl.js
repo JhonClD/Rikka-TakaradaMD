@@ -36,6 +36,22 @@ function cleanFilename(value, fallback) {
   return `${safe || fallback}.mp4`.replace(/\.mp4\.mp4$/i, '.mp4')
 }
 
+function formatBytes(value) {
+  const bytes = Number(value) || 0
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  return hours ? `${hours}h ${minutes}m ${secs}s` : `${minutes}m ${secs}s`
+}
+
 export function extractMp4UploadMedia(html, id) {
   const source = String(html || '').replace(/\\u0026/gi, '&').replace(/\\\//g, '/').replace(/&amp;/gi, '&')
   const patterns = [
@@ -117,25 +133,60 @@ async function downloadMedia(mediaUrl, destPath, referer) {
     response.data.destroy()
     throw new Error(`El video supera el límite de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`)
   }
+  const startedAt = Date.now()
+  const host = new URL(finalUrl).hostname
   let bytes = 0
+  let lastRenderAt = 0
+  let lastLoggedAt = startedAt
+  let nextLogAt = 16 * 1024 * 1024
+  const renderProgress = (force = false) => {
+    const now = Date.now()
+    const elapsed = Math.max((now - startedAt) / 1000, 0.001)
+    const speed = bytes / elapsed
+    const percent = expected ? Math.min(100, bytes / expected * 100) : null
+    if (process.stdout.isTTY) {
+      if (!force && now - lastRenderAt < 1000) return
+      lastRenderAt = now
+      const width = 22
+      const filled = percent == null ? 0 : Math.round(width * percent / 100)
+      const bar = `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
+      const progress = percent == null ? '  --.-%' : `${percent.toFixed(1).padStart(5)}%`
+      process.stdout.write(`\r[MP4UPLOAD] [${bar}] ${progress} | ${formatBytes(bytes)}${expected ? ` / ${formatBytes(expected)}` : ''} | ${formatBytes(speed)}/s | ${formatDuration(elapsed)}   `)
+      return
+    }
+    if (force || now - lastLoggedAt >= 10_000 || bytes >= nextLogAt) {
+      const progress = percent == null ? 'porcentaje n/d' : `${percent.toFixed(1)}%`
+      console.log(`[MP4UPLOAD] ${progress} · ${formatBytes(bytes)}${expected ? ` / ${formatBytes(expected)}` : ''} · ${formatBytes(speed)}/s · ${formatDuration(elapsed)} · ${host}`)
+      lastLoggedAt = now
+      while (bytes >= nextLogAt) nextLogAt += 16 * 1024 * 1024
+    }
+  }
+  console.log(`[MP4UPLOAD] Descargando desde ${host} · tamaño esperado: ${expected ? formatBytes(expected) : 'desconocido'}`)
   const limiter = new Transform({
     transform(chunk, _encoding, callback) {
       bytes += chunk.length
       if (bytes > MAX_DOWNLOAD_BYTES) callback(new Error(`El video supera el límite de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`))
-      else callback(null, chunk)
+      else {
+        renderProgress()
+        callback(null, chunk)
+      }
     },
   })
   try {
     await pipeline(response.data, limiter, fs.createWriteStream(destPath, { flags: 'wx' }))
   } catch (error) {
+    if (process.stdout.isTTY) process.stdout.write('\n')
     await fs.promises.rm(destPath, { force: true })
     throw error
   }
+  renderProgress(true)
+  if (process.stdout.isTTY) process.stdout.write('\n')
   const stat = await fs.promises.stat(destPath)
   if (stat.size < MIN_VALID_BYTES) {
     await fs.promises.rm(destPath, { force: true })
     throw new Error('El archivo recibido parece incompleto o no es un video válido.')
   }
+  console.log(`[MP4UPLOAD] Descarga completa · ${formatBytes(stat.size)} · ${formatDuration((Date.now() - startedAt) / 1000)}`)
   return stat
 }
 
@@ -167,9 +218,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   }
   try {
     await fs.promises.mkdir(tempDir, { recursive: true })
+    console.log(`[MP4UPLOAD] Resolviendo enlace · ID ${parsed.id}`)
     const sent = await conn.sendMessage(m.chat, { text: `🔎 Resolviendo MP4Upload · ID ${parsed.id}…` }, { quoted: m })
     statusKey = sent?.key || null
     const { mediaUrl } = await getMp4UploadPage(parsed.id, parsed.url)
+    console.log(`[MP4UPLOAD] Video encontrado en ${new URL(mediaUrl).hostname} · URL ocultada`)
     await update('⬇️ Descargando desde MP4Upload…')
     const stat = await downloadMedia(mediaUrl, outputPath, parsed.url)
     const sizeMB = (stat.size / 1024 / 1024).toFixed(1)
@@ -180,9 +233,10 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       mimetype: 'video/mp4',
       caption: `✅ Descarga MP4Upload completada\n📦 Tamaño: ${sizeMB} MB`,
     }, { quoted: m })
+    console.log(`[MP4UPLOAD] Enviado a WhatsApp · ${filename} · ${sizeMB} MB`)
     await update(`✅ Enviado: ${filename}`)
   } catch (error) {
-    console.error('[mp4upload-dl]', error?.message || error)
+    console.error(`[MP4UPLOAD] Error · ID ${parsed.id} · ${error?.message || error}`)
     const message = `❌ ${String(error?.message || 'Falló la descarga MP4Upload.').slice(0, 500)}`
     if (statusKey) await update(message)
     else await m.reply(message)
