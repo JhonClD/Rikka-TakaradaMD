@@ -1175,7 +1175,24 @@ async function enviarEpisodio(chatIds, ep, conn) {
     const discovered = fuente === 'latanime' ? await scrapeServidoresLatAnime(epUrl) : await scrapeServidores(epUrl)
     const srvs = getSupportedServers(discovered, fuente)
     if (!srvs.length) {
-      console.log(`[tioanime-notify] 📭 Sin servidores compatibles para "${titulo}" ep ${epNum}; se descarta sin enviar mensajes.`)
+      console.log(`[tioanime-notify] 📭 Sin servidores compatibles para "${titulo}" ep ${epNum}; se avisará únicamente al grupo central.`)
+      try {
+        await conn.sendMessage(CENTRAL_CHAT_ID, {
+          text: [
+            '⚠️ *Episodio detectado sin servidor disponible*',
+            '',
+            `🎬 *${titulo}*`,
+            `📋 Episodio: *${zeroPad(epNum)}*`,
+            `📡 Fuente: *${fuente === 'latanime' ? 'LatAnime' : 'TioAnime'}*`,
+            '',
+            '_No se enviará a los demás grupos hasta que haya un servidor compatible._',
+            epUrl ? `🔗 ${epUrl}` : '',
+          ].filter(Boolean).join('\n'),
+        })
+      } catch (error) {
+        console.error(`[tioanime-notify] No se pudo avisar al grupo central sobre ${titulo} ep ${epNum}: ${error.message}`)
+        void reportTioError(conn, `Aviso central sin servidor — ${titulo} ep. ${epNum}`, error)
+      }
       return false
     }
 
