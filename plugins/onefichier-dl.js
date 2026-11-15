@@ -142,7 +142,9 @@ function findDirectDownloadLink(html, baseUrl) {
     const anchor = $(element)
     const label = `${anchor.text()} ${anchor.attr('title') || ''}`.toLowerCase()
     const href = anchor.attr('href') || ''
-    if (!/download|telecharger|descargar|dl/i.test(label) && !/\/dl\//i.test(href)) continue
+    if (anchor.closest('form').length) continue
+    const isDownloadAction = /^(?:download|free download|descargar|descarga|télécharger|telecharger|click here to download)\b/i.test(label.trim())
+    if (!isDownloadAction && !/\/dl\//i.test(href)) continue
     try {
       const url = new URL(href, baseUrl)
       if (allowedHost(url.hostname) && url.href !== baseUrl) return url.href
