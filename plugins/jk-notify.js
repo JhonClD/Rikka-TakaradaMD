@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio'
 import fs from 'fs'
 import path from 'path'
 import axios from 'axios'
+import { Impit } from 'impit'
 import { fetch as wreqFetch } from 'wreq-js'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
@@ -15,6 +16,7 @@ const HEADERS = {
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
 }
+const impitClient = new Impit({ browser: 'chrome136', timeout: 15000 })
 
 // Anti-Cloudflare (JKAnime responde 403 a clientes que no parecen un navegador):
 //   JK_COOKIE=cf_clearance=...   cookie copiada de tu navegador (usa el mismo JK_UA e IP)
@@ -54,6 +56,13 @@ const jkHeaders = (extra = {}) => ({
   ...(jk.cookie && { Cookie: jk.cookie }),
   ...extra,
 })
+
+async function impitGet(url, headers, timeout) {
+  const response = await impitClient.fetch(url, { headers, redirect: 'follow', timeout })
+  if (!response.ok) throw new Error(`impit HTTP ${response.status}`)
+  const data = await response.text()
+  return { data, status: response.status, headers: response.headers, request: { res: { responseUrl: response.url || url } } }
+}
 
 function curlGet(url, headers, timeout) {
   return new Promise((resolve, reject) => {
@@ -96,6 +105,7 @@ async function jkRequest(url, options = {}) {
       const data = await response.text()
       return { data, status: response.status, headers: response.headers, request: { res: { responseUrl: response.url || url } } }
     },
+    () => impitGet(url, jkHeaders(options.headers), timeout),
     () => axios.get(url, { ...options, headers: jkHeaders(options.headers), timeout }),
     async () => ({ data: await curlGet(url, jkHeaders(options.headers), timeout) }),
   ]
@@ -138,8 +148,10 @@ async function request(url, options = {}) {
     } catch (err) {
       if (intento === 3) {
         try {
+          return await impitGet(url, { ...HEADERS, ...options.headers }, options.timeout || 15000)
+        } catch (_) {
           return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
-        } catch (fallbackErr) { throw fallbackErr }
+        }
       }
       await sleep(1000 * intento)
     }
