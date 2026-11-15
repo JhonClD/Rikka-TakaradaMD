@@ -62,7 +62,7 @@ const MEGA_CHUNK_SIZE        = 1024 * 1024 // máximo documentado por megajs: 1 
 const MF_HILOS               = 8   // hilos para descarga por rangos en MediaFire
 const MF_MIN_SIZE_PARALELO   = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
 
-const TIO_SERVIDORES = ['yourupload', 'mega', 'voe']
+const TIO_SERVIDORES = ['yourupload', 'voe', 'mega']
 const LAT_SERVIDORES = ['mediafire', 'mega', 'voe']
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
