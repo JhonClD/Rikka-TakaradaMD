@@ -2,12 +2,13 @@ import * as cheerio from 'cheerio'
 import fs from 'fs'
 import path from 'path'
 import axios from 'axios'
+import { fetch as wreqFetch } from 'wreq-js'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const HEADERS = {
   'User-Agent': UA,
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -21,7 +22,7 @@ const HEADERS = {
 const FLARESOLVERR_URL = (process.env.FLARESOLVERR_URL || '').replace(/\/+$/, '')
 const jk = { ua: process.env.JK_UA || UA, cookie: process.env.JK_COOKIE || '' }
 
-const sleep = ms => sleep(ms)
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const isJKAnimeUrl = url => {
   try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
@@ -68,6 +69,18 @@ async function jkRequest(url, options = {}) {
   const timeout = options.timeout || 15000
   const ajax = /\/ajax\//i.test(new URL(url).pathname)
   const attempts = [
+    async () => {
+      const response = await wreqFetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        headers: jkHeaders(options.headers),
+        redirect: 'follow',
+        signal: AbortSignal.timeout(timeout),
+      })
+      if (!response.ok) throw new Error(`wreq-js HTTP ${response.status}`)
+      const data = await response.text()
+      return { data, status: response.status, headers: response.headers, request: { res: { responseUrl: response.url || url } } }
+    },
     () => axios.get(url, { ...options, headers: jkHeaders(options.headers), timeout }),
     async () => ({ data: await curlGet(url, jkHeaders(options.headers), timeout) }),
   ]
@@ -83,7 +96,11 @@ async function jkRequest(url, options = {}) {
     if (round === 1 || !FLARESOLVERR_URL) break
     try { await flareSession() } catch (err) { lastErr = err; break }
   }
-  const failed = new Error(`No se pudo acceder a JKAnime: ${lastErr.message}`)
+  const needsSolver = !FLARESOLVERR_URL && /403/.test(String(lastErr?.message || ''))
+  const detail = needsSolver
+    ? 'JKAnime devolvió HTTP 403 (desafío Cloudflare). Configura FLARESOLVERR_URL con una instancia FlareSolverr accesible desde el servidor del bot, o aporta JK_COOKIE y JK_UA vigentes del mismo navegador/IP.'
+    : `No se pudo acceder a JKAnime: ${lastErr?.message || 'error desconocido'}`
+  const failed = new Error(detail)
   failed.code = 'JKANIME_FETCH_FAILED'
   throw failed
 }
@@ -92,10 +109,23 @@ async function request(url, options = {}) {
   if (isJKAnimeUrl(url)) return jkRequest(url, options)
   for (let intento = 1; ; intento++) {
     try {
-      return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
+      const response = await wreqFetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        headers: { ...HEADERS, ...options.headers },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(options.timeout || 15000),
+      })
+      if (!response.ok) throw new Error(`wreq-js HTTP ${response.status}`)
+      const data = await response.text()
+      return { data, status: response.status, headers: response.headers, request: { res: { responseUrl: response.url || url } } }
     } catch (err) {
-      if (intento === 3) throw err
-      await sleep(2000)
+      if (intento === 3) {
+        try {
+          return await axios.get(url, { ...options, headers: { ...HEADERS, ...options.headers } })
+        } catch (fallbackErr) { throw fallbackErr }
+      }
+      await sleep(1000 * intento)
     }
   }
 }
