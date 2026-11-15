@@ -398,16 +398,49 @@ async function fetchSingleCandidate(startUrl) {
     if (cookieHeader && cookieHost === currentHost) reqHeaders['Cookie'] = cookieHeader
     reqHeaders['Referer'] = hop === 0 ? 'https://tioanime.com/' : startUrl
     reqHeaders['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    reqHeaders['User-Agent'] = FFMPEG_USER_AGENT
 
     let response
     for (let retry = 0; retry < 3; retry++) {
-      response = await wreqFetch(currentUrl, {
-        browser: 'chrome_136',
-        os: 'windows',
-        headers: reqHeaders,
-        redirect: 'manual',
-        signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
-      })
+      try {
+        response = await wreqFetch(currentUrl, {
+          browser: 'chrome_136',
+          os: 'windows',
+          headers: reqHeaders,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+        })
+      } catch (primaryError) {
+        // Algunos mirrors cierran la conexión de wreq-js con EOF. Reintentar
+        // con undici mantiene el control manual de redirects y suele superar
+        // ese fallo transitorio sin descartar inmediatamente el mirror.
+        try {
+          response = await nodeFetch(currentUrl, {
+            headers: reqHeaders,
+            redirect: 'manual',
+            signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+          })
+        } catch (fallbackError) {
+          if (retry === 2) throw fallbackError
+          await new Promise(resolve => setTimeout(resolve, 500 * (retry + 1)))
+          continue
+        }
+      }
+
+      // Si wreq-js recibió un 403/5xx, dar una oportunidad al cliente
+      // explícito antes de abandonar el mirror.
+      if ([403, 429, 500, 502, 503, 504].includes(response.status)) {
+        try {
+          const fallbackResponse = await nodeFetch(currentUrl, {
+            headers: reqHeaders,
+            redirect: 'manual',
+            signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+          })
+          if (fallbackResponse.ok || fallbackResponse.status < response.status) {
+            response = fallbackResponse
+          }
+        } catch (_) {}
+      }
       if (![403, 429, 500, 502, 503, 504].includes(response.status) || retry === 2) break
       await new Promise(resolve => setTimeout(resolve, 500 * (retry + 1)))
     }
