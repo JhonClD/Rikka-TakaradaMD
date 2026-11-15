@@ -6,7 +6,7 @@ import { fetch as wreqFetch } from 'wreq-js'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
-import { extractJkAnimeLinks, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
+import { extractJkAnimeLinks, extractJkAnimeM3u8Candidates, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
@@ -24,6 +24,20 @@ const FLARESOLVERR_URL = (process.env.FLARESOLVERR_URL || '').replace(/\/+$/, ''
 const jk = { ua: process.env.JK_UA || UA, cookie: process.env.JK_COOKIE || '' }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const JK_MIN_REQUEST_INTERVAL = 700
+let jkLastRequestAt = 0
+let jkRequestQueue = Promise.resolve()
+
+function waitJkRequestSlot() {
+  const slot = jkRequestQueue.then(async () => {
+    const elapsed = Date.now() - jkLastRequestAt
+    const delay = Math.max(0, JK_MIN_REQUEST_INTERVAL - elapsed) + Math.floor(Math.random() * 251)
+    if (delay) await sleep(delay)
+    jkLastRequestAt = Date.now()
+  })
+  jkRequestQueue = slot.catch(() => {})
+  return slot
+}
 
 const isJKAnimeUrl = url => {
   try { return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname) } catch (_) { return false }
@@ -89,6 +103,7 @@ async function jkRequest(url, options = {}) {
   for (let round = 0; round < 2; round++) {
     for (const attempt of attempts) {
       try {
+        await waitJkRequestSlot()
         const res = await attempt()
         if (ajax && typeof res.data === 'string') { try { res.data = JSON.parse(res.data) } catch (_) {} }
         return res
@@ -261,6 +276,18 @@ function extraerUrlVideo(code) {
 
 async function resolverEmbed(embedUrl) {
   const u = embedUrl.toLowerCase()
+  if (/jkanime\.net\/jkplayer\//i.test(u)) {
+    try {
+      const { data } = await request(embedUrl, { headers: { Referer: `${JKANIME_URL}/` }, timeout: 15000 })
+      for (const candidate of extractJkAnimeM3u8Candidates(data)) {
+        try {
+          const manifest = await request(candidate, { headers: { Referer: embedUrl }, timeout: 12000 })
+          if (String(manifest.data).includes('#EXTM3U')) return candidate
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return null
+  }
   if (/voe\d*\.sx/.test(u)) {
     try {
       const { data } = await request(embedUrl.replace(/\/e\//, '/'), { headers: { Referer: embedUrl }, timeout: 15000 })
@@ -330,10 +357,13 @@ async function descargarEmbed(embedUrl, outputDir, fileName, referer) {
     throw new Error(`Servidor sin soporte: ${embedUrl.split('/')[2]}`)
 
   let videoUrl = embedUrl
+  let videoReferer = referer
   const resuelto = await resolverEmbed(embedUrl)
   if (resuelto) {
     videoUrl = resuelto
+    if (/jkanime\.net\/jkplayer\//i.test(u)) videoReferer = embedUrl
   } else {
+    if (/jkanime\.net\/jkplayer\//i.test(u)) throw new Error('JKPlayer no expuso un manifest HLS accesible desde el servidor')
     try {
       const { data } = await request(embedUrl, { headers: { Referer: referer }, timeout: 12000 })
       const dm = data.match(/file\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
@@ -343,12 +373,13 @@ async function descargarEmbed(embedUrl, outputDir, fileName, referer) {
   }
 
   const outTemplate = path.join(outputDir, 'video.%(ext)s')
+  const refererHeader = videoReferer === JKANIME_URL ? `${JKANIME_URL}/` : videoReferer
   const cmdArgs = [
     '--no-check-certificate', '--no-warnings',
     '-f', 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best',
     '--merge-output-format', 'mp4',
     '--add-header', `User-Agent: ${UA}`,
-    '--add-header', `Referer: ${referer}/`,
+    '--add-header', `Referer: ${refererHeader}`,
     '-o', outTemplate,
     videoUrl,
   ]
@@ -392,7 +423,8 @@ async function fetchLatestEpisodesJK() {
   const $ = cheerio.load(data)
   const lista = []
 
-  $('#animes .dir1').each((_, el) => {
+  const cardSelector = $('#animes .dir1').length ? '#animes .dir1' : '#animes .card'
+  $(cardSelector).each((_, el) => {
     const $el = $(el)
     const aTag = $el.find('a').first()
     const href = aTag.attr('href') || ''
@@ -405,9 +437,10 @@ async function fetchLatestEpisodesJK() {
     if (!tiempo.toLowerCase().includes('hoy') && !tiempo.toLowerCase().includes('ayer')) return
 
     const titulo = ($el.find('.card-title').text() || aTag.attr('title') || slug.replace(/-/g, ' ')).trim()
-    const imgEl = $el.find('img').first()
-    const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || ''
-    const imgUrl = imgSrc.startsWith('http') ? imgSrc : imgSrc ? JKANIME_URL + imgSrc : ''
+    const imgEl = $el.find('img.card-img-top').first().length ? $el.find('img.card-img-top').first() : $el.find('img').first()
+    const imgSrc = imgEl.attr('src') || imgEl.attr('data-src') || imgEl.attr('data-animepic') || ''
+    let imgUrl = ''
+    try { if (imgSrc) imgUrl = new URL(imgSrc, JKANIME_URL).href } catch (_) {}
     const id = `jk-${slug.toLowerCase()}-${epNum}`
 
     if (!lista.find(e => e.id === id))
@@ -415,15 +448,22 @@ async function fetchLatestEpisodesJK() {
   })
 
   if (lista.length === 0) {
-    $('a[href]').each((_, el) => {
+    $('#animes a[href]').each((_, el) => {
       const href = $(el).attr('href') || ''
+      const $card = $(el).closest('.card, .dir1')
+      if (!$card.length) return
+      const tiempo = $card.find('.badge-secondary').text().trim().toLowerCase()
+      if (!tiempo.includes('hoy') && !tiempo.includes('ayer')) return
       const episodio = parseJkAnimeEpisodeUrl(href, JKANIME_URL)
       if (!episodio) return
       const { slug, epNum, epUrl } = episodio
       const id = `jk-${slug.toLowerCase()}-${epNum}`
       if (lista.find(e => e.id === id)) return
       const titulo = ($(el).attr('title') || $(el).text() || slug.replace(/-/g, ' ')).trim()
-      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl: '' })
+      const imgSrc = $card.find('img.card-img-top').first().attr('src') || $card.find('img').first().attr('data-animepic') || ''
+      let imgUrl = ''
+      try { if (imgSrc) imgUrl = new URL(imgSrc, JKANIME_URL).href } catch (_) {}
+      lista.push({ id, slug, titulo, epNum, epUrl, imgUrl })
     })
   }
 

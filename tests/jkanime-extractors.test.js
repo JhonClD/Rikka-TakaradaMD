@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extractJkAnimeLinks, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
+import { extractJkAnimeLinks, extractJkAnimeM3u8Candidates, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
 
 const pageUrl = 'https://jkanime.net/serie/12/'
 
@@ -40,6 +40,24 @@ test('extrae slug y número de episodio desde URLs absolutas y relativas', () =>
     epNum: 7,
     epUrl: 'https://www.jkanime.net/serie/7/',
   })
+})
+
+test('acepta remote en URL plana y conserva el token completo del JKPlayer', () => {
+  const streamUrl = 'https://hgcloud.to/e/episode-token'
+  const playerUrl = 'https://jkanime.net/jkplayer/um?e=abc_DEF-123.xY--&t=hash'
+  const html = `var servers = ${JSON.stringify([{ remote: streamUrl, server: 'Streamwish' }])};\nvideo[0] = '<iframe src="${playerUrl}"></iframe>';`
+  const links = extractJkAnimeLinks(html, pageUrl)
+
+  assert.deepEqual(links.map(link => link.url), [streamUrl, playerUrl])
+  assert.equal(links[1].kind, 'player')
+})
+
+test('prioriza el candidato HLS final y decodifica URLs ocultas en atob', () => {
+  const oldUrl = 'https://cdn.example/old.m3u8?token=old'
+  const escapedUrl = 'https:\\/\\/cdn.example/escaped.m3u8?token=escaped'
+  const activeUrl = 'https://cdn.example/active.m3u8?token=active'
+  const html = `url: '${oldUrl}'; video: '${escapedUrl}';\nhls.loadSource(atob('${Buffer.from(activeUrl).toString('base64')}'));`
+  assert.deepEqual(extractJkAnimeM3u8Candidates(html), [activeUrl, 'https://cdn.example/escaped.m3u8?token=escaped', oldUrl])
 })
 
 test('rechaza URLs fuera de JKAnime y no ejecuta literales JavaScript no JSON', () => {

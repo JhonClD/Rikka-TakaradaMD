@@ -40,6 +40,12 @@ function decodeBase64(value) {
   try { return Buffer.from(value, 'base64').toString('utf8').trim() } catch (_) { return null }
 }
 
+function decodeRemote(value) {
+  const remote = typeof value === 'string' ? value.trim() : ''
+  if (/^https?:\/\//i.test(remote)) return remote
+  return decodeBase64(remote)
+}
+
 function safeHttpUrl(value, baseUrl) {
   try {
     const url = new URL(value, baseUrl)
@@ -76,6 +82,35 @@ function extractVideoIframeUrls(html, baseUrl) {
   return urls
 }
 
+function extractJkPlayerUrls(html, baseUrl) {
+  const urls = []
+  const pattern = /https?:\/\/(?:www\.)?jkanime\.net\/jkplayer\/[a-z0-9]+\?[^"'<>\s]+/gi
+  for (const match of html.matchAll(pattern)) {
+    const url = safeHttpUrl(match[0], baseUrl)
+    if (url && !urls.includes(url)) urls.push(url)
+  }
+  return urls
+}
+
+// Reimplementación independiente basada en el comportamiento del player
+// JKPlayer documentado públicamente en github.com/gmacastil/jkanime.
+export function extractJkAnimeM3u8Candidates(html) {
+  const source = html.replace(/\\\//g, '/')
+  const candidates = []
+  const literal = /['"](https?:\/\/[^'"\s\\]+\.m3u8[^'"\s\\]*)['"]/gi
+  const atob = /atob\(\s*(['"])([A-Za-z0-9+/=]+)\1\s*\)/gi
+  for (const match of source.matchAll(literal)) candidates.push({ index: match.index, url: match[1] })
+  for (const match of source.matchAll(atob)) {
+    let url
+    try { url = Buffer.from(match[2], 'base64').toString('utf8').trim() } catch (_) { continue }
+    if (/^https?:\/\//i.test(url) && /\.m3u8(?:[?#]|$)/i.test(url)) candidates.push({ index: match.index, url })
+  }
+  return candidates
+    .sort((a, b) => b.index - a.index)
+    .map(item => item.url)
+    .filter((url, index, all) => all.indexOf(url) === index)
+}
+
 /**
  * Extrae fuentes conocidas por el módulo JKAnime de anime1v-api:
  * `servers[].remote` en Base64, URLs de descarga basadas en `remote` + `slug`,
@@ -104,7 +139,7 @@ export function extractJkAnimeLinks(html, baseUrl) {
   const remoteBase = remoteMatch ? safeHttpUrl(remoteMatch[2], baseUrl) : null
   for (const entry of servers) {
     if (!entry || typeof entry !== 'object') continue
-    const decoded = decodeBase64(entry.remote)
+    const decoded = decodeRemote(entry.remote)
     if (decoded) add(decoded, entry.server || 'embed', 'stream', entry.lang || null)
     if (remoteBase && entry.slug) {
       const downloadUrl = `${remoteBase.replace(/\/$/, '')}/d/${encodeURIComponent(String(entry.slug))}/`
@@ -113,5 +148,6 @@ export function extractJkAnimeLinks(html, baseUrl) {
   }
 
   for (const url of extractVideoIframeUrls(html, baseUrl)) add(url, 'jkplayer', 'player')
+  for (const url of extractJkPlayerUrls(html, baseUrl)) add(url, 'jkplayer', 'player')
   return links
 }

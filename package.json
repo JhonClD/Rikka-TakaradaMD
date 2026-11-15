@@ -11,6 +11,7 @@
     "start": "FORCE_COLOR=2 node --expose-gc index.js",
     "qr": "FORCE_COLOR=2 node index.js qr",
     "code": "FORCE_COLOR=2 node index.js code",
+    "test": "node --test tests/jkanime-extractors.test.js",
     "eslint": "eslint .",
     "eslintfix": "eslint --fix ."
   },
