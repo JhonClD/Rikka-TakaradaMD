@@ -9,12 +9,14 @@ import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
+import { fetch as nodeFetch } from 'undici'
 import ffmpegStatic from 'ffmpeg-static'
 
 const execFileAsync = promisify(execFile)
 const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 25000
 const DIRECT_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000
+const RANGE_REQUEST_TIMEOUT_MS = 45 * 1000
 const RANGE_CONNECTIONS = 4
 const RANGE_CHUNK_SIZE = 8 * 1024 * 1024
 const RANGE_RETRIES = 3
@@ -548,6 +550,7 @@ async function fetchVoePageWithFallback(voe, triedMirrors = new Set()) {
 
 function getDownloadHeaders(pageData) {
   const headers = {
+    'User-Agent': FFMPEG_USER_AGENT,
     Referer: pageData.referer,
     Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.8'
   }
@@ -561,9 +564,10 @@ function parseContentRange(value) {
 }
 
 async function downloadDirectMp4Sequential(streamUrl, pageData, outputPath, response, total) {
-  if (!response.body || typeof response.body.getReader !== 'function') {
-    throw new Error('La respuesta MP4 no permite descarga por stream')
-  }
+  if (!response.body) throw new Error('La respuesta MP4 no contiene un stream')
+  const responseStream = typeof response.body.getReader === 'function'
+    ? Readable.fromWeb(response.body)
+    : response.body
   let downloaded = 0
   let lastLog = Date.now()
   let lastBytes = 0
@@ -590,7 +594,7 @@ async function downloadDirectMp4Sequential(streamUrl, pageData, outputPath, resp
       callback(null, chunk)
     }
   })
-  await pipeline(Readable.fromWeb(response.body), progress, createWriteStream(outputPath))
+  await pipeline(responseStream, progress, createWriteStream(outputPath))
   logVoe(`MP4 terminado: ${formatBytes(downloaded)} en ${formatDuration((Date.now() - startedAt) / 1000)}`)
 }
 
@@ -627,9 +631,9 @@ async function downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total,
       const end = Math.min(total - 1, start + RANGE_CHUNK_SIZE - 1)
       let lastError
       for (let retry = 1; retry <= RANGE_RETRIES; retry++) {
-        const requestTimeout = createTimeoutSignal(abortController.signal, DIRECT_DOWNLOAD_TIMEOUT_MS)
+        const requestTimeout = createTimeoutSignal(abortController.signal, RANGE_REQUEST_TIMEOUT_MS)
         try {
-          const response = await fetch(streamUrl, {
+          const response = await nodeFetch(streamUrl, {
             headers: { ...headers, Range: `bytes=${start}-${end}` },
             redirect: 'follow',
             signal: requestTimeout.signal
@@ -693,7 +697,7 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath, attemptSignal)
   const probeTimeout = createTimeoutSignal(attemptSignal, PAGE_TIMEOUT_MS)
   let probe
   try {
-    probe = await fetch(streamUrl, {
+    probe = await nodeFetch(streamUrl, {
       headers: { ...headers, Range: 'bytes=0-0' },
       redirect: 'follow',
       signal: probeTimeout.signal
@@ -717,13 +721,18 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath, attemptSignal)
   }
   if (probe.status === 206 && probeRange && probeRange.start === 0 && probeRange.end === 0 && total > 0) {
     logVoe(`Iniciando MP4 paralelo: ${formatBytes(total)} · ${RANGE_CONNECTIONS} conexiones · bloques de ${formatBytes(RANGE_CHUNK_SIZE)}`)
-    await downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers, attemptSignal)
-    return
+    try {
+      await downloadDirectMp4Parallel(streamUrl, pageData, outputPath, total, headers, attemptSignal)
+      return
+    } catch (error) {
+      await rm(outputPath, { force: true }).catch(() => {})
+      logVoe(`Descarga MP4 paralela falló (${error.message}); reintentando en modo secuencial.`)
+    }
   }
 
   const downloadTimeout = createTimeoutSignal(attemptSignal, DIRECT_DOWNLOAD_TIMEOUT_MS)
   try {
-    const response = await fetch(streamUrl, {
+    const response = await nodeFetch(streamUrl, {
       headers,
       redirect: 'follow',
       signal: downloadTimeout.signal
@@ -734,13 +743,11 @@ async function downloadDirectMp4(streamUrl, pageData, outputPath, attemptSignal)
     if (contentType.includes('text/html') || contentType.includes('application/json')) {
       throw new Error(`La CDN devolvió ${contentType || 'contenido no válido'} en lugar de MP4`)
     }
-    if (!response.body || typeof response.body.getReader !== 'function') {
-      throw new Error('La respuesta MP4 no permite descarga por stream')
-    }
+    if (!response.body) throw new Error('La respuesta MP4 no contiene un stream')
 
     const sequentialTotal = Number(response.headers?.get?.('content-length') || 0)
     logVoe(`Iniciando MP4 directo${sequentialTotal ? ` (${formatBytes(sequentialTotal)})` : ''}`)
-    await downloadDirectMp4Sequential(streamUrl, pageData, outputPath, sequentialTotal, response)
+    await downloadDirectMp4Sequential(streamUrl, pageData, outputPath, response, sequentialTotal)
   } finally {
     downloadTimeout.cleanup()
   }
