@@ -113,6 +113,10 @@ function detectCaptcha(html) {
   return /recaptcha\/api|hcaptcha\.com|cf-turnstile|g-recaptcha-response|verify you are human/i.test(html)
 }
 
+function detectInfrastructureBlock(text) {
+  return /professional infrastructure detected|ip address has been identified as belonging to a (?:server|proxy|vpn|relay network)|private,\s*non-shared residential internet connections/i.test(String(text || ''))
+}
+
 function getDownloadForm(html, baseUrl) {
   const $ = cheerio.load(html)
   for (const element of $('form').toArray()) {
@@ -143,7 +147,7 @@ function findDirectDownloadLink(html, baseUrl) {
     const label = `${anchor.text()} ${anchor.attr('title') || ''}`.toLowerCase()
     const href = anchor.attr('href') || ''
     if (anchor.closest('form').length) continue
-    const isDownloadAction = /^(?:download|free download|descargar|descarga|télécharger|telecharger|click here to download)\b/i.test(label.trim())
+    const isDownloadAction = /^(?:download|free download|start your download|descargar|descarga|télécharger|telecharger|click here to download)\b/i.test(label.trim())
     if (!isDownloadAction && !/\/dl\//i.test(href)) continue
     try {
       const url = new URL(href, baseUrl)
@@ -206,6 +210,9 @@ async function getDownloadStream(inputUrl, session) {
     if (detectCaptcha(html)) {
       throw new Error('1fichier solicita CAPTCHA o verificación humana. El plugin no la resuelve; completa la verificación manualmente en el navegador.')
     }
+    if (detectInfrastructureBlock(text)) {
+      throw new Error('1fichier bloqueó la IP de esta conexión porque la clasifica como infraestructura profesional (servidor/proxy/VPN). El bot no puede continuar desde esta IP; el plugin no intenta evadir este bloqueo.')
+    }
     if (/unusual usage detected|download limit|too many downloads|ip.{0,20}blocked|trafic.{0,20}limite|limite.{0,20}telechargement/i.test(text)) {
       throw new Error('1fichier bloque o limitó esta descarga para la conexión actual. Espera o revisa tu cuenta/estado en 1fichier.')
     }
@@ -229,6 +236,10 @@ async function getDownloadStream(inputUrl, session) {
       if (!isHtmlResponse(next.response)) return next
       const returnedHtml = await readLimitedHtml(next.response.data)
       if (detectCaptcha(returnedHtml)) throw new Error('1fichier pidió CAPTCHA al procesar el formulario. Completa la verificación manualmente.')
+      const returnedText = cheerio.load(returnedHtml).text()
+      if (detectInfrastructureBlock(returnedText)) {
+        throw new Error('1fichier bloqueó la IP de esta conexión porque la clasifica como infraestructura profesional (servidor/proxy/VPN). El bot no puede continuar desde esta IP; el plugin no intenta evadir este bloqueo.')
+      }
       const returnedLink = findDirectDownloadLink(returnedHtml, next.finalUrl)
       if (returnedLink) {
         referer = next.finalUrl
