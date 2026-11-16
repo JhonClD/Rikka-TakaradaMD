@@ -319,7 +319,7 @@ async function processQueue() {
   } finally { global.animeV1NotifyQueueRunning = false }
 }
 
-async function checkChat(chatId, conn) {
+async function checkChat(chatId, conn, manual = false) {
   if (global.animeV1NotifyChecking.has(chatId)) return 0
   global.animeV1NotifyChecking.add(chatId)
   try {
@@ -329,7 +329,7 @@ async function checkChat(chatId, conn) {
       await conn.sendMessage(chatId, { text: `📋 *${items.length} episodios nuevos detectados en AnimeV1*\n\n${items.map((item, index) => `${index + 1}. *${item.title}* — Ep ${episodeNumber(item.ep)} (${item.variant})`).join('\n')}\n\n⏳ _Se enviarán de uno en uno..._` })
     }
     for (const item of items) {
-      global.animeV1NotifyQueue.push({ chatId, ...item })
+      global.animeV1NotifyQueue.push({ chatId, ...item, manual })
       global.animeV1NotifyQueuedIds.add(`${chatId}:${item.id}`)
     }
     processQueue().catch(error => console.error(`[animev1-notify] Cola: ${error.message}`))
@@ -432,7 +432,7 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
       await initializeCatalogForChat(m.chat)
     }
     await m.reply('🔍 Revisando episodios nuevos en AnimeV1...')
-    const count = await checkChat(m.chat, conn)
+    const count = await checkChat(m.chat, conn, true)
     return m.reply(count ? `✅ Detecté *${count}* episodio(s), añadidos a la cola.` : '✅ No hay episodios nuevos.')
   }
 
@@ -462,7 +462,7 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
 
   if (command === 'animev1unblock') {
     if (!global.animeV1NotifyQueue.length) return m.reply('🔓 No hay episodios pendientes.')
-    global.animeV1NotifyQueueRunning = false
+    if (global.animeV1NotifyQueueRunning) return m.reply('⏳ La cola ya está procesando un episodio; no iniciaré otro trabajador para evitar envíos duplicados.')
     processQueue().catch(() => {})
     return m.reply(`🔓 Cola reanudada: *${global.animeV1NotifyQueue.length}* episodio(s).`)
   }
