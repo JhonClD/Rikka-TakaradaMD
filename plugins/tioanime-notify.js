@@ -917,15 +917,71 @@ async function descargarMega(megaUrl, outputDir, fileName) {
 }
 
 async function descargarMediaFire(mfUrl, outputDir, fileName) {
-  let mfPage
-  try {
-    const res = await axios.get(mfUrl, { headers: HEADERS, httpsAgent, timeout: 12000 })
-    mfPage = res.data
-  } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+  const cleanMediaFireLink = value => String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/^(["'])(.*)\1$/, '$2')
+    .trim()
+  const asAbsoluteMediaFireLink = value => {
+    const clean = cleanMediaFireLink(value)
+    if (!clean) return ''
+    try { return new URL(clean, mfUrl).href } catch (_) { return '' }
+  }
+  const quickKey = String(mfUrl).match(/mediafire\.com\/(?:file|file_premium)\/([A-Za-z0-9]+)/i)?.[1]
+  let mfLink = ''
+  let pageUrl = mfUrl
 
-  const mfLink = mfPage.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/)?.[1] ||
-                 mfPage.match(/id="downloadButton"[^>]+href=["']([^"']+)["']/)?.[1] ||
-                 mfPage.match(/"(https?:\/\/download\d*\.mediafire\.com\/[^"]+)"/)?.[1]
+  // La API puede devolver un enlace CDN sin cargar la página protegida.
+  if (quickKey) {
+    try {
+      const api = await axios.get('https://www.mediafire.com/api/1.5/file/get_links.php', {
+        params: { quick_key: quickKey, response_format: 'json', link_type: 'direct_download' },
+        headers: { ...HEADERS, Accept: 'application/json' },
+        httpsAgent,
+        timeout: 12000,
+        validateStatus: status => status >= 200 && status < 400,
+      })
+      mfLink = asAbsoluteMediaFireLink(api.data?.response?.links?.[0]?.direct_download)
+    } catch (_) {}
+
+    if (!mfLink) {
+      try {
+        const api = await axios.get('https://www.mediafire.com/api/1.5/file/get_links.php', {
+          params: { quick_key: quickKey, response_format: 'json', link_type: 'normal_download' },
+          headers: { ...HEADERS, Accept: 'application/json' },
+          httpsAgent,
+          timeout: 12000,
+          validateStatus: status => status >= 200 && status < 400,
+        })
+        pageUrl = asAbsoluteMediaFireLink(api.data?.response?.links?.[0]?.normal_download) || pageUrl
+      } catch (_) {}
+    }
+  }
+
+  if (!mfLink) {
+    let mfPage
+    try {
+      const res = await axios.get(pageUrl, {
+        headers: { ...HEADERS, Referer: LATANIME_URL },
+        httpsAgent,
+        timeout: 12000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+      })
+      mfPage = typeof res.data === 'string' ? res.data : ''
+      if (res.status === 403 && /cloudflare|just a moment|enable javascript/i.test(mfPage)) {
+        throw new Error('MediaFire está bloqueado por Cloudflare (403); no entregó el enlace directo')
+      }
+      const scrambled = mfPage.match(/data-scrambled-url=["']([^"']+)["']/i)?.[1]
+      let decodedScrambled = ''
+      if (scrambled) {
+        try { decodedScrambled = Buffer.from(scrambled, 'base64').toString('utf8') } catch (_) {}
+      }
+      mfLink = asAbsoluteMediaFireLink(decodedScrambled) ||
+               asAbsoluteMediaFireLink(mfPage.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/i)?.[1]) ||
+               asAbsoluteMediaFireLink(mfPage.match(/id="downloadButton"[^>]+href=["']([^"']+)["']/i)?.[1]) ||
+               asAbsoluteMediaFireLink(mfPage.match(/"(https?:\/\/download\d*\.mediafire\.com\/[^"']+)"/i)?.[1])
+    } catch (err) { throw new Error(`MediaFire: ${err.message}`) }
+  }
 
   if (!mfLink) throw new Error('MediaFire: sin link directo')
 
