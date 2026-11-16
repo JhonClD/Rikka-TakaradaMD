@@ -8,6 +8,7 @@ import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 import animeInfoHandler from './search-animeinfo.js'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import { buildAniDDriveMetadata } from '../src/libraries/anid-drive-info.js'
 
 async function compatibleDriveFetch(...args) {
   const response = await driveFetch(...args)
@@ -390,6 +391,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
         const folderTitle = await getDriveFolderTitle(args[0], signal)
         const inferredTitle = folderTitle ? '' : deriveAnimeTitle(details)
         const animeTitle = folderTitle || await cleanAnimeTitleWithGemini(inferredTitle, details)
+        const aniDMetadata = buildAniDDriveMetadata(details, folderTitle)
         if (animeTitle) {
           console.log(`[aniD] 🔎 Buscando ficha de anime: ${animeTitle}`)
           await animeInfoHandler(m, {
@@ -399,6 +401,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
             command: 'animeinfo',
             silentNotFound: true,
             forceSynopsisSummary: true,
+            aniDMetadata,
           })
         } else {
           console.log('[aniD] ℹ️ No se detectó título en carpeta ni archivos; se omite la ficha del anime.')

@@ -102,7 +102,7 @@ async function resumirSinopsisGemini(texto, maxCaracteres) {
 }
 
 // ====================== HANDLER ======================
-const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummary = false }) => {
+const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummary = false, aniDMetadata = null }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
 
@@ -266,7 +266,25 @@ const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummar
 
     const temporadaEsp = formatTemporada(result, TRADUCCIONES.temporadas);
 
-    const AnimeInfo = `✨*INFORMACIÓN DEL ANIME*✨
+    const aniDSeasonNumbers = [...new Set((aniDMetadata?.seasonNumbers || [])
+      .map(Number)
+      .filter(number => Number.isInteger(number) && number > 0))]
+      .sort((a, b) => a - b);
+    const aniDSeasonText = aniDSeasonNumbers.length
+      ? aniDSeasonNumbers.join(', ')
+      : result.seasonNumber || 'No detectada';
+    const aniDChapters = Number(aniDMetadata?.chapters);
+    const aniDChapterText = Number.isFinite(aniDChapters) && aniDChapters > 0
+      ? String(aniDChapters)
+      : result.episodes || 'No disponible';
+    const aniDAudioText = Array.isArray(aniDMetadata?.audio) && aniDMetadata.audio.length
+      ? aniDMetadata.audio.join(', ')
+      : 'No detectado';
+    const aniDSubtitleLine = aniDMetadata?.subtitles
+      ? `\n➢ 𝑺υвτiτυℓσs: ${aniDMetadata.subtitles}`
+      : '';
+
+    const animeInfoGeneral = `✨*INFORMACIÓN DEL ANIME*✨
 
 🈺 *Título:* ${titulo}${tituloIngles}${tituloNativo}
 🏦 *Estudio:* ${estudios}
@@ -282,6 +300,30 @@ const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummar
 
 📜 *Sinopsis:*
 ${sinopsisFormateada}`;
+
+    const AnimeInfo = aniDMetadata
+      ? [
+          `┌─────── “ *🅃ɪᴛᴜʟᴏ ❄️* „ ️━━━━━━━┓`,
+          `└➤ ✎~ ${titulo}`,
+          `╰───────────────────────`,
+          '',
+          `➢ 𝑪αρiτυℓσs: ${aniDChapterText}`,
+          `➢ 𝑻ємρσrα∂α: ${aniDSeasonText}`,
+          `➢ 𝑮єทєrσ: ${generosEsp}`,
+          `➢ 𝑨υ∂iσ: ${aniDAudioText}${aniDSubtitleLine}`,
+          `➢ 𝑹єsσℓυciσท: ${aniDMetadata.resolution || 'No detectada'}`,
+          '',
+          '❐✼❑✼❑✼❑✼❒✼❐✼❑✼❒✼❑❐✼❑✼❑✼❑✼',
+          '',
+          '🔮 𝙎𝘪𝙣𝙤𝙥𝙨𝙞𝙨:',
+          '',
+          sinopsisFormateada,
+          '',
+          '*╔═══ ≪ •❈• ≫ ═══╗*',
+          '                 𝗖𝗜𝗗',
+          '*╚═══ ≪ •❈• ≫ ═══╝*',
+        ].join('\n')
+      : animeInfoGeneral;
 
     const imageUrl = result.images?.jpg?.large_image_url || result.images?.jpg?.image_url;
 
