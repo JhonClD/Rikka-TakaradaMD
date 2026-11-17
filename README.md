@@ -120,11 +120,15 @@ plugins que las necesitan avisan si faltan.
 git clone https://github.com/JhonClD/Rikka-TakaradaMD.git
 cd Rikka-TakaradaMD
 npm ci --ignore-scripts     # instala exactamente lo del lockfile
+mkdir -p src/tmp database temp_videos RikkaSession
+cp .env.example .env        # edita .env con tus claves
 ```
 
 `--ignore-scripts` evita la descarga del Chromium de `puppeteer` (es
-dependencia *opcional*, solo la usan los descargadores de AnimeV1). Si te falla
-`npm ci`, usa `bash install.sh`, que además crea las carpetas de trabajo.
+dependencia *opcional*, solo la usan los descargadores de AnimeV1). Si `npm ci`
+falla, revisa el mensaje de npm y resuelve el problema indicado antes de volver
+a intentarlo. El comando `mkdir` prepara las carpetas de trabajo; copia `.env`
+una sola vez y conserva ese archivo al actualizar el bot.
 
 > 💡 `package.json` fija `baileys` a un commit concreto
 > (`github:this-xys/bails#61af77a…`) para que la instalación sea reproducible.
@@ -173,9 +177,7 @@ que cualquier descuido nuevo rompe la integración). Se mantiene `no-undef`
 apagado (el bot se apoya en globales declarados en `main.js`) y `args: 'none'`
 por las firmas de callback impuestas por la API.
 
-GitHub Actions (`.github/workflows/ci.yml`) ejecuta `npm ci`, `npm run check`,
-lint y tests en Node 20 y 22 en cada PR, y falla si alguien versiona la sesión
-de WhatsApp o el `.env`.
+Las pruebas y comprobaciones se ejecutan manualmente con los comandos anteriores.
 
 ### Tests que ya cubren cosas delicadas
 
@@ -201,10 +203,8 @@ Rikka-TakaradaMD/
 ├── config.js             # Configuración global (prefijo, owner, textos)
 ├── api.js                # Shim de globales heredado (axios/fetch/moment/cheerio)
 ├── eslint.config.js      # Reglas de lint
-├── install.sh            # Instalador (Termux y apt)
 ├── .env.example          # Plantilla de variables
 ├── THIRD-PARTY-NOTICES.md# Avisos de código de terceros y licencia pendiente
-├── .github/workflows/    # CI: lint + tests
 ├── scripts/              # Herramientas de desarrollo (check-ghost-identifiers)
 ├── tests/                # node --test
 ├── plugins/              # 58 plugins, un archivo por función, en kebab-case
