@@ -1,5 +1,5 @@
 /**
- * Play.js  —  Rikka-TakaradaMD
+ * play.js  —  Rikka-TakaradaMD
  * Comandos: play · play2 · mp3 · mp4 · video · playaudio
  */
 

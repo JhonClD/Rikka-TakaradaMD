@@ -4,7 +4,7 @@
 
 ### Bot multifunción para WhatsApp basado en Node.js y Baileys
 
-<img src="./src/menu/menu.png" alt="Rikka Takarada" width="720">
+<img src="./src/assets/menu.png" alt="Rikka Takarada" width="720">
 
 <p>
   <img src="https://img.shields.io/badge/Node.js-20%2B-0ea5e9?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 20+">
@@ -50,7 +50,7 @@
 - 🔗 Subir archivos o convertirlos a URL — `upload`, `uploader`, `tourl`
 - 🌐 Obtener contenido HTTP — `fetch`, `get`
 - 🖥️ Captura de páginas web — `ssweb`, `ssf`
-- 🗜️ Compresión y procesamiento de vídeo — `Compres-harsub.js`, `video-redondo.js`
+- 🗜️ Compresión y procesamiento de vídeo — `compres-harsub.js`, `video-redondo.js`
 - 🌍 Traducción — `translate`, `traducir`, `trad`
 - ⚡ Speedtest — `speedtest`, `speed`, `stest`
 - 🧾 Perfil de usuario — `perfil`, `profile`, `pf`
@@ -161,14 +161,15 @@ npm start
 
 ```bash
 npm test              # todos los tests de tests/ (node --test)
-npm run lint          # ESLint (falla si suben los avisos del umbral actual)
+npm run lint          # ESLint (.  entero; los avisos cuentan como error)
 npm run lint:fix      # correcciones automáticas
 npm run check         # node --check sobre index/main/handler/config/api
+npm run check:ghosts  # asignaciones a identificadores que nadie declaró
 ```
 
 `npm run lint` es `eslint .` con `js.configs.recommended` y `no-unused-vars` a
-nivel de **error**: el código heredado ya está limpio de variables sin uso, así
-que cualquier descuido nuevo rompe la integración. Se mantiene `no-undef`
+nivel de **error** (sin umbral de avisos: el código heredado ya está limpio, así
+que cualquier descuido nuevo rompe la integración). Se mantiene `no-undef`
 apagado (el bot se apoya en globales declarados en `main.js`) y `args: 'none'`
 por las firmas de callback impuestas por la API.
 
@@ -183,8 +184,8 @@ de WhatsApp o el `.env`.
 | `tests/jkanime-extractors.test.js` | extracción de enlaces JKAnime, sin ejecutar el JS remoto |
 | `tests/download-registry.test.js` | cancelación única de descargas (`download-registry.js`) |
 | `tests/message-validation.test.js` | filtrado de mensajes, dedupe, texto de mensajes interactivos |
-| `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, y ningún alias lo comparten dos plugins |
-| `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` |
+| `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, ningún alias lo comparten dos plugins, y los archivos se llaman en kebab-case |
+| `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` y las imágenes del proyecto están donde dice `paths.js` |
 | `tests/ghost-identifiers.test.js` | nadie asigna a un identificador no declarado (`npm run check:ghosts`) |
 
 ---
@@ -203,13 +204,19 @@ Rikka-TakaradaMD/
 ├── .env.example          # Plantilla de variables
 ├── THIRD-PARTY-NOTICES.md# Avisos de código de terceros y licencia pendiente
 ├── .github/workflows/    # CI: lint + tests
+├── scripts/              # Herramientas de desarrollo (check-ghost-identifiers)
 ├── tests/                # node --test
-├── plugins/              # 58 comandos, un archivo por función
+├── plugins/              # 58 plugins, un archivo por función, en kebab-case
 └── src/
+    ├── assets/           # Imágenes (menú, avatares, svg de bienvenida)
     ├── funcion/          # Funciones auxiliares (rutas, .env, validación, LID)
-    ├── libraries/        # Librerías internas (Baileys simple, store, stickers…)
-    └── menu/             # Imagen del menú
+    └── libraries/        # Librerías internas (Baileys simple, store, stickers…)
 ```
+
+Los nombres de archivo de `plugins/` van todos en minúsculas y con guiones
+(`tiktok-dl.js`, no `Tiktok-DL.js`), y `tests/plugins-structure.test.js` lo
+vigila: con nombres que solo se distinguen en mayúsculas, un checkout en
+Windows/macOS puede acabar cargando el plugin equivocado.
 
 ---
 
@@ -219,11 +226,11 @@ Rikka-TakaradaMD/
 - [`downloader-mediafire.js`](./plugins/downloader-mediafire.js)
 - [`downloader-drive.js`](./plugins/downloader-drive.js)
 - [`ytdl.js`](./plugins/ytdl.js)
-- [`Tiktok-DL.js`](./plugins/Tiktok-DL.js)
-- [`Facebook-DL.js`](./plugins/Facebook-DL.js)
-- [`Voe-DL.js`](./plugins/Voe-DL.js)
+- [`tiktok-dl.js`](./plugins/tiktok-dl.js)
+- [`facebook-dl.js`](./plugins/facebook-dl.js)
+- [`voe-dl.js`](./plugins/voe-dl.js)
 - [`twitter-x.js`](./plugins/twitter-x.js)
-- [`Play.js`](./plugins/Play.js)
+- [`play.js`](./plugins/play.js)
 - [`tool-sticker.js`](./plugins/tool-sticker.js)
 - [`welcome.js`](./plugins/welcome.js)
 - [`antilink.js`](./plugins/antilink.js)
@@ -273,6 +280,6 @@ Se pasan después de `npm start --`, por ejemplo `npm start -- --self --autoclea
 
 ### 💙 Hecho con cariño para la comunidad de WhatsApp
 
-<img src="./src/menu/menu.png" alt="Rikka Takarada" width="520">
+<img src="./src/assets/menu.png" alt="Rikka Takarada" width="520">
 
 </div>

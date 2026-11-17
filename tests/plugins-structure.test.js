@@ -11,6 +11,12 @@ const PLUGINS = path.join(ROOT, 'plugins')
 
 const files = fs.readdirSync(PLUGINS).filter((f) => f.endsWith('.js')).sort()
 
+// Un archivo por función, en kebab-case minúsculo. No es capricho: con nombres
+// tipo `Play.js`/`Purga.js` mezclados con `ytdl.js`, dos clones del mismo plugin
+// acaban conviviendo (`play.js` y `Play.js`) y en un sistema de archivos sin
+// distinción de mayúsculas eso es un cargue aleatorio de uno u otro.
+const NAME_OK = /^[a-z0-9][a-z0-9._-]*\.js$/;
+
 const quoted = (text) =>
   [...text.matchAll(/['"]([A-Za-z0-9_-]+)['"]/g)].map((m) => m[1].toLowerCase());
 
@@ -84,4 +90,20 @@ test('los plugins que ejecutan comandos del sistema están reservados al owner',
     const gated = /handler\.(owner|rowner)\s*=\s*true/.test(source) || /isOwner/.test(source);
     assert.ok(gated, `${file} permite ejecutar comandos del sistema sin control de owner`);
   }
+});
+
+test('los nombres de archivo siguen kebab-case en minúsculas', () => {
+  const fuera = files.filter((f) => !NAME_OK.test(f));
+  assert.deepEqual(fuera, [], 'renombra a minúsculas: ' + fuera.join(', '));
+});
+
+test('no hay dos plugins que solo se distingan por mayúsculas', () => {
+  const vistos = new Map();
+  const choques = [];
+  for (const f of files) {
+    const clave = f.toLowerCase();
+    if (vistos.has(clave)) choques.push(`${vistos.get(clave)} vs ${f}`);
+    vistos.set(clave, f);
+  }
+  assert.deepEqual(choques, []);
 });

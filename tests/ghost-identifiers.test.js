@@ -12,9 +12,18 @@ import { findGhostWrites } from '../scripts/check-ghost-identifiers.mjs'
 // `isFirstConnection = true` en main.js y `type`/`call`/`callText` en
 // src/libraries/simple.js.
 const ghosts = await findGhostWrites();
-const skip = ghosts === null ? 'ESLint no está instalado (es devDependency)' : false;
 
-test('el proyecto no asigna identificadores sin declarar', { skip }, () => {
+if (ghosts === null) {
+  // Sin ESLint no hay guardián. En local se consiente (puede faltar node_modules);
+  // en CI es un error: un test que se auto-salta deja pasar justo lo que vigila.
+  test('el guardián de identificadores fantasma puede ejecutarse', {
+    skip: process.env.CI ? false : 'ESLint no está instalado (es devDependency)',
+  }, () => {
+    assert.fail('ESLint no se pudo importar: el guardián no está vigilando nada');
+  });
+}
+
+test('el proyecto no asigna identificadores sin declarar', { skip: ghosts === null }, () => {
   assert.deepEqual(
     ghosts,
     [],
@@ -22,7 +31,7 @@ test('el proyecto no asigna identificadores sin declarar', { skip }, () => {
   );
 });
 
-test('el detector no está vacío: encuentra una asignación fantasma sembrada', { skip }, async () => {
+test('el detector no está vacío: encuentra una asignación fantasma sembrada', { skip: ghosts === null }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rikka-ghost-'));
   try {
     await fs.writeFile(

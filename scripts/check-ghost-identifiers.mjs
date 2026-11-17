@@ -47,8 +47,12 @@ export async function findGhostWrites({ cwd = ROOT } = {}) {
   let ESLint;
   try {
     ({ ESLint } = await import('eslint'));
-  } catch {
-    return null; // sin ESLint (instalación con --omit=dev): el test se salta
+  } catch (error) {
+    // Solo se perdona que el paquete no esté (npm install --omit=dev). Cualquier
+    // otro fallo al importar ESLint es un guardián estropeado, y eso debe
+    // romperse arriba en vez de convertirse en un "todo bien".
+    if (error?.code === 'ERR_MODULE_NOT_FOUND') return null;
+    throw error;
   }
 
   const eslint = new ESLint({
