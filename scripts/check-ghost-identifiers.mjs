@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const PATTERNS = ['*.js', 'plugins/**/*.js', 'src/**/*.js'];
+const PATTERNS = ['*.js', 'plugins/**/*.js', 'src/**/*.js', 'tests/**/*.js', 'scripts/**/*.mjs'];
 
 // Globales reales de Node/DOM que no hace falta declarar. Está suelto porque el
 // filtro final solo mira escrituras; si falta alguno, simplemente no pasa nada.

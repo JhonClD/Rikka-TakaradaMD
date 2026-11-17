@@ -21,6 +21,7 @@ import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
 import { dbFile, TMP_DIR } from './src/funcion/paths.js';
+import { STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
 
 const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
@@ -51,7 +52,14 @@ const mediaUploadAgent = new https.Agent({
 let socketReloadInProgress = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
-const maxReconnectDelayMs = 30_000;
+// Vigilante del handshake: Baileys avisa con `close` casi siempre, pero hay
+// desconexiones que no emiten nada (un TCP que se apaga sin FIN) y sin
+// vigilancia el bot se queda con un socket que ni abre ni cierra.
+let connectWatchdog = null;
+// Sesión en un estado que ningún reintento arregla (logout, sesión reemplazada
+// o inválida). Mientras esté activo no se programa ningún socket nuevo.
+let terminalSession = false;
+let terminalRetryTimer = null;
 const qrGuard = createQRGuard({
   ttlMs: 60_000,
   onBlocked: () => console.log(chalk.gray('[ ℹ️ ] QR repetido ignorado; usa el último QR mostrado.')),
@@ -157,6 +165,12 @@ console.debug = () => { };
 
 const consoleErrorForOwnerAlerts = console.error.bind(console);
 const pendingOwnerErrorAlerts = [];
+// La cola solo se vacía con el socket abierto, así que durante una caída larga
+// cada error de plugin dejaba otro aviso dentro: sin tope, un bot offline
+// algunas horas acumulaba decenas de MB y luego los soltaba de golpe. Se
+// conservan los más recientes y se suma un cartel con lo descartado.
+const MAX_PENDING_OWNER_ALERTS = 50;
+let droppedOwnerAlerts = 0;
 const recentOwnerErrorAlerts = new Map();
 let ownerErrorAlertFlushRunning = false;
 let sendingOwnerErrorAlert = false;
@@ -176,6 +190,13 @@ async function flushOwnerErrorAlerts() {
   if (stopped !== 'open' || target !== global.conn || !target?.sendMessage || !target?.user || !ownerJid) return;
   ownerErrorAlertFlushRunning = true;
   try {
+    if (droppedOwnerAlerts > 0) {
+      const dropped = droppedOwnerAlerts;
+      droppedOwnerAlerts = 0;
+      pendingOwnerErrorAlerts.unshift(
+        `⚠️ Se descartaron ${dropped} aviso(s) anteriores por ir demasiado rápido (máx. ${MAX_PENDING_OWNER_ALERTS} en cola).`,
+      );
+    }
     while (pendingOwnerErrorAlerts.length) {
       const text = pendingOwnerErrorAlerts[0];
       try {
@@ -203,6 +224,10 @@ global.notifyOwnerError = (...args) => {
   recentOwnerErrorAlerts.set(fingerprint, now);
   for (const [key, timestamp] of recentOwnerErrorAlerts) {
     if (now - timestamp > 10 * 60_000) recentOwnerErrorAlerts.delete(key);
+  }
+  while (pendingOwnerErrorAlerts.length >= MAX_PENDING_OWNER_ALERTS) {
+    pendingOwnerErrorAlerts.shift();
+    droppedOwnerAlerts += 1;
   }
   pendingOwnerErrorAlerts.push(`🚨 *Error del bot (consola/plugin)*\n\n${details}`.slice(0, 3500));
   void flushOwnerErrorAlerts();
@@ -277,6 +302,11 @@ const connectionOptions = {
 
 global.conn = makeWASocket(connectionOptions);
 store?.bind(global.conn);
+// El primer handshake también va vigilado: con credenciales válidas pero una
+// red que no termina de conectar, no llegaba ni un `close` y había que
+// reiniciar a mano. Con sesión sin registrar no se arma, que ahí lo que falta
+// es un QR, no un reintento.
+if (state.creds?.registered) armConnectWatchdog('arranque');
 
 if (methodCode && !state.creds.registered) {
   withPairingGuard(global.conn, {
@@ -424,10 +454,12 @@ async function connectionUpdate(update) {
     });
   }
   if (connection == 'open') {
+    const recoveredAfter = reconnectAttempt;
     reconnectAttempt = 0;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+    terminalSession = false;
+    clearPendingReconnect();
+    if (recoveredAfter >= RECONNECT_POLICY.alertAfterAttempts) {
+      console.log(chalk.yellow(`[　✅　　] Reconectado tras ${recoveredAfter} intentos.`));
     }
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
@@ -457,6 +489,7 @@ async function connectionUpdate(update) {
     // vinculadas y arrancar una única vez para obtener un código nuevo.
     console.log(chalk.bold.redBright('[ ⚠️ ] WhatsApp rechazó esta sesión porque fue reemplazada (405/440).'));
     console.log(chalk.yellow('[ ℹ️ ] Cierra todas las sesiones en WhatsApp > Dispositivos vinculados, detén el servidor y vuelve a iniciar una sola vez.'));
+    markTerminalSession('sesión reemplazada (405/440)');
     return;
   }
   if (connection === 'close') {
@@ -464,6 +497,7 @@ async function connectionUpdate(update) {
       if (shouldLogError('badSession')) {
         conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
+      markTerminalSession('sesión inválida (badSession)');
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogError('connectionClosed')) {
         conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
@@ -480,6 +514,7 @@ async function connectionUpdate(update) {
       if (shouldLogError('loggedOut')) {
         conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
+      markTerminalSession('sesión cerrada desde el teléfono (loggedOut)');
     } else if (reason === DisconnectReason.restartRequired) {
       if (shouldLogError('restartRequired')) {
         conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
@@ -495,29 +530,131 @@ async function connectionUpdate(update) {
       if (shouldLogError(unknownError)) {
         conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
-      scheduleSocketReconnect(`unknown_${reason || 'none'}`);
+      // Motivo que no conocemos: se consulta la misma tabla que usan los
+      // anteriores, porque WhatsApp inventa códigos nuevos de vez en cuando y
+      // un código de sesión revocada no debe entrar en bucle.
+      if (classifyDisconnect(reason, DisconnectReason) === STOP) {
+        markTerminalSession(`motivo ${reason ?? 'desconocido'}`);
+      } else {
+        scheduleSocketReconnect(`unknown_${reason || 'none'}`);
+      }
     }
   }
 }
 
+function clearConnectWatchdog() {
+  if (!connectWatchdog) return;
+  clearTimeout(connectWatchdog);
+  connectWatchdog = null;
+}
+
+/** Descarta todo lo programado: reconexión, vigilante y latido terminal. */
+function clearPendingReconnect() {
+  clearConnectWatchdog();
+  if (terminalRetryTimer) {
+    clearTimeout(terminalRetryTimer);
+    terminalRetryTimer = null;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+/**
+ * La sesión exige acción humana. Se tiran los reintentos en cola: recrear el
+ * socket con credenciales rechazadas no arregla nada, gasta el rate limit de
+ * emparejamiento y puede dejar dos sesiones peleando por el mismo número (que
+ * es precisamente como se entra en 405/440).
+ */
+function markTerminalSession(hint) {
+  terminalSession = true;
+  clearPendingReconnect();
+  console.log(chalk.gray(`[ ℹ️ ] Reconexiones en pausa: ${hint}.`));
+  if (terminalRetryTimer || shutdownStarted) return;
+  terminalRetryTimer = setTimeout(() => {
+    terminalRetryTimer = null;
+    // Un solo intento, y solo si nadie reconectó ya ni se está apagando. Si
+    // vuelve a caer, entrará aquí otra vez: es un latido de 5 minutos, no un bucle.
+    if (shutdownStarted || stopped === 'open') return;
+    terminalSession = false;
+    console.log(chalk.gray('[ ℹ️ ] Se reintenta una vez tras el estado terminal de la sesión.'));
+    scheduleSocketReconnect('terminal-retry');
+  }, RECONNECT_POLICY.terminalRetryMs);
+}
+
+function armConnectWatchdog(reason) {
+  clearConnectWatchdog();
+  connectWatchdog = setTimeout(() => {
+    connectWatchdog = null;
+    // Si ya hay otro intento en cola (llegó un `close` mientras tanto), no hay
+    // nada que duplicar: ese temporizador hace su trabajo mejor cronometrado.
+    if (terminalSession || reconnectTimer || socketReloadInProgress || stopped === 'open') return;
+    // Si no hay credenciales registradas hace falta escanear el QR: reintentar
+    // en bucle solo volvería a imprimir códigos que nadie va a usar.
+    if (!global.conn?.authState?.creds?.registered) {
+      console.log(chalk.gray('[ ℹ️ ] Sin sesión registrada; se espera el QR en lugar de reintentar.'));
+      return;
+    }
+    console.log(chalk.gray(`[ ℹ️ ] El socket no llegó a abrir tras "${reason}"; se reintenta.`));
+    scheduleSocketReconnect(`watchdog:${reason}`);
+  }, RECONNECT_POLICY.connectTimeoutMs);
+}
+
+function notifyReconnectTrouble(attempt) {
+  if (!shouldAlertOwner(attempt, RECONNECT_POLICY)) return;
+  // console.error realimenta el pipeline de avisos al owner (está interceptado
+  // más arriba), así que el aviso no se pierde: sale por WhatsApp en cuanto el
+  // socket vuelva a abrir, y se agrupa si hubo muchos errores de por medio.
+  console.error(
+    `[Socket] ${attempt} intentos seguidos sin reconectar. Si fue un corte de red, `
+    + 'el bot sigue reintentando solo; si la sesión fue revocada hay que volver a '
+    + 'vincular el dispositivo.',
+  );
+}
+
 function scheduleSocketReconnect(reason) {
-  if (reconnectTimer || socketReloadInProgress) return;
-  const delay = Math.min(maxReconnectDelayMs, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
+  // `shutdownStarted` importa: durante el apagado llegaba a crearse un socket
+  // nuevo justo después de cerrar el viejo, porque el `close` del cierre
+  // programado reentraba aquí.
+  if (terminalSession || reconnectTimer || shutdownStarted) return;
+  const delay = nextReconnectDelay(reconnectAttempt, RECONNECT_POLICY);
   reconnectAttempt += 1;
-  console.log(chalk.gray(`[ ℹ️ ] Reconexión programada en ${Math.ceil(delay / 1000)}s (${reason}).`));
+  console.log(chalk.gray(
+    `[ ℹ️ ] Reconexión programada en ${Math.ceil(delay / 1000)}s (${reason}), intento ${reconnectAttempt}.`,
+  ));
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
     try {
-      await global.reloadHandler(true);
+      const reloaded = await global.reloadHandler(true);
+      // reloadHandler(true) devuelve false cuando otro recargue va en curso.
+      // Antes ese valor se tiraba a la basura y el intento desaparecía sin dejar
+      // nada programado: el bot se quedaba offline hasta el reinicio manual.
+      if (reloaded === false) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          scheduleSocketReconnect(`busy:${reason}`);
+        }, RECONNECT_POLICY.baseMs * 2);
+        return;
+      }
     } catch (error) {
       console.error('[Socket] Falló la reconexión:', error);
+      notifyReconnectTrouble(reconnectAttempt);
       scheduleSocketReconnect('retry');
+      return;
+    }
+    if (stopped !== 'open') {
+      armConnectWatchdog(reason);
+      notifyReconnectTrouble(reconnectAttempt);
     }
   }, delay);
 }
 
 
 let isInit = true;
+const handlerPath = join(__dirname, 'handler.js');
+/** mtime de handler.js en el último import real (ver global.reloadHandler). */
+let handlerLoadedAt = statSync(handlerPath).mtimeMs;
 let handler = await import('./handler.js');
 
 async function refreshAuthState() {
@@ -532,10 +669,20 @@ async function refreshAuthState() {
 
 global.reloadHandler = async function (restatConn) {
   try {
-    const Handler = await import(`./handler.js?update=${Date.now()}`).catch(console.error);
-    if (Object.keys(Handler || {}).length) handler = Handler;
-  } catch (e) {
-    console.error(e);
+    // Cada reconexión reimportaba handler.js con `?update=${Date.now()}`, y un
+    // especificador nuevo es para ESM un módulo NUEVO que además no se puede
+    // expulsar del caché: en una tormenta de reintentos (1s, 2s, 4s…) cada
+    // intento dejaba otra copia del grafo de módulos residente. Se vuelve a
+    // importar solo si el archivo cambió; en desarrollo (--dev) se fuerza, que
+    // es justo cuando interesa ver cada guardado.
+    const loadedAt = statSync(handlerPath).mtimeMs;
+    if (loadedAt !== handlerLoadedAt || global.opts?.dev) {
+      handlerLoadedAt = loadedAt;
+      const Handler = await import(`${pathToFileURL(handlerPath).href}?update=${loadedAt}`).catch(console.error);
+      if (Object.keys(Handler || {}).length) handler = Handler;
+    }
+  } catch (error) {
+    console.error('[handler] no se pudo revisar handler.js:', error?.message || error);
   }
   if (restatConn) {
     if (socketReloadInProgress) return false;
@@ -678,6 +825,10 @@ async function gracefulShutdown(signal) {
   if (shutdownStarted) return;
   shutdownStarted = true;
   stopped = 'close';
+  // Apagando: ningún reintento pendiente debe volver a crear un socket (el
+  // `close` provocado por nuestro propio cierre entraba aquí y reprogramaba).
+  terminalSession = true;
+  clearPendingReconnect();
   console.log(`[ SHUTDOWN ] ${signal}: guardando datos y cerrando WhatsApp...`);
   if (pairingRequestTimer) {
     clearTimeout(pairingRequestTimer);
