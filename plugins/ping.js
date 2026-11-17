@@ -196,6 +196,8 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   }, { quoted: m });
 };
 
+handler.help = ['ping', 'info', 'status'];
+handler.tags = ['info'];
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
     

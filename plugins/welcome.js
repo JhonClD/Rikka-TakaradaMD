@@ -200,7 +200,9 @@ handler.before = async function (m, { conn, participants, groupMetadata }) {
 
 handler.help = ['welcome <on|off|msg|bye|reset|ver>'];
 handler.tags = ['group'];
-handler.command = ['welcome', 'bienvenida', 'setwelcome'];
+// `setwelcome` lo atiende plugins/group-setwelcome.js. Declararlo también aquí
+// hacía que el despachador ejecutara los dos plugins con un solo comando.
+handler.command = ['welcome', 'bienvenida'];
 handler.group = true;
 
 export default handler;

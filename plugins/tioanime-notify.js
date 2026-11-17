@@ -7,7 +7,6 @@ import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
 import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
-import { spawn }    from 'child_process'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'

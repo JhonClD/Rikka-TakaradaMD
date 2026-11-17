@@ -20,7 +20,7 @@ import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
-import { dbFile, TMP_DIR, sessionFile } from './src/funcion/paths.js';
+import { dbFile, TMP_DIR } from './src/funcion/paths.js';
 
 const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
@@ -81,12 +81,13 @@ global.db = new Low(new JSONFile(dbFile(global.opts._?.[0] || '')), null);
 
 global.loadDatabase = async function loadDatabase() {
   if (global.db.READ) {
-    return new Promise((resolve) => setInterval(async function () {
-      if (!global.db.READ) {
-        clearInterval(this);
-        resolve(global.db.data == null ? global.loadDatabase() : global.db.data);
-      }
-    }, 1 * 1000));
+    // Esperar con un setInterval dentro de `new Promise` dejaba un temporizador
+    // vivo para siempre si la carga nunca terminaba (y la promesa no se
+    // resolvía, congelando el handler). Se sondea con un tope de 30s.
+    for (let attempt = 0; attempt < 120 && global.db.READ; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return global.db.data == null ? global.loadDatabase() : global.db.data;
   }
   if (global.db.data !== null) return;
   global.db.READ = true;

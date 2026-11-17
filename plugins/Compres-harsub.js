@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { exec, spawn, execSync, spawnSync } from 'child_process';
+import { spawn, execSync, spawnSync } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { compressDw4 } from '../src/libraries/dw4-compress.js';
 
@@ -481,5 +481,7 @@ let handler = async (m, { conn, text, command, args }) => {
     }
 };
 
+handler.help = ['dw <enlace/archivo>', 'dw2', 'dw3', 'dw4', 'mi'];
+handler.tags = ['tools'];
 handler.command = /^(dw|dw2|dw3|dw4|mi)$/i;
 export default handler;

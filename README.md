@@ -9,7 +9,7 @@
 <p>
   <img src="https://img.shields.io/badge/Node.js-20%2B-0ea5e9?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 20+">
   <img src="https://img.shields.io/badge/WhatsApp-Baileys-2563eb?style=for-the-badge&logo=whatsapp&logoColor=white" alt="Baileys">
-  <img src="https://img.shields.io/github/license/JhonClD/Rikka-TakaradaMD?style=for-the-badge&color=38bdf8" alt="Licencia">
+  <img src="https://img.shields.io/github/actions/workflow/status/JhonClD/Rikka-TakaradaMD/ci.yml?style=for-the-badge&label=CI" alt="Estado de la integración continua">
 </p>
 
 <p>📥 Descargas · 🧩 Plugins · 🛠️ Herramientas · 👥 Grupos · 💙 Estilo Rikka</p>
@@ -102,10 +102,15 @@
 
 ## ⚙️ Requisitos
 
-- **Node.js** v20 o superior
+- **Node.js** v20 o superior (recomendado v22)
 - **npm**
-- **FFmpeg** disponible en el sistema
+- **FFmpeg** y **ffprobe** disponibles en el sistema (`sticker`, `dw`, conversores)
+- **ImageMagick** o **GraphicsMagick** (`convert`/`magick`/`gm`) para stickers y pósters
+- **python3**, solo para `speedtest` (usa `src/libraries/ookla-speedtest.py`)
 - **Git**, si quieres clonar o actualizar el repositorio
+
+El bot comprueba esas herramientas al arrancar (`_quickTest` en `main.js`) y los
+plugins que las necesitan avisan si faltan.
 
 ---
 
@@ -114,8 +119,16 @@
 ```bash
 git clone https://github.com/JhonClD/Rikka-TakaradaMD.git
 cd Rikka-TakaradaMD
-npm install
+npm ci --ignore-scripts     # instala exactamente lo del lockfile
 ```
+
+`--ignore-scripts` evita la descarga del Chromium de `puppeteer` (es
+dependencia *opcional*, solo la usan los descargadores de AnimeV1). Si te falla
+`npm ci`, usa `bash install.sh`, que además crea las carpetas de trabajo.
+
+> 💡 `package.json` fija `baileys` a un commit concreto
+> (`github:this-xys/bails#61af77a…`) para que la instalación sea reproducible.
+> Para actualizar Baileys, cambia ese SHA al commit que quieras.
 
 ### Configurar `.env`
 
@@ -147,12 +160,29 @@ npm start
 ## 🧪 Scripts de desarrollo
 
 ```bash
-# Revisar el código
-npm run eslint
-
-# Aplicar correcciones automáticas de ESLint
-npm run eslintfix
+npm test              # todos los tests de tests/ (node --test)
+npm run lint          # ESLint (falla si suben los avisos del umbral actual)
+npm run lint:fix      # correcciones automáticas
+npm run check         # node --check sobre index/main/handler/config/api
 ```
+
+`npm run lint` usa `eslint . --max-warnings=42`: el umbral es un *ratchet*, el
+código heredado arrastra 42 avisos de `no-unused-vars` y la idea es bajarlo a
+medida que se limpien, no dejar que crezca.
+
+GitHub Actions (`.github/workflows/ci.yml`) ejecuta `npm ci`, `npm run check`,
+lint y tests en Node 20 y 22 en cada PR, y falla si alguien versiona la sesión
+de WhatsApp o el `.env`.
+
+### Tests que ya cubren cosas delicadas
+
+| Archivo | Qué protege |
+|---|---|
+| `tests/jkanime-extractors.test.js` | extracción de enlaces JKAnime, sin ejecutar el JS remoto |
+| `tests/download-registry.test.js` | cancelación única de descargas (`download-registry.js`) |
+| `tests/message-validation.test.js` | filtrado de mensajes, dedupe, texto de mensajes interactivos |
+| `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, y ningún alias lo comparten dos plugins |
+| `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` |
 
 ---
 
@@ -160,20 +190,22 @@ npm run eslintfix
 
 ```text
 Rikka-TakaradaMD/
-├── index.js              # Entrada principal
-├── main.js               # Conexión y eventos
-├── handler.js            # Manejador de mensajes
-├── api.js                # API REST
-├── config.js             # Configuración global
-├── install.sh            # Instalador
+├── index.js              # Banner, bloqueo de instancia y elección de vinculación
+├── main.js               # Conexión Baileys, reconexión, carga de plugins
+├── handler.js            # Despacho de comandos y eventos de grupo
+├── config.js             # Configuración global (prefijo, owner, textos)
+├── api.js                # Shim de globales heredado (axios/fetch/moment/cheerio)
+├── eslint.config.js      # Reglas de lint
+├── install.sh            # Instalador (Termux y apt)
 ├── .env.example          # Plantilla de variables
-├── plugins/              # Comandos del bot
+├── THIRD-PARTY-NOTICES.md# Avisos de código de terceros y licencia pendiente
+├── .github/workflows/    # CI: lint + tests
+├── tests/                # node --test
+├── plugins/              # 58 comandos, un archivo por función
 └── src/
-    ├── funcion/          # Funciones auxiliares
-    ├── libraries/         # Librerías internas
-    ├── menu/              # Imágenes del menú
-    ├── antiArab.json      # Datos de protección
-    └── *.png              # Recursos gráficos
+    ├── funcion/          # Funciones auxiliares (rutas, .env, validación, LID)
+    ├── libraries/        # Librerías internas (Baileys simple, store, stickers…)
+    └── menu/             # Imagen del menú
 ```
 
 ---
@@ -195,11 +227,41 @@ Rikka-TakaradaMD/
 
 ---
 
+## ⚙️ Flags de arranque
+
+Se pasan después de `npm start --`, por ejemplo `npm start -- --self --autocleartmp`:
+
+| Flag | Efecto |
+|---|---|
+| `qr` / `code` / `mobile` | método de vinculación (también `npm run qr`, `npm run code`) |
+| `--test` | no abre sesión ni programa guardados automáticos |
+| `--self` | ignora mensajes propios |
+| `--pconly` / `--gconly` / `--swonly` | solo privados / solo grupos / solo estados |
+| `--nyimak` | conectado y sin responder nada (útil para depurar) |
+| `--restrict` | oculta los plugins marcados `admin` |
+| `--autoread` / `--noprint` / `--img` / `--queque` | marcar leídos / no imprimir mensajes / menú con imagen / cola de mensajes |
+| `--autocleartmp` | limpia `src/tmp` y el tmp del sistema cada 30s |
+| `--dev` | recarga en caliente de `config.js` y `api.js` (los plugins se recargan siempre que cambien en disco) |
+
+## 🔒 Seguridad
+
+- `RikkaSession/` contiene las claves Signal de tu cuenta: está en `.gitignore`,
+  no la subas ni la compartas por chat. Si alguna vez la subiste, elimina la
+  sesión desde WhatsApp y vuelve a vincular.
+- `npm start` bloquea una segunda instancia con un lock en `/tmp`; si el proceso
+  muere de forma brusca, borra `/tmp/rikka-takarada-md.lock`.
+- Los plugins `ex`/`e` ejecutan JavaScript arbitrario y `npm`, `update` ejecutan
+  comandos del sistema: están limitados al owner (`handler.owner`), no añadas
+  más usuarios a `global.owner` a la ligera.
+- Las claves van en `.env` (se carga solo, desde la raíz del proyecto, antes de
+  importar los plugins).
+
 ## 📝 Notas
 
 - La sesión de WhatsApp se guarda en `RikkaSession/` cuando se ejecuta el bot.
 - El prefijo se configura desde `config.js` o mediante el plugin de prefijo.
-- Los mensajes de descarga de Mega, MediaFire y Drive incluyen estados editables y control de cancelación donde el plugin lo permite.
+- `*.cancelar*` / `*.stop*` cancela **todas** tus descargas activas (Mega,
+  MediaFire y Drive), o solo un servicio con `*.cancelar mediafire*`.
 - Gofile y Drime quedan reservados para una próxima actualización.
 
 ---
