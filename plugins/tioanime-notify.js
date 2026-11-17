@@ -83,6 +83,7 @@ global.tioConn         = global.tioConn         || null
 global.tioQueuedIds    = global.tioQueuedIds    || new Set()
 global.tioCheckingChats = global.tioCheckingChats || new Set()
 global.tioCentralTimer  = global.tioCentralTimer  || null
+global.tioCentralTimerInterval = global.tioCentralTimerInterval || 0
 global.tioAnimeCoverCache = global.tioAnimeCoverCache || new Map()
 global.tioAnimeCoverNegTime = global.tioAnimeCoverNegTime || new Map()
 global.tioDriveCoverFiles = global.tioDriveCoverFiles || null
@@ -120,7 +121,19 @@ function loadJson(file, fallback = {}) {
     const value = JSON.parse(fs.readFileSync(file, 'utf-8'))
     return value && typeof value === 'object' ? value : fallback
   } catch (err) {
-    if (fs.existsSync(file)) console.error(`[tioanime-notify] No se pudo leer ${file}: ${err.message}`)
+    if (fs.existsSync(file)) {
+      console.error(`[tioanime-notify] No se pudo leer ${file}: ${err.message}`)
+      // Mover el archivo corrupto a un .bak: sin él, el estado se sembraría
+      // como "todo nuevo" y los episodios ya enviados volverían a salir.
+      try {
+        const backup = `${file}.bak-${Date.now()}`
+        fs.renameSync(file, backup)
+        console.error(`[tioanime-notify] Archivo corrupto movido a ${backup}`)
+      } catch (renameErr) {
+        console.error(`[tioanime-notify] No se pudo respaldar ${file}: ${renameErr.message}`)
+      }
+      void reportTioError(global.tioConn, `Archivo de datos corrupto: ${path.basename(file)}`, err)
+    }
     return fallback
   }
 }
@@ -198,8 +211,17 @@ function getCachedCover(key) {
   return value
 }
 
+const COVER_CACHE_MAX = 300
+
 function setCachedCoverPositive(key, cover) {
   if (!key) return
+  // Map conserva el orden de inserción: expulsa los más antiguos para no crecer sin límite.
+  while (global.tioAnimeCoverCache.size >= COVER_CACHE_MAX) {
+    const oldest = global.tioAnimeCoverCache.keys().next().value
+    if (oldest === undefined) break
+    global.tioAnimeCoverCache.delete(oldest)
+    global.tioAnimeCoverNegTime.delete(oldest)
+  }
   global.tioAnimeCoverCache.set(key, cover)
   global.tioAnimeCoverNegTime.delete(key)
 }
@@ -761,7 +783,24 @@ async function scrapeServidoresLatAnime(epUrl) {
     else if (esRedirector) srvs.push({ nombre: label || 'redir', url: href, directo: false, esRedirector: true })
   })
 
-  const redirs = srvs.filter(s => s.esRedirector)
+  // Solo vale la pena seguir un redirector si puede terminar en un servidor conocido.
+  // Redes sociales y enlaces varios del HTML nunca lo harán: se descartan sin pedirlos.
+  const REDIRECTOR_JUNK_RE = /^(?:www\.|m\.|mobile\.|web\.)?(?:facebook|fb\.watch|instagram|twitter|x|tiktok|youtube|youtu\.be|discord(?:app)?|t\.me|telegram\.me|wa\.me|api\.whatsapp|whatsapp|linktr\.ee|linktree|pinterest|reddit|vk|medium\.com|patreon)(?:\.|\/|$)/i
+  const MAX_REDIRECTORES = 6
+  const hostDe = url => { try { return new URL(url).hostname } catch (_) { return '' } }
+  for (let index = srvs.length - 1; index >= 0; index -= 1) {
+    const item = srvs[index]
+    if (!item.esRedirector) continue
+    const host = hostDe(item.url)
+    if (!host || REDIRECTOR_JUNK_RE.test(host)) srvs.splice(index, 1)
+  }
+
+  const redirs = srvs.filter(s => s.esRedirector).slice(0, MAX_REDIRECTORES)
+  // Los redirectores que excedan el tope se retiran: sin resolver quedarían como basura.
+  for (const extra of srvs.filter(s => s.esRedirector).slice(MAX_REDIRECTORES)) {
+    const index = srvs.indexOf(extra)
+    if (index !== -1) srvs.splice(index, 1)
+  }
   for (const r of redirs) {
     try {
       const res = await axios.get(r.url, { headers: { 'User-Agent': UA, 'Referer': LATANIME_URL }, maxRedirects: 5, timeout: 10000, validateStatus: () => true })
@@ -1300,7 +1339,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
         if (videoPath) {
           const downloadedSize = fs.statSync(videoPath).size
-          if (fuente === 'tioanime' && downloadedSize < MIN_EPISODE_SIZE_BYTES) {
+          if (downloadedSize < MIN_EPISODE_SIZE_BYTES) {
             console.log(`[tioanime-notify] ⚠️ [ ${nombreServidor} ] archivo de ${fmtBytes(downloadedSize)} (< 5 MB); se descarta y se probará el siguiente servidor.`)
             fs.rmSync(videoPath, { force: true })
             videoPath = null
@@ -1319,7 +1358,8 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
     if (!videoPath) throw new Error('Todos los servidores fallaron')
 
-    const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
+    const videoSize = fs.statSync(videoPath).size
+    const sizeMB = (videoSize / 1024 / 1024).toFixed(1)
     console.log(`[tioanime-notify] ✅ Descarga completa: ${fileName} (${sizeMB} MB) — preparando 360p antes de avisar...`)
     const fileName360 = build360FileName(fileName)
     const video360Path = path.join(tmpDir, fileName360)
@@ -1328,6 +1368,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       console.log(`[tioanime-notify] ⚙️ Iniciando compresión /dw4 360p: ${fileName}`)
       await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
       console.log(`[tioanime-notify] ✅ Compresión /dw4 360p terminada: ${fileName360}`)
+      const video360Size = fs.statSync(video360Path).size
       const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
       const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
 
@@ -1338,52 +1379,91 @@ async function enviarEpisodio(chatIds, ep, conn) {
         } catch (_) {}
       }
 
-      // El central ya recibió la portada al inicio; los demás la reciben solo cuando ambos videos están listos.
-      let originalBuffer = fs.readFileSync(videoPath)
+      // Envío por destinatario: un grupo que falle no cancela a los demás ni
+      // fuerza un reenvío completo (evita duplicados). Stream nuevo por envío:
+      // un createReadStream no se puede consumir dos veces.
+      const enviadosOriginal = []
       for (const chatId of recipients) {
-        if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
+        try {
+          if (coverBuffer && !(chatId === CENTRAL_CHAT_ID && centralCoverSent)) {
+            try {
+              await conn.sendMessage(chatId, { image: coverBuffer, hd: true })
+            } catch (coverError) {
+              console.error(`[tioanime-notify] No se pudo enviar la portada a ${chatId}: ${coverError.message}`)
+            }
+          }
           await conn.sendMessage(chatId, {
-            image: coverBuffer,
-            hd: true,
+            document   : fs.createReadStream(videoPath),
+            fileLength : videoSize,
+            fileName,
+            mimetype   : 'video/mp4',
+            jpegThumbnail,
           })
+          enviadosOriginal.push(chatId)
+        } catch (sendError) {
+          console.error(`[tioanime-notify] No se pudo enviar el original a ${chatId}: ${sendError.message}`)
+          void reportTioError(conn, `Envío del original a ${chatId} — ${titulo} ep. ${epNum}`, sendError)
         }
-        await conn.sendMessage(chatId, {
-          document : originalBuffer,
-          fileName,
-          mimetype : 'video/mp4',
-          jpegThumbnail,
-        })
       }
-      originalBuffer = null
+      if (enviadosOriginal.length === 0) {
+        throw new Error('No se pudo enviar el video original a ningún destinatario')
+      }
       originalSent = true
-      console.log(`[tioanime-notify] 🚀 Enviado original: ${fileName}`)
-      let video360Buffer = fs.readFileSync(video360Path)
+      console.log(`[tioanime-notify] 🚀 Enviado original a ${enviadosOriginal.length}/${recipients.length} grupo(s): ${fileName}`)
+
+      const fallidos360 = []
       for (const chatId of recipients) {
-        await conn.sendMessage(chatId, {
-          document : video360Buffer,
-          fileName: fileName360,
-          mimetype : 'video/mp4',
-          jpegThumbnail: jpegThumbnail360,
-        })
+        try {
+          await conn.sendMessage(chatId, {
+            document   : fs.createReadStream(video360Path),
+            fileLength : video360Size,
+            fileName   : fileName360,
+            mimetype   : 'video/mp4',
+            jpegThumbnail: jpegThumbnail360,
+          })
+        } catch (sendError) {
+          fallidos360.push(chatId)
+          console.error(`[tioanime-notify] No se pudo enviar la versión 360p a ${chatId}: ${sendError.message}`)
+          void reportTioError(conn, `Envío 360p a ${chatId} — ${titulo} ep. ${epNum}`, sendError)
+        }
       }
-      video360Buffer = null
-      console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
+      if (fallidos360.length > 0) {
+        // El original ya se entregó: avisar solo a los afectados y dar el episodio por resuelto.
+        for (const chatId of fallidos360) {
+          try {
+            await conn.sendMessage(chatId, {
+              text: `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* se envió, pero falló la versión 360p.`,
+            })
+          } catch (noticeError) {
+            console.error(`[tioanime-notify] No se pudo avisar del fallo 360p a ${chatId}: ${noticeError.message}`)
+          }
+        }
+        console.warn(`[tioanime-notify] 360p no llegó a ${fallidos360.length}/${recipients.length} grupo(s)`)
+      } else {
+        console.log(`[tioanime-notify] 🚀 Enviado /dw4 360p a ${recipients.length} grupo(s): ${fileName360}`)
+      }
     } catch (error) {
       const retryError = error instanceof Error ? error : new Error(String(error))
-      console.error(`[tioanime-notify] No se pudo crear o enviar la versión 360p de ${fileName}: ${retryError.message}`)
-      void reportTioError(conn, `Compresión o entrega 360p — ${titulo} ep. ${epNum}`, retryError)
+      console.error(`[tioanime-notify] No se pudo completar la entrega de ${fileName}: ${retryError.message}`)
+      void reportTioError(conn, `Compresión o entrega — ${titulo} ep. ${epNum}`, retryError)
+      // originalSent === true no ocurre aquí (el 360p ya no lanza); este aviso cubre el fallo de entrega total.
       try {
         for (const chatId of recipients) {
-          await conn.sendMessage(chatId, {
-            text: originalSent
-              ? `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* se envió, pero falló la versión 360p.`
-              : `⚠️ No se pudieron completar los envíos de *${titulo}* ep. *${zeroPad(epNum)}*.`,
-          })
+          try {
+            await conn.sendMessage(chatId, {
+              text: originalSent
+                ? `⚠️ El original de *${titulo}* ep. *${zeroPad(epNum)}* se envió, pero falló la versión 360p.`
+                : `⚠️ No se pudieron completar los envíos de *${titulo}* ep. *${zeroPad(epNum)}*.`,
+            })
+          } catch (noticeError) {
+            console.error(`[tioanime-notify] No se pudo notificar el fallo de envío a ${chatId}: ${noticeError.message}`)
+            void reportTioError(conn, `Aviso de fallo de envío — ${titulo} ep. ${epNum}`, noticeError)
+          }
         }
         retryError.tioRecipientNoticeSent = true
       } catch (noticeError) {
-        console.error(`[tioanime-notify] No se pudo notificar el fallo 360p: ${noticeError.message}`)
-        void reportTioError(conn, `Aviso de fallo 360p — ${titulo} ep. ${epNum}`, noticeError)
+        console.error(`[tioanime-notify] No se pudo notificar el fallo: ${noticeError.message}`)
+        void reportTioError(conn, `Aviso de fallo — ${titulo} ep. ${epNum}`, noticeError)
       }
       throw retryError
     }
@@ -1395,6 +1475,31 @@ async function enviarEpisodio(chatIds, ep, conn) {
 }
 
 // ─── Cola ─────────────────────────────────────────────────────────────────────
+
+// Episodio que falló de forma definitiva (sin servidores o todos fallaron):
+// no se reencola en cada sondeo. Se reintenta solo después del TTL.
+const FALLO_RETRY_TTL_MS = 6 * 60 * 60 * 1000
+global.tioFailedEpisodes = global.tioFailedEpisodes || new Map()
+
+function registrarFalloEpisodio(id) {
+  if (!id) return
+  if (global.tioFailedEpisodes.size > 500) {
+    const oldest = global.tioFailedEpisodes.keys().next().value
+    if (oldest !== undefined) global.tioFailedEpisodes.delete(oldest)
+  }
+  global.tioFailedEpisodes.set(id, Date.now())
+}
+
+function falloEpisodioReciente(id) {
+  if (!id) return false
+  const at = global.tioFailedEpisodes.get(id)
+  if (at == null) return false
+  if (Date.now() - at > FALLO_RETRY_TTL_MS) {
+    global.tioFailedEpisodes.delete(id)
+    return false
+  }
+  return true
+}
 
 async function procesarCola() {
   if (global.tioQueueRunning) return
@@ -1410,26 +1515,33 @@ async function procesarCola() {
       const item = global.tioEpisodeQueue[0]
       if (!item) { global.tioEpisodeQueue.shift(); continue }
       const { chatId, ep, manual = false } = item
-      const recipients = item.recipients ?? (manual ? [chatId] : getRecipientChatIds())
+      // Automáticos: destinatarios en vivo (un grupo que hizo tiostop no recibe
+      // aunque el episodio ya estuviera encolado). Manuales: respetan su lista original.
+      const recipients = manual ? (item.recipients ?? [chatId]) : getRecipientChatIds()
       const quitarItemActual = () => {
         const index = global.tioEpisodeQueue.indexOf(item)
         if (index !== -1) global.tioEpisodeQueue.splice(index, 1)
       }
       let intentos = 0
       let exito    = false
+      let sinConexion = false
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
         const connActivo = global.tioConn
         if (!connActivo) {
-          await new Promise(r => setTimeout(r, ESPERA_REINTENTO))
-          continue
+          // Sin conexión no se puede trabajar: pausar la cola y reanudar en 5 min
+          // (el ítem queda en cabeza) en lugar de girar en falso para siempre.
+          sinConexion = true
+          break
         }
         try {
           const enviado = await enviarEpisodio(recipients, ep, connActivo)
           if (!enviado) {
+            // Sin servidores compatibles: no reenviar en cada sondeo durante 6 h.
             quitarItemActual()
             global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
+            if (!manual) registrarFalloEpisodio(ep.id)
             break
           }
           exito = true
@@ -1439,6 +1551,7 @@ async function procesarCola() {
             if (!seen[CENTRAL_CHAT_ID].includes(ep.id)) seen[CENTRAL_CHAT_ID].push(ep.id)
             if (seen[CENTRAL_CHAT_ID].length > 500) seen[CENTRAL_CHAT_ID] = seen[CENTRAL_CHAT_ID].slice(-500)
             saveSeen(seen)
+            global.tioFailedEpisodes.delete(ep.id)
           }
           const state = loadState()
           for (const recipient of recipients) {
@@ -1462,6 +1575,8 @@ async function procesarCola() {
           } else {
             quitarItemActual()
             global.tioQueuedIds.delete(`${chatId}:${ep.id}`)
+            // Fallo definitivo (no es de conexión): no reenviar en cada sondeo durante 6 h.
+            if (!manual) registrarFalloEpisodio(ep.id)
             if (!err.tioRecipientNoticeSent) {
               try {
                 const connErr = global.tioConn
@@ -1472,6 +1587,15 @@ async function procesarCola() {
             }
           }
         }
+      }
+      if (sinConexion) {
+        // El ítem sigue en cabeza: reanudar la cola sola cuando haya conexión.
+        console.warn('[tioanime-notify] Conexión no disponible; la cola se reanudará en 5 minutos.')
+        const reanudar = setTimeout(() => {
+          procesarCola().catch(err => console.error(`[tioanime-notify] Error reanudando cola: ${err.message}`))
+        }, ESPERA_REQUEUEUE)
+        if (typeof reanudar.unref === 'function') reanudar.unref()
+        break
       }
       if (global.tioEpisodeQueue.length > 0) await new Promise(r => setTimeout(r, QUEUE_DELAY))
     }
@@ -1521,6 +1645,9 @@ async function checkNuevosEpisodios(_chatId, conn) {
         && !seen[CENTRAL_CHAT_ID].includes(idAnterior)
         && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${e.id}`)
         && !global.tioQueuedIds.has(`${CENTRAL_CHAT_ID}:${idAnterior}`)
+        // Fallo definitivo reciente: no reenviar hasta que pase el TTL de 6 h.
+        && !falloEpisodioReciente(e.id)
+        && !falloEpisodioReciente(idAnterior)
     })
     if (!nuevos.length) return
 
@@ -1539,6 +1666,17 @@ async function checkNuevosEpisodios(_chatId, conn) {
 
 function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
   if (conn) global.tioConn = conn
+  // No recrear el timer si ya existe con el mismo intervalo: restaurar para N
+  // chats creaba y destruía N veces seguidas el sondeo en cada arranque.
+  const cambioIntervalo = global.tioCentralTimerInterval !== intervalSec
+  if (global.tioCentralTimer && !cambioIntervalo) {
+    if (checkNow && global.tioConn) {
+      checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
+        void reportTioError(global.tioConn, 'Sondeo inicial central', err)
+      })
+    }
+    return
+  }
   if (global.tioCentralTimer) clearInterval(global.tioCentralTimer)
   global.tioCentralTimer = setInterval(() => {
     if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
@@ -1546,6 +1684,7 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
     })
   }, intervalSec * 1000)
   if (typeof global.tioCentralTimer.unref === 'function') global.tioCentralTimer.unref()
+  global.tioCentralTimerInterval = intervalSec
   if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
     void reportTioError(global.tioConn, 'Sondeo inicial central', err)
   })
@@ -1579,7 +1718,7 @@ function restaurarNotificadores(conn) {
   for (const chatId of Object.keys(state)) {
     if (chatId === '__config') continue
     if (!global.tioActiveChats.has(chatId)) {
-      iniciarNotificador(chatId, conn, getGlobalIntervalSec())
+      iniciarNotificador(chatId, conn, getGlobalIntervalSec(), false)
     }
   }
 }
@@ -1592,18 +1731,23 @@ if (!global.tioWatchdog) {
     for (const chatId of Object.keys(state)) {
       if (chatId === '__config') continue
       if (!global.tioActiveChats.has(chatId)) {
-        iniciarNotificador(chatId, conn, getGlobalIntervalSec())
+        iniciarNotificador(chatId, conn, getGlobalIntervalSec(), false)
       }
     }
   }, 2 * 60 * 1000)
   if (typeof global.tioWatchdog.unref === 'function') global.tioWatchdog.unref()
 }
 
-let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
+const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.tioConn = conn
-  restaurarNotificadores(conn)
+  // Comprobar restauración como máximo una vez por minuto: este hook corre en cada mensaje.
+  const ahora = Date.now()
+  if (ahora - (global.tioRestoreCheckAt || 0) >= 60_000) {
+    global.tioRestoreCheckAt = ahora
+    restaurarNotificadores(conn)
+  }
 
-  const COMANDOS_OWNER = ['tiostart', 'tiostop', 'tiointerval', 'tioflush', 'tiounblock', 'tioexample', 'latexample']
+  const COMANDOS_OWNER = ['tiostart', 'tiostop', 'tiointerval', 'tioflush', 'tiounblock', 'tioexample', 'latexample', 'tiocheck']
   if (COMANDOS_OWNER.includes(command) && !isOwner) {
     return conn.sendMessage(m.chat, { text: '⛔ Solo el *owner* puede usar este comando.' }, { quoted: m })
   }
@@ -1774,7 +1918,12 @@ handler.limit   = false
 
 handler.before = async (m, { conn }) => {
   if (conn) global.tioConn = conn
-  restaurarNotificadores(conn)
+  // Mismo freno que en el handler: este gancho corre en cada mensaje del bot.
+  const ahora = Date.now()
+  if (ahora - (global.tioRestoreCheckAt || 0) >= 60_000) {
+    global.tioRestoreCheckAt = ahora
+    restaurarNotificadores(conn)
+  }
   if (conn && !global.tioCentralTimer) iniciarSondeoCentral(conn, getGlobalIntervalSec())
 }
 
