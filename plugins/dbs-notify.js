@@ -34,6 +34,7 @@ import { Transform } from 'stream'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
+import { fetchDbs, esErrorDeBloqueo, HEADERS as HEADERS_DBS } from '../src/libraries/dbs-http.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -73,18 +74,28 @@ const MEGA_CHUNK_SIZE      = 1024 * 1024 // máximo documentado por megajs: 1 MB
 const MF_HILOS             = 8
 const MF_MIN_SIZE_PARALELO = 5 * 1024 * 1024
 
+const BLOQUEO_TEXTO = [
+  '🚫 *AnimeDBS está bloqueando al bot (HTTP 403)*',
+  '',
+  'El sitio rechaza conexiones que no vienen de un navegador desde una IP',
+  'residencial. Para que el notificador vuelva a funcionar, el dueño puede:',
+  '',
+  '┃ 1️⃣ *Proxy* — añadir `DBS_PROXY_URL=http://usuario:clave@host:puerto`',
+  '┃ 2️⃣ *Cloudflare* — levantar FlareSolverr y poner `DBS_FLARESOLVERR_URL`',
+  '┃ 3️⃣ *Cookie* — copiar `cf_clearance` del navegador en `DBS_COOKIE`',
+  '',
+  '> El bot ya intenta huella de Chrome (wreq/impit), axios y curl.',
+  '> Los episodios no se pierden: quedan pendientes hasta que el acceso funcione.',
+].join('\n')
+
 const DBS_SERVIDORES  = new Set(['mega', 'mediafire', 'directo'])
 const ERROR_OWNER_JID = process.env.DBS_ERROR_OWNER_JID || process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 const ZONA_HORARIA    = process.env.DBS_TIMEZONE || 'America/Lima'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-const HEADERS = {
-  'User-Agent'     : UA,
-  'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
-}
+// Cabeceras de navegador real (Chrome) compartidas con el cliente HTTP.
+const HEADERS = HEADERS_DBS
 
 // ─── Estado global ────────────────────────────────────────────────────────────
 
@@ -370,25 +381,38 @@ function isRetryableStatus(status) {
   return status === 408 || status === 425 || status === 429 || status >= 500
 }
 
-/** Error que puede resolverse solo (red, límite de peticiones, servidor caído). */
+/**
+ * Error que puede resolverse reintentando (red, límite de peticiones, servidor
+ * caído). Un 403 del WAF no: se resuelve cambiando de cliente o de IP, así que
+ * el episodio se deja pendiente sin gastar tres intentos por ficha.
+ */
 function isRetryableScrapeError(error) {
-  const status = error?.response?.status
+  if (esErrorDeBloqueo(error)) return false
+  const status = error?.response?.status || error?.status
   return !status || isRetryableStatus(status)
 }
 
+/** ¿El fallo es de red/bloqueo (el episodio sigue pendiente) o del propio enlace? */
+function esFalloDeAcceso(error) {
+  return esErrorDeBloqueo(error) || isRetryableScrapeError(error)
+}
+
+/**
+ * Petición a AnimeDBS.
+ *
+ * Delega en `fetchDbs`, que prueba huella de Chrome (wreq/impit), axios, curl y
+ * FlareSolverr hasta dar con uno que el WAF acepte. Antes esto era un `axios`
+ * con cabeceras de Chrome: al bot le respondían 403 desde que el sitio empezó a
+ * validar el handshake TLS, y el error llegaba al chat como "Request failed with
+ * status code 403".
+ */
 async function getPage(url, options = {}, attempts = 3) {
-  let lastError
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await axios.get(url, { ...options, timeout: options.timeout || HTTP_TIMEOUT })
-    } catch (error) {
-      lastError = error
-      // Un 404 no se arregla esperando: solo se reintenta lo transitorio.
-      if (error?.response?.status && !isRetryableStatus(error.response.status)) break
-      if (attempt < attempts) await sleep(attempt * 1000)
-    }
-  }
-  throw lastError
+  const respuesta = await fetchDbs(url, {
+    headers: options.headers,
+    timeout: options.timeout || HTTP_TIMEOUT,
+    intentos: Math.min(attempts, 2),
+  })
+  return respuesta
 }
 
 function setBoundedCache(map, key, value, max) {
@@ -445,13 +469,16 @@ async function getCoverBuffer(coverUrl) {
   const cached = coverBufferCache.get(coverUrl)
   if (cached && Date.now() - cached.at < SERVERS_CACHE_MS) return cached.buffer
   try {
-    const response = await axios.get(coverUrl, {
-      responseType: 'arraybuffer',
-      headers: HEADERS,
+    // La portada suele venir del propio AnimeDBS, que también filtra por
+    // huella TLS: se pide con el mismo cliente escalado.
+    const response = await fetchDbs(coverUrl, {
+      documento: false,
+      binario: true,
       timeout: 10_000,
-      maxContentLength: 8 * 1024 * 1024,
+      headers: { Accept: 'image/avif,image/webp,image/png,image/*,*/*;q=0.8' },
     })
     const buffer = Buffer.from(response.data)
+    if (!buffer.length) return null
     setBoundedCache(coverBufferCache, coverUrl, { buffer, at: Date.now() }, 30)
     return buffer
   } catch (_) {
@@ -819,7 +846,9 @@ async function seleccionarVersionPreferidaDBS(lista, {
           resuelto = true
           break
         } catch (error) {
-          if (isRetryableScrapeError(error)) falloRed = true
+          // Un 403 del WAF deja el episodio pendiente en vez de marcarlo visto:
+          // cuando se configure el proxy o la cookie, se enviará.
+          if (esFalloDeAcceso(error)) falloRed = true
         }
       }
       if (resuelto) break
@@ -1571,6 +1600,16 @@ limpiarTempViejos()
 
 // ─── Comandos ─────────────────────────────────────────────────────────────────
 
+/**
+ * Mensaje para el chat cuando falla el acceso al sitio. Antes se reenviaba el
+ * texto crudo de axios ("Request failed with status code 403"), que no dice
+ * nada ni al dueño ni a quien puede arreglarlo.
+ */
+function mensajeDeError(error) {
+  if (esErrorDeBloqueo(error)) return BLOQUEO_TEXTO
+  return `❌ Error: ${error.message}`
+}
+
 function estadoTexto(m) {
   const active = global.dbsActiveChats.get(m.chat)
   const cola = global.dbsEpisodeQueue.filter(item => item.recipients?.includes(m.chat) || item.chatId === m.chat)
@@ -1688,7 +1727,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         await m.reply('✅ Sin episodios nuevos.')
       }
     } catch (error) {
-      await m.reply(`❌ Error: ${error.message}`)
+      await m.reply(mensajeDeError(error))
     }
     return
   }
@@ -1716,7 +1755,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       lista = await seleccionarVersionPreferidaDBS(lista, { limit: cantidad })
       if (!lista.length) return m.reply('❌ No hay enlaces SUB ni LAT disponibles.')
     } catch (error) {
-      return m.reply(`❌ Error: ${error.message}`)
+      return m.reply(mensajeDeError(error))
     }
     const seleccion = lista.slice(0, cantidad)
     if (seleccion.length > 1) {

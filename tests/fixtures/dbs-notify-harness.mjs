@@ -122,6 +122,28 @@ const overrides = {
   'animev1-download.cjs': writeOverride('thumb.mjs',
     'const api = globalThis.__dbsThumbStub; export default api; export const createJpegThumbnail = api.createJpegThumbnail;'),
   'dw4-compress.js': writeOverride('compress.mjs', 'export const compressDw4 = globalThis.__dbsCompressStub.compressDw4;'),
+  // Cliente HTTP escalado: el doble de axios hace las veces de sitio simulado,
+  // así el test sigue probando el plugin y no la capa de red.
+  'src/libraries/dbs-http.js': writeOverride('dbs-http.mjs', [
+    "export const HEADERS = { 'User-Agent': 'harness', Accept: 'text/html' };",
+    'export async function fetchDbs(url, opciones = {}) {',
+    '  try {',
+    '    const respuesta = await globalThis.__dbsAxiosStub(url, { responseType: opciones.responseType, headers: opciones.headers });',
+    '    const datos = Buffer.isBuffer(respuesta.data) ? respuesta.data.toString("utf8") : respuesta.data;',
+    '    return { data: datos, status: respuesta.status || 200, headers: respuesta.headers || {} };',
+    '  } catch (error) {',
+    '    // Mismo contrato que el cliente real: el 403 llega como DBS_FORBIDDEN.',
+    '    if (error?.response?.status === 403) {',
+    '      const bloqueo = new Error("AnimeDBS bloqueó la petición (HTTP 403). Configura DBS_PROXY_URL o DBS_FLARESOLVERR_URL.");',
+    '      bloqueo.code = "DBS_FORBIDDEN";',
+    '      throw bloqueo;',
+    '    }',
+    '    throw error;',
+    '  }',
+    '}',
+    'export function esErrorDeBloqueo(error) { return error?.code === "DBS_FORBIDDEN" || error?.status === 403 || error?.response?.status === 403; }',
+    'export const ANIMEDBS_URL = "https://www.animedbs.online";',
+  ].join('\n')),
 }
 
 const hookSource = `
@@ -316,8 +338,33 @@ try {
     documentos: documentos().length,
   }
 
-  fase = 'dbsstatus'
+  fase = 'sitio bloqueando (403 en todo)'
   delete dbs.status[EPISODE_URL]
+  // El plugin pide la portada sin barra final (ANIMEDBS_URL = '...online').
+  dbs.status['https://www.animedbs.online'] = 403
+  dbs.status['https://www.animedbs.online/'] = 403
+  const mensajesAntes403 = calls.enviados.slice()
+  await call('dbsexample', '1')
+  const nuevos403 = calls.enviados.slice(mensajesAntes403.length)
+  const bloqueo = {
+    // El chat debe recibir el aviso accionable, no el texto crudo de axios.
+    mensajes: nuevos403,
+    ultimoMensaje: nuevos403.at(-1) || null,
+  }
+
+  // Con el sitio bloqueando y un capítulo sin ver, el sondeo no debe marcarlo
+  // como visto: cuando se arregle el acceso tiene que enviarse.
+  dbs.episodes[EPISODE_URL] = episodioHtml(5, '2024-01-02 03:04:05')
+  dbs.series[SERIES_URL] =
+    `<div class="thumb"><img src="${coverUrl}" /></div><h1>One Piece</h1>` +
+    `<ul class="eplister"><li><a href="${EP5_PATH}">Episodio 5</a></li></ul>`
+  fs.writeFileSync(path.join(TMP, 'database', 'dbs_seen.json'), JSON.stringify({ [CHAT]: [] }, null, 2))
+  await call('dbscheck')
+  bloqueo.vistoTrasBloqueo = leerJson('dbs_seen.json')?.[CHAT] || []
+
+  fase = 'dbsstatus'
+  delete dbs.status['https://www.animedbs.online']
+  delete dbs.status['https://www.animedbs.online/']
   await call('dbsstatus')
 
   out({
@@ -327,6 +374,7 @@ try {
     nuevo,
     sinDuplicados,
     fichaCaida,
+    bloqueo,
     estado: calls.enviados.at(-1) || null,
     errorLog: calls.error,
   })
