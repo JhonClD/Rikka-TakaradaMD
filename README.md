@@ -171,11 +171,11 @@ npm run check         # node --check sobre index/main/handler/config/api
 npm run check:ghosts  # asignaciones a identificadores que nadie declaró
 ```
 
-`npm run lint` es `eslint .` con `js.configs.recommended` y `no-unused-vars` a
-nivel de **error** (sin umbral de avisos: el código heredado ya está limpio, así
-que cualquier descuido nuevo rompe la integración). Se mantiene `no-undef`
-apagado (el bot se apoya en globales declarados en `main.js`) y `args: 'none'`
-por las firmas de callback impuestas por la API.
+`npm run lint` usa `src/config/eslint.config.js`, con `js.configs.recommended` y
+`no-unused-vars` a nivel de **error** (sin umbral de avisos: el código heredado
+ya está limpio, así que cualquier descuido nuevo rompe la integración). Se
+mantiene `no-undef` apagado (el bot se apoya en globales declarados en `main.js`)
+y `args: 'none'` por las firmas de callback impuestas por la API.
 
 Las pruebas y comprobaciones se ejecutan manualmente con los comandos anteriores.
 
@@ -202,7 +202,6 @@ Rikka-TakaradaMD/
 ├── handler.js            # Despacho de comandos y eventos de grupo
 ├── config.js             # Configuración global (prefijo, owner, textos)
 ├── api.js                # Shim de globales heredado (axios/fetch/moment/cheerio)
-├── eslint.config.js      # Reglas de lint
 ├── .env.example          # Plantilla de variables
 ├── THIRD-PARTY-NOTICES.md# Avisos de código de terceros y licencia pendiente
 ├── scripts/              # Herramientas de desarrollo (check-ghost-identifiers)
@@ -210,6 +209,7 @@ Rikka-TakaradaMD/
 ├── plugins/              # 58 plugins, un archivo por función, en kebab-case
 └── src/
     ├── assets/           # Imágenes (menú, avatares, svg de bienvenida)
+    ├── config/            # Configuración de herramientas (ESLint)
     ├── funcion/          # Funciones auxiliares (rutas, .env, validación, LID)
     └── libraries/        # Librerías internas (Baileys simple, store, stickers…)
 ```
