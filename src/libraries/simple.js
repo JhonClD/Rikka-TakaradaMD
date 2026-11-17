@@ -1,5 +1,6 @@
 // Fix 2025 - MysitcBot and Fu*k You Meta® - LID Fix 98% - replace lids for numbers real.
 import path from "path";
+import { randomBytes } from "node:crypto";
 import {
     toAudio
 } from "./converter.js";
@@ -110,9 +111,15 @@ export function makeWASocket(connectionOptions, options = {}) {
             async value(jid, text = "", buffer, title, body, url, quoted, options) {
                 if (buffer) {
                     try {
-                        ((type = await conn.getFile(buffer)), (buffer = type.data));
+                        // Era ((type = await conn.getFile(buffer)), (buffer = type.data)).
+                        // `type` no estaba declarado en este método, así que el
+                        // ReferenceError lo engullía el propio catch y ningún adjunto
+                        // se resolvía nunca.
+                        const { data } = await conn.getFile(buffer);
+                        buffer = data;
                     } catch {
-                        buffer = buffer;
+                        // getFile falló (enlace muerto, sin red): se sigue con el valor
+                        // original, que es lo que hacía el catch vacío.
                     }
                 }
                 const prep = generateWAMessageFromContent(
@@ -1330,11 +1337,15 @@ END:VCARD
                     !Buffer.isBuffer(buffer) &&
                     (typeof buffer === "string" || Array.isArray(buffer))
                 )
+                    // Desplaza un puesto cada argumento: quien llama pasa la URL en el
+                    // hueco de `buffer`. En este fork call/callText dejaron de ser
+                    // parámetros (los ocupan url2/urlText2), así que leerlos ahí era un
+                    // ReferenceError seguro; el hueco correcto es este.
                     ((options = quoted),
                         (quoted = buttons),
-                        (buttons = callText),
-                        (callText = call),
-                        (call = urlText),
+                        (buttons = urlText2),
+                        (urlText2 = url2),
+                        (url2 = urlText),
                         (urlText = url),
                         (url = buffer),
                         (buffer = null));

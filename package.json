@@ -17,7 +17,8 @@
     "lint:fix": "eslint --fix .",
     "eslint": "eslint .",
     "eslintfix": "eslint --fix .",
-    "check": "node --check index.js && node --check main.js && node --check handler.js && node --check config.js && node --check api.js"
+    "check": "node --check index.js && node --check main.js && node --check handler.js && node --check config.js && node --check api.js",
+    "check:ghosts": "node scripts/check-ghost-identifiers.mjs"
   },
   "dependencies": {
     "@vitalets/google-translate-api": "^9.2.1",
