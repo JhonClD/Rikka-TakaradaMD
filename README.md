@@ -185,6 +185,7 @@ de WhatsApp o el `.env`.
 | `tests/message-validation.test.js` | filtrado de mensajes, dedupe, texto de mensajes interactivos |
 | `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, y ningún alias lo comparten dos plugins |
 | `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` |
+| `tests/ghost-identifiers.test.js` | nadie asigna a un identificador no declarado (`npm run check:ghosts`) |
 
 ---
 

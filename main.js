@@ -432,7 +432,10 @@ async function connectionUpdate(update) {
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
     console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
-    isFirstConnection = true;
+    // Aquí había un `isFirstConnection = true;` sin declarar: en un módulo ES
+    // (siempre estricto) lanzaba ReferenceError y cortaba la rama 'open' antes
+    // del flush, de modo que los avisos acumulados durante la caída no se
+    // entregaban hasta el siguiente error.
     void flushOwnerErrorAlerts();
   }
   const reason = lastDisconnect?.error?.output?.statusCode
