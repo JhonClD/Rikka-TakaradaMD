@@ -17,9 +17,7 @@
 //     verdad no tiene enlaces descargables.
 //   • Un episodio = un envío: si SUB y LAT comparten ficha, se descarga una
 //     vez y el segundo idioma reutiliza el archivo.
-//   • La portada lleva el caption (antes la imagen salía muda), la fecha del
-//     mensaje es la de publicación y los títulos del directorio ya no generan
-//     episodios duplicados.
+//   • El envío de episodios es limpio: solo documentos, sin portada ni caption.
 //   • Menos peticiones: caché del sondeo y del listado de servidores, y
 //     restaurarNotificadores deja de leer el disco en cada mensaje recibido.
 
@@ -40,7 +38,6 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 const ANIMEDBS_URL        = 'https://www.animedbs.online'
 const DBS_DIRECTORY_URL   = `${ANIMEDBS_URL}/anime/?status=&type=&order=update`
 const DBS_DIRECTORY_LIMIT = 12
-const ANILIST_URL         = 'https://graphql.anilist.co'
 
 const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
@@ -64,7 +61,6 @@ const FEED_CACHE_MS     = 40_000
 const SERVERS_CACHE_MS  = 10 * 60_000
 const FEED_CACHE_MAX    = 4
 const SERVERS_CACHE_MAX = 40
-const COVER_CACHE_MAX   = 300
 const HTTP_TIMEOUT      = 15_000
 
 // [MEJORA VELOCIDAD] megajs descarga por bloques y conexiones paralelas.
@@ -89,7 +85,6 @@ const BLOQUEO_TEXTO = [
 
 const DBS_SERVIDORES  = new Set(['mega', 'mediafire', 'directo'])
 const ERROR_OWNER_JID = process.env.DBS_ERROR_OWNER_JID || process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
-const ZONA_HORARIA    = process.env.DBS_TIMEZONE || 'America/Lima'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
@@ -472,15 +467,13 @@ global.dbsConn         = global.dbsConn         || null
 global.dbsQueuedIds    = global.dbsQueuedIds    || new Set()
 global.dbsChecking     = global.dbsChecking     || false
 global.dbsGlobalTimer  = global.dbsGlobalTimer  || null
-global.dbsAnimeCoverCache = global.dbsAnimeCoverCache || new Map()
 global.dbsLastCheckAt  = global.dbsLastCheckAt  || 0
 global.dbsQueueLastProgress = global.dbsQueueLastProgress || 0
 
-/** Caché del sondeo (portada + directorio), de fichas y de portadas descargadas. */
+/** Caché del sondeo, de fichas y de servidores de descarga. */
 const feedCache     = new Map()
 const serversCache  = new Map()
 const serversInflight = new Map()
-const coverBufferCache = new Map()
 /** Archivo ya descargado por episodio, para no bajarlo dos veces (SUB + LAT). */
 const jobResults = new Map()
 
@@ -567,6 +560,25 @@ function getGlobalIntervalSec() {
 function setGlobalIntervalSec(intervalSec) {
   updateState(state => {
     state.__config = { ...(state.__config || {}), intervalSec }
+  })
+}
+
+function getCentralChatId() {
+  const configured = loadState().__config?.centralChatId
+  return typeof configured === 'string' && configured ? configured : null
+}
+
+function setCentralChatId(chatId) {
+  updateState(state => {
+    state.__config = { ...(state.__config || {}), centralChatId: chatId }
+  })
+}
+
+function clearCentralChatId() {
+  updateState(state => {
+    if (!state.__config) return false
+    delete state.__config.centralChatId
+    return true
   })
 }
 
@@ -701,29 +713,6 @@ function fmtSpeed(bytes, elapsedMs) {
   return `${fmtBytes(bytes / Math.max(elapsedMs, 1) * 1000)}/s`
 }
 
-/** "Publicado" del captions: la fecha real del episodio, no la hora de envío. */
-function formatPublishedAt(ep) {
-  if (Number(ep?.publishedAt) > 0) {
-    try {
-      return new Intl.DateTimeFormat('es-PE', {
-        timeZone: ZONA_HORARIA,
-        day: '2-digit',
-        month: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(new Date(Number(ep.publishedAt)))
-    } catch (_) {}
-  }
-  const age = Number(ep?.ageSeconds)
-  if (Number.isFinite(age)) {
-    if (age < 3600) return `hace ${Math.max(1, Math.round(age / 60))} min`
-    if (age < 86400) return `hace ${Math.round(age / 3600)} h`
-    return `hace ${Math.round(age / 86400)} día(s)`
-  }
-  return 'recién publicado'
-}
-
 function absoluteUrl(value, base) {
   // `new URL('', base)` devuelve la base: un <img> sin src acababa pasando la
   // portada del sitio como si fuera la carátula del anime, y el envío fallaba.
@@ -801,55 +790,6 @@ function detectarServidor(url, label = '') {
   if (/media\s*fire/.test(text)) return 'mediafire'
   if (/\bdirect(?:o)?\b/.test(text) || /\.mp4$/i.test(pathname)) return 'directo'
   return ''
-}
-
-// ─── Portadas (AniList) ───────────────────────────────────────────────────────
-
-async function getAniListCover(titulo, slug = '') {
-  const candidates = [titulo, String(slug).replace(/[-_]+/g, ' ')].map(v => String(v || '').trim()).filter(Boolean)
-  const key = normalizeTitleKey(candidates[0])
-  if (!key) return null
-  if (global.dbsAnimeCoverCache.has(key)) return global.dbsAnimeCoverCache.get(key)
-  const query = `query ($search: String) { Page(perPage: 3) { media(search: $search, type: ANIME) { coverImage { extraLarge large medium } } } }`
-  for (const search of candidates) {
-    try {
-      const response = await axios.post(ANILIST_URL, { query, variables: { search } }, {
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        timeout: 10_000,
-      })
-      const media = response.data?.data?.Page?.media || []
-      const cover = media[0]?.coverImage?.extraLarge || media[0]?.coverImage?.large || media[0]?.coverImage?.medium
-      if (cover) {
-        setBoundedCache(global.dbsAnimeCoverCache, key, cover, COVER_CACHE_MAX)
-        return cover
-      }
-    } catch (_) {}
-  }
-  setBoundedCache(global.dbsAnimeCoverCache, key, null, COVER_CACHE_MAX)
-  return null
-}
-
-/** Descarga la portada una sola vez por URL y reutiliza el buffer entre chat. */
-async function getCoverBuffer(coverUrl) {
-  if (!coverUrl) return null
-  const cached = coverBufferCache.get(coverUrl)
-  if (cached && Date.now() - cached.at < SERVERS_CACHE_MS) return cached.buffer
-  try {
-    // La portada suele venir del propio AnimeDBS, que también filtra por
-    // huella TLS: se pide con el mismo cliente escalado.
-    const response = await fetchDbs(coverUrl, {
-      documento: false,
-      binario: true,
-      timeout: 10_000,
-      headers: { Accept: 'image/avif,image/webp,image/png,image/*,*/*;q=0.8' },
-    })
-    const buffer = Buffer.from(response.data)
-    if (!buffer.length) return null
-    setBoundedCache(coverBufferCache, coverUrl, { buffer, at: Date.now() }, 30)
-    return buffer
-  } catch (_) {
-    return null
-  }
 }
 
 // ─── Scraping ─────────────────────────────────────────────────────────────────
@@ -1572,6 +1512,13 @@ function limpiarTempViejos() {
   } catch (_) {}
 }
 
+async function reenviarDesdeCentral(conn, centralMessage, recipient, fallbackMessage) {
+  if (typeof conn.copyNForward === 'function' && centralMessage) {
+    return conn.copyNForward(recipient, centralMessage, true)
+  }
+  return conn.sendMessage(recipient, fallbackMessage)
+}
+
 /**
  * Envía un episodio a todos los destinatarios.
  *
@@ -1579,9 +1526,13 @@ function limpiarTempViejos() {
  * reutiliza el archivo ya descargado en vez de bajar cientos de MB otra vez.
  */
 async function enviarEpisodio(chatId, ep, conn) {
-  const { titulo, epNum, epUrl, imgUrl } = ep
+  const { titulo, epNum, epUrl } = ep
   const recipients = [...new Set((Array.isArray(chatId) ? chatId : [chatId]).filter(Boolean))]
   if (!recipients.length) throw new Error('No hay chats receptores configurados')
+  const centralChatId = getCentralChatId()
+  const central = centralChatId && recipients.includes(centralChatId) ? centralChatId : null
+  if (!central) throw new Error('El grupo central no está activo; usa dbsstart en el grupo central antes de continuar.')
+  const otherRecipients = recipients.filter(recipient => recipient !== central)
   const esLatino = ep.fuente === 'latino' || ep.idioma === 'latino'
   const fileName = buildFileName(titulo, epNum, esLatino ? 'latino' : 'dbs', ep.idioma, ep.slug)
 
@@ -1597,40 +1548,7 @@ async function enviarEpisodio(chatId, ep, conn) {
   // reintento reutiliza lo ya descargado y `releaseEpisodeDirIfIdle` la borra
   // cuando el episodio sale del todo de la cola.
   const tmpDir = episodeWorkDir(ep)
-  const etiqueta = esLatino ? 'AnimeDBS Audio Latino 🌐' : 'AnimeDBS Sub Español 🌐'
-  const caption = [
-    '*✨ Nuevo Episodio ✨*',
-    '━━━━━━━━━━━━━━━━━━━━━',
-    `> 🌐 ${titulo}`,
-    `> 🆕 Capítulo: *${epNum}*`,
-    `> 🎙️ Audio: *${esLatino ? 'Latino' : 'Sub Español'}*`,
-    `> 🕐 Publicado: *${formatPublishedAt(ep)}*`,
-    `> 🔗 Ver online: ${epUrl}`,
-    `> 📡 Fuente: *${etiqueta}*`,
-    '━━━━━━━━━━━━━━━━━━━━━',
-    '✅ _INICIANDO DESCARGA..._',
-  ].join('\n')
-
-  // 1) Portada con caption. Antes la imagen se mandaba sin texto y el caption
-  //    se perdía, así que el chat recibía una foto muda.
-  let coverBuffer = null
-  try {
-    const coverUrl = await getAniListCover(titulo, ep.slug) || imgUrl
-    coverBuffer = await getCoverBuffer(coverUrl)
-  } catch (_) {}
-  for (const recipient of recipients) {
-    if (coverBuffer) {
-      try {
-        await conn.sendMessage(recipient, { image: coverBuffer, caption })
-      } catch (_) {
-        await conn.sendMessage(recipient, { text: caption }).catch(() => {})
-      }
-    } else {
-      await conn.sendMessage(recipient, { text: caption }).catch(() => {})
-    }
-  }
-
-  // 2) Descarga (reutilizada si otra variante del mismo capítulo ya la hizo).
+  // 1) Descarga (reutilizada si otra variante del mismo capítulo ya la hizo).
   const previous = jobResults.get(ep.id)
   let videoPath = previous?.path && fs.existsSync(previous.path) ? previous.path : null
   let downloadedFileName = previous?.fileName || fileName
@@ -1669,39 +1587,49 @@ async function enviarEpisodio(chatId, ep, conn) {
   // reintenta, el archivo descargado se reutiliza en vez de bajarse otra vez.
   jobResults.set(ep.id, { path: videoPath, fileName: downloadedFileName })
 
-  // 3) Envío del original desde disco. Pasar una ruta local hace que Baileys
+  // 2) Envío del original desde disco. Pasar una ruta local hace que Baileys
   //    abra el archivo con createReadStream: no se duplica en memoria.
   const sizeTexto = fmtBytes(fs.statSync(videoPath).size)
   let jpegThumbnail
   try { jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath) } catch (_) {}
-  const captionDoc = `✅ *${titulo}*\n📌 Episodio ${zeroPad(epNum)}\n📦 ${sizeTexto} · ${etiqueta}`
-  for (const recipient of recipients) {
-    await conn.sendMessage(recipient, {
+  const originalMessage = await conn.sendMessage(central, {
       document: { url: videoPath },
       fileName: downloadedFileName,
       mimetype: 'video/mp4',
       jpegThumbnail,
-      caption: captionDoc,
+  })
+  for (const recipient of otherRecipients) {
+    await reenviarDesdeCentral(conn, originalMessage, recipient, {
+      document: { url: videoPath },
+      fileName: downloadedFileName,
+      mimetype: 'video/mp4',
+      jpegThumbnail,
     })
   }
-  console.log(`[dbs-notify] 🚀 Enviado: ${downloadedFileName} (${sizeTexto}) a ${recipients.length} chat(s)${reused ? ' (archivo reutilizado)' : ''}`)
+  console.log(`[dbs-notify] 🚀 Enviado al central y reenviado a ${otherRecipients.length} chat(s): ${downloadedFileName} (${sizeTexto})${reused ? ' (archivo reutilizado)' : ''}`)
 
-  // 4) Versión 360p. Se borra en cuanto se envía para no dejar dos veces el
+  // 3) Versión 360p. Se borra en cuanto se envía para no dejar dos veces el
   //    episodio en disco mientras la cola sigue con el siguiente.
   const fileName360 = build360FileName(downloadedFileName)
   const video360Path = path.join(tmpDir, fileName360)
   try {
     await compressDw4(videoPath, video360Path, { label: 'DW4 AnimeDBS' })
     const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
-    for (const recipient of recipients) {
-      await conn.sendMessage(recipient, {
+    const reducedMessage = await conn.sendMessage(central, {
+        document: { url: video360Path },
+        fileName: fileName360,
+        mimetype: 'video/mp4',
+        jpegThumbnail: jpegThumbnail360,
+    })
+    for (const recipient of otherRecipients) {
+      await reenviarDesdeCentral(conn, reducedMessage, recipient, {
         document: { url: video360Path },
         fileName: fileName360,
         mimetype: 'video/mp4',
         jpegThumbnail: jpegThumbnail360,
       })
     }
-    console.log(`[dbs-notify] 🚀 Enviado /dw4 360p: ${fileName360}`)
+    console.log(`[dbs-notify] 🚀 Enviado /dw4 360p al central y reenviado a ${otherRecipients.length} chat(s): ${fileName360}`)
   } catch (error) {
     console.error(`[dbs-notify] No se pudo crear o enviar 360p: ${error.message}`)
     await reportDbsError(conn, `Versión 360p de ${titulo} ep. ${epNum}`, error)
@@ -1947,6 +1875,10 @@ function restaurarNotificadores(conn) {
   if (Date.now() - lastRestoreAt < RESTORE_THROTTLE_MS) return
   lastRestoreAt = Date.now()
   const state = loadState()
+  if (!getCentralChatId()) {
+    const primerChat = Object.keys(state).find(chatId => chatId !== '__config' && state[chatId] && typeof state[chatId] === 'object')
+    if (primerChat) setCentralChatId(primerChat)
+  }
   for (const [chatId, cfg] of Object.entries(state)) {
     if (chatId === '__config' || !cfg || typeof cfg !== 'object') continue
     if (global.dbsActiveChats.has(chatId)) continue
@@ -2002,6 +1934,7 @@ function estadoTexto(m) {
 
 let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.dbsConn = conn
+  if (command === 'dbstar') command = 'dbsstart'
   const OWNER_COMMANDS = ['dbsstart', 'dbsstop', 'dbsinterval', 'dbsflush', 'dbsunblock', 'dbsexample']
   if (OWNER_COMMANDS.includes(command) && !isOwner) {
     return conn.sendMessage(m.chat, { text: '⛔ Solo el *owner* puede usar este comando.' }, { quoted: m })
@@ -2012,6 +1945,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     const intervalSec = Number.isInteger(value) && value >= MIN_INTERVAL_SECONDS && value <= MAX_INTERVAL_SECONDS
       ? value
       : CHECK_INTERVAL_SECONDS
+    const configuredCentral = getCentralChatId()
+    const esCentral = !configuredCentral || configuredCentral === m.chat
+    if (!configuredCentral) setCentralChatId(m.chat)
     iniciarNotificador(m.chat, conn, intervalSec, false)
     let lista = []
     try {
@@ -2024,7 +1960,8 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         '',
         `┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\``,
         '┃ 🌐 *AnimeDBS* — `SUB + Audio Latino (LAT)`',
-        '┃ 💬 *Chat Activo*',
+        `┃ ${esCentral ? '🎯 *Grupo central*' : '📨 *Grupo receptor*'}`,
+        esCentral ? '┃ 📤 Los demás grupos recibirán reenvíos desde aquí.' : `┃ 🎯 *Central:* \`${getCentralChatId()}\``,
         `📋 *${lista.length}* episodios registrados como base.`,
         '> Solo los nuevos se enviarán.',
         `*Usa \`${usedPrefix}dbsstop\` para detener*`,
@@ -2037,6 +1974,13 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (command === 'dbsstop') {
     const entry = global.dbsActiveChats.get(m.chat)
     if (!entry) return m.reply('ℹ️ El notificador no estaba activo.')
+    if (getCentralChatId() === m.chat) {
+      const otrosActivos = [...global.dbsActiveChats.keys()].filter(chatId => chatId !== m.chat)
+      if (otrosActivos.length) {
+        return m.reply('⛔ Este es el grupo central. Detén primero los grupos receptores o deja el central activo para que pueda reenviar los archivos.')
+      }
+      clearCentralChatId()
+    }
     const activeTime = formatActiveTime(entry.startedAt)
     const sentCount = Number(entry.sentCount) || 0
     detenerNotificador(m.chat)
@@ -2144,9 +2088,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 }
 
-handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
+handler.command = /^(dbsstart|dbstar|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime', 'notificaciones']
-handler.help = ['dbsstart [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
+handler.help = ['dbsstart [segundos]', 'dbstar [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
 handler.exp = 0
 handler.level = 0
 handler.limit = false

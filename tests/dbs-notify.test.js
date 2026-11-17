@@ -174,7 +174,7 @@ test('dbsstart registra la portada como base y no reenvía episodios viejos', { 
   assert.equal(sinNovedades.documentos, 0, 'un episodio ya registrado no debe enviarse')
 })
 
-test('un episodio nuevo se envía una sola vez, con portada y desde disco', { timeout: 150_000 }, async () => {
+test('un episodio nuevo se envía una sola vez, limpio y desde disco', { timeout: 150_000 }, async () => {
   const { nuevo } = await ejecutar()
 
   // SUB y LAT comparten ficha: un único envío, aunque la ficha traiga los dos.
@@ -187,10 +187,9 @@ test('un episodio nuevo se envía una sola vez, con portada y desde disco', { ti
     assert.equal(doc.mimetype, 'video/mp4')
   }
 
-  // Portada con caption: antes la imagen salía muda y el texto se perdía.
-  assert.equal(nuevo.portadas, 1)
-  assert.match(nuevo.caption, /Nuevo Episodio/)
-  assert.match(nuevo.caption, /Ver online/)
+  // El notificador envía únicamente los archivos, sin portada ni textos extra.
+  assert.equal(nuevo.portadas, 0)
+  assert.equal(nuevo.caption, null)
 
   // SUB y LAT quedan marcados como vistos para no volver a enviarlos.
   assert.ok(nuevo.visto.includes('dbs-one-piece-6'))
