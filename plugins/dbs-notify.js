@@ -37,6 +37,7 @@ import { compressDw4 } from '../src/libraries/dw4-compress.js'
 const ANIMEDBS_URL        = 'https://www.animedbs.online'
 const DBS_DIRECTORY_URL   = `${ANIMEDBS_URL}/anime/?status=&type=&order=update`
 const DBS_DIRECTORY_LIMIT = 12
+const ANILIST_URL         = 'https://graphql.anilist.co'
 
 const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
@@ -1517,13 +1518,72 @@ async function reenviarDesdeCentral(conn, centralMessage, recipient, fallbackMes
   return conn.sendMessage(recipient, fallbackMessage)
 }
 
+async function resolverImagenEpisodio(ep) {
+  if (ep.imgUrl) return ep.imgUrl
+  try {
+    const { data } = await getPage(ep.epUrl, {
+      headers: { ...DBS_HEADERS, Referer: ANIMEDBS_URL },
+      timeout: 10_000,
+    })
+    const $ = cheerio.load(data)
+    const candidates = [
+      $('.thumb img, .thumbook img, .ts-post-image img, .poster img').first(),
+      $('meta[property="og:image"]').first(),
+      $('img[src]').first(),
+    ]
+    for (const element of candidates) {
+      const raw = element.attr('data-src') || element.attr('data-lazy-src') || element.attr('content') || element.attr('src') || ''
+      const image = absoluteUrl(raw, ep.epUrl)
+      if (image) {
+        ep.imgUrl = image
+        return image
+      }
+    }
+  } catch (error) {
+    console.log(`[dbs-notify] No se pudo obtener la imagen de vista previa: ${error.message}`)
+  }
+  return ''
+}
+
+async function resolverImagenAniList(ep) {
+  const candidates = [ep.titulo, String(ep.slug || '').replace(/[-_]+/g, ' ')]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+  const query = `query ($search: String!) {
+    Page(perPage: 3) {
+      media(search: $search, type: ANIME) {
+        coverImage { extraLarge large medium }
+      }
+    }
+  }`
+  for (const search of [...new Set(candidates)]) {
+    try {
+      const response = await axios.post(ANILIST_URL, {
+        query,
+        variables: { search },
+      }, {
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        timeout: 10_000,
+      })
+      const media = response.data?.data?.Page?.media || []
+      const image = media[0]?.coverImage?.extraLarge
+        || media[0]?.coverImage?.large
+        || media[0]?.coverImage?.medium
+      if (image) return image
+    } catch (error) {
+      console.log(`[dbs-notify] AniList no disponible para "${search}": ${error.message}`)
+    }
+  }
+  return ''
+}
+
 /**
  * Envía un episodio a todos los destinatarios.
  *
  * `jobResults` evita el caso SUB + LAT de la misma ficha: el segundo idioma
  * reutiliza el archivo ya descargado en vez de bajar cientos de MB otra vez.
  */
-async function enviarEpisodio(chatId, ep, conn) {
+async function enviarEpisodio(chatId, ep, conn, { preview = false } = {}) {
   const { titulo, epNum, epUrl } = ep
   const recipients = [...new Set((Array.isArray(chatId) ? chatId : [chatId]).filter(Boolean))]
   if (!recipients.length) throw new Error('No hay chats receptores configurados')
@@ -1546,6 +1606,19 @@ async function enviarEpisodio(chatId, ep, conn) {
   // reintento reutiliza lo ya descargado y `releaseEpisodeDirIfIdle` la borra
   // cuando el episodio sale del todo de la cola.
   const tmpDir = episodeWorkDir(ep)
+  if (preview) {
+    const previewImage = await resolverImagenAniList(ep) || await resolverImagenEpisodio(ep)
+    if (previewImage) {
+      const previewMessage = await conn.sendMessage(central, {
+        image: { url: previewImage },
+      })
+      for (const recipient of otherRecipients) {
+        await reenviarDesdeCentral(conn, previewMessage, recipient, {
+          image: { url: previewImage },
+        })
+      }
+    }
+  }
   // 1) Descarga (reutilizada si otra variante del mismo capítulo ya la hizo).
   const previous = jobResults.get(ep.id)
   let videoPath = previous?.path && fs.existsSync(previous.path) ? previous.path : null
@@ -1708,7 +1781,7 @@ async function procesarCola() {
           continue
         }
         try {
-          const result = await enviarEpisodio(activeRecipients, ep, conn)
+          const result = await enviarEpisodio(activeRecipients, ep, conn, { preview: manual })
           // Si la ficha respondió pero no hay enlaces descargables, se marca
           // como visto para no reintentarlo en cada sondeo.
           markSeenByRecipients(activeRecipients, ep)
