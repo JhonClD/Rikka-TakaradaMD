@@ -1381,7 +1381,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
 
       // Envío por destinatario: un grupo que falle no cancela a los demás ni
       // fuerza un reenvío completo (evita duplicados). Stream nuevo por envío:
-      // un createReadStream no se puede consumir dos veces.
+      // la ruta se entrega como { url } para que Baileys abra un stream nuevo.
       const enviadosOriginal = []
       for (const chatId of recipients) {
         try {
@@ -1393,7 +1393,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
             }
           }
           await conn.sendMessage(chatId, {
-            document   : fs.createReadStream(videoPath),
+            document   : { url: videoPath },
             fileLength : videoSize,
             fileName,
             mimetype   : 'video/mp4',
@@ -1415,7 +1415,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
       for (const chatId of recipients) {
         try {
           await conn.sendMessage(chatId, {
-            document   : fs.createReadStream(video360Path),
+            document   : { url: video360Path },
             fileLength : video360Size,
             fileName   : fileName360,
             mimetype   : 'video/mp4',
