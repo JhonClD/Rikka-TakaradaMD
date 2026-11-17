@@ -55,9 +55,28 @@ jobs:
 
       - name: Volcar el fallo en la anotación del check
         if: failure()
+        env:
+          NODE_VERSION: ${{ matrix.node-version }}
         run: |
-          details=$(tail -n 40 tests-output.log 2>/dev/null | tr '\n' '|' | tr -d '\r' | cut -c1-900 || true)
-          echo "::error::Tests fallados en Node ${NODE_VERSION:-?}: ${details:-sin salida capturada}"
+          # La cola del log son los tests que SÍ pasaron; el culpable está en
+          # mitad. Se busca cualquier `not ok` (anidados incluidos) con su error; si no hay
+          # ninguno (ESLint, npm ci), se cae a la cola del log.
+          details=$(grep -E -A 24 '^[[:space:]]*not ok' tests-output.log 2>/dev/null | head -n 120 | tr '\n' '|' | tr -d '\r' | cut -c1-1000 || true)
+          if [ -z "$details" ]; then
+            details=$(tail -n 40 tests-output.log 2>/dev/null | tr '\n' '|' | tr -d '\r' | cut -c1-900 || true)
+          fi
+          echo "::error::Fallo en Node ${NODE_VERSION:-?}: ${details:-sin salida capturada}"
+
+      # Los logs crudos de Actions no siempre se pueden descargar desde fuera,
+      # así que el log completo de la ejecución queda como artefacto del run.
+      - name: Guardar el log de tests como artefacto
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-output-node-${{ matrix.node-version }}
+          path: tests-output.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: No hay sesión de WhatsApp ni .env versionados
         run: |

@@ -187,6 +187,7 @@ de WhatsApp o el `.env`.
 | `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, ningún alias lo comparten dos plugins, y los archivos se llaman en kebab-case |
 | `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` y las imágenes del proyecto están donde dice `paths.js` |
 | `tests/ghost-identifiers.test.js` | nadie asigna a un identificador no declarado (`npm run check:ghosts`) |
+| `tests/reconnect-policy.test.js` | retroceso de reconexión, motivos que sí/no admiten reintento y que los códigos coincidan con los del fork de Baileys |
 
 ---
 
@@ -251,7 +252,33 @@ Se pasan después de `npm start --`, por ejemplo `npm start -- --self --autoclea
 | `--restrict` | oculta los plugins marcados `admin` |
 | `--autoread` / `--noprint` / `--img` / `--queque` | marcar leídos / no imprimir mensajes / menú con imagen / cola de mensajes |
 | `--autocleartmp` | limpia `src/tmp` y el tmp del sistema cada 30s |
-| `--dev` | recarga en caliente de `config.js` y `api.js` (los plugins se recargan siempre que cambien en disco) |
+| `--dev` | recarga en caliente de `config.js`, `api.js` y `handler.js` (los plugins se recargan siempre que cambien en disco) |
+
+## 🔁 Cómo reconecta el socket
+
+La política vive en [`src/funcion/reconnect-policy.js`](./src/funcion/reconnect-policy.js)
+(funciones puras, testeables) y `main.js` solo la aplica:
+
+1. **Retroceso exponencial con jitter**: 1 s → 2 → 4 → 8 → 16 → 30 s, con ±25 %
+   de dispersión para que varias instancias que cayeron juntas no vuelvan a
+   intentar exactamente a la vez.
+2. **Modo tormenta**: a partir del intento 10 el ritmo pasa a 60 s. Tres horas de
+   corte son ~141 intentos en vez de ~219, y el server no ve un bucle de 30 s.
+3. **Vigilante de handshake**: si tras reconectar el socket sigue sin abrir en
+   45 s, se fuerza otro intento. Cubre el caso feo —un TCP que se apaga sin
+   cerrar— en el que Baileys no emite `close` y el bot se quedaba colgado con un
+   socket zombie.
+4. **Estados terminales**: `loggedOut` (401), `badSession` (500),
+   `connectionReplaced` (440), `multideviceMismatch` (411) y el 405 no se
+   reintentan en bucle; se cancela lo programado y se hace **un** intento cada
+   5 minutos, que es lo que salva el "cerré la otra sesión y no reinicié el bot".
+5. **Aviso al owner** en el intento 8 y luego cada 20, por el mismo canal de
+   errores de la consola: si el bot recupera conexión, el aviso sale entonces.
+
+Los números de `DisconnectReason` de este fork **no son** los de Baileys
+estándar: aquí `badSession` es 500 y `restartRequired` 515, al revés que
+upstream. Un test lo vigila contra el enum real, porque copiar la tabla de otro
+proyecto convertiría "hay que escanear otra vez" en un bucle infinito.
 
 ## 🔒 Seguridad
 
