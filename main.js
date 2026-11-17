@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import path, { join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { platform } from 'process';
+import os from 'os';
 import fs, { readdirSync, statSync, unlinkSync, existsSync, readFileSync, watch } from 'fs';
 import https from 'https';
 import yargs from 'yargs';
@@ -19,6 +20,7 @@ import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
+import { dbFile, TMP_DIR, sessionFile } from './src/funcion/paths.js';
 
 const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
@@ -27,7 +29,6 @@ import readline from 'readline';
 import qrcodeTerminal from 'qrcode-terminal';
 import NodeCache from 'node-cache';
 const { chain } = lodash;
-const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
 let stopped = 'close';
 protoType();
 serialize();
@@ -60,11 +61,18 @@ global.__filename = function filename(pathURL = import.meta.url, rmPrefix = plat
 };
 global.timestamp = { start: new Date };
 const __dirname = global.__dirname(import.meta.url);
-const tmpDir = join(__dirname, './src/tmp');
+const tmpDir = TMP_DIR;
 fs.mkdirSync(tmpDir, { recursive: true });
 global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
 global.prefix = new RegExp('^[#!/.]')
-global.db = new Low(/https?:\/\//.test(opts['db'] || '') ? new cloudDBAdapter(opts['db']) : new JSONFile(`${opts._[0] ? opts._[0] + '_' : ''}database.json`), null);
+// --db con URL apuntaba a un cloudDBAdapter que nunca se importó (y que además
+// pide `got`, ausente en package.json): reventaba con ReferenceError al
+// arrancar. Se degrada a la base local en vez de romper el arranque.
+const dbOption = String(global.opts['db'] || '');
+if (/^https?:\/\//.test(dbOption)) {
+  console.warn(chalk.yellow('[ ⚠️ ] --db con URL no está soportado en esta versión; se usará la base de datos local.'));
+}
+global.db = new Low(new JSONFile(dbFile(global.opts._?.[0] || '')), null);
 
 global.loadDatabase = async function loadDatabase() {
   if (global.db.READ) {
@@ -92,10 +100,10 @@ global.loadDatabase = async function loadDatabase() {
 };
 loadDatabase();
 
-let { state, saveCreds } = await useMultiFileAuthState(global.authFile);
+let { state, saveCreds } = await useMultiFileAuthState(global.authFilePath);
 const version22 = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1033893291] }));
-console.log(version22)
-const version = version22?.version || [2, 3000, 1033893291]; 
+const version = version22?.version || [2, 3000, 1033893291];
+console.log(chalk.gray(`[ ℹ️ ] Versión de WhatsApp: ${version.join('.')}`));
 let phoneNumber = global.botnumber || process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
 const methodCodeQR = process.argv.includes('--method=qr');
 const methodCode = !!phoneNumber || process.argv.includes('--method=code');
@@ -110,13 +118,13 @@ let pairingCodeDone = false;
 let pairingAttemptCount = 0;
 let pairingRequestTimer = null;
 if (methodCodeQR) opcion = '1';
-if (!methodCodeQR && !methodCode && !fs.existsSync(`./${global.authFile}/creds.json`)) {
+if (!methodCodeQR && !methodCode && !fs.existsSync(join(global.authFilePath, 'creds.json'))) {
   do {
     opcion = await question('[ ℹ️ ] Seleccione una opción:\n1. Con código QR\n2. Con código de texto de 8 dígitos\n---> ');
     if (!/^[1-2]$/.test(opcion)) {
       console.log('[ ⚠️ ] Por favor, seleccione solo 1 o 2.\n');
     }
-  } while (opcion !== '1' && opcion !== '2' || fs.existsSync(`./${global.authFile}/creds.json`));
+  } while (opcion !== '1' && opcion !== '2' || fs.existsSync(join(global.authFilePath, 'creds.json')));
 }
 
 const filterStrings = [
@@ -206,8 +214,26 @@ console.warn = function (...args) {
   }
 };
 
+const decodedFilterStrings = filterStrings
+  .map((value) => {
+    try {
+      return Buffer.from(value, 'base64').toString();
+    } catch {
+      return '';
+    }
+  })
+  .filter(Boolean);
+
+// Ruido conocido de Baileys (sesiones cerradas, MAC inválida) que no aporta
+// nada en la consola. err.message puede no ser un string: Buffer.from() dentro
+// del propio handler mataba el proceso, así que aquí se normaliza primero.
+const isFilteredError = (value) => {
+  const message = typeof value === 'string' ? value : String(value?.message ?? value ?? '');
+  return !!message && decodedFilterStrings.some((noise) => message.includes(noise));
+};
+
 process.on('uncaughtException', (err) => {
-  if (filterStrings.includes(Buffer.from(err.message).toString('base64'))) return;
+  if (isFilteredError(err)) return;
   console.error('Uncaught Exception:', err);
 });
 
@@ -255,7 +281,7 @@ if (methodCode && !state.creds.registered) {
   });
 }
 
-if (!fs.existsSync(`./${global.authFile}/creds.json`)) {
+if (!fs.existsSync(join(global.authFilePath, 'creds.json'))) {
   if (opcion === '2' || methodCode) {
     opcion = '2';
     if (!conn.authState.creds.registered) {
@@ -313,14 +339,18 @@ if (!opts['test']) {
     setInterval(async () => {
       if (global.db.data) await global.db.write();
       if (opts['autocleartmp'] && (global.support || {}).find) {
-        const tmp = [os.tmpdir(), 'tmp', 'jadibts'];
-        tmp.forEach((filename) => cp.spawn('find', [filename, '-amin', '3', '-type', 'f', '-delete']));
+        // os y cp no estaban importados: el `find` nunca se ejecutaba y el
+        // ReferenceError quedaba tapado por el handler de unhandledRejection.
+        const tmp = [os.tmpdir(), TMP_DIR].filter((dir) => dir && existsSync(dir));
+        tmp.forEach((dir) => {
+          spawn('find', [dir, '-amin', '3', '-type', 'f', '-delete']).on('error', (error) => {
+            console.warn('[ ⚠️ ] No se pudo limpiar ', dir, error?.message || error);
+          });
+        });
       }
     }, 30 * 1000);
   }
 }
-
-if (opts['server']) (await import('./server.js')).default(global.conn, PORT);
 
 function clearTmp() {
   const tmp = [tmpDir];
@@ -464,13 +494,12 @@ function scheduleSocketReconnect(reason) {
   }, delay);
 }
 
-process.on('uncaughtException', console.error);
 
 let isInit = true;
 let handler = await import('./handler.js');
 
 async function refreshAuthState() {
-  const freshAuth = await useMultiFileAuthState(global.authFile)
+  const freshAuth = await useMultiFileAuthState(global.authFilePath)
   state = freshAuth.state
   saveCreds = freshAuth.saveCreds
   connectionOptions.auth = {
@@ -645,11 +674,13 @@ async function gracefulShutdown(signal) {
 process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 
-// Manejo de errores no capturadas relacionadas con LID
-process.on('unhandledRejection', (reason, promise) => {
-  if (reason && reason.message && reason.message.includes('lid')) {
-    console.error('❌ Error no manejado relacionado con LID:', reason);
-  }
+// Registrar este handler desactiva el crash por defecto de Node: si solo se
+// loguea el caso LID, cualquier otra promesa rechazada queda silenciosa.
+process.on('unhandledRejection', (reason) => {
+  if (isFilteredError(reason)) return;
+  const error = reason instanceof Error ? reason : new Error(String(reason?.message ?? reason));
+  const isLidError = /\blid\b/i.test(error.message || '');
+  console.error(isLidError ? '❌ Error no manejado relacionado con LID:' : '❌ Promesa rechazada sin manejo:', error);
 });
 
 async function _quickTest() {

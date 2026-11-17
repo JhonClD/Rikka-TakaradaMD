@@ -6,6 +6,7 @@ import axios        from 'axios'
 import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import { spawn }    from 'child_process'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
@@ -22,7 +23,7 @@ const DBS_DIRECTORY_LIMIT    = 12
 const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 const SEEN_FILE              = path.join(DB_DIR, 'dbs_seen.json')
@@ -887,7 +888,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     console.log(`[dbs-notify] Sin servidores para "${titulo}" ep ${epNum}; se omite sin enviar mensajes.`)
     return false
   }
-  const localTmp = path.join(process.cwd(), 'temp_videos')
+  const localTmp = TEMP_VIDEOS_DIR
   if (!fs.existsSync(localTmp)) fs.mkdirSync(localTmp, { recursive: true })
   const tmpDir = path.join(localTmp, `dbs_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })

@@ -3,13 +3,14 @@
 
 import fs from 'fs'
 import path from 'path'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 const STATE_FILE = path.join(DB_DIR, 'animev1_notify_state.json')
@@ -230,7 +231,7 @@ async function fetchNewEpisodes(chatId) {
 
 async function sendEpisode(chatId, item, conn) {
   const { subscription, ep } = { subscription: item, ep: item.ep }
-  const localTmp = path.join(process.cwd(), 'temp_videos')
+  const localTmp = TEMP_VIDEOS_DIR
   fs.mkdirSync(localTmp, { recursive: true })
   const tmpDir = path.join(localTmp, `animev1_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })

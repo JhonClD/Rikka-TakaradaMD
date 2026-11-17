@@ -7,6 +7,22 @@ import { unwatchFile, watchFile } from 'fs';
 import fs from 'fs';
 import chalk from 'chalk';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
+import { ANTI_ARAB_JSON } from './src/funcion/paths.js';
+
+// La lista anti-números árabes se leía con una ruta relativa a process.cwd()
+// y dentro del bucle de participantes, por participante. Como el archivo no
+// existe en el repositorio, JSON.parse lanzaba ENOENT, el try/catch lo
+// tragaba y el mensaje de bienvenida no se enviaba nunca. Se carga una sola
+// vez y tolera su ausencia.
+function loadAntiArabPrefixes() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ANTI_ARAB_JSON, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+const antiArabPrefixes = loadAntiArabPrefixes();
 
 import _printModule from './src/libraries/print.js';
 const _printMessage = _printModule?.default ?? _printModule;
@@ -693,8 +709,7 @@ export async function participantsUpdate({ id, participants: _rawParticipants, a
           try {
             let pp = await m?.conn?.profilePictureUrl(userJid, 'image').catch(_ => 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60');
             const apii = await mconn?.conn?.getFile(pp);
-            const antiArab = JSON.parse(fs.readFileSync('./src/antiArab.json'));
-            const userPrefix = antiArab.some((prefix) => userJid.startsWith(prefix));
+            const userPrefix = antiArabPrefixes.some((prefix) => userJid.startsWith(prefix));
             const botJidClean = m?.conn?.user?.jid || '';
             const botPhoneClean = botJidClean.replace(/[^0-9]/g, '');
             const botTt2 = groupMetadata?.participants?.find((u) => {
