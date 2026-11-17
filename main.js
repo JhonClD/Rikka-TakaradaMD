@@ -32,9 +32,14 @@ const { chain } = lodash;
 let stopped = 'close';
 protoType();
 serialize();
-const msgRetryCounterMap = new Map();
-const msgRetryCounterCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
-const userDevicesCache = new NodeCache({ stdTTL: 0, checkperiod: 0 });
+// stdTTL 0 en node-cache significa "no caduca nunca": con el bot varios días
+// encendido estos dos cachés de Baileys crecían sin límite.
+const msgRetryCounterCache = new NodeCache({ stdTTL: 10_000, checkperiod: 120 });
+const userDevicesCache = new NodeCache({ stdTTL: 30_000, checkperiod: 120 });
+// Nivel del logger interno de Baileys. 'silent' conserva el comportamiento
+// actual; LOG_LEVEL=debug permite ver el handshake sin tocar el código.
+const logLevel = process.env.LOG_LEVEL || 'silent';
+const baileysLogger = () => pino({ level: logLevel });
 // Reutiliza conexiones TLS del upload endpoint de WhatsApp entre envíos.
 const mediaUploadAgent = new https.Agent({
   keepAlive: true,
@@ -238,7 +243,7 @@ process.on('uncaughtException', (err) => {
 });
 
 const connectionOptions = {
-  logger: pino({ level: 'silent' }),
+  logger: baileysLogger(),
   // El QR se imprime manualmente en connectionUpdate para evitar duplicados.
   printQRInTerminal: false,
   mobile: MethodMobile,
@@ -259,8 +264,8 @@ const connectionOptions = {
       return "";
     }
   },
-  msgRetryCounterCache: msgRetryCounterCache || new Map(),
-  userDevicesCache: userDevicesCache || new Map(),
+  msgRetryCounterCache,
+  userDevicesCache,
   defaultQueryTimeoutMs: 20000,
   fetchAgent: mediaUploadAgent,
   cachedGroupMetadata: (jid) => global.conn.chats[jid]?.metadata ?? {},
@@ -277,7 +282,7 @@ if (methodCode && !state.creds.registered) {
     maxPerHour: 3,
     globalMaxPerHour: 6,
     minIntervalMs: 60_000,
-    logger: pino({ level: 'silent' }),
+    logger: baileysLogger(),
   });
 }
 

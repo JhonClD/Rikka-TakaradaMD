@@ -6,8 +6,7 @@ import { tmpdir } from 'os'
 import { pipeline } from 'stream/promises'
 import { Transform, PassThrough } from 'stream'
 
-global.megaActiveDownloads = global.megaActiveDownloads || new Map()
-global.megaUserDownloads = global.megaUserDownloads || new Map()
+import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
 
 const MAX_SIZE = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
@@ -90,14 +89,6 @@ function parseMegaError(err) {
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
-  if (/^(cancelar|stop)$/i.test(command)) {
-    const userKey = m.chat + ':' + m.sender
-    const dl = global.megaActiveDownloads.get(userKey)
-    if (!dl) return m.reply('❌ No hay descarga activa para este chat.')
-    dl.controller.abort()
-    return
-  }
-
   const url = args[0]
   if (!url || !/mega\.nz/i.test(url)) {
     throw (
@@ -108,8 +99,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     )
   }
 
-  const userKey = m.chat + ':' + m.sender
-  if (global.megaUserDownloads.get(userKey)) {
+  const userKey = downloadKey(m)
+  if (hasDownload(userKey, 'mega')) {
     return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
   }
 
@@ -155,8 +146,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       `_Usa_ *.cancelar* _para detener._`
     )
 
-    global.megaActiveDownloads.set(userKey, { controller })
-    global.megaUserDownloads.set(userKey, true)
+    startDownload(userKey, 'mega', controller, { label: '☁️ Mega' })
 
     tempPath = path.join(tmpdir(), `mega_${Date.now()}_${sanitize(name)}`)
 
@@ -265,8 +255,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     }
   } finally {
     if (watchdog) watchdog.stop()
-    global.megaActiveDownloads.delete(userKey)
-    global.megaUserDownloads.delete(userKey)
+    finishDownload(userKey, 'mega', controller)
     if (tempPath && fs.existsSync(tempPath)) {
       try { fs.unlinkSync(tempPath) } catch {}
     }
@@ -275,6 +264,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
 handler.help = ['mega <enlace>', 'mg <enlace>']
 handler.tags = ['downloader']
-handler.command = /^(mega|mg|cancelar|stop)$/i
+handler.command = /^(mega|mg)$/i
 
 export default handler

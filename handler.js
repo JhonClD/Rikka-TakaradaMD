@@ -465,7 +465,10 @@ export async function handler(chatUpdate) {
           __dirname: ___dirname,
           __filename,
         });
-        if (_beforeResult) { console.log('[DEBUG] plugin.before cortó el flujo en:', name); continue; }
+        if (_beforeResult) {
+          if (opts['debug']) console.log('[debug] plugin.before cortó el flujo en:', name);
+          continue;
+        }
       }
 
       if (typeof plugin !== 'function') continue;
@@ -487,8 +490,8 @@ export async function handler(chatUpdate) {
               plugin.command === command :
               false;
 
-        if (isAccept) console.log('[DEBUG] Comando aceptado:', command, 'plugin:', name);
         if (!isAccept) continue;
+        if (opts['debug']) console.log('[debug] comando', command, '→', name);
 
 
         if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return;
