@@ -47,7 +47,17 @@ jobs:
         run: npm run lint
 
       - name: Tests
-        run: npm test
+        # tee guarda la salida para poder reproducirla en una anotación si
+        # falla; PIPESTATUS preserva el código real del runner.
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee tests-output.log
+
+      - name: Volcar el fallo en la anotación del check
+        if: failure()
+        run: |
+          details=$(tail -n 40 tests-output.log 2>/dev/null | tr '\n' '|' | tr -d '\r' | cut -c1-900 || true)
+          echo "::error::Tests fallados en Node ${NODE_VERSION:-?}: ${details:-sin salida capturada}"
 
       - name: No hay sesión de WhatsApp ni .env versionados
         run: |
