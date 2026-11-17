@@ -6,7 +6,7 @@ import axios        from 'axios'
 import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
-import { spawn }    from 'child_process'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
@@ -22,7 +22,7 @@ const DBS_DIRECTORY_LIMIT    = 12
 const ANILIST_URL            = 'https://graphql.anilist.co'
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 const SEEN_FILE              = path.join(DB_DIR, 'dbs_seen.json')
@@ -144,23 +144,6 @@ function setGlobalIntervalSec(intervalSec) {
 
 function absoluteUrl(value, base) {
   try { return new URL(value, base).href } catch (_) { return '' }
-}
-
-function parseEpisodeHref(href, baseUrl) {
-  const epUrl = absoluteUrl(href, baseUrl)
-  if (!epUrl) return null
-  let pathname
-  try { pathname = decodeURIComponent(new URL(epUrl).pathname) } catch (_) { return null }
-  const match = pathname.match(/\/ver\/([^/]+?)(?:[-_](?:episode|episodio|ep)[-_]?)?(?:[-_])?(\d+)(?:[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p))?\/?$/i)
-    || pathname.match(/\/ver\/([^/]+?)[-_](\d+)\/?$/i)
-  if (!match) return null
-  const epNum = Number.parseInt(match[2], 10)
-  if (!Number.isInteger(epNum) || epNum < 0) return null
-  const slug = match[1].replace(/[-_](?:episode|episodio|ep)$/i, '')
-  const normSlug = slug
-    .replace(/[-_](?:sub|latino|castellano|espanol|español|esp|dub|hd|fhd|1080p|720p|480p)$/i, '')
-    .toLowerCase()
-  return { slug, normSlug, epNum, epUrl }
 }
 
 async function getPage(url, options = {}, attempts = 3) {
@@ -887,7 +870,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     console.log(`[dbs-notify] Sin servidores para "${titulo}" ep ${epNum}; se omite sin enviar mensajes.`)
     return false
   }
-  const localTmp = path.join(process.cwd(), 'temp_videos')
+  const localTmp = TEMP_VIDEOS_DIR
   if (!fs.existsSync(localTmp)) fs.mkdirSync(localTmp, { recursive: true })
   const tmpDir = path.join(localTmp, `dbs_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
@@ -1161,7 +1144,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     return m.reply(txt)
   }
   if (command === 'dbsqueue') return m.reply(global.dbsEpisodeQueue.length ? `📋 *Cola (${global.dbsEpisodeQueue.length}):*\n\n` + global.dbsEpisodeQueue.map((i,n) => `${n+1}. *${i.ep.titulo}* ep ${zeroPad(i.ep.epNum)} [${i.recipients?.includes(m.chat) ? 'este chat' : 'otro chat'}]`).join('\n') : '✅ Cola vacía.')
-  if (command === 'dbsflush') { const antes = global.dbsEpisodeQueue.length; let removed = 0; for (const item of global.dbsEpisodeQueue) { if (!item.recipients?.includes(m.chat)) continue; item.recipients = item.recipients.filter(id => id !== m.chat); global.dbsQueuedIds.delete(`${m.chat}:${item.ep.id}`); removed++ } global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.recipients?.length); return m.reply(`🗑️ *${removed}* episodio(s) eliminado(s) de este chat.`) }
+  if (command === 'dbsflush') { let removed = 0; for (const item of global.dbsEpisodeQueue) { if (!item.recipients?.includes(m.chat)) continue; item.recipients = item.recipients.filter(id => id !== m.chat); global.dbsQueuedIds.delete(`${m.chat}:${item.ep.id}`); removed++ } global.dbsEpisodeQueue = global.dbsEpisodeQueue.filter(item => item.recipients?.length); return m.reply(`🗑️ *${removed}* episodio(s) eliminado(s) de este chat.`) }
   if (command === 'dbsunblock') { const estaba = global.dbsQueueRunning; if (global.dbsEpisodeQueue.length) { await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\n▶️ Reanudando ${global.dbsEpisodeQueue.length} episodio(s)...`); if (!estaba) procesarCola().catch(() => {}) } else await m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.\nℹ️ No hay episodios pendientes.`); return }
   if (command === 'dbscheck') { await m.reply('🔍 Chequeando episodios SUB + LAT de AnimeDBS...'); try { await checkNuevosEpisodios(m.chat, conn); if (!global.dbsEpisodeQueue.some(i => i.recipients?.includes(m.chat) || i.chatId === m.chat)) await m.reply('✅ Sin episodios nuevos.') } catch (err) { await m.reply(`❌ Error: ${err.message}`) }; return }
   if (command === 'dbsinterval') { const seconds = parseIntervalInput(text); if (!Number.isInteger(seconds) || seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return m.reply(`❌ Usa entre *${MIN_INTERVAL_SECONDS} segundos* y *${MAX_INTERVAL_SECONDS / 60} minutos*.\nEjemplos: *${usedPrefix}dbsinterval 60s* o *${usedPrefix}dbsinterval 10m*`); if (!global.dbsActiveChats.has(m.chat)) return m.reply(`⚠️ Usa *${usedPrefix}dbsstart* primero.`); setGlobalIntervalSec(seconds); for (const chatId of Object.keys(loadState()).filter(id => id !== '__config')) iniciarNotificador(chatId, conn, seconds, false); return m.reply(`⏱️ Intervalo global actualizado a *${formatInterval(seconds)}*.`) }

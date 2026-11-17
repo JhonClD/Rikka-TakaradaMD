@@ -130,9 +130,7 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   const settings = global.db?.data?.settings?.[conn.user?.jid] ?? {};
   const { restrict, antiCall, antiprivado } = settings;
   const { autoread, gconly, pconly, self } = global.opts ?? {};
-
-  const on  = (v) => (v ? "✅ activo"   : "❌ desactivado");
-  const onP = (v) => (v ? "✅ activado" : "❌ desactivado");
+  const on = (v) => (v ? "✅ activo" : "❌ desactivado");
 
   const linkUrl = "https://wa.me/51925092348";
   const info = `𓂃 ࣪˖ ִֶָ *Rikka Takarada - MD* 𓈈
@@ -166,6 +164,15 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   ˖ *Privados:* ${privados}
   ˖ *Grupos:* ${groups.length}
   ˖ *Total:* ${allChats.length}
+﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌
+
+𓂃 ࣪˖ *Flags*
+  ˖ *Modo restringido:* ${on(restrict)}
+  ˖ *Anti llamadas:* ${on(antiCall)}
+  ˖ *Solo dueño en privado:* ${on(antiprivado)}
+  ˖ *Auto-leer:* ${on(autoread)}
+  ˖ *Solo grupos:* ${on(gconly)}
+  ˖ *Solo privados:* ${on(pconly)}
 ﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌`.trim();
 
   const menuImage = global.imagen1 ?? Buffer.alloc(0);
@@ -196,6 +203,8 @@ const handler = async (m, { conn, usedPrefix, command }) => {
   }, { quoted: m });
 };
 
+handler.help = ['ping', 'info', 'status'];
+handler.tags = ['info'];
 handler.command = /^(p|ping|info|status|estado|infobot)$/i;
 export default handler;
     

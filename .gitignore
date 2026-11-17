@@ -1,5 +1,36 @@
+# Dependencias
+node_modules/
+
+# Configuración y datos locales
 .env
 .env.*
 !.env.example
-node_modules/
+
+# Sesión de WhatsApp: creds.json guarda las claves Signal de la cuenta.
+# Esto NUNCA debe llegar a Git.
+RikkaSession/
+*.data-node/
+session-data/
+src/session/
+
+# Bases de datos y estado en runtime
+database.json
+database_*.json
+database/
+temp_videos/
+src/tmp/
 tmp/
+src/lidsresolve.json
+src/lidsresolve.json.bak
+
+# Volcados y logs
+*.log
+npm-debug.log*
+core.*
+hs_err_pid*.log
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

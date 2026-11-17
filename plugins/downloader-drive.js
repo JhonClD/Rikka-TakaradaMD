@@ -23,8 +23,7 @@ async function compatibleDriveFetch(...args) {
   return response
 }
 
-global.gdActiveDownloads = global.gdActiveDownloads || new Map()
-global.gdUserDownloads = global.gdUserDownloads || new Map()
+import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
 
 const MAX_SIZE = 2 * 1024 ** 3
 const MAX_FOLDER_FILES = 25
@@ -357,14 +356,6 @@ async function gdriveDl(url, signal) {
 
 const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
   const animeDriveCommand = /^anid$/i.test(command)
-  if (/^(cancelar|stop)$/i.test(command)) {
-    const userKey = m.chat + ':' + m.sender
-    const dl = global.gdActiveDownloads.get(userKey)
-    if (!dl) return m.reply('❌ No hay descarga activa para este chat.')
-    dl.controller.abort()
-    return
-  }
-
   if (!args[0]) {
     throw (
       `🔮 ʀɪᴋᴋᴀ ᴅʀɪᴠᴇ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ 🧸\n\n` +
@@ -383,8 +374,8 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
     return conn.sendMessage(m.chat, { text: 'Usa /aniD con el enlace de una carpeta pública de Google Drive.' })
   }
 
-  const userKey = m.chat + ':' + m.sender
-  if (global.gdUserDownloads.get(userKey)) {
+  const userKey = downloadKey(m)
+  if (hasDownload(userKey, 'gdrive')) {
     return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
   }
 
@@ -414,8 +405,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
         if (isAbort(err)) throw err
         throw parseGDriveError(err)
       }
-      global.gdActiveDownloads.set(userKey, { controller })
-      global.gdUserDownloads.set(userKey, true)
+      startDownload(userKey, 'gdrive', controller, { label: '📁 Google Drive' })
       await editStatus(`📁 *Carpeta encontrada*\n📄 ${files.length} archivo(s)\n🔄 _Calculando tamaños..._`)
       const details = []
       let totalBytes = 0
@@ -503,8 +493,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
       `_Usa_ *.cancelar* _para detener._`
     )
 
-    global.gdActiveDownloads.set(userKey, { controller })
-    global.gdUserDownloads.set(userKey, true)
+    startDownload(userKey, 'gdrive', controller, { label: '📁 Google Drive' })
 
     tempPath = path.join(os.tmpdir(), `gdrive_${Date.now()}_${sanitize(info.fileName)}`)
 
@@ -572,8 +561,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
     }
   } finally {
     if (watchdog) watchdog.stop()
-    global.gdActiveDownloads.delete(userKey)
-    global.gdUserDownloads.delete(userKey)
+    finishDownload(userKey, 'gdrive', controller)
     if (tempPath && fs.existsSync(tempPath)) {
       try { fs.unlinkSync(tempPath) } catch {}
     }
@@ -582,6 +570,6 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
 
 handler.help = ['gdrive <enlace archivo|carpeta>', 'aniD <enlace-carpeta>']
 handler.tags = ['downloader']
-handler.command = /^(gdrive|gd|drive|anid|cancelar|stop)$/i
+handler.command = /^(gdrive|gd|drive|anid)$/i
 
 export default handler

@@ -3,13 +3,14 @@
 
 import fs from 'fs'
 import path from 'path'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 const STATE_FILE = path.join(DB_DIR, 'animev1_notify_state.json')
@@ -90,33 +91,6 @@ function buildFileName(ep, subscription, extension = '.mp4') {
   const variant = normalizeVariant(subscription.variant)
   const number = zeroPad(episodeNumber(ep) || 'x')
   return `${number} ${title} (${variant})${extension}`
-}
-
-async function resolveSubscription(input, variant = 'SUB') {
-  const raw = String(input || '').trim()
-  if (!raw) throw new Error(`Indica un título o URL de AnimeV1 (${DOMAIN}).`)
-  let url = /^https?:\/\//i.test(raw) ? raw : ''
-  let result = null
-  if (!url) {
-    const response = await animeV1.searchAnime(raw, DOMAIN)
-    result = response?.data?.results?.[0]
-    if (!result?.url) throw new Error(`No encontré *${clean(raw)}* en AnimeV1.`)
-    url = result.url
-  }
-  const infoResponse = await animeV1.getAnimeInfo(url)
-  const anime = infoResponse?.data
-  if (!anime?.episodes?.length) throw new Error('AnimeV1 no devolvió episodios para esa serie.')
-  const episodes = [...anime.episodes].sort((a, b) => episodeNumber(a) - episodeNumber(b))
-  const latest = episodes[episodes.length - 1]
-  return {
-    key: subscriptionKey(url, variant),
-    url,
-    title: clean(anime.title || result?.title || raw, 120),
-    image: anime.image || result?.image || '',
-    variant: normalizeVariant(variant),
-    lastEpisodeNumber: episodeNumber(latest),
-    latestEpisode: latest,
-  }
 }
 
 async function discoverCatalogSubscriptions() {
@@ -230,7 +204,7 @@ async function fetchNewEpisodes(chatId) {
 
 async function sendEpisode(chatId, item, conn) {
   const { subscription, ep } = { subscription: item, ep: item.ep }
-  const localTmp = path.join(process.cwd(), 'temp_videos')
+  const localTmp = TEMP_VIDEOS_DIR
   fs.mkdirSync(localTmp, { recursive: true })
   const tmpDir = path.join(localTmp, `animev1_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })

@@ -1,9 +1,9 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join } from 'path';
+import { SPEEDTEST_SCRIPT } from '../src/funcion/paths.js';
 
 const execFileAsync = promisify(execFile);
-const SCRIPT = join(process.cwd(), 'src', 'libraries', 'ookla-speedtest.py');
+const SCRIPT = SPEEDTEST_SCRIPT;
 const TIMEOUT = 180000;
 
 function formatMbps(bitsPerSecond = 0) {

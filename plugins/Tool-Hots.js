@@ -7,6 +7,7 @@ import { exec } from 'child_process';
 import fs from 'fs/promises';
 import util from 'util';
 import path from 'path';
+import { TMP_DIR } from '../src/funcion/paths.js';
 
 const execAsync = util.promisify(exec);
 
@@ -14,7 +15,7 @@ const execAsync = util.promisify(exec);
 
 class FastFetchDownloader {
   constructor() {
-    this.config = { binPath: path.join(process.cwd(), 'src/tmp') };
+    this.config = { binPath: TMP_DIR };
     this.fastfetchBinaries = new Map([
       ['linux-x64',   { fileName: 'fastfetch-linux-amd64.tar.gz',   relativePath: 'fastfetch-linux-amd64/usr/bin/fastfetch'   }],
       ['linux-arm64', { fileName: 'fastfetch-linux-aarch64.tar.gz', relativePath: 'fastfetch-linux-aarch64/usr/bin/fastfetch' }],

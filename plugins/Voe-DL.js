@@ -1,4 +1,3 @@
-import { execFile } from 'child_process'
 import { createWriteStream } from 'fs'
 import { mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -7,12 +6,10 @@ import { isIP } from 'net'
 import { Readable, Transform } from 'stream'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
-import { promisify } from 'util'
 import { fetch as wreqFetch } from 'wreq-js'
 import { fetch as nodeFetch } from 'undici'
 import ffmpegStatic from 'ffmpeg-static'
 
-const execFileAsync = promisify(execFile)
 const FFMPEG_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 25000
 const DIRECT_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000

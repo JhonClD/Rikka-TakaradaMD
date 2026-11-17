@@ -1,19 +1,11 @@
-import fs from 'node:fs'
-import path from 'node:path'
+import { loadEnv } from '../src/funcion/env.js'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 
-function loadEnvFile() {
-  const envPath = path.resolve(process.cwd(), '.env')
-  if (!fs.existsSync(envPath)) return
-  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/)
-    if (!match || match[1] in process.env) continue
-    process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2')
-  }
-}
-
-loadEnvFile()
+// El .env lo carga config.js (src/funcion/env.js) antes de importar los
+// plugins; este duplicado leía el archivo desde process.cwd() y, según el
+// orden de carga, dejaba las claves de nidl sin definir.
+loadEnv()
 
 const DOMAIN = String(process.env.ANIMEV1_DOMAIN || process.env.DEFAULT_ANIME_DOMAIN || 'animeav1.com')
   .replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase()

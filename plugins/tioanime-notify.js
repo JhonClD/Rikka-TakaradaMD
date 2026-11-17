@@ -6,7 +6,7 @@ import axios        from 'axios'
 import * as cheerio from 'cheerio'
 import fs           from 'fs'
 import path         from 'path'
-import { spawn }    from 'child_process'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import https        from 'https'
@@ -41,7 +41,7 @@ class NotModified extends Error {
 }
 
 // [CORRECCIÓN 1] Crear carpeta 'database' para no perder datos al reiniciar
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 const SEEN_FILE              = path.join(DB_DIR, 'tioanime_seen.json')
@@ -1217,7 +1217,7 @@ async function enviarEpisodio(chatIds, ep, conn) {
   const fileName = buildFileName(titulo, epNum, fuente, idioma, slug)
   
   // [CORRECCIÓN 2] Usar carpeta local segura para descargar y evitar ENOSPC
-  const localTmp = path.join(process.cwd(), 'temp_videos')
+  const localTmp = TEMP_VIDEOS_DIR
   if (!fs.existsSync(localTmp)) fs.mkdirSync(localTmp, { recursive: true })
   
   const tmpDir = path.join(localTmp, `tio_${Date.now()}`)
@@ -1576,7 +1576,7 @@ function detenerNotificador(chatId) {
 
 function restaurarNotificadores(conn) {
   const state = loadState()
-  for (const [chatId, cfg] of Object.entries(state)) {
+  for (const chatId of Object.keys(state)) {
     if (chatId === '__config') continue
     if (!global.tioActiveChats.has(chatId)) {
       iniciarNotificador(chatId, conn, getGlobalIntervalSec())
@@ -1589,7 +1589,7 @@ if (!global.tioWatchdog) {
     const conn = global.tioConn
     if (!conn) return
     const state = loadState()
-    for (const [chatId, cfg] of Object.entries(state)) {
+    for (const chatId of Object.keys(state)) {
       if (chatId === '__config') continue
       if (!global.tioActiveChats.has(chatId)) {
         iniciarNotificador(chatId, conn, getGlobalIntervalSec())

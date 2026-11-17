@@ -19,14 +19,13 @@
 const _storeBaileys = await import('baileys');
 const _storeDef = _storeBaileys.default || _storeBaileys;
 // Extraer del nivel raíz del módulo (named exports en itsliaaa/baileys)
-const { BufferJSON, proto, isJidBroadcast, WAMessageStubType, updateMessageWithReceipt, updateMessageWithReaction, jidNormalizedUser } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
+const { proto, isJidBroadcast, updateMessageWithReceipt, updateMessageWithReaction } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
 
 const TIME_TO_DATA_STALE = 5 * 60 * 1000;
 
 function makeInMemoryStore() {
     let chats = {};
     let messages = {};
-    let state = { connection: 'close' };
 
     function loadMessage(jid, id = null) {
         let message = null;
@@ -55,6 +54,12 @@ function makeInMemoryStore() {
         return chats[jid].metadata;
     }
 
+    // El almacén es solo de memoria: sin un tope, messages[jid] acumulaba un
+    // entry por mensaje durante toda la vida del proceso (fuga en bots con
+    // muchos días de uptime). 200 por chat cubre citas, reacciones y reenvíos
+    // recientes sin crecer sin control.
+    const MAX_MESSAGES_PER_CHAT = 200;
+
     function upsertMessage(jid, message, type = 'append') {
         jid = jid?.decodeJid?.();
         if (!(jid in messages)) messages[jid] = [];
@@ -63,6 +68,11 @@ function makeInMemoryStore() {
         const msg = loadMessage(jid, message.key.id);
         if (msg) Object.assign(msg, message);
         else type === 'append' ? messages[jid].push(message) : messages[jid].unshift(message);
+        const list = messages[jid];
+        if (list.length > MAX_MESSAGES_PER_CHAT) {
+            if (type === 'append') list.splice(0, list.length - MAX_MESSAGES_PER_CHAT);
+            else list.length = MAX_MESSAGES_PER_CHAT;
+        }
     }
 
     function bind(conn) {
@@ -162,7 +172,9 @@ function makeInMemoryStore() {
         }
     }
 
-    return { bind, loadMessage, toJSON, fromJSON, upsertMessage };
+    // fetchGroupMetadata se expone porque Baileys lo busca cuando
+    // generateHighQualityLinkPreview está activo.
+    return { bind, loadMessage, toJSON, fromJSON, upsertMessage, fetchGroupMetadata };
 }
 
 export default makeInMemoryStore();

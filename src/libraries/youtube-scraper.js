@@ -4,37 +4,16 @@ import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import os             from 'os';
 import path           from 'path';
-import { fileURLToPath } from 'url';
+import { loadEnv } from '../funcion/env.js';
 
 const execPromise    = promisify(exec);
 const execFilePromise = promisify(execFile);
 const FFMPEG_TIMEOUT = 120_000;
 const TMP_DIR        = os.tmpdir();
 
-// Este proyecto no depende de dotenv. Cargar solo las variables ausentes
-// permite que /play funcione igual con PM2, npm start o una ejecución directa.
-const loadProjectEnv = () => {
-    const candidates = [
-        path.resolve(process.cwd(), '.env'),
-        path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env'),
-    ];
-    const envFile = candidates.find(file => fs.existsSync(file));
-    if (!envFile) return;
-
-    try {
-        const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
-        for (const line of lines) {
-            const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
-            if (!match || match[1] in process.env) continue;
-            const value = match[2].replace(/^(["'])(.*)\1$/, '$2').trim();
-            process.env[match[1]] = value;
-        }
-    } catch (error) {
-        console.warn(`[env] no se pudo leer ${envFile}: ${error.message}`);
-    }
-};
-
-loadProjectEnv();
+// El .env lo carga config.js mediante src/funcion/env.js; se conservaba un
+// segundo parser local que resolvía la ruta contra process.cwd().
+loadEnv();
 
 export const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/))([a-zA-Z0-9_-]{11})/;
 
@@ -152,27 +131,6 @@ const resolveFormat = (type, quality = '720p') => {
     return valid.includes(q) ? q : '720';
 };
 
-// ── Fetch con reintentos ──────────────────────────────────────────────────────
-
-const fetchBuffer = async (url, headers = {}, retries = 3) => {
-    for (let i = 0; i <= retries; i++) {
-        try {
-            const res = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
-                    ...headers,
-                },
-                signal: AbortSignal.timeout(120_000),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const ab = await res.arrayBuffer();
-            return Buffer.from(ab);
-        } catch (e) {
-            if (i === retries) throw e;
-            await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-        }
-    }
-};
 
 // ── FFmpeg ────────────────────────────────────────────────────────────────────
 
@@ -199,8 +157,6 @@ const ffmpegVideo = async (rawFile, outFile) => {
         fs.copyFileSync(rawFile, outFile);
     }
 };
-
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── Provider: yt-dlp local ───────────────────────────────────────────────────
 

@@ -30,12 +30,6 @@ export function parseMp4UploadUrl(value) {
   return { id: pathMatch[1], url: url.href }
 }
 
-function cleanFilename(value, fallback) {
-  const name = String(value || '').replace(/<[^>]*>/g, '').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").trim()
-  const safe = path.basename(name).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 150)
-  return `${safe || fallback}.mp4`.replace(/\.mp4\.mp4$/i, '.mp4')
-}
-
 function formatBytes(value) {
   const bytes = Number(value) || 0
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`

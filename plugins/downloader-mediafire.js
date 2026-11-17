@@ -10,8 +10,7 @@ import https from 'https'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
 
-global.mfActiveDownloads = global.mfActiveDownloads || new Map()
-global.mfUserDownloads = global.mfUserDownloads || new Map()
+import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
 
 const MAX_SIZE = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
@@ -107,14 +106,6 @@ async function mediafireDl(url) {
 }
 
 const handler = async (m, { conn, args, usedPrefix, command }) => {
-  if (/^(cancelar|stop)$/i.test(command)) {
-    const userKey = m.chat + ':' + m.sender
-    const dl = global.mfActiveDownloads.get(userKey)
-    if (!dl) return m.reply('❌ No hay descarga activa para este chat.')
-    dl.controller.abort()
-    return
-  }
-
   const url = args[0]
   if (!url || !/mediafire\.com/i.test(url)) {
     throw (
@@ -124,8 +115,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     )
   }
 
-  const userKey = m.chat + ':' + m.sender
-  if (global.mfUserDownloads.get(userKey)) {
+  const userKey = downloadKey(m)
+  if (hasDownload(userKey, 'mediafire')) {
     return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
   }
 
@@ -174,8 +165,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       `_Usa_ *.cancelar* _para detener._`
     )
 
-    global.mfActiveDownloads.set(userKey, { controller })
-    global.mfUserDownloads.set(userKey, true)
+    startDownload(userKey, 'mediafire', controller, { label: '🔥 MediaFire' })
 
     tempPath = join(tmpdir(), `mf_${Date.now()}_${sanitize(mfData.name)}`)
 
@@ -277,8 +267,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     }
   } finally {
     if (watchdog) watchdog.stop()
-    global.mfActiveDownloads.delete(userKey)
-    global.mfUserDownloads.delete(userKey)
+    finishDownload(userKey, 'mediafire', controller)
     if (tempPath && fs.existsSync(tempPath)) {
       try { fs.unlinkSync(tempPath) } catch {}
     }
@@ -287,6 +276,6 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
 
 handler.help = ['mediafire <enlace>', 'mf <enlace>']
 handler.tags = ['downloader']
-handler.command = /^(mediafire|mf|cancelar|stop)$/i
+handler.command = /^(mediafire|mf)$/i
 
 export default handler

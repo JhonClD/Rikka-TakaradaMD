@@ -779,6 +779,7 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     cfg.cronDisabled = true
     saveCfg(cfg)
     stopCron()
+    stopHealthCheck()
     return conn.sendMessage(m.chat, { text: '🛑 Cron detenido (persistente). Usa *.crstart* para reanudar.' }, { quoted: m })
   }
 
@@ -787,6 +788,7 @@ let handler = async (m, { conn, command, args, isOwner, isAdmin }) => {
     const cfg = loadCfg()
     cfg.cronDisabled = false
     saveCfg(cfg)
+    startHealthCheck()
     startCron(conn)
     return conn.sendMessage(m.chat, { text: '▶️ Cron reiniciado.' }, { quoted: m })
   }

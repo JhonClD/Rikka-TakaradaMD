@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint + tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      # El lockfile resuelve `baileys` (y su `libsignal`) como git+ssh://.
+      # Sin esta reescritura, `npm ci` en runners sin clave SSH se cuelga.
+      - name: Usar HTTPS para las dependencias de GitHub
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git+ssh://git@github.com/"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # --ignore-scripts: evita la descarga del Chromium de puppeteer (que es
+      # dependencia opcional). Aquí no se arranca el bot, solo se lintea y testea.
+      - name: Instalar dependencias
+        run: npm ci --ignore-scripts
+
+      - name: Sintaxis de los módulos de arranque
+        run: npm run check
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Tests
+        # tee guarda la salida para poder reproducirla en una anotación si
+        # falla; PIPESTATUS preserva el código real del runner.
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee tests-output.log
+
+      - name: Volcar el fallo en la anotación del check
+        if: failure()
+        run: |
+          details=$(tail -n 40 tests-output.log 2>/dev/null | tr '\n' '|' | tr -d '\r' | cut -c1-900 || true)
+          echo "::error::Tests fallados en Node ${NODE_VERSION:-?}: ${details:-sin salida capturada}"
+
+      - name: No hay sesión de WhatsApp ni .env versionados
+        run: |
+          if git ls-files | grep -E '(^|/)(RikkaSession/|\.env$|creds\.json$|database\.json$)'; then
+            echo "::error::Hay archivos de sesión o de configuración local en el árbol de Git."
+            exit 1
+          fi
+          echo "OK: sin archivos de sesión versionados."

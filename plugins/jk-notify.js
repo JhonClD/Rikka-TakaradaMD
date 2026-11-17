@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio'
 import fs from 'fs'
 import path from 'path'
+import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js';
 import axios from 'axios'
 import { Impit } from 'impit'
 import { fetch as wreqFetch } from 'wreq-js'
@@ -415,7 +416,7 @@ async function descargarEmbed(embedUrl, outputDir, fileName, referer) {
 }
 
 const JKANIME_URL = 'https://jkanime.net'
-const DB_DIR = path.join(process.cwd(), 'database')
+const DB_DIR = DATA_DIR
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 const SEEN_FILE = path.join(DB_DIR, 'jkanime_seen.json')
 const STATE_FILE = path.join(DB_DIR, 'jkanime_state.json')
@@ -596,7 +597,7 @@ async function getAniListCover(titulo, slug = '') {
 async function enviarEpisodio(chatId, ep, conn) {
   const { titulo, epNum, epUrl, imgUrl, slug = '' } = ep
   const fileName = buildFileName(titulo, epNum, slug)
-  const tmpRoot = path.join(process.cwd(), 'temp_videos')
+  const tmpRoot = TEMP_VIDEOS_DIR
   if (!fs.existsSync(tmpRoot)) fs.mkdirSync(tmpRoot, { recursive: true })
   const tmpDir = path.join(tmpRoot, `jk_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
