@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -81,16 +82,33 @@ test('los cortes de red sí se reintentan, y lo desconocido también', () => {
   }
 })
 
-test('los códigos se contrastan con los de baileys', async (t) => {
-  let DisconnectReason
+// El enum se lee en un PROCESO APARTE. Importar `baileys` dentro del proceso de
+// test funciona en Node 22, pero en Node 20 deja `process.exitCode = 1` puesto
+// (algún dependiente lo toca al quejarse del runtime), y `node --test` reportaba
+// el archivo entero como fallado aunque las 14 pruebas pasaran. Un hijo no puede
+// ensuciar al runner, y su stdout se lee igual aunque salga con código raro.
+function readRealDisconnectReason() {
+  const code = 'import("baileys").then((m) => process.stdout.write(JSON.stringify(m.DisconnectReason ?? null)))'
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: ROOT, encoding: 'utf8', timeout: 30_000,
+  })
+  const out = (run.stdout || '').trim().match(/\{.*\}/s)?.[0]
+  if (!out) return null
   try {
-    ({ DisconnectReason } = await import('baileys'))
+    return JSON.parse(out)
   } catch {
-    t.skip('baileys no está instalado en este entorno')
-    return
+    return null
   }
-  // Si el fork cambia un número, la tabla local se queda obsoleta en silencio y
-  // un badSession dejaría de ser terminal. Esto lo pilla.
+}
+
+const REAL_DISCONNECT = readRealDisconnectReason()
+
+test('los códigos se contrastan con los de baileys', {
+  skip: REAL_DISCONNECT ? false : 'no se pudo importar baileys en este entorno',
+}, () => {
+  const DisconnectReason = REAL_DISCONNECT
+  // Si el fork cambia un número, la tabla local se queda obsoleta en silencio
+  // y un badSession dejaría de ser terminal. Esto lo pilla.
   const TERMINALES = new Set(['loggedOut', 'badSession', 'connectionReplaced', 'multideviceMismatch'])
   for (const [name, code] of Object.entries({
     loggedOut: 401, connectionClosed: 428, connectionLost: 408, connectionReplaced: 440,
