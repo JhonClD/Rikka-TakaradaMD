@@ -166,9 +166,11 @@ npm run lint:fix      # correcciones automáticas
 npm run check         # node --check sobre index/main/handler/config/api
 ```
 
-`npm run lint` usa `eslint . --max-warnings=42`: el umbral es un *ratchet*, el
-código heredado arrastra 42 avisos de `no-unused-vars` y la idea es bajarlo a
-medida que se limpien, no dejar que crezca.
+`npm run lint` es `eslint .` con `js.configs.recommended` y `no-unused-vars` a
+nivel de **error**: el código heredado ya está limpio de variables sin uso, así
+que cualquier descuido nuevo rompe la integración. Se mantiene `no-undef`
+apagado (el bot se apoya en globales declarados en `main.js`) y `args: 'none'`
+por las firmas de callback impuestas por la API.
 
 GitHub Actions (`.github/workflows/ci.yml`) ejecuta `npm ci`, `npm run check`,
 lint y tests en Node 20 y 22 en cada PR, y falla si alguien versiona la sesión

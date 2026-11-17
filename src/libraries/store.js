@@ -19,14 +19,13 @@
 const _storeBaileys = await import('baileys');
 const _storeDef = _storeBaileys.default || _storeBaileys;
 // Extraer del nivel raíz del módulo (named exports en itsliaaa/baileys)
-const { BufferJSON, proto, isJidBroadcast, WAMessageStubType, updateMessageWithReceipt, updateMessageWithReaction, jidNormalizedUser } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
+const { proto, isJidBroadcast, updateMessageWithReceipt, updateMessageWithReaction } = _storeBaileys.isJidBroadcast ? _storeBaileys : _storeDef;
 
 const TIME_TO_DATA_STALE = 5 * 60 * 1000;
 
 function makeInMemoryStore() {
     let chats = {};
     let messages = {};
-    let state = { connection: 'close' };
 
     function loadMessage(jid, id = null) {
         let message = null;
@@ -173,7 +172,9 @@ function makeInMemoryStore() {
         }
     }
 
-    return { bind, loadMessage, toJSON, fromJSON, upsertMessage };
+    // fetchGroupMetadata se expone porque Baileys lo busca cuando
+    // generateHighQualityLinkPreview está activo.
+    return { bind, loadMessage, toJSON, fromJSON, upsertMessage, fetchGroupMetadata };
 }
 
 export default makeInMemoryStore();

@@ -42,9 +42,12 @@ export default [
     },
     rules: {
       'no-undef': 'off',
-      // Los plugins y librerías arrastran variables heredadas del bot base;
-      // se avisa pero no se corta la integración continua con eso.
-      'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
+      // Limpiado el ruido heredado: variables y parámetros sin uso están a
+      // error para que no vuelvan. args/caughtErrors a 'none' porque destructuring
+      // parcial y `catch` sin uso son habituales en los plugins.
+      // args a 'none': son firmas de callback impuestas por la API (err, data, …)
+      // que no se pueden recortar sin tocar la llamada.
+      'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
       'no-empty': ['warn', { allowEmptyCatch: true }],
     },
   },

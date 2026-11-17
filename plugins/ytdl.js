@@ -26,7 +26,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
     try {
         await socket.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
 
-        const { buffer, meta, provider } = await ytDownload(url, type, { quality });
+        const { buffer, meta } = await ytDownload(url, type, { quality });
 
         const title    = meta?.title || (isAudio ? 'Audio_YouTube' : 'Video_YouTube');
         const ext      = isAudio ? 'mp3' : 'mp4';

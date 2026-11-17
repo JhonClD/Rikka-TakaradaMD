@@ -93,33 +93,6 @@ function buildFileName(ep, subscription, extension = '.mp4') {
   return `${number} ${title} (${variant})${extension}`
 }
 
-async function resolveSubscription(input, variant = 'SUB') {
-  const raw = String(input || '').trim()
-  if (!raw) throw new Error(`Indica un título o URL de AnimeV1 (${DOMAIN}).`)
-  let url = /^https?:\/\//i.test(raw) ? raw : ''
-  let result = null
-  if (!url) {
-    const response = await animeV1.searchAnime(raw, DOMAIN)
-    result = response?.data?.results?.[0]
-    if (!result?.url) throw new Error(`No encontré *${clean(raw)}* en AnimeV1.`)
-    url = result.url
-  }
-  const infoResponse = await animeV1.getAnimeInfo(url)
-  const anime = infoResponse?.data
-  if (!anime?.episodes?.length) throw new Error('AnimeV1 no devolvió episodios para esa serie.')
-  const episodes = [...anime.episodes].sort((a, b) => episodeNumber(a) - episodeNumber(b))
-  const latest = episodes[episodes.length - 1]
-  return {
-    key: subscriptionKey(url, variant),
-    url,
-    title: clean(anime.title || result?.title || raw, 120),
-    image: anime.image || result?.image || '',
-    variant: normalizeVariant(variant),
-    lastEpisodeNumber: episodeNumber(latest),
-    latestEpisode: latest,
-  }
-}
-
 async function discoverCatalogSubscriptions() {
   const results = new Map()
   try {

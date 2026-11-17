@@ -33,16 +33,12 @@ const {
     downloadContentFromMessage,
     jidDecode,
     areJidsSameUser,
-    generateWAMessage,
     generateForwardMessageContent,
     generateWAMessageFromContent,
     WAMessageStubType,
     extractMessageContent,
-    makeInMemoryStore,
-    getAggregateVotesInPollMessage,
     prepareWAMessageMedia,
     WA_DEFAULT_EPHEMERAL,
-    PHONENUMBER_MCC,
 } = _baileys;
 
 export function makeWASocket(connectionOptions, options = {}) {
@@ -2079,9 +2075,7 @@ export function serialize() {
             return "";
         }
     };
-    const safeSplit = (str, separator) =>
-        typeof str === "string" ? str.split(separator) : [];
-    
+
     return Object.defineProperties(proto.WebMessageInfo.prototype, {
         conn: {
             value: undefined,
@@ -2102,11 +2096,10 @@ export function serialize() {
         isBaileys: {
             get() {
                 try {
-                    const userId = this.conn?.user?.id || "";
-                    const sender = this.sender || "";
                     const messageId = this.id || "";
-                    const isFromBot = this?.fromMe || areJidsSameUser(userId, sender);
-                    //if (!isFromBot) return false;
+                    // La comprobación "es del bot" se deja a propósito
+                    // desactivada: ver los prefijos de id abajo basta.
+
                     const baileysStarts = ['NJX-', 'Lyru-', 'META-', 'EvoGlobalBot-', 'FizzxyTheGreat-', 'BAE5', '3EB0', 'B24E', '8SCO', 'SUKI', 'MYSTIC-'];
                     const hasKnownPrefix = baileysStarts.some(prefix => messageId.startsWith(prefix));
 		            const isSukiPattern = /^SUKI[A-F0-9]+$/.test(messageId);
@@ -2565,11 +2558,10 @@ export function serialize() {
                             },
                             isBaileys: {
                                 get() {
-                                    const userId = self.conn?.user?.id || "";
-                                    const sender = this.sender || "";
                                     const messageId = this.id || "";
-                                    const isFromBot = this?.fromMe || areJidsSameUser(userId, sender);
-                                    //if (!isFromBot) return false;
+                                    // Comprobación "es del bot" desactivada a
+                                    // propósito (misma razón que en el getter anterior).
+
                                     const baileysStarts = ['NJX-', 'Lyru-', 'META-', 'EvoGlobalBot-', 'FizzxyTheGreat-', 'BAE5', '3EB0', 'B24E', '8SCO', 'SUKI', 'MYSTIC-'];
                                     const hasKnownPrefix = baileysStarts.some(prefix => messageId.startsWith(prefix));
 				                    const isSukiPattern = /^SUKI[A-F0-9]+$/.test(messageId);

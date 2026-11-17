@@ -131,27 +131,6 @@ const resolveFormat = (type, quality = '720p') => {
     return valid.includes(q) ? q : '720';
 };
 
-// ── Fetch con reintentos ──────────────────────────────────────────────────────
-
-const fetchBuffer = async (url, headers = {}, retries = 3) => {
-    for (let i = 0; i <= retries; i++) {
-        try {
-            const res = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
-                    ...headers,
-                },
-                signal: AbortSignal.timeout(120_000),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const ab = await res.arrayBuffer();
-            return Buffer.from(ab);
-        } catch (e) {
-            if (i === retries) throw e;
-            await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-        }
-    }
-};
 
 // ── FFmpeg ────────────────────────────────────────────────────────────────────
 
@@ -178,8 +157,6 @@ const ffmpegVideo = async (rawFile, outFile) => {
         fs.copyFileSync(rawFile, outFile);
     }
 };
-
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── Provider: yt-dlp local ───────────────────────────────────────────────────
 

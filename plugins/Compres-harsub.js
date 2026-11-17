@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync, spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { compressDw4 } from '../src/libraries/dw4-compress.js';
 

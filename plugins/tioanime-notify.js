@@ -1576,7 +1576,7 @@ function detenerNotificador(chatId) {
 
 function restaurarNotificadores(conn) {
   const state = loadState()
-  for (const [chatId, cfg] of Object.entries(state)) {
+  for (const chatId of Object.keys(state)) {
     if (chatId === '__config') continue
     if (!global.tioActiveChats.has(chatId)) {
       iniciarNotificador(chatId, conn, getGlobalIntervalSec())
@@ -1589,7 +1589,7 @@ if (!global.tioWatchdog) {
     const conn = global.tioConn
     if (!conn) return
     const state = loadState()
-    for (const [chatId, cfg] of Object.entries(state)) {
+    for (const chatId of Object.keys(state)) {
       if (chatId === '__config') continue
       if (!global.tioActiveChats.has(chatId)) {
         iniciarNotificador(chatId, conn, getGlobalIntervalSec())

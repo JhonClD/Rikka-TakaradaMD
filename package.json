@@ -13,9 +13,9 @@
     "code": "FORCE_COLOR=2 node index.js code",
     "test": "node --test",
     "test:one": "node --test tests/jkanime-extractors.test.js",
-    "lint": "eslint . --max-warnings=42",
+    "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "eslint": "eslint . --max-warnings=42",
+    "eslint": "eslint .",
     "eslintfix": "eslint --fix .",
     "check": "node --check index.js && node --check main.js && node --check handler.js && node --check config.js && node --check api.js"
   },

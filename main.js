@@ -318,22 +318,37 @@ if (!fs.existsSync(join(global.authFilePath, 'creds.json'))) {
   }
 }
 
-// Solicitar el código una sola vez, después de crear el socket. Hacerlo desde
+// Solicitar el código después de crear el socket. Hacerlo desde
 // connection.update puede repetir la solicitud durante el handshake y provocar
-// que WhatsApp reemplace la conexión anterior.
-if (pairingPhoneNumber && !state.creds.registered) {
-  setTimeout(async () => {
+// que WhatsApp reemplace la conexión anterior. Se limita el número de intentos
+// para no martillear el endpoint de pairing cuando WhatsApp devuelve un código
+// inválido (rate limit).
+const MAX_PAIRING_ATTEMPTS = 3;
+const PAIRING_RETRY_DELAY_MS = 5_000;
+
+function requestPairingCodeOnce() {
+  if (pairingCodeDone || pairingAttemptCount >= MAX_PAIRING_ATTEMPTS) return;
+  pairingAttemptCount += 1;
+  void (async () => {
     try {
       if (state.creds.registered || !global.conn?.requestPairingCode) return;
-      let codigo = await global.conn.requestPairingCode(pairingPhoneNumber);
-      codigo = String(codigo || '').replace(/[^A-Za-z0-9]/g, '');
+      const raw = await global.conn.requestPairingCode(pairingPhoneNumber);
+      const codigo = String(raw || '').replace(/[^A-Za-z0-9]/g, '');
       if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
+      pairingCodeDone = true;
       console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
       console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
     } catch (err) {
-      console.log(chalk.red(`[ ⚠️ ] Error al obtener código: ${err.message}`));
+      console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/${MAX_PAIRING_ATTEMPTS}): ${err.message}`));
+      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS) {
+        pairingRequestTimer = setTimeout(requestPairingCodeOnce, PAIRING_RETRY_DELAY_MS);
+      }
     }
-  }, 3000);
+  })();
+}
+
+if (pairingPhoneNumber && !state.creds.registered) {
+  pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
 }
 
 conn.isInit = false;
@@ -422,8 +437,6 @@ async function connectionUpdate(update) {
   }
   const reason = lastDisconnect?.error?.output?.statusCode
     ?? lastDisconnect?.error?.output?.payload?.statusCode;
-  const lastErrors = {};
-  const errorTimers = {};
   const errorCounters = {};
   function shouldLogError(errorType) {
     if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };
@@ -663,6 +676,10 @@ async function gracefulShutdown(signal) {
   shutdownStarted = true;
   stopped = 'close';
   console.log(`[ SHUTDOWN ] ${signal}: guardando datos y cerrando WhatsApp...`);
+  if (pairingRequestTimer) {
+    clearTimeout(pairingRequestTimer);
+    pairingRequestTimer = null;
+  }
   try {
     await global.db?.write?.();
   } catch (error) {
