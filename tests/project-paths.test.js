@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { ROOT, MENU_IMAGE, TMP_DIR, fromRoot } from '../src/funcion/paths.js'
+import { ROOT, ASSETS_DIR, MENU_IMAGE, TMP_DIR, fromRoot } from '../src/funcion/paths.js'
 
 // Rutas del proyecto: el bot se puede arrancar desde cualquier directorio
 // (`node /ruta/al/bot/index.js`, pm2, un launcher de Termux). Todo lo que se
@@ -19,9 +19,21 @@ const jsFiles = (dir) =>
     .map((f) => path.join(dir, f));
 
 test('paths.js apunta a la raíz del repositorio', () => {
-  assert.equal(path.basename(ROOT), 'Rikka-TakaradaMD');
-  assert.equal(MENU_IMAGE, fromRoot('src', 'menu', 'menu.png'));
+  // Se comprueba la forma del proyecto, no el nombre de la carpeta: el bot se
+  // puede clonar como ~/bot-rikka, /data/home/Rikka-TakaradaMD o lo que sea, y
+  // un assert.equal(basename, 'Rikka-TakaradaMD') fallaría sin motivo.
+  assert.equal(JSON.parse(fs.readFileSync(fromRoot('package.json'), 'utf8')).name, 'rikka-takarada-md');
+  for (const entry of ['main.js', 'handler.js', 'plugins', 'src']) {
+    assert.ok(fs.existsSync(path.join(ROOT, entry)), `ROOT no contiene ${entry}`);
+  }
   assert.ok(TMP_DIR.startsWith(ROOT));
+});
+
+test('MENU_IMAGE resuelve dentro del proyecto', () => {
+  // La imagen vive en src/assets/; se tolera la ubicación vieja (src/menu/)
+  // porque paths.js la acepta como compatibilidad.
+  const permitidas = [path.join(ASSETS_DIR, 'menu.png'), fromRoot('src', 'menu', 'menu.png')];
+  assert.ok(permitidas.includes(MENU_IMAGE), `MENU_IMAGE apunta a ${MENU_IMAGE}`);
 });
 
 test('los archivos gráficos que carga config.js existen', () => {

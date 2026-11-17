@@ -32,7 +32,7 @@ const handler = async (m, { conn, client, args, text, command }) => {
         const ext      = isAudio ? 'mp3' : 'mp4';
         const fileName = `${title.replace(/[\\/:*?"<>|]/g, '')}.${ext}`;
 
-        // Tarjeta con miniatura (igual que Play.js)
+        // Tarjeta con miniatura (igual que play.js)
         if (meta?.thumbnail) {
             await socket.sendMessage(m.chat, {
                 image:   { url: meta.thumbnail },

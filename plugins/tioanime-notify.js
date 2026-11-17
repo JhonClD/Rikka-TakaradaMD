@@ -14,7 +14,7 @@ import { File as MegaFile } from 'megajs'
 import { listFiles, getFileMetadata } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
-import { downloadVoeWithMirrorFailover, isKnownVoeMirrorUrl, parseVoeUrl } from './Voe-DL.js'
+import { downloadVoeWithMirrorFailover, isKnownVoeMirrorUrl, parseVoeUrl } from './voe-dl.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 

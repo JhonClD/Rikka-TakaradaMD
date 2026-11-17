@@ -16,7 +16,7 @@ global.fetch = fetch;
 global.axios = axios;
 global.moment = moment;
 
-// Clave del endpoint de traducción usado como respaldo por plugins/Traslate.js.
+// Clave del endpoint de traducción usado como respaldo por plugins/translate.js.
 // Estaba hardcodeada con la clave de un tercero; ahora viene del entorno y, si
 // no se define, el plugin omite el respaldo en lugar de usar una ajena.
 global.lolkeysapi = process.env.LOLHUMAN_API_KEY || '';
