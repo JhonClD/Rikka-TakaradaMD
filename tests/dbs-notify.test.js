@@ -82,6 +82,23 @@ test('una ficha caída no marca el episodio como visto (se reintenta)', { timeou
   assert.deepEqual(fichaCaida.visto, ['dbs-marcador-previo-1'])
 })
 
+test('cuando el sitio bloquea, el chat recibe instrucciones y no el error crudo', { timeout: 150_000 }, async () => {
+  const { bloqueo } = await ejecutar()
+  const mensaje = bloqueo?.ultimoMensaje || ''
+  assert.match(mensaje, /403/, 'debe decir que el sitio bloquea con 403')
+  assert.match(mensaje, /DBS_PROXY_URL/)
+  assert.match(mensaje, /DBS_FLARESOLVERR_URL/)
+  assert.match(mensaje, /quedan pendientes/)
+  // El texto de axios no aporta nada al usuario y era justo lo que se veía.
+  assert.doesNotMatch(mensaje, /Request failed with status code/)
+})
+
+test('un bloqueo del sitio no hace perder episodios: quedan pendientes', { timeout: 150_000 }, async () => {
+  const { bloqueo } = await ejecutar()
+  // Si se marcara como visto, al arreglar el acceso el capítulo no se enviaría nunca.
+  assert.deepEqual(bloqueo.vistoTrasBloqueo, [])
+})
+
 test('dbsstatus resume el estado sin romperse', { timeout: 150_000 }, async () => {
   const { estado } = await ejecutar()
   assert.match(estado, /Estado AnimeDBS/)
