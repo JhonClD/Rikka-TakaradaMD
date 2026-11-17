@@ -13,6 +13,10 @@ import { Readable } from 'node:stream'
 import Module from 'node:module'
 import { fileURLToPath } from 'node:url'
 
+// El plugin sólo debe usar estas estrategias, que son las que el doble de
+// axios simula. Sin esto, wreq/impit intentarían salir a internet de verdad.
+process.env.DBS_HTTP_ESTRATEGIAS = 'axios'
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const TMP = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'dbs-harness-'))
 const fileUrl = relative => new URL(`file://${path.join(ROOT, relative)}`).href
@@ -122,28 +126,6 @@ const overrides = {
   'animev1-download.cjs': writeOverride('thumb.mjs',
     'const api = globalThis.__dbsThumbStub; export default api; export const createJpegThumbnail = api.createJpegThumbnail;'),
   'dw4-compress.js': writeOverride('compress.mjs', 'export const compressDw4 = globalThis.__dbsCompressStub.compressDw4;'),
-  // Cliente HTTP escalado: el doble de axios hace las veces de sitio simulado,
-  // así el test sigue probando el plugin y no la capa de red.
-  'src/libraries/dbs-http.js': writeOverride('dbs-http.mjs', [
-    "export const HEADERS = { 'User-Agent': 'harness', Accept: 'text/html' };",
-    'export async function fetchDbs(url, opciones = {}) {',
-    '  try {',
-    '    const respuesta = await globalThis.__dbsAxiosStub(url, { responseType: opciones.responseType, headers: opciones.headers });',
-    '    const datos = Buffer.isBuffer(respuesta.data) ? respuesta.data.toString("utf8") : respuesta.data;',
-    '    return { data: datos, status: respuesta.status || 200, headers: respuesta.headers || {} };',
-    '  } catch (error) {',
-    '    // Mismo contrato que el cliente real: el 403 llega como DBS_FORBIDDEN.',
-    '    if (error?.response?.status === 403) {',
-    '      const bloqueo = new Error("AnimeDBS bloqueó la petición (HTTP 403). Configura DBS_PROXY_URL o DBS_FLARESOLVERR_URL.");',
-    '      bloqueo.code = "DBS_FORBIDDEN";',
-    '      throw bloqueo;',
-    '    }',
-    '    throw error;',
-    '  }',
-    '}',
-    'export function esErrorDeBloqueo(error) { return error?.code === "DBS_FORBIDDEN" || error?.status === 403 || error?.response?.status === 403; }',
-    'export const ANIMEDBS_URL = "https://www.animedbs.online";',
-  ].join('\n')),
 }
 
 const hookSource = `

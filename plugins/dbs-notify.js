@@ -34,7 +34,6 @@ import { Transform } from 'stream'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
-import { fetchDbs, esErrorDeBloqueo, HEADERS as HEADERS_DBS } from '../src/libraries/dbs-http.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -94,8 +93,375 @@ const ZONA_HORARIA    = process.env.DBS_TIMEZONE || 'America/Lima'
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
-// Cabeceras de navegador real (Chrome) compartidas con el cliente HTTP.
-const HEADERS = HEADERS_DBS
+// ─── Cliente HTTP de AnimeDBS ────────────────────────────────────────────────
+//
+// El sitio responde **403** al bot cuando lo sondea desde una IP de datacenter
+// (VPS, Termux con datos móviles, etc.): el WAF mira el handshake TLS, no solo
+// el `User-Agent`, así que mandar cabeceras de Chrome no alcanza. Por eso aquí
+// abajo se habla con huella de Chrome de verdad (wreq-js / impit) y, si aun así
+// bloquean, se escala a un proxy o a FlareSolverr.
+//
+// Estrategias, en orden. La primera que responde 2xx gana y **se recuerda**,
+// para no gastar cinco peticiones por cada ficha durante el resto del proceso:
+//
+//   1. wreq-js      — huella Chrome (lo que ya usa jk-notify en este repo)
+//   2. impit        — huella Chrome; implementación distinta, cubre fallos de wreq
+//   3. axios        — navegador "de mentira"; sirve si el WAF solo mira headers
+//   4. curl         — binario del sistema, otra pila TLS
+//   5. FlareSolverr — solo si DBS_FLARESOLVERR_URL está configurado
+//
+// Si todas fallan con 403, el error dice exactamente qué configurar
+// (DBS_PROXY_URL o DBS_FLARESOLVERR_URL) en vez de un "Request failed with
+// status code 403" que no deja hacer nada.
+
+
+const DBS_HTTP_TIMEOUT = 20_000
+const DBS_CLIENTE_REINTENTOS = 3
+// Lista blanca opcional de estrategias, por si hace falta forzar una:
+// DBS_HTTP_ESTRATEGIAS=axios,curl. Sin definir se prueban todas en orden.
+const DBS_ESTRATEGIAS_FORZADAS = String(process.env.DBS_HTTP_ESTRATEGIAS || '')
+  .split(',')
+  .map(nombre => nombre.trim().toLowerCase())
+  .filter(Boolean)
+
+// Mismo navegador que declaran impit/wreq: si el User-Agent no coincide con el
+// handshake TLS, el WAF lo nota.
+const NAVEGADOR_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
+// Perfil que emulan wreq-js e impit; si se cambia uno hay que cambiar el otro,
+// porque un UA que no case con el handshake delata igual que un axios.
+const PERFIL_WREQ = 'chrome_136'
+const PERFIL_IMPIT = 'chrome136'
+
+// Cabeceras de reserva. Si wreq-js está disponible se sustituyen por las de su
+// emulación (incluyen sec-ch-ua): un Chrome 136 que no manda client hints es
+// tan sospechoso como un axios.
+const CABECERAS_BASE = {
+  'User-Agent': NAVEGADOR_UA,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
+  'Upgrade-Insecure-Requests': '1',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+}
+
+/**
+ * Cabeceras activas. Es mutable a propósito: `wreq-js` solo existe tras un
+ * import dinámico, y cuando llega su emulación se reemplaza el contenido de
+ * este objeto (no la referencia) para que quien ya lo tenga en la mano lo vea.
+ */
+const DBS_HEADERS = { ...CABECERAS_BASE }
+
+const PROXY_URL = String(
+  process.env.DBS_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '',
+).trim()
+const FLARESOLVERR_URL = String(process.env.DBS_FLARESOLVERR_URL || process.env.FLARESOLVERR_URL || '').replace(/\/+$/, '')
+const COOKIE_INICIAL = String(process.env.DBS_COOKIE || '').trim()
+
+// Si el dueño copió la cookie de su navegador, el sitio espera el UA de *ese*
+// navegador y no el Chrome 136 que ponemos por defecto.
+const NAVEGADOR_UA_ENV = String(process.env.DBS_UA || NAVEGADOR_UA).trim()
+
+const dbsHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 8 })
+
+// Clientes perezosos: si `impit`/`wreq-js` no traen binario para esta
+// plataforma (Termux ARM, por ejemplo) el import no debe tumbar el plugin
+// entero; simplemente se saltan esas estrategias.
+let moduloWreq = null
+let wreqFallido = false
+async function getWreq() {
+  if (moduloWreq || wreqFallido) return moduloWreq
+  try {
+    moduloWreq = await import('wreq-js')
+    // getEmulationHeaders da el juego exacto de cabeceras del perfil, que es
+    // más creíble que cualquier lista escrita a mano.
+    try {
+      const emuladas = moduloWreq.getEmulationHeaders(PERFIL_WREQ, 'windows')
+      const plano = emuladas && typeof emuladas.forEach === 'function'
+        ? Object.fromEntries(emuladas)
+        : emuladas
+      if (plano && Object.keys(plano).length) {
+        // `getEmulationHeaders` devuelve los nombres en minúscula; mezclarlos
+        // con los de reserva mandaría dos User-Agent distintos.
+        for (const clave of Object.keys(DBS_HEADERS)) delete DBS_HEADERS[clave]
+        Object.assign(DBS_HEADERS, plano)
+      }
+    } catch (_) { /* se conservan las de reserva */ }
+  } catch (error) {
+    wreqFallido = true
+    console.warn(`[dbs-notify] wreq-js no disponible: ${error.message}`)
+  }
+  return moduloWreq
+}
+
+let impitClient = null
+let impitFallido = false
+async function getImpit() {
+  if (impitClient || impitFallido) return impitClient
+  try {
+    const { Impit } = await import('impit')
+    impitClient = new Impit({
+      browser: PERFIL_IMPIT,
+      timeout: DBS_HTTP_TIMEOUT,
+      headers: DBS_HEADERS,
+      ...(PROXY_URL ? { proxyUrl: PROXY_URL } : {}),
+    })
+  } catch (error) {
+    impitFallido = true
+    console.warn(`[dbs-notify] impit no disponible: ${error.message}`)
+  }
+  return impitClient
+}
+
+const dbsSleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+/** Cookie vigente: la de entorno (copiada de un navegador) o la de FlareSolverr. */
+let cookieSesion = COOKIE_INICIAL
+/** User-Agent que dictó FlareSolverr al resolver el desafío; manda sobre el de entorno. */
+let uaSesion = ''
+
+/**
+ * Cabeceras de una petición concreta.
+ *
+ * `DBS_HEADERS` puede venir de la emulación de wreq (nombres en minúscula) o de la
+ * reserva; aquí se normaliza todo a minúsculas para que sobrescribir el UA no
+ * deje un `user-agent` viejo al lado.
+ */
+function cabeceras(extra = {}, { documento = true } = {}) {
+  const agente = uaSesion || NAVEGADOR_UA_ENV
+  const base = documento
+    ? DBS_HEADERS
+    : { accept: '*/*', 'accept-language': DBS_HEADERS['accept-language'] || DBS_HEADERS['Accept-Language'] }
+  const salida = {}
+  for (const [clave, valor] of Object.entries(base)) salida[clave.toLowerCase()] = valor
+  salida['user-agent'] = agente
+  if (cookieSesion) salida.cookie = cookieSesion
+  for (const [clave, valor] of Object.entries(extra)) salida[clave.toLowerCase()] = valor
+  return salida
+}
+
+function normalizar(respuesta, url) {
+  return {
+    data: respuesta.data,
+    status: respuesta.status,
+    headers: respuesta.headers || {},
+    request: { res: { responseUrl: respuesta.url || url } },
+  }
+}
+
+// ── Estrategias ──────────────────────────────────────────────────────────────
+
+async function conWreq(url, headers, timeout, binario = false) {
+  const modulo = await getWreq()
+  if (!modulo) throw new Error('wreq-js no disponible')
+  const respuesta = await modulo.fetch(url, {
+    browser: PERFIL_WREQ,
+    os: 'windows',
+    headers,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(timeout),
+  })
+  if (!respuesta.ok) {
+    const error = new Error(`wreq-js HTTP ${respuesta.status}`)
+    error.status = respuesta.status
+    throw error
+  }
+  return normalizar({
+    data: binario ? Buffer.from(await respuesta.arrayBuffer()) : await respuesta.text(),
+    status: respuesta.status,
+    headers: Object.fromEntries(respuesta.headers),
+    url: respuesta.url,
+  }, url)
+}
+
+async function conImpit(url, headers, timeout, binario = false) {
+  const cliente = await getImpit()
+  if (!cliente) throw new Error('impit no disponible')
+  const respuesta = await cliente.fetch(url, { headers, redirect: 'follow', timeout })
+  if (!respuesta.ok) {
+    const error = new Error(`impit HTTP ${respuesta.status}`)
+    error.status = respuesta.status
+    throw error
+  }
+  return normalizar({
+    data: binario ? Buffer.from(await respuesta.arrayBuffer()) : await respuesta.text(),
+    status: respuesta.status,
+    headers: Object.fromEntries(respuesta.headers),
+    url: respuesta.url,
+  }, url)
+}
+
+async function conAxios(url, headers, timeout, binario = false) {
+  return axios.get(url, {
+    headers,
+    timeout,
+    responseType: binario ? 'arraybuffer' : 'text',
+    dbsHttpsAgent,
+    maxRedirects: 5,
+    proxy: PROXY_URL ? new URL(PROXY_URL) : undefined,
+    validateStatus: status => status >= 200 && status < 300,
+  })
+}
+
+function conCurl(url, headers, timeout, binario = false) {
+  return new Promise((resolve, reject) => {
+    // Se lee en Buffers: concatenar como texto destrozaría una portada PNG.
+    const args = ['-sSL', '--compressed', '--max-time', String(Math.ceil(timeout / 1000)), '-w', '\n%{http_code}']
+    if (PROXY_URL) args.push('--proxy', PROXY_URL)
+    for (const [clave, valor] of Object.entries(headers)) {
+      if (valor) args.push('-H', `${clave}: ${valor}`)
+    }
+    const proceso = spawn('curl', [...args, url])
+    const trozos = []
+    let errores = ''
+    proceso.stdout.on('data', trozo => trozos.push(trozo))
+    proceso.stderr.on('data', trozo => { errores += trozo })
+    proceso.on('error', reject)
+    proceso.on('close', () => {
+      let salida = Buffer.concat(trozos)
+      // Los últimos bytes son "\n<status>"; se separan antes de interpretar el cuerpo.
+      const corte = salida.lastIndexOf(0x0a)
+      const status = Number.parseInt(salida.subarray(corte + 1).toString('utf8'), 10)
+      salida = salida.subarray(0, corte)
+      const cuerpo = binario ? salida : salida.toString('utf8')
+      if (status >= 200 && status < 300) resolve({ data: cuerpo, status, headers: {} })
+      else reject(Object.assign(new Error(errores.trim() || `curl HTTP ${status}`), { status: Number.isFinite(status) ? status : 0 }))
+    })
+  })
+}
+
+async function conFlareSolverr(url, _headers, timeout = DBS_HTTP_TIMEOUT, binario = false) {
+  if (!FLARESOLVERR_URL) throw new Error('FlareSolverr no configurado')
+  // Devuelve el HTML ya resuelto como texto; un PNG saldría corrupto.
+  if (binario) throw new Error('FlareSolverr no se usa para imágenes')
+  // Resolver un desafío de Cloudflare tarda bastante más que un GET normal:
+  // se le da margen sobre el timeout del llamador, no el fijo del módulo.
+  const respuesta = await axios.post(`${FLARESOLVERR_URL}/v1`, {
+    cmd: 'request.get',
+    url,
+    maxTimeout: timeout * 3,
+  }, { timeout: timeout * 4 })
+  const solucion = respuesta.data?.solution
+  if (respuesta.data?.status !== 'ok' || !solucion) {
+    throw new Error(`FlareSolverr: ${respuesta.data?.message || 'sin solución'}`)
+  }
+  // El UA y las cookies del navegador resuelto se reutilizan en las siguientes
+  // peticiones: sin ellas el desafío vuelve en el minuto siguiente.
+  if (solucion.userAgent && !process.env.DBS_UA) uaSesion = String(solucion.userAgent).trim()
+  if (Array.isArray(solucion.cookies) && solucion.cookies.length) {
+    cookieSesion = solucion.cookies.map(c => `${c.name}=${c.value}`).join('; ')
+  }
+  return { data: solucion.response, status: Number(solucion.status) || 200, headers: {} }
+}
+
+// ── Orquestador ──────────────────────────────────────────────────────────────
+
+/**
+ * Orden de estrategias. Empieza por la última que funcionó; el resto solo se
+ * prueba cuando esa falla. Un 403 recalibra la lista (el WAF pudo cambiar).
+ */
+let estrategiaActual = null
+
+const ESTRATEGIAS = [
+  { nombre: 'wreq', ejecutar: conWreq, huella: true },
+  { nombre: 'impit', ejecutar: conImpit, huella: true },
+  { nombre: 'axios', ejecutar: conAxios, huella: false },
+  { nombre: 'curl', ejecutar: conCurl, huella: false },
+  { nombre: 'flaresolverr', ejecutar: conFlareSolverr, huella: true },
+]
+
+function ordenar() {
+  const disponibles = DBS_ESTRATEGIAS_FORZADAS.length
+    ? ESTRATEGIAS.filter(estrategia => DBS_ESTRATEGIAS_FORZADAS.includes(estrategia.nombre))
+    : ESTRATEGIAS
+  if (!disponibles.length) return ESTRATEGIAS
+  if (estrategiaActual == null) return disponibles
+  const indice = disponibles.findIndex(estrategia => estrategia.nombre === estrategiaActual)
+  if (indice <= 0) return disponibles
+  return [disponibles[indice], ...disponibles.slice(0, indice), ...disponibles.slice(indice + 1)]
+}
+
+function esBloqueo(error) {
+  return error?.status === 403 || error?.response?.status === 403
+}
+
+function esReintentable(error) {
+  if (esBloqueo(error)) return false // el 403 lo resuelve cambiar de estrategia
+  const status = error?.status || error?.response?.status
+  if (status) return status === 408 || status === 425 || status === 429 || status >= 500
+  return true // red, DNS, timeout
+}
+
+/**
+ * GET con escalado de clientes.
+ * @param {string} url
+ * @param {object} [opciones]
+ * @param {object} [opciones.headers] cabeceras extra del llamador
+ * @param {number} [opciones.timeout]
+ * @param {boolean} [opciones.documento] `false` para assets: no finge navegación
+ * @param {boolean} [opciones.binario] devuelve `Buffer` en vez de texto (portadas)
+ * @param {number} [opciones.intentos]
+ */
+async function fetchDbs(
+  url,
+  { headers = {}, timeout = DBS_HTTP_TIMEOUT, documento = true, binario = false, intentos = 1 } = {},
+) {
+  const totales = Math.min(Math.max(1, intentos), DBS_CLIENTE_REINTENTOS)
+  let ultimoError = null
+  let huboBloqueo = false
+
+  for (let intento = 1; intento <= totales; intento++) {
+    if (intento > 1) await dbsSleep(1000 * intento)
+
+    for (const estrategia of ordenar()) {
+      try {
+        const respuesta = await estrategia.ejecutar(url, cabeceras(headers, { documento }), timeout, binario)
+        if (estrategiaActual !== estrategia.nombre) {
+          estrategiaActual = estrategia.nombre
+          console.log(`[dbs-notify] cliente activo: ${estrategia.nombre}`)
+        }
+        return respuesta
+      } catch (error) {
+        ultimoError = error
+        if (esBloqueo(error)) {
+          huboBloqueo = true
+          estrategiaActual = null
+        }
+      }
+    }
+
+    // Todas las estrategias fallaron (incluida FlareSolverr si está disponible).
+    if (huboBloqueo) break
+    if (!esReintentable(ultimoError)) break
+  }
+
+  throw describirFallo(url, ultimoError, huboBloqueo)
+}
+
+function describirFallo(url, error, bloqueo) {
+  const fallo = new Error(
+    bloqueo
+      ? `AnimeDBS bloqueó la petición (HTTP 403) en ${new URL(url).pathname}. `
+        + 'El sitio exige una IP de residencia/país permitido o un desafío de Cloudflare: '
+        + 'configura DBS_PROXY_URL (proxy HTTP/SOCKS) o DBS_FLARESOLVERR_URL, y opcionalmente DBS_COOKIE.'
+      : `No se pudo consultar AnimeDBS en ${new URL(url).pathname}: ${error?.message || 'error desconocido'}`,
+  )
+  fallo.code = bloqueo ? 'DBS_FORBIDDEN' : 'DBS_FETCH_FAILED'
+  fallo.cause = error
+  return fallo
+}
+
+/** ¿El error significa que el sitio nos está bloqueando? */
+function esErrorDeBloqueo(error) {
+  return error?.code === 'DBS_FORBIDDEN' || esBloqueo(error)
+}
+
+// Se exportan para que tests/dbs-notify.test.js pueda probar el cliente sin
+// otra copia del código. `main.js` registra `module.default || module`, así que
+// estos named exports no cambian cómo se carga el plugin en el bot.
+export { fetchDbs, esErrorDeBloqueo, DBS_HEADERS }
+
 
 // ─── Estado global ────────────────────────────────────────────────────────────
 
@@ -588,7 +954,7 @@ async function enrichWithRealDates(collector, series) {
       try {
         const seriesUrl = absoluteUrl(item.href, ANIMEDBS_URL)
         const { data: seriesHtml } = await getPage(seriesUrl, {
-          headers: { ...HEADERS, Referer: DBS_DIRECTORY_URL },
+          headers: { ...DBS_HEADERS, Referer: DBS_DIRECTORY_URL },
           timeout: 8000,
           maxRedirects: 3,
         }, 1)
@@ -600,7 +966,7 @@ async function enrichWithRealDates(collector, series) {
         const epNum = first.text().match(/\d+/)?.[0] || episodeUrl.match(/episodio[- _]?(\d+)/i)?.[1]
         if (!epNum) return
         const { data: episodeHtml } = await getPage(episodeUrl, {
-          headers: { ...HEADERS, Referer: seriesUrl },
+          headers: { ...DBS_HEADERS, Referer: seriesUrl },
           timeout: 8000,
           maxRedirects: 3,
         }, 1)
@@ -650,13 +1016,13 @@ async function fetchLatestEpisodesDBS({ force = false } = {}) {
   const cached = feedCache.get('episodios')
   if (!force && cached && Date.now() - cached.at < FEED_CACHE_MS) return cached.lista
 
-  const { data } = await getPage(ANIMEDBS_URL, { headers: HEADERS })
+  const { data } = await getPage(ANIMEDBS_URL, { headers: DBS_HEADERS })
   const collector = parseHomePage(data)
 
   // El directorio ordenado por actualización da la fecha real de publicación.
   // Si falla, se sigue con la portada: nunca se pierde el sondeo entero.
   try {
-    const { data: directoryHtml } = await getPage(DBS_DIRECTORY_URL, { headers: HEADERS })
+    const { data: directoryHtml } = await getPage(DBS_DIRECTORY_URL, { headers: DBS_HEADERS })
     await enrichWithRealDates(collector, parseDirectoryPage(directoryHtml))
   } catch (error) {
     console.error(`[dbs-notify] Directorio de AnimeDBS no disponible: ${error.message}`)
@@ -670,7 +1036,7 @@ async function fetchLatestEpisodesDBS({ force = false } = {}) {
 
 /** Lee una ficha de AnimeDBS y devuelve sus enlaces descargables. */
 async function scrapeServidoresDBS(epUrl, idioma = 'sub') {
-  const { data } = await getPage(epUrl, { headers: { ...HEADERS, Referer: ANIMEDBS_URL } })
+  const { data } = await getPage(epUrl, { headers: { ...DBS_HEADERS, Referer: ANIMEDBS_URL } })
   const $ = cheerio.load(data)
   const srvs = []
   const idiomaObjetivo = /lat/i.test(idioma) ? 'latino' : 'sub'
@@ -977,7 +1343,7 @@ async function descargarMega(megaUrl, outputDir, fileName, { onProgress } = {}) 
 async function descargarMediaFire(mfUrl, outputDir, fileName, { onProgress } = {}) {
   let mfPage
   try {
-    const res = await axios.get(mfUrl, { headers: HEADERS, httpsAgent, timeout: HTTP_TIMEOUT })
+    const res = await axios.get(mfUrl, { headers: DBS_HEADERS, httpsAgent, timeout: HTTP_TIMEOUT })
     mfPage = String(res.data || '')
   } catch (error) { throw new Error(`MediaFire: ${error.message}`) }
 
@@ -995,7 +1361,7 @@ async function descargarMediaFire(mfUrl, outputDir, fileName, { onProgress } = {
   let total = 0
   let soportaRangos = false
   try {
-    const head = await axios.head(downloadUrl, { headers: HEADERS, httpsAgent, timeout: 10_000 })
+    const head = await axios.head(downloadUrl, { headers: DBS_HEADERS, httpsAgent, timeout: 10_000 })
     total = parseInt(head.headers['content-length'] || '0', 10) || 0
     soportaRangos = /bytes/i.test(head.headers['accept-ranges'] || '')
   } catch (_) {}
@@ -1030,7 +1396,7 @@ async function descargarMediaFire(mfUrl, outputDir, fileName, { onProgress } = {
       await Promise.all(partes.map(async p => {
         const res = await axios.get(downloadUrl, {
           responseType: 'stream',
-          headers: { ...HEADERS, Referer: 'https://www.mediafire.com/', Range: `bytes=${p.start}-${p.end}` },
+          headers: { ...DBS_HEADERS, Referer: 'https://www.mediafire.com/', Range: `bytes=${p.start}-${p.end}` },
           httpsAgent,
           timeout: DL_TIMEOUT,
         })
@@ -1079,7 +1445,7 @@ async function descargarMediaFire(mfUrl, outputDir, fileName, { onProgress } = {
   try {
     mfRes = await axios.get(downloadUrl, {
       responseType: 'stream',
-      headers: { ...HEADERS, Referer: 'https://www.mediafire.com/' },
+      headers: { ...DBS_HEADERS, Referer: 'https://www.mediafire.com/' },
       httpsAgent,
       timeout: DL_TIMEOUT,
     })
@@ -1114,7 +1480,7 @@ async function descargarUrlServidor(directUrl, serverUrl, outputDir, fileName) {
   try {
     const res = await axios.get(parsed.href, {
       responseType: 'stream',
-      headers: { ...HEADERS, Referer: serverUrl },
+      headers: { ...DBS_HEADERS, Referer: serverUrl },
       httpsAgent,
       timeout: DL_TIMEOUT,
       maxRedirects: 8,
@@ -1156,7 +1522,7 @@ async function descargarServidorVideo(serverUrl, outputDir, fileName) {
   let directUrl = /\.mp4(?:[?#]|$)/i.test(serverUrl) ? serverUrl : ''
   if (!directUrl) {
     const page = await axios.get(serverUrl, {
-      headers: { ...HEADERS, Referer: serverUrl },
+      headers: { ...DBS_HEADERS, Referer: serverUrl },
       httpsAgent,
       timeout: HTTP_TIMEOUT,
       maxRedirects: 5,
