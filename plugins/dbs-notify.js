@@ -18,8 +18,7 @@
 //   • Un episodio = un envío: si SUB y LAT comparten ficha, se descarga una
 //     vez y el segundo idioma reutiliza el archivo.
 //   • El envío de episodios es limpio: solo documentos, sin portada ni caption.
-//   • Menos peticiones: caché del sondeo y del listado de servidores, y
-//     restaurarNotificadores deja de leer el disco en cada mensaje recibido.
+//   • Menos peticiones: caché del sondeo y del listado de servidores.
 
 import axios from 'axios'
 import * as cheerio from 'cheerio'
@@ -53,7 +52,6 @@ const QUEUE_DELAY            = 90_000        // ms entre ítems de cola (90 seg)
 const DL_TIMEOUT             = 3 * 60 * 60 * 1000
 const MIN_EPISODE_SIZE_BYTES = 5 * 1024 * 1024
 const MAX_SEEN_POR_CHAT      = 500
-const RESTORE_THROTTLE_MS    = 60_000        // handler.before corre en cada mensaje
 const STALE_TEMP_MS          = 6 * 60 * 60 * 1000
 
 // Cachés de red: entre chats se repiten el sondeo y las mismas fichas.
@@ -1866,32 +1864,11 @@ function detenerNotificador(chatId) {
   }
 }
 
-let lastRestoreAt = 0
-
-function restaurarNotificadores(conn) {
-  // handler.before se ejecuta con CADA mensaje de cualquier chat: leer el JSON
-  // del disco aquí mismo era un sync de I/O por mensaje. Se limita a una vez
-  // por minuto, y el watchdog de dos minutos cubre los reinicios.
-  if (Date.now() - lastRestoreAt < RESTORE_THROTTLE_MS) return
-  lastRestoreAt = Date.now()
-  const state = loadState()
-  if (!getCentralChatId()) {
-    const primerChat = Object.keys(state).find(chatId => chatId !== '__config' && state[chatId] && typeof state[chatId] === 'object')
-    if (primerChat) setCentralChatId(primerChat)
-  }
-  for (const [chatId, cfg] of Object.entries(state)) {
-    if (chatId === '__config' || !cfg || typeof cfg !== 'object') continue
-    if (global.dbsActiveChats.has(chatId)) continue
-    iniciarNotificador(chatId, conn, cfg.intervalSec || getGlobalIntervalSec())
-  }
-}
-
-if (!global.dbsWatchdog) {
-  global.dbsWatchdog = setInterval(() => {
-    if (!global.dbsActiveChats.size) return
-    restaurarNotificadores(global.dbsConn)
-  }, 2 * 60 * 1000)
-  if (global.dbsWatchdog.unref) global.dbsWatchdog.unref()
+// Si una versión anterior dejó un watchdog activo durante una recarga, se
+// cancela para que ningún comando vuelva a activar DBS automáticamente.
+if (global.dbsWatchdog) {
+  clearInterval(global.dbsWatchdog)
+  global.dbsWatchdog = null
 }
 
 limpiarTempViejos()
@@ -1934,7 +1911,6 @@ function estadoTexto(m) {
 
 let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   if (conn) global.dbsConn = conn
-  if (command === 'dbstar') command = 'dbsstart'
   const OWNER_COMMANDS = ['dbsstart', 'dbsstop', 'dbsinterval', 'dbsflush', 'dbsunblock', 'dbsexample']
   if (OWNER_COMMANDS.includes(command) && !isOwner) {
     return conn.sendMessage(m.chat, { text: '⛔ Solo el *owner* puede usar este comando.' }, { quoted: m })
@@ -2088,11 +2064,11 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 }
 
-handler.command = /^(dbsstart|dbstar|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
+handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime', 'notificaciones']
-handler.help = ['dbsstart [segundos]', 'dbstar [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
+handler.help = ['dbsstart [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
 handler.exp = 0
 handler.level = 0
 handler.limit = false
-handler.before = async (m, { conn }) => { if (conn) global.dbsConn = conn; restaurarNotificadores(conn) }
+handler.before = async (_m, { conn }) => { if (conn) global.dbsConn = conn }
 export default handler
