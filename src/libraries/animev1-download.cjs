@@ -18,7 +18,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ANIMEV1_DOWNLOAD_TIMEOUT_MS) || 15 * 60_000)
 const MIN_VALID_BYTES = 256 * 1024
-const PRIORITY = ['voe', 'byse', 'hls', 'upnshare', 'mp4upload', '1fichier']
+const PRIORITY = ['hls', 'byse', 'voe']
+const ENABLED_SERVERS = new Set(PRIORITY)
 const DISABLED_SERVERS = ['yourupload', 'pixeldrain', 'pdrain', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
@@ -496,6 +497,8 @@ function listCandidates(data, variant, preferredQuality = null) {
   ]
     .filter(item => {
       if (!item?.url) return false
+      const serverName = String(item.server || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+      if (!ENABLED_SERVERS.has(serverName)) return false
       const identity = `${item.server || ''} ${item.url}`.toLowerCase()
       let isAnimeV1HlsPlayer = false
       try {
