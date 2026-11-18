@@ -32,8 +32,8 @@
 // se remuxea con ffmpeg (mp4, copia de códecs, sin recodificar).
 
 import { createDecipheriv, generateKeyPairSync, sign as firmar, randomBytes } from 'node:crypto'
-import { createWriteStream } from 'node:fs'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { constants as fsConstants, createWriteStream } from 'node:fs'
+import { access, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -885,11 +885,27 @@ async function resolverFuente(info, signal) {
 
 let rutaFfmpeg = null
 async function getFfmpeg() {
-  // Importante: la ruta de reserva se guarda en la caché. Antes se marcaba
-  // como "fallido" pero se devolvía `null`, así que la primera descarga daba
-  // un error raro y todas las siguientes morían con un TypeError de node
-  // ("The \"file\" argument must be of type string. Received null").
   if (rutaFfmpeg) return rutaFfmpeg
+
+  // Permite fijar explícitamente el binario (por ejemplo /usr/bin/ffmpeg).
+  const configurado = String(process.env.FFMPEG_PATH || '').trim()
+  if (configurado) {
+    rutaFfmpeg = configurado
+    log('se usará FFMPEG_PATH', { ruta: rutaFfmpeg })
+    return rutaFfmpeg
+  }
+
+  // Prefiere FFmpeg del sistema: en algunos VPS el binario de ffmpeg-static
+  // arranca pero se cae al procesar ciertos manifiestos HLS.
+  for (const ruta of ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']) {
+    try {
+      await access(ruta, fsConstants.X_OK)
+      rutaFfmpeg = ruta
+      log('se usará FFmpeg del sistema', { ruta })
+      return rutaFfmpeg
+    } catch (_) {}
+  }
+
   try {
     const modulo = await import('ffmpeg-static')
     const ruta = modulo?.default || modulo
@@ -898,9 +914,8 @@ async function getFfmpeg() {
       return rutaFfmpeg
     }
   } catch (_) {}
-  const reserva = process.env.FFMPEG_PATH || 'ffmpeg'
-  log('ffmpeg-static no disponible; se usará la reserva', { reserva })
-  rutaFfmpeg = reserva
+  log('no se encontró FFmpeg estático ni en rutas habituales; se usará el PATH')
+  rutaFfmpeg = 'ffmpeg'
   return rutaFfmpeg
 }
 
