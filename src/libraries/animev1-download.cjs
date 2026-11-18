@@ -333,7 +333,7 @@ async function fetchWithExistingDownloader(candidate, url, basePath, onStatus) {
   const identity = `${candidate.server || ''} ${url}`.toLowerCase()
   const outputPath = `${basePath}.mp4`
   if (/\bvoe\b|voe\.(?:sx|to|com)/i.test(identity)) {
-    const plugin = await import('../plugins/voe-dl.js')
+    const plugin = await import('../../plugins/voe-dl.js')
     const voe = plugin.parseVoeUrl(url)
     if (!plugin.isKnownVoeMirrorUrl(url)) throw new Error('El enlace no pertenece a un mirror Voe reconocido.')
     const tempDir = await fs.promises.mkdtemp(path.join(TEMP_DIR, 'animev1-voe-'))
@@ -347,12 +347,12 @@ async function fetchWithExistingDownloader(candidate, url, basePath, onStatus) {
     return { filePath: outputPath, extension: '.mp4', mimetype: 'video/mp4' }
   }
   if (/\bbyse\b|byse\./i.test(identity)) {
-    const plugin = await import('../plugins/byse-dl.js')
+    const plugin = await import('../../plugins/byse-dl.js')
     onStatus?.('Descargando con el plugin Byse…')
     return plugin.downloadByseFile(url, outputPath)
   }
   if (/mp4\s?upload|mp4upload\./i.test(identity)) {
-    const plugin = await import('../plugins/mp4upload-dl.js')
+    const plugin = await import('../../plugins/mp4upload-dl.js')
     onStatus?.('Descargando con el plugin MP4Upload…')
     return plugin.downloadMp4UploadFile(url, outputPath)
   }
