@@ -534,7 +534,46 @@ async function readErrorBody(response, limit = 300) {
   }
 }
 
-async function openDownload(xh, target, pwToken, signal) {
+/**
+ * Normaliza el cuerpo de una respuesta a un `Readable` de Node.
+ *
+ * main.js carga api.js, que reemplaza `global.fetch` por `node-fetch`: ahí
+ * `Response.body` es un `PassThrough` (stream de Node). Con el fetch nativo o
+ * undici en cambio es un `ReadableStream` web. `Readable.fromWeb()` solo acepta
+ * el segundo y lanza ERR_INVALID_ARG_TYPE — «The "readableStream" argument
+ * must be an instance of ReadableStream. Received an instance of PassThrough»—
+ * al recibir el primero. De ahí venía el error al iniciar la descarga.
+ */
+export function toNodeReadable(body) {
+  if (!body) throw new TransferItError('La descarga llegó sin cuerpo.')
+  if (typeof body.getReader === 'function') {
+    try {
+      return Readable.fromWeb(body)
+    } catch (error) {
+      // ReadableStream de otro realm o polyfill: en Node 20+ es async iterable.
+      if (typeof body[Symbol.asyncIterator] === 'function') return Readable.from(body)
+      throw new TransferItError(`No se pudo convertir el cuerpo de la descarga: ${error.message}`)
+    }
+  }
+  if (typeof body.pipe === 'function' || typeof body[Symbol.asyncIterator] === 'function') return body
+  throw new TransferItError('transfer.it devolvió un cuerpo de descarga incompatible.')
+}
+
+/** Libera el cuerpo de una respuesta descartada, sea web stream o stream de Node. */
+function releaseBody(body) {
+  if (!body) return
+  try {
+    if (typeof body.cancel === 'function') {
+      const pending = body.cancel()
+      pending?.catch?.(() => {})
+    } else if (typeof body.destroy === 'function') {
+      body.destroy()
+    }
+  } catch {}
+}
+
+/** Exportada para probar la compatibilidad con el shim de fetch del bot. */
+export async function openDownload(xh, target, pwToken, signal) {
   let lastError = null
   const headers = {
     'User-Agent': 'Mozilla/5.0',
@@ -572,12 +611,11 @@ async function openDownload(xh, target, pwToken, signal) {
       const declared = Number(response.headers.get('content-length')) || 0
       const size = declared || target.size || 0
       if (size > MAX_BYTES) {
-        const cancelled = response.body.cancel?.()
-        cancelled?.catch?.(() => {})
+        releaseBody(response.body)
         throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
       }
 
-      return { stream: Readable.fromWeb(response.body), size, contentType }
+      return { stream: toNodeReadable(response.body), size, contentType }
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastError = error
