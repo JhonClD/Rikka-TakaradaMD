@@ -1,3 +1,19 @@
+/**
+ * Descargador de transfer.it en un solo archivo y sin dependencias nuevas.
+ *
+ * transfer.it está respaldado por la API de MEGA. En lugar de raspar HTML:
+ *   1. `xi` entrega metadatos públicos (título, tamaño, password, ZIP).
+ *   2. `f` entrega el árbol de nodos; los nombres se descifran en local
+ *      con AES-CBC (IV=0) y la clave XOR-reducida de cada nodo.
+ *   3. `GET /cs/g?x=<xh>&n=<handle>&fn=<nombre>` devuelve los bytes en
+ *      claro (el servidor ya descifra); exige Referer/Origin de transfer.it.
+ *
+ * Contraseñas: jamás se envía la contraseña en claro. Se deriva un token
+ * PBKDF2-HMAC-SHA256(100000, 32) con una sal de 18 bytes construida desde
+ * el handle, se valida con `xv` y se adjunta como `pw=` en `f` y `/cs/g`.
+ *
+ * El registro central de descargas permite cancelar con `.cancelar`.
+ */
 import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { join } from 'node:path'
@@ -57,6 +73,7 @@ function decodeText(value) {
   }
 }
 
+/** Clave de atributos: clave de 16 bytes, o XOR de las dos mitades de 32. */
 function foldKey(key) {
   if (!Buffer.isBuffer(key)) return null
   if (key.length === 16) return Buffer.from(key)
@@ -66,6 +83,7 @@ function foldKey(key) {
   return out
 }
 
+/** Descifra blobs de clave MEGA: AES-CBC bloque a bloque, IV=0, sin padding. */
 function decryptKeyBlocks(encrypted, wrappingKey) {
   if (!encrypted.length || encrypted.length % 16 !== 0) return null
   if (wrappingKey.length !== 16 && wrappingKey.length !== 32) return null
@@ -82,6 +100,7 @@ function decryptKeyBlocks(encrypted, wrappingKey) {
   return out
 }
 
+/** Claves candidatas: `k` plano de transfer.it o `owner:clave` envuelta. */
 function keyCandidates(rawKey, wrappingKey = null) {
   const candidates = []
   for (const entry of String(rawKey || '').split('/').filter(Boolean)) {
@@ -118,6 +137,7 @@ function decryptAttrs(encryptedAttrs, aesKey) {
   }
 }
 
+/** Exportado para poder probar el descifrado con fixtures reales. */
 export function decryptNodeAttributes(encryptedAttrs, key) {
   const keys = Buffer.isBuffer(key) ? [key] : keyCandidates(key)
   for (const candidate of keys) {
@@ -127,10 +147,12 @@ export function decryptNodeAttributes(encryptedAttrs, key) {
   throw new TransferItError('No se pudieron descifrar los atributos del nodo.')
 }
 
+/** Token PBKDF2 que la API espera en `xv`, `f` y `/cs/g`. */
 export function derivePasswordToken(xh, password) {
   const raw = base64urlDecode(xh)
   let salt = raw.subarray(Math.max(0, raw.length - 6))
   if (String(xh).length > 12) {
+    // Variante "open sesame" del webclient: handle codificado dos veces.
     const inner = base64urlDecode(raw.toString('latin1'))
     if (inner.length >= 7) salt = inner.subarray(inner.length - 7, inner.length - 1)
   }
@@ -177,6 +199,10 @@ function tokenize(text) {
   return tokens
 }
 
+/**
+ * Acepta URL completa, URL sin esquema, `/t/<xh>`, handle suelto,
+ * `#<handle>`, `/t/<xh>/<handle>` y opciones después del enlace.
+ */
 export function parseTransferInput(raw) {
   const source = String(raw || '').trim()
   const found = source.match(/(?:https?:\/\/)?(?:www\.)?transfer\.it\/t\/[A-Za-z0-9_-]+[^\s]*/i)
@@ -345,6 +371,7 @@ function firstObject(value) {
   return result && typeof result === 'object' ? result : null
 }
 
+/** POST /cs: siempre un array de comandos, con reintentos y hosts de respaldo. */
 async function apiCommand(command, { x = '', pw = '', signal } = {}) {
   let lastError = null
   const remember = (error) => {
@@ -417,6 +444,7 @@ async function fetchInfo(xh, signal) {
     return firstObject(await apiCommand({ a: 'xi', xh }, { signal })) || {}
   } catch (error) {
     if (signal.aborted || isAbortError(error)) throw error
+    // Algunos clusters no responden `xi`; `f` sigue siendo autoritativo.
     console.warn(`[TRANSFERIT] metadatos no disponibles: ${error.message}`)
     return {}
   }
@@ -438,6 +466,7 @@ async function validatePassword(xh, pwToken, signal) {
     if (signal.aborted || isAbortError(error)) throw error
     if (error.code === -14) throw new TransferItError('La contraseña del transfer es incorrecta.', -14)
     if (error.code === -8 || error.code === -9 || error.code === -16) throw error
+    // `xv` puede no existir en algún cluster; `f` validará el token igualmente.
   }
 }
 
@@ -491,6 +520,7 @@ function zipTarget(info, xh) {
   }
 }
 
+/** URL directa del webclient: sirve bytes en claro y sigue redirecciones. */
 export function buildDownloadUrl(host, xh, handle, fileName, pwToken = '') {
   const base = `${host.replace(/\/+$/, '')}/cs/g?x=${encodeURIComponent(xh)}&n=${encodeURIComponent(handle)}&fn=${encodeURIComponent(fileName)}`
   return pwToken ? `${base}&pw=${encodeURIComponent(pwToken)}` : base
@@ -504,7 +534,7 @@ async function readErrorBody(response, limit = 300) {
   }
 }
 
-async function openDownload(xh, target, pwToken, signal, offset = 0) {
+async function openDownload(xh, target, pwToken, signal) {
   let lastError = null
   const headers = {
     'User-Agent': 'Mozilla/5.0',
@@ -512,7 +542,6 @@ async function openDownload(xh, target, pwToken, signal, offset = 0) {
     'Referer': `${ORIGIN}/t/${xh}`,
     'Origin': ORIGIN,
   }
-  if (offset > 0) headers.Range = `bytes=${offset}-`
 
   for (const host of API_HOSTS) {
     try {
@@ -539,23 +568,16 @@ async function openDownload(xh, target, pwToken, signal, offset = 0) {
         )
       }
       if (!response.body) throw new TransferItError('La descarga llegó sin cuerpo.')
-      if (offset > 0 && response.status !== 206) {
-        throw new TransferItError('El servidor no permite reanudar la descarga.')
-      }
 
       const declared = Number(response.headers.get('content-length')) || 0
-      const size = offset > 0 ? offset + declared : (declared || target.size || 0)
+      const size = declared || target.size || 0
       if (size > MAX_BYTES) {
         const cancelled = response.body.cancel?.()
         cancelled?.catch?.(() => {})
         throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
       }
 
-      const stream = typeof response.body.getReader === 'function'
-        ? Readable.fromWeb(response.body)
-        : response.body
-
-      return { stream, size, contentType }
+      return { stream: Readable.fromWeb(response.body), size, contentType }
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastError = error
@@ -604,8 +626,9 @@ function makeWatchdog(controller) {
   }
 }
 
-function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick, offset = 0 }) {
-  let bytes = offset
+/** Transform que cuenta bytes, vigila el límite y reporta progreso. */
+function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick }) {
+  let bytes = 0
   const started = Date.now()
   let lastTick = 0
   const tick = (force = false) => {
@@ -613,7 +636,7 @@ function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick, offset = 0
     if (!force && now - lastTick < EDIT_INTERVAL_MS) return
     lastTick = now
     const elapsed = Math.max((now - started) / 1000, 0.001)
-    const speed = (bytes - offset) / elapsed
+    const speed = bytes / elapsed
     const percent = total > 0 ? Math.min(100, bytes / total * 100) : 0
     onTick(buildStatus(emoji, label, percent, bytes, total, speed))
   }
@@ -648,41 +671,19 @@ function guessMime(fileName) {
   return types[ext] || 'application/octet-stream'
 }
 
-async function downloadToTemp(first, reopen, tempPath, expectedSize, exact, watchdog, signal, update) {
-  const total = exact ? expectedSize : (first.size || expectedSize)
-  let current = first
-  let written = 0
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const meter = makeMeter({
-      label: 'Descargando de Transfer.it',
-      emoji: '📥',
-      total,
-      maxBytes: MAX_BYTES,
-      watchdog,
-      offset: written,
-      onTick: (text) => { void update(text) },
-    })
-    try {
-      await pipeline(
-        current.stream,
-        meter,
-        fs.createWriteStream(tempPath, { flags: written ? 'a' : 'wx' }),
-        { signal },
-      )
-    } catch (error) {
-      if (signal.aborted || isAbortError(error) || error instanceof TransferItError || !exact) throw error
-      console.warn(`[TRANSFERIT] descarga interrumpida: ${error.message}`)
-    }
-    written = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
-    if (!exact || written >= total || attempt === 5) break
-    console.warn(`[TRANSFERIT] reanudando desde ${fmtBytes(written)} de ${fmtBytes(total)}`)
-    current = await reopen(written)
-  }
-  const realSize = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
-  if (!realSize || (total > 0 && realSize < total)) {
-    throw new TransferItError(
-      `La descarga quedó incompleta (${fmtBytes(realSize)} de ${fmtBytes(total)}); inténtalo de nuevo.`,
-    )
+async function downloadToTemp(stream, tempPath, expectedSize, watchdog, signal, update) {
+  const meter = makeMeter({
+    label: 'Descargando de Transfer.it',
+    emoji: '📥',
+    total: expectedSize,
+    maxBytes: MAX_BYTES,
+    watchdog,
+    onTick: (text) => { void update(text) },
+  })
+  await pipeline(stream, meter, fs.createWriteStream(tempPath, { flags: 'wx' }), { signal })
+  const realSize = fs.statSync(tempPath).size
+  if (!realSize || (expectedSize > 0 && realSize < expectedSize)) {
+    throw new TransferItError('La descarga quedó incompleta; inténtalo de nuevo.')
   }
   return realSize
 }
@@ -841,9 +842,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       return
     }
 
-    const expectedSize = target.kind === 'file'
-      ? Math.max(Number(target.size) || 0, files.length === 1 ? totalSize : 0)
-      : (target.size || (target.kind === 'zip' ? totalSize : 0))
+    const expectedSize = target.size || (target.kind === 'zip' ? totalSize : 0)
     if (expectedSize > MAX_BYTES) {
       await update(`❌ El archivo (${fmtBytes(expectedSize)}) supera el límite de ${MAX_MB} MB.`)
       return
@@ -860,13 +859,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const download = await openDownload(input.xh, target, activeToken, signal)
     tempPath = join(tmpdir(), `transferit_${randomUUID()}_${cleanFileName(target.name, 'archivo.bin')}`)
 
-    const exact = target.kind === 'file' && expectedSize > 0
+    const sizeForProgress = download.size || expectedSize
     const realSize = await downloadToTemp(
-      download,
-      (offset) => openDownload(input.xh, target, activeToken, signal, offset),
+      download.stream,
       tempPath,
-      expectedSize,
-      exact,
+      sizeForProgress,
       watchdog,
       signal,
       update,
