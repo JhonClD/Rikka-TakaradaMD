@@ -498,17 +498,19 @@ function listCandidates(data, variant, preferredQuality = null) {
       return true
     })
     .sort((a, b) => {
-      const rank = item => {
+      const serverPriority = item => {
         const text = `${item.server || ''} ${item.url || ''}`.toLowerCase()
         const index = PRIORITY.findIndex(token => text.includes(token))
-        const kindBonus = item.kind === 'descarga' ? 0 : 1
-        const serverRank = index < 0 ? PRIORITY.length * 2 + kindBonus : index * 2 + kindBonus
-        const qualityRank = preferredQuality && item.quality
-          ? String(item.quality).toLowerCase().includes(String(preferredQuality).toLowerCase()) ? -100 : 20
-          : 0
-        return qualityRank + serverRank
+        return index < 0 ? PRIORITY.length : index
       }
-      return rank(a) - rank(b)
+      const priorityDifference = serverPriority(a) - serverPriority(b)
+      if (priorityDifference) return priorityDifference
+      if (preferredQuality) {
+        const qualityRank = item => item.quality && String(item.quality).toLowerCase().includes(String(preferredQuality).toLowerCase()) ? 0 : 1
+        const qualityDifference = qualityRank(a) - qualityRank(b)
+        if (qualityDifference) return qualityDifference
+      }
+      return (a.kind === 'descarga' ? 0 : 1) - (b.kind === 'descarga' ? 0 : 1)
     })
 }
 
