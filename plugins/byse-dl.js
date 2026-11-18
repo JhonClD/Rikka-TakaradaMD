@@ -85,7 +85,11 @@ const HOSTS_CONOCIDOS = new Set([
 const HOST_FAMILIA_BYSE = /^byse[a-z0-9]{0,16}\.(?:sx|com|top|xyz|net|to|in|sbs|cyou|lol)$/i
 
 function log(evento, datos = {}) {
-  console.log(`[BYSE][${new Date().toISOString()}] ${evento} ${JSON.stringify(datos)}`)
+  const ahora = new Date().toLocaleTimeString('es-MX', { hour12: false })
+  const color = process.stdout.isTTY && !process.env.NO_COLOR
+  const cyan = color ? '\u001b[36m' : ''
+  const reset = color ? '\u001b[0m' : ''
+  console.log(`${cyan}[BYSE ${ahora}]${reset} ${evento}${Object.keys(datos).length ? ` ${JSON.stringify(datos)}` : ''}`)
 }
 
 function formatearBytes(valor) {
@@ -94,6 +98,59 @@ function formatearBytes(valor) {
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
   return `${bytes} B`
+}
+
+function formatearTiempo(segundos) {
+  const valor = Math.max(0, Math.floor(Number(segundos) || 0))
+  const horas = Math.floor(valor / 3600)
+  const minutos = Math.floor((valor % 3600) / 60)
+  const resto = valor % 60
+  return horas ? `${horas}:${String(minutos).padStart(2, '0')}:${String(resto).padStart(2, '0')}` : `${minutos}:${String(resto).padStart(2, '0')}`
+}
+
+let ultimaSalidaProgreso = 0
+function progresoTerminal({ visto, total, velocidad, bytesSalida, reintento, modo }) {
+  if (reintento) {
+    if (process.stdout.isTTY && !process.env.NO_COLOR) process.stdout.write(`\r\u001b[2K  ↻ Reintentando: ${reintento}\n`)
+    else log('reintentando descarga', { variante: reintento })
+    return
+  }
+  const porcentaje = total > 0 ? Math.min(100, Math.max(0, (visto / total) * 100)) : null
+  const cantidad = modo === 'hls'
+    ? `${formatearTiempo(visto)}${total > 0 ? ` / ${formatearTiempo(total)}` : ''}`
+    : `${formatearBytes(visto)}${total > 0 ? ` / ${formatearBytes(total)}` : ''}`
+  const etiqueta = modo === 'hls' ? 'FFmpeg' : 'Descarga'
+  if (!process.stdout.isTTY || process.env.NO_COLOR) {
+    if (Date.now() - ultimaSalidaProgreso >= 5000) {
+      ultimaSalidaProgreso = Date.now()
+      log(`progreso ${etiqueta}`, { avance: cantidad, porcentaje: porcentaje == null ? null : `${porcentaje.toFixed(1)}%`, salida: bytesSalida ? formatearBytes(bytesSalida) : undefined, velocidad: velocidad ? `${velocidad}x` : undefined })
+    }
+    return
+  }
+  const largo = 22
+  const llenas = porcentaje == null ? 0 : Math.round((porcentaje / 100) * largo)
+  const barra = `${'█'.repeat(llenas)}${'░'.repeat(largo - llenas)}`
+  const avance = porcentaje == null ? '' : ` ${porcentaje.toFixed(1)}% [${barra}]`
+  const rapidez = velocidad ? ` · ${velocidad}x` : ''
+  const salida = modo === 'hls' && bytesSalida ? ` · MP4 ${formatearBytes(bytesSalida)}` : ''
+  process.stdout.write(`\r\u001b[2K  ${etiqueta} ↓ ${cantidad}${avance}${rapidez}${salida}`)
+}
+
+function iniciarSpinnerTerminal(etiqueta) {
+  if (!process.stdout.isTTY || process.env.NO_COLOR) {
+    log(etiqueta)
+    return () => {}
+  }
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+  let indice = 0
+  const dibujar = () => process.stdout.write(`\r\u001b[2K  ${frames[indice++ % frames.length]} ${etiqueta}`)
+  dibujar()
+  const timer = setInterval(dibujar, 120)
+  timer.unref?.()
+  return (resultado) => {
+    clearInterval(timer)
+    process.stdout.write(`\r\u001b[2K  ${resultado}\n`)
+  }
 }
 
 function errorAbortado() {
@@ -951,6 +1008,7 @@ function correrFfmpeg(binario, argumentos, { salida, signal, alProgresar }) {
     const hijo = spawn(binario, argumentos, { stdio: ['ignore', 'ignore', 'pipe'] })
     const diagnosticos = []
     let duracion = 0
+    let bytesSalida = 0
     let ultimoAviso = 0
     let velocidad = ''
     let pendiente = ''
@@ -989,11 +1047,14 @@ function correrFfmpeg(binario, argumentos, { salida, signal, alProgresar }) {
         const rapidez = /^speed=\s*([\d.]+)x/i.exec(limpia)
         if (rapidez) velocidad = rapidez[1]
 
+        const tamanio = /^total_size=(\d+)/i.exec(limpia)
+        if (tamanio) bytesSalida = Number(tamanio[1])
+
         const avance = /^out_time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(limpia)
         if (avance && Date.now() - ultimoAviso >= 900) {
           ultimoAviso = Date.now()
           const visto = Number(avance[1]) * 3600 + Number(avance[2]) * 60 + Number(avance[3])
-          alProgresar?.({ visto, total: duracion, velocidad: velocidad || null })
+          alProgresar?.({ visto, total: duracion, velocidad: velocidad || null, bytesSalida })
         }
         if (RUIDO_FFMPEG.test(limpia)) continue
 
@@ -1054,6 +1115,8 @@ function errorReintentable(error) {
  */
 async function descargarHls({ url, referer, salida, signal, alProgresar }) {
   const binario = await getFfmpeg()
+  const inicioFfmpeg = Date.now()
+  log('FFmpeg iniciado: uniendo segmentos HLS sin recodificar', { binario, contenedor: 'MP4' })
   const base = [
     '-hide_banner', '-loglevel', 'info', '-nostdin', '-y',
     '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
@@ -1086,6 +1149,8 @@ async function descargarHls({ url, referer, salida, signal, alProgresar }) {
     }
     try {
       await correrFfmpeg(binario, [...base, ...variante.extra, '-f', 'mp4', salida], { salida, signal, alProgresar })
+      if (process.stdout.isTTY && !process.env.NO_COLOR) process.stdout.write('\n')
+      log('FFmpeg terminó correctamente', { variante: variante.etiqueta, segundos: Math.round((Date.now() - inicioFfmpeg) / 1000) })
       if (indice > 0) log('ffmpeg funcionó con la variante ligera', { variante: variante.etiqueta })
       return salida
     } catch (error) {
@@ -1217,13 +1282,23 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
   }
 
   try {
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    log('nueva descarga', { codigo: info.code, host: info.host })
     await reaccionar('⏳')
     const estado = await conn.sendMessage(m.chat, {
       text: `🔎 *Byse* · buscando el vídeo...\n_Código:_ \`${info.code}\``,
     }, { quoted: m })
     llaveEstado = estado?.key || null
 
-    const fuente = await resolverFuente(info, signal)
+    const detenerResolucion = iniciarSpinnerTerminal(`Resolviendo enlace Byse (${info.code})...`)
+    let fuente
+    try {
+      fuente = await resolverFuente(info, signal)
+      detenerResolucion(`✓ Enlace resuelto: ${fuente.titulo || info.code}`)
+    } catch (error) {
+      detenerResolucion(`✗ No se pudo resolver: ${unaLinea(error?.message || error, 120)}`)
+      throw error
+    }
     if (signal.aborted) throw errorAbortado()
     const titulo = fuente.titulo || info.code
     log('fuente resuelta', { host: info.host, codigo: info.code, titulo, hls: /\.m3u8|\/hls/i.test(fuente.url) })
@@ -1237,17 +1312,25 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
     let ultimoTexto = ''
     let ultimoEnvio = 0
     let ultimoVisto = 0
+    let ultimoBytesFfmpeg = 0
     let ultimaVelocidad = ''
-    const alProgresar = ({ visto, total, velocidad, reintento }) => {
+    const esHls = /\.m3u8|\/hls/i.test(fuente.url)
+    const inicioDescarga = Date.now()
+    log('descarga iniciada', { titulo, tipo: esHls ? 'HLS' : 'directa' })
+    const alProgresar = ({ visto, total, velocidad, bytesSalida, reintento }) => {
       // ffmpeg manda el avance (out_time) y la velocidad (speed) en líneas
       // distintas: se combinan aquí para no perder ninguna de las dos.
       if (reintento) {
         ultimoVisto = 0
+        ultimoBytesFfmpeg = 0
         ultimaVelocidad = ''
+        progresoTerminal({ visto: 0, total: 0, reintento })
         return editarEstado(`🔁 *${titulo}*\n_Reintentando con un modo más ligero (${reintento})..._`)
       }
       if (Number(visto) >= 0) ultimoVisto = Number(visto)
+      if (Number(bytesSalida) >= 0) ultimoBytesFfmpeg = Number(bytesSalida || 0)
       if (velocidad) ultimaVelocidad = String(velocidad)
+      progresoTerminal({ visto: ultimoVisto, total, velocidad: ultimaVelocidad, bytesSalida: ultimoBytesFfmpeg, modo: esHls ? 'hls' : 'directo' })
       const porcentaje = total > 0 ? Math.min(100, (ultimoVisto / total) * 100) : null
       const llenas = porcentaje == null ? 0 : Math.round(porcentaje / 100 * 14)
       const barra = porcentaje == null ? '' : `${'█'.repeat(llenas)}${'░'.repeat(14 - llenas)}`
@@ -1280,6 +1363,8 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
       registro()
     }
 
+    if (process.stdout.isTTY && !process.env.NO_COLOR) process.stdout.write('\n')
+
     if (signal.aborted) throw errorAbortado()
 
     const archivo = await stat(salida)
@@ -1287,14 +1372,23 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
       throw new Error('La descarga quedó vacía o incompleta. Puede que el vídeo aún se esté procesando.')
     }
 
+    log('descarga terminada', { titulo, bytes: archivo.size, tamano: formatearBytes(archivo.size), segundos: Math.round((Date.now() - inicioDescarga) / 1000) })
     await editarEstado(`📤 *${titulo}*\n⚖️ ${formatearBytes(archivo.size)}\n_Subiendo a WhatsApp..._`)
 
-    await conn.sendMessage(m.chat, {
-      document: { url: salida },
-      fileName: `${base}.mp4`,
-      mimetype: 'video/mp4',
-      caption: `✅ *${titulo}*\n📦 ${formatearBytes(archivo.size)}\n🌐 Byse · \`${info.code}\``,
-    }, { quoted: m })
+    const detenerSubida = iniciarSpinnerTerminal(`Subiendo ${formatearBytes(archivo.size)} a WhatsApp (Baileys no informa porcentaje)...`)
+    const inicioSubida = Date.now()
+    try {
+      await conn.sendMessage(m.chat, {
+        document: { url: salida },
+        fileName: `${base}.mp4`,
+        mimetype: 'video/mp4',
+        caption: `✅ *${titulo}*\n📦 ${formatearBytes(archivo.size)}\n🌐 Byse · \`${info.code}\``,
+      }, { quoted: m })
+      detenerSubida(`✓ Subida completada en ${formatearTiempo((Date.now() - inicioSubida) / 1000)}`)
+    } catch (error) {
+      detenerSubida(`✗ Falló la subida: ${unaLinea(error?.message || error, 120)}`)
+      throw error
+    }
 
     await editarEstado(`✅ *${titulo}*\n📦 ${formatearBytes(archivo.size)}\n_Enviado._`)
     await reaccionar('✅')
@@ -1306,6 +1400,8 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
       return
     }
     const mensaje = String(error?.message || error || 'error desconocido')
+    if (process.stdout.isTTY && !process.env.NO_COLOR) process.stdout.write('\n')
+    log('descarga fallida', { codigo: info.code, error: unaLinea(mensaje, 200) })
     console.error('[Byse-DL]', error?.stack || mensaje)
     await reaccionar('❌')
     const propio = /supera el límite|No pude extraer|todavía se está codificando|No pude conectar|No encuentro ffmpeg|ffmpeg murió|ffmpeg terminó/i.test(mensaje)
@@ -1319,6 +1415,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
     // El temporal se borra siempre: WhatsApp ya copió el archivo al enviarlo.
     if (carpeta) await rm(carpeta, { recursive: true, force: true }).catch(() => {})
     log('proceso terminado', { codigo: info.code })
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
   }
 }
 
