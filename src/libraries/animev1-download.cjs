@@ -79,6 +79,15 @@ function isPrivateAddress(host) {
 function normalizeCandidateUrl(rawUrl, server) {
   const url = safeHttpUrl(rawUrl)
   if (!url) return null
+  try {
+    const parsed = new URL(url)
+    const playId = parsed.pathname.match(/^\/play\/([^/]+)\/?$/i)
+    if (String(server || '').trim().toLowerCase() === 'hls' &&
+      parsed.hostname.toLowerCase() === 'player.zilla-networks.com' && playId) {
+      parsed.pathname = `/m3u8/${playId[1]}`
+      return parsed.href
+    }
+  } catch (_) {}
   return url
 }
 
@@ -485,9 +494,17 @@ function listCandidates(data, variant, preferredQuality = null) {
     ...stream.map(item => ({ ...item, kind: 'stream' })),
     ...downloads.map(item => ({ ...item, kind: 'descarga' })),
   ]
-    .filter(item => item?.url && !DISABLED_SERVERS.some(token =>
-      `${item.server || ''} ${item.url}`.toLowerCase().includes(token),
-    ))
+    .filter(item => {
+      if (!item?.url) return false
+      const identity = `${item.server || ''} ${item.url}`.toLowerCase()
+      let isAnimeV1HlsPlayer = false
+      try {
+        const url = new URL(item.url)
+        isAnimeV1HlsPlayer = String(item.server || '').trim().toLowerCase() === 'hls' &&
+          url.hostname.toLowerCase() === 'player.zilla-networks.com' && url.pathname.startsWith('/play/')
+      } catch (_) {}
+      return !DISABLED_SERVERS.some(token => identity.includes(token) && !(token === 'zilla' && isAnimeV1HlsPlayer))
+    })
   const seen = new Set()
   return candidates
     .filter(item => {
