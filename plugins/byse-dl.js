@@ -477,18 +477,31 @@ function extraerMedioDeTexto(texto, base) {
   return unicas.find((url) => /master\.m3u8|\/hls/i.test(url)) || unicas[0]
 }
 
+// Títulos que Byse pone por defecto en el cascarón del embed. No sirven como
+// nombre de archivo: son todos iguales y no dicen nada del vídeo.
+const TITULO_GENERICO = /^(?:byse(?:\s+(?:frontend|player|video|stream)|\s*[-|·].*)?|video\s*player|player|watch|loading|embed|home|dashboard|login)$/i
+
+function esTituloGenerico(valor) {
+  const limpio = String(valor || '').replace(/\s+/g, ' ').trim()
+  if (!limpio || limpio.length > 140) return true
+  if (TITULO_GENERICO.test(limpio)) return true
+  // "Byse Frontend", "Byse - Watch", "Video player | Byse"…
+  return /^byse\b/i.test(limpio) && limpio.split(/\s+/).length <= 3
+}
+
 function extraerTitulo(html, codigo) {
   const crudo = String(html || '')
   const og = crudo.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
   const tituloEl = crudo.match(/<title[^>]*>([^<]+)<\/title>/i)
   const json = crudo.match(/"title"\s*:\s*"([^"]{2,180})"/)
   const valor = (og?.[1] || json?.[1] || tituloEl?.[1] || '').replace(/\s+/g, ' ').trim()
-  if (!valor || /^(?:byse|video player|player)$/i.test(valor)) return codigo
-  return valor
+  if (esTituloGenerico(valor)) return codigo
+  const limpio = valor
     .replace(/\s*[-|·]\s*Byse.*$/i, '')
     .replace(/\.(?:mp4|mkv|webm)$/i, '')
     .trim()
-    .slice(0, 140) || codigo || ''
+    .slice(0, 140)
+  return esTituloGenerico(limpio) ? codigo : limpio
 }
 
 // ── Reto de acceso (challenge → attest → captcha PoW → playback) ────────────
@@ -835,7 +848,7 @@ async function resolverFuente(info, signal) {
     vistos.add(huella)
 
     const directa = await fuentesDesdeApi(host, codigo, parent, signal)
-    if (directa?.titulo && !titulo) titulo = directa.titulo
+    if (directa?.titulo && !titulo && !esTituloGenerico(directa.titulo)) titulo = directa.titulo
 
     if (directa?.estado) estadoCodificacion = directa.estado
     const elegida = mejorFuente(directa?.fuentes)
@@ -853,7 +866,7 @@ async function resolverFuente(info, signal) {
 
     const siguiente = await embedDesdeApi(host, codigo, signal)
     if (!siguiente || !esHostByse(siguiente.host)) break
-    if (siguiente.titulo && !titulo) titulo = siguiente.titulo
+    if (siguiente.titulo && !titulo && !esTituloGenerico(siguiente.titulo)) titulo = siguiente.titulo
     host = siguiente.host
     codigo = siguiente.codigo
     parent = siguiente.parent
@@ -871,20 +884,23 @@ async function resolverFuente(info, signal) {
 // ── Descarga ─────────────────────────────────────────────────────────────────
 
 let rutaFfmpeg = null
-let ffmpegFallido = false
 async function getFfmpeg() {
-  if (rutaFfmpeg || ffmpegFallido) return rutaFfmpeg
+  // Importante: la ruta de reserva se guarda en la caché. Antes se marcaba
+  // como "fallido" pero se devolvía `null`, así que la primera descarga daba
+  // un error raro y todas las siguientes morían con un TypeError de node
+  // ("The \"file\" argument must be of type string. Received null").
+  if (rutaFfmpeg) return rutaFfmpeg
   try {
     const modulo = await import('ffmpeg-static')
-    rutaFfmpeg = modulo?.default || modulo || null
-  } catch (_) {
-    rutaFfmpeg = null
-  }
-  if (!rutaFfmpeg) {
-    ffmpegFallido = true
-    log('ffmpeg-static no disponible', { reserva: process.env.FFMPEG_PATH || 'ffmpeg' })
-    return process.env.FFMPEG_PATH || 'ffmpeg'
-  }
+    const ruta = modulo?.default || modulo
+    if (typeof ruta === 'string' && ruta) {
+      rutaFfmpeg = ruta
+      return rutaFfmpeg
+    }
+  } catch (_) {}
+  const reserva = process.env.FFMPEG_PATH || 'ffmpeg'
+  log('ffmpeg-static no disponible; se usará la reserva', { reserva })
+  rutaFfmpeg = reserva
   return rutaFfmpeg
 }
 
@@ -899,10 +915,131 @@ function cabecerasFfmpeg(url, referer) {
     .join('')
 }
 
-/** Baja un HLS (troceado) y lo remuxea a mp4 sin recodificar. */
+// Líneas que escribe `-progress`: sirven para el porcentaje, nunca como excusa
+// de error. Antes acababan en el mensaje al usuario ("ffmpeg stats and
+// -progress period set to 2"), tapando el motivo real.
+const RUIDO_FFMPEG = /^(?:out_time(?:_us|_ms)?|speed|bitrate|total_size|frame|fps|progress|dup_frames|drop_frames|stream_\d+_\d+_q|stats_period)\s*=/i
+
+function unaLinea(valor, maximo = 200) {
+  return String(valor || '').replace(/\s+/g, ' ').trim().slice(0, maximo)
+}
+
+/**
+ * Corre ffmpeg y devuelve el motivo real de un fallo.
+ *
+ * `code` nulo en el evento `close` significa que el proceso murió por una
+ * señal (SIGKILL por memoria, SIGSEGV por binario incompatible, SIGTERM…), no
+ * que ffmpeg "terminara mal": el mensaje tiene que decirlo.
+ */
+function correrFfmpeg(binario, argumentos, { salida, signal, alProgresar }) {
+  return new Promise((resolver, rechazar) => {
+    const hijo = spawn(binario, argumentos, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const diagnosticos = []
+    let duracion = 0
+    let ultimoAviso = 0
+    let velocidad = ''
+    let pendiente = ''
+    let detenido = false
+
+    const matar = () => {
+      detenido = true
+      try { hijo.kill('SIGKILL') } catch (_) {}
+    }
+    const temporizador = setTimeout(() => {
+      log('ffmpeg agotó el tiempo', { limiteMin: Math.round(TIEMPO_MAX_DESCARGA_MS / 60000) })
+      matar()
+    }, TIEMPO_MAX_DESCARGA_MS)
+    const alAbortar = () => matar()
+    if (signal) {
+      if (signal.aborted) alAbortar()
+      else signal.addEventListener('abort', alAbortar, { once: true })
+    }
+
+    hijo.stderr.on('data', (trozo) => {
+      pendiente += trozo.toString()
+      const lineas = pendiente.split(/\r?\n/)
+      pendiente = lineas.pop() || ''
+      for (const linea of lineas) {
+        const limpia = linea.trim()
+        if (!limpia) continue
+
+        const marca = /^Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(limpia)
+        if (marca && !duracion) {
+          duracion = Number(marca[1]) * 3600 + Number(marca[2]) * 60 + Number(marca[3])
+        }
+
+        // El progreso se interpreta ANTES de descartar el ruido: `out_time` y
+        // `speed` son líneas distintas de `-progress`, así que la velocidad se
+        // guarda y se adjunta al siguiente avance.
+        const rapidez = /^speed=\s*([\d.]+)x/i.exec(limpia)
+        if (rapidez) velocidad = rapidez[1]
+
+        const avance = /^out_time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(limpia)
+        if (avance && Date.now() - ultimoAviso >= 900) {
+          ultimoAviso = Date.now()
+          const visto = Number(avance[1]) * 3600 + Number(avance[2]) * 60 + Number(avance[3])
+          alProgresar?.({ visto, total: duracion, velocidad: velocidad || null })
+        }
+        if (RUIDO_FFMPEG.test(limpia)) continue
+
+        diagnosticos.push(limpia)
+        if (diagnosticos.length > 40) diagnosticos.shift()
+      }
+    })
+
+    hijo.once('error', (error) => {
+      clearTimeout(temporizador)
+      signal?.removeEventListener?.('abort', alAbortar)
+      if (signal?.aborted) return rechazar(errorAbortado())
+      const faltante = error?.code === 'ENOENT'
+      rechazar(new Error(faltante
+        ? `No encuentro ffmpeg (${binario}). Instala ffmpeg-static o define FFMPEG_PATH; sin él no puedo unir el HLS.`
+        : `ffmpeg no pudo arrancar: ${error?.message || error}`))
+    })
+
+    hijo.once('close', (codigo, senal) => {
+      clearTimeout(temporizador)
+      signal?.removeEventListener?.('abort', alAbortar)
+      if (signal?.aborted) return rechazar(errorAbortado())
+      if (detenido) {
+        const error = new Error('ffmpeg se detuvo antes de terminar (tiempo límite o cancelación).')
+        error.detenido = true
+        return rechazar(error)
+      }
+      if (codigo === 0) return resolver(salida)
+
+      const detalle = unaLinea(diagnosticos.slice(-4).join(' | '), 300) || 'sin diagnóstico'
+      const error = new Error(senal
+        ? `ffmpeg murió por la señal ${senal}${senal === 'SIGKILL' ? ' (sin memoria o cancelado por el sistema)' : ''}: ${detalle}`
+        : `ffmpeg terminó con código ${codigo}: ${detalle}`)
+      error.senal = senal || null
+      error.codigoFfmpeg = codigo
+      error.diagnostico = detalle
+      rechazar(error)
+    })
+  })
+}
+
+/** ¿Vale la pena reintentar sin `-bsf:a` / sin `+faststart` con este error? */
+function errorReintentable(error) {
+  if (!error || error.cancelado || error.detenido) return false
+  const texto = `${error.message || ''} ${error.diagnostico || ''}`
+  // Señales: SIGKILL suele ser memoria (faststart con archivos grandes) y
+  // SIGSEGV un build roto, pero un reintento más ligero a veces pasa.
+  return /Invalid data|adts|aac|bitstream|not supported|unsupported|moov|faststart|SIGKILL|SIGSEGV|Conversion failed|Error while opening/i.test(texto)
+}
+
+/**
+ * Baja un HLS (troceado) y lo remuxea a mp4 sin recodificar.
+ *
+ * Va por intentos de menos a más: `+faststart` exige reservar el moov en
+ * memoria y con vídeos largos el proceso se queda sin memoria y muere. Se
+ * reintenta sin el `-bsf` de audio y, al final, sin `+faststart` (el mp4 queda
+ * reproducible igual, solo que el índice va al final).
+ */
 async function descargarHls({ url, referer, salida, signal, alProgresar }) {
   const binario = await getFfmpeg()
-  const argumentos = [
+  const base = [
     '-hide_banner', '-loglevel', 'info', '-nostdin', '-y',
     '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
     '-user_agent', UA,
@@ -914,71 +1051,39 @@ async function descargarHls({ url, referer, salida, signal, alProgresar }) {
     '-progress', 'pipe:2', '-stats_period', '2',
     '-i', url,
     '-map', '0:v:0', '-map', '0:a:0?',
-    '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart',
-    '-fs', String(MAX_DESCARGA_BYTES),
-    '-f', 'mp4', salida,
+    '-c', 'copy',
   ]
 
-  return new Promise((resolver, rechazar) => {
-    const hijo = spawn(binario, argumentos, { stdio: ['ignore', 'ignore', 'pipe'] })
-    let cabeza = ''
-    let cola = ''
-    let duracion = 0
-    let ultimoAviso = 0
-    let detenido = false
+  const variantes = [
+    { etiqueta: 'normal', extra: ['-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart'] },
+    { etiqueta: 'sin bsf de audio', extra: ['-movflags', '+faststart'] },
+    { etiqueta: 'sin faststart (ahorra memoria)', extra: [] },
+  ]
 
-    const matar = () => {
-      detenido = true
-      try { hijo.kill('SIGKILL') } catch (_) {}
+  const errores = []
+  let ultimoError = null
+  for (const [indice, variante] of variantes.entries()) {
+    if (signal?.aborted) throw errorAbortado()
+    if (indice > 0) {
+      log('reintentando ffmpeg', { variante: variante.etiqueta, anterior: unaLinea(errores.at(-1), 180) })
+      await rm(salida, { force: true }).catch(() => {})
+      alProgresar?.({ visto: 0, total: 0, velocidad: null, reintento: variante.etiqueta })
     }
-    const temporizador = setTimeout(() => {
-      log('ffmpeg agotó el tiempo', { url: url.slice(0, 100) })
-      matar()
-    }, TIEMPO_MAX_DESCARGA_MS)
-    const alAbortar = () => matar()
-    if (signal) {
-      if (signal.aborted) alAbortar()
-      else signal.addEventListener('abort', alAbortar, { once: true })
+    try {
+      await correrFfmpeg(binario, [...base, ...variante.extra, '-f', 'mp4', salida], { salida, signal, alProgresar })
+      if (indice > 0) log('ffmpeg funcionó con la variante ligera', { variante: variante.etiqueta })
+      return salida
+    } catch (error) {
+      if (esCancelacion(error) || error.detenido) throw error
+      errores.push(`${variante.etiqueta}: ${error.message}`)
+      ultimoError = error
+      if (!errorReintentable(error)) break
     }
+  }
 
-    hijo.stderr.on('data', (trozo) => {
-      const texto = trozo.toString()
-      if (cabeza.length < 8192) cabeza += texto
-      cola = (cola + texto).slice(-8192)
-
-      if (!duracion) {
-        const encontrado = cabeza.match(/Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/)
-        if (encontrado) duracion = Number(encontrado[1]) * 3600 + Number(encontrado[2]) * 60 + Number(encontrado[3])
-      }
-
-      const actual = [...texto.matchAll(/out_time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/g)].pop()
-      if (actual && Date.now() - ultimoAviso >= 1000) {
-        ultimoAviso = Date.now()
-        const visto = Number(actual[1]) * 3600 + Number(actual[2]) * 60 + Number(actual[3])
-        const velocidad = /speed=\s*([\d.]+)x/.exec(texto)?.[1]
-        alProgresar?.({ visto, total: duracion, velocidad })
-      }
-    })
-
-    hijo.once('error', (error) => {
-      clearTimeout(temporizador)
-      signal?.removeEventListener?.('abort', alAbortar)
-      const faltante = error?.code === 'ENOENT'
-      rechazar(new Error(faltante
-        ? 'No encuentro ffmpeg en el servidor (npm i ffmpeg-static, o define FFMPEG_PATH); sin él no puedo unir el HLS.'
-        : `ffmpeg no pudo arrancar: ${error?.message || error}`))
-    })
-
-    hijo.once('close', (codigo) => {
-      clearTimeout(temporizador)
-      signal?.removeEventListener?.('abort', alAbortar)
-      if (signal?.aborted) return rechazar(errorAbortado())
-      if (detenido) return rechazar(new Error('ffmpeg se detuvo antes de terminar.'))
-      if (codigo === 0) return resolver(salida)
-      const detalle = (cola || cabeza).replace(/\s+/g, ' ').trim().slice(-400)
-      rechazar(new Error(`ffmpeg terminó con código ${codigo}: ${detalle || 'sin detalle'}`))
-    })
-  })
+  const error = new Error(ultimoError?.message || 'ffmpeg no pudo procesar el HLS.')
+  error.intentos = errores
+  throw error
 }
 
 /** Baja un mp4 directo por streaming, con límite de tamaño y progreso. */
@@ -1116,14 +1221,25 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
 
     let ultimoTexto = ''
     let ultimoEnvio = 0
-    const alProgresar = ({ visto, total, velocidad }) => {
-      const porcentaje = total > 0 ? Math.min(100, (visto / total) * 100) : null
-      const barra = porcentaje == null
-        ? ''
-        : `${'█'.repeat(Math.round(porcentaje / 100 * 14))}${'░'.repeat(14 - Math.round(porcentaje / 100 * 14))}`
+    let ultimoVisto = 0
+    let ultimaVelocidad = ''
+    const alProgresar = ({ visto, total, velocidad, reintento }) => {
+      // ffmpeg manda el avance (out_time) y la velocidad (speed) en líneas
+      // distintas: se combinan aquí para no perder ninguna de las dos.
+      if (reintento) {
+        ultimoVisto = 0
+        ultimaVelocidad = ''
+        return editarEstado(`🔁 *${titulo}*\n_Reintentando con un modo más ligero (${reintento})..._`)
+      }
+      if (Number(visto) >= 0) ultimoVisto = Number(visto)
+      if (velocidad) ultimaVelocidad = String(velocidad)
+      const porcentaje = total > 0 ? Math.min(100, (ultimoVisto / total) * 100) : null
+      const llenas = porcentaje == null ? 0 : Math.round(porcentaje / 100 * 14)
+      const barra = porcentaje == null ? '' : `${'█'.repeat(llenas)}${'░'.repeat(14 - llenas)}`
+      const cola = `${ultimaVelocidad ? ` · ⚡ ${ultimaVelocidad}x` : ''}`
       const texto = porcentaje == null
-        ? `📥 *${titulo}*\n📦 ${formatearBytes(visto)}${velocidad ? ` · ⚡ ${velocidad}x` : ''}`
-        : `📥 *${titulo}*\n\`[${barra}] ${porcentaje.toFixed(1)}%\`\n📦 ${formatearBytes(visto)} / ${formatearBytes(total)}${velocidad ? ` · ⚡ ${velocidad}x` : ''}`
+        ? `📥 *${titulo}*\n📦 ${formatearBytes(ultimoVisto)}${cola}`
+        : `📥 *${titulo}*\n\`[${barra}] ${porcentaje.toFixed(1)}%\`\n📦 ${formatearBytes(ultimoVisto)} / ${formatearBytes(total)}${cola}`
       if (texto === ultimoTexto) return
       if (Date.now() - ultimoEnvio < INTERVALO_ESTADO_MS) return
       ultimoTexto = texto
@@ -1177,9 +1293,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
     const mensaje = String(error?.message || error || 'error desconocido')
     console.error('[Byse-DL]', error?.stack || mensaje)
     await reaccionar('❌')
-    const detalle = /supera el límite|No pude extraer|todavía se está codificando|No pude conectar/i.test(mensaje)
-      ? mensaje
-      : `No pude completar la descarga: ${mensaje}`
+    const propio = /supera el límite|No pude extraer|todavía se está codificando|No pude conectar|No encuentro ffmpeg|ffmpeg murió|ffmpeg terminó/i.test(mensaje)
+    const intentos = Array.isArray(error?.intentos) && error.intentos.length > 1
+      ? `\n_Intentos:_ ${error.intentos.map((intento) => unaLinea(intento, 150)).join(' · ')}`
+      : ''
+    const detalle = `${propio ? mensaje : `No pude completar la descarga: ${mensaje}`}${intentos}`
     await notificar(`❌ *Byse*\n${detalle.slice(0, 500)}`)
   } finally {
     finishDownload(downloadKey(m), 'byse', controlador)
