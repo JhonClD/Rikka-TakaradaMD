@@ -208,6 +208,74 @@ async function downloadHls(url, filePath, referer, extraHeaders = {}) {
   return filePath
 }
 
+async function normalizeVideoForWhatsApp(inputPath, basePath, onStatus) {
+  const outputPath = `${basePath}.compatible.mp4`
+  const finalPath = `${basePath}.mp4`
+  const startedAt = Date.now()
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats_period', '5', '-progress', 'pipe:2', '-nostats',
+    '-i', inputPath,
+    '-map', '0:v:0', '-map', '0:a:0?',
+    '-map_metadata', '0', '-map_chapters', '-1',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level:v', '4.1', '-tag:v', 'avc1',
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
+    '-brand', 'mp42', '-movflags', '+faststart', '-y', outputPath,
+  ]
+  downloadLog('conversión compatible iniciada', { entrada: path.basename(inputPath), salida: path.basename(finalPath), video: 'H.264 8-bit', audio: 'AAC estéreo' })
+  onStatus?.('Convirtiendo el video a H.264 compatible con WhatsApp…')
+
+  const child = spawn(getFfmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+  let stderr = ''
+  let progressBuffer = ''
+  let progressFields = {}
+  let lastProgressAt = 0
+  child.stderr.on('data', chunk => {
+    const text = chunk.toString()
+    stderr = (stderr + text).slice(-4000)
+    progressBuffer += text
+    const lines = progressBuffer.split(/\r?\n/)
+    progressBuffer = lines.pop() || ''
+    for (const line of lines) {
+      const separator = line.indexOf('=')
+      if (separator < 0) continue
+      const key = line.slice(0, separator).trim()
+      const value = line.slice(separator + 1).trim()
+      if (!key || !value) continue
+      progressFields[key] = value
+      if (key === 'progress' && Date.now() - lastProgressAt >= 15_000) {
+        lastProgressAt = Date.now()
+        const elapsed = Math.round((Date.now() - startedAt) / 1000)
+        downloadLog('conversión compatible en curso', { tiempoVideo: progressFields.out_time || 'calculando', velocidad: progressFields.speed || 'n/d', tiempoTranscurridoSeg: elapsed })
+        Promise.resolve(onStatus?.(`🎞️ Preparando video compatible… ${progressFields.out_time || ''}`)).catch(() => {})
+      }
+    }
+  })
+
+  const timer = setTimeout(() => child.kill('SIGKILL'), DOWNLOAD_TIMEOUT_MS)
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', code => code === 0
+        ? resolve()
+        : reject(new Error(`FFmpeg no pudo convertir el video a H.264 (código ${code}): ${stderr.trim().slice(-700)}`)))
+    })
+    const stat = await fs.promises.stat(outputPath)
+    if (stat.size < MIN_VALID_BYTES || stat.size >= MAX_DOWNLOAD_BYTES) {
+      throw new Error('El MP4 convertido no tiene un tamaño válido.')
+    }
+    await fs.promises.rename(outputPath, finalPath)
+    if (inputPath !== finalPath) await fs.promises.rm(inputPath, { force: true })
+    downloadLog('conversión compatible completada', { archivo: path.basename(finalPath), tamaño: formatBytes(stat.size), tiempoSeg: Math.round((Date.now() - startedAt) / 1000) })
+    return { filePath: finalPath, extension: '.mp4', mimetype: 'video/mp4' }
+  } catch (error) {
+    await fs.promises.rm(outputPath, { force: true })
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function resolveWithBrowser(url, referer, onStatus) {
   let puppeteer
   try { puppeteer = require('puppeteer') } catch (_) {
@@ -548,7 +616,8 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     })
     options.onStatus?.(`Probando ${candidate.server || 'servidor'} (${variant})…`)
     try {
-      const file = await fetchCandidate(candidate, basePath, options.onStatus)
+      const downloadedFile = await fetchCandidate(candidate, basePath, options.onStatus)
+      const file = await normalizeVideoForWhatsApp(downloadedFile.filePath, basePath, options.onStatus)
       const stat = await fs.promises.stat(file.filePath)
       if (stat.size < MIN_VALID_BYTES || stat.size >= MAX_DOWNLOAD_BYTES) {
         await fs.promises.rm(file.filePath, { force: true })
@@ -569,7 +638,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     } catch (error) {
       downloadLog('candidato fallido', { servidor: candidate.server || 'servidor', error: error.message })
       errors.push(`${candidate.server || 'servidor'}: ${error.message}`)
-      for (const extension of ['.mp4', '.webm', '.mkv', '.mov']) {
+      for (const extension of ['.mp4', '.webm', '.mkv', '.mov', '.compatible.mp4']) {
         await fs.promises.rm(`${basePath}${extension}`, { force: true })
       }
     }
@@ -604,4 +673,4 @@ async function createJpegThumbnail(filePath) {
   })
 }
 
-module.exports = { downloadEpisodeFile, cleanupDownloadFile, createJpegThumbnail, MAX_DOWNLOAD_BYTES }
+module.exports = { downloadEpisodeFile, cleanupDownloadFile, createJpegThumbnail, normalizeVideoForWhatsApp, MAX_DOWNLOAD_BYTES }
