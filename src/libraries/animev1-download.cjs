@@ -17,7 +17,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ANIMEV1_DOWNLOAD_TIMEOUT_MS) || 15 * 60_000)
 const MIN_VALID_BYTES = 256 * 1024
-const PRIORITY = ['mega', 'yourupload', 'pixeldrain', 'pdrain', '1fichier', 'mp4upload', 'upnshare', 'hls', 'zilla']
+const PRIORITY = ['mega', '1fichier', 'mp4upload', 'upnshare', 'hls']
+const DISABLED_SERVERS = ['yourupload', 'pixeldrain', 'pdrain', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
 function downloadLog(event, details = {}) {
@@ -79,23 +80,6 @@ function isPrivateAddress(host) {
 function normalizeCandidateUrl(rawUrl, server) {
   const url = safeHttpUrl(rawUrl)
   if (!url) return null
-  const parsed = new URL(url)
-  const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
-  const token = String(server || '').toLowerCase()
-
-  if (host.includes('zilla-networks.com') && parsed.pathname.startsWith('/play/')) {
-    const id = parsed.pathname.split('/').filter(Boolean).pop()
-    if (id) return `https://player.zilla-networks.com/m3u8/${encodeURIComponent(id)}`
-  }
-  if (host.includes('pixeldrain.com')) {
-    const parts = parsed.pathname.split('/').filter(Boolean)
-    const id = parts[0] === 'api' && parts[1] === 'file' ? parts[2] : parts[0] === 'u' ? parts[1] : null
-    if (id) return `https://pixeldrain.com/api/file/${encodeURIComponent(id)}?download`
-  }
-  if (token.includes('zilla') && /\/play\//i.test(parsed.pathname)) {
-    const id = parsed.pathname.split('/').filter(Boolean).pop()
-    if (id) return `https://player.zilla-networks.com/m3u8/${encodeURIComponent(id)}`
-  }
   return url
 }
 
@@ -469,7 +453,9 @@ function listCandidates(data, variant, preferredQuality = null) {
     ...stream.map(item => ({ ...item, kind: 'stream' })),
     ...downloads.map(item => ({ ...item, kind: 'descarga' })),
   ]
-    .filter(item => item?.url)
+    .filter(item => item?.url && !DISABLED_SERVERS.some(token =>
+      `${item.server || ''} ${item.url}`.toLowerCase().includes(token),
+    ))
   const seen = new Set()
   return candidates
     .filter(item => {
