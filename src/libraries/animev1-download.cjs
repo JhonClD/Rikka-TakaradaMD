@@ -17,7 +17,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ANIMEV1_DOWNLOAD_TIMEOUT_MS) || 15 * 60_000)
 const MIN_VALID_BYTES = 256 * 1024
-const PRIORITY = ['mega', '1fichier', 'mp4upload', 'upnshare', 'hls']
+const PRIORITY = ['mp4upload', 'byse', 'voe', 'mega', 'hls', 'upnshare', '1fichier']
 const DISABLED_SERVERS = ['yourupload', 'pixeldrain', 'pdrain', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
