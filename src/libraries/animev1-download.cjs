@@ -329,6 +329,36 @@ async function readLimitedText(stream, maxBytes = 4 * 1024 * 1024) {
   return Buffer.concat(chunks).toString('utf8')
 }
 
+async function fetchWithExistingDownloader(candidate, url, basePath, onStatus) {
+  const identity = `${candidate.server || ''} ${url}`.toLowerCase()
+  const outputPath = `${basePath}.mp4`
+  if (/\bvoe\b|voe\.(?:sx|to|com)/i.test(identity)) {
+    const plugin = await import('../plugins/voe-dl.js')
+    const voe = plugin.parseVoeUrl(url)
+    if (!plugin.isKnownVoeMirrorUrl(url)) throw new Error('El enlace no pertenece a un mirror Voe reconocido.')
+    const tempDir = await fs.promises.mkdtemp(path.join(TEMP_DIR, 'animev1-voe-'))
+    try {
+      onStatus?.('Descargando con el plugin Voe…')
+      const result = await plugin.downloadVoeWithMirrorFailover(voe, tempDir)
+      await fs.promises.rename(result.outputPath, outputPath)
+    } finally {
+      await fs.promises.rm(tempDir, { recursive: true, force: true })
+    }
+    return { filePath: outputPath, extension: '.mp4', mimetype: 'video/mp4' }
+  }
+  if (/\bbyse\b|byse\./i.test(identity)) {
+    const plugin = await import('../plugins/byse-dl.js')
+    onStatus?.('Descargando con el plugin Byse…')
+    return plugin.downloadByseFile(url, outputPath)
+  }
+  if (/mp4\s?upload|mp4upload\./i.test(identity)) {
+    const plugin = await import('../plugins/mp4upload-dl.js')
+    onStatus?.('Descargando con el plugin MP4Upload…')
+    return plugin.downloadMp4UploadFile(url, outputPath)
+  }
+  return null
+}
+
 async function fetchCandidate(candidate, basePath, onStatus) {
   let url = normalizeCandidateUrl(candidate.url, candidate.server)
   if (!url) throw new Error('URL de servidor no válida.')
@@ -341,6 +371,9 @@ async function fetchCandidate(candidate, basePath, onStatus) {
   const origin = new URL(url).origin
   const referer = `${origin}/`
   let filePath = `${basePath}.mp4`
+
+  const pluginDownload = await fetchWithExistingDownloader(candidate, url, basePath, onStatus)
+  if (pluginDownload) return pluginDownload
 
   if (isMegaCandidate(candidate, url)) {
     return { filePath: await downloadMega(url, filePath, onStatus), extension: '.mp4', mimetype: 'video/mp4' }

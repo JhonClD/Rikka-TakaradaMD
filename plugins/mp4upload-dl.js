@@ -184,6 +184,13 @@ async function downloadMedia(mediaUrl, destPath, referer) {
   return stat
 }
 
+export async function downloadMp4UploadFile(inputUrl, outputPath) {
+  const parsed = parseMp4UploadUrl(inputUrl)
+  const { mediaUrl } = await getMp4UploadPage(parsed.id, parsed.url)
+  const file = await downloadMedia(mediaUrl, outputPath, parsed.url)
+  return { filePath: outputPath, fileSize: file.size, extension: '.mp4', mimetype: 'video/mp4' }
+}
+
 function getInput(m, text, args) {
   const quoted = m.quoted?.text || m.quoted?.caption || ''
   const value = String(text || args?.[0] || quoted || '').match(/https?:\/\/[^\s<>]+/i)?.[0] || ''

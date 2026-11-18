@@ -1226,6 +1226,29 @@ function nombreSeguro(titulo, codigo) {
   return base || `byse-${codigo}`
 }
 
+export async function downloadByseFile(inputUrl, outputPath, options = {}) {
+  const info = parseByseUrl(inputUrl)
+  const signal = options.signal || new AbortController().signal
+  const fuente = await resolverFuente(info, signal)
+  if (signal.aborted) throw errorAbortado()
+  if (/\.m3u8|\/hls\//i.test(fuente.url)) {
+    await descargarHls({ url: fuente.url, referer: fuente.referer, salida: outputPath, signal, alProgresar: options.onProgress })
+  } else {
+    try {
+      await descargarDirecto({ url: fuente.url, referer: fuente.referer, salida: outputPath, signal, alProgresar: options.onProgress })
+    } catch (error) {
+      if (esCancelacion(error) || signal.aborted) throw error
+      await descargarHls({ url: fuente.url, referer: fuente.referer, salida: outputPath, signal, alProgresar: options.onProgress })
+    }
+  }
+  const archivo = await stat(outputPath)
+  if (!archivo.size || archivo.size < MIN_BYTES_VALIDOS) {
+    await rm(outputPath, { force: true }).catch(() => {})
+    throw new Error('La descarga de Byse quedó vacía o incompleta.')
+  }
+  return { filePath: outputPath, fileSize: archivo.size, extension: '.mp4', mimetype: 'video/mp4', title: fuente.titulo || info.code }
+}
+
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => {
