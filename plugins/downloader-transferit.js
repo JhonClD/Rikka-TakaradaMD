@@ -2,7 +2,7 @@ import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { Readable, Transform } from 'node:stream'
+import { PassThrough, Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
@@ -551,7 +551,11 @@ async function openDownload(xh, target, pwToken, signal, offset = 0) {
         throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
       }
 
-      return { stream: Readable.fromWeb(response.body), size, contentType }
+      const stream = typeof response.body.getReader === 'function'
+        ? Readable.fromWeb(response.body)
+        : response.body
+
+      return { stream, size, contentType }
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastError = error
@@ -837,7 +841,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
       return
     }
 
-    const expectedSize = target.size || (target.kind === 'zip' ? totalSize : 0)
+    const expectedSize = target.kind === 'file'
+      ? Math.max(Number(target.size) || 0, files.length === 1 ? totalSize : 0)
+      : (target.size || (target.kind === 'zip' ? totalSize : 0))
     if (expectedSize > MAX_BYTES) {
       await update(`❌ El archivo (${fmtBytes(expectedSize)}) supera el límite de ${MAX_MB} MB.`)
       return
@@ -854,7 +860,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const download = await openDownload(input.xh, target, activeToken, signal)
     tempPath = join(tmpdir(), `transferit_${randomUUID()}_${cleanFileName(target.name, 'archivo.bin')}`)
 
-    const exact = target.kind === 'file' && target.size > 0
+    const exact = target.kind === 'file' && expectedSize > 0
     const realSize = await downloadToTemp(
       download,
       (offset) => openDownload(input.xh, target, activeToken, signal, offset),
