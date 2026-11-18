@@ -504,12 +504,104 @@ async function readErrorBody(response, limit = 300) {
   }
 }
 
-async function openDownload(xh, target, pwToken, signal) {
+async function openDownload(xh, target, pwToken, signal, offset = 0) {
   let lastError = null
   const headers = {
     'User-Agent': 'Mozilla/5.0',
-    'Accept': '*function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick }) {
-  let bytes = 0
+    'Accept': '*/*',
+    'Referer': `${ORIGIN}/t/${xh}`,
+    'Origin': ORIGIN,
+  }
+  if (offset > 0) headers.Range = `bytes=${offset}-`
+
+  for (const host of API_HOSTS) {
+    try {
+      const response = await fetch(
+        buildDownloadUrl(host, xh, target.handle, target.urlName || target.name, pwToken),
+        { headers, signal, redirect: 'follow' },
+      )
+      const contentType = response.headers.get('content-type') || ''
+      const disposition = response.headers.get('content-disposition') || ''
+      const landingPage = /^https?:\/\/(?:www\.)?transfer\.it\/t\//i.test(response.url || '')
+
+      if (!response.ok) {
+        const detail = await readErrorBody(response)
+        throw new TransferItError(
+          `No se pudo iniciar la descarga (HTTP ${response.status})${detail ? `: ${detail}` : ''}.`,
+        )
+      }
+      if (landingPage || (/^(?:text\/html|application\/json)/i.test(contentType) && !/attachment/i.test(disposition))) {
+        await readErrorBody(response, 200)
+        throw new TransferItError(
+          landingPage
+            ? 'transfer.it devolvió la página del enlace en vez del archivo. Puede haber expirado o requerir verificación.'
+            : `transfer.it devolvió ${contentType || 'una respuesta no binaria'} en vez del archivo.`,
+        )
+      }
+      if (!response.body) throw new TransferItError('La descarga llegó sin cuerpo.')
+      if (offset > 0 && response.status !== 206) {
+        throw new TransferItError('El servidor no permite reanudar la descarga.')
+      }
+
+      const declared = Number(response.headers.get('content-length')) || 0
+      const size = offset > 0 ? offset + declared : (declared || target.size || 0)
+      if (size > MAX_BYTES) {
+        const cancelled = response.body.cancel?.()
+        cancelled?.catch?.(() => {})
+        throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
+      }
+
+      return { stream: Readable.fromWeb(response.body), size, contentType }
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) throw error
+      lastError = error
+    }
+  }
+  throw lastError || new TransferItError('No se pudo abrir la descarga en transfer.it.')
+}
+
+function fmtBytes(bytes) {
+  const value = Number(bytes) || 0
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`
+  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`
+  return `${Math.round(value)} B`
+}
+
+function progressBar(percent, width = 16) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0))
+  const filled = Math.round(width * pct / 100)
+  return '█'.repeat(filled) + '░'.repeat(width - filled)
+}
+
+function buildStatus(emoji, label, percent, done, total, speed) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0))
+  if (total > 0) {
+    return `${emoji} *${label}*\n` +
+      `\`[${progressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
+      `📦 ${fmtBytes(done)} / ${fmtBytes(total)}\n` +
+      `⚡ ${fmtBytes(speed)}/s`
+  }
+  return `${emoji} *${label}*\n📦 ${fmtBytes(done)}\n⚡ ${fmtBytes(speed)}/s`
+}
+
+function makeWatchdog(controller) {
+  let last = Date.now()
+  const timer = setInterval(() => {
+    if (Date.now() - last > IDLE_TIMEOUT_MS) {
+      controller.abort(Object.assign(new Error('Inactividad'), { name: 'AbortError' }))
+      clearInterval(timer)
+    }
+  }, 5_000)
+  timer.unref?.()
+  return {
+    ping() { last = Date.now() },
+    stop() { clearInterval(timer) },
+  }
+}
+
+function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick, offset = 0 }) {
+  let bytes = offset
   const started = Date.now()
   let lastTick = 0
   const tick = (force = false) => {
@@ -517,7 +609,7 @@ async function openDownload(xh, target, pwToken, signal) {
     if (!force && now - lastTick < EDIT_INTERVAL_MS) return
     lastTick = now
     const elapsed = Math.max((now - started) / 1000, 0.001)
-    const speed = bytes / elapsed
+    const speed = (bytes - offset) / elapsed
     const percent = total > 0 ? Math.min(100, bytes / total * 100) : 0
     onTick(buildStatus(emoji, label, percent, bytes, total, speed))
   }
@@ -552,29 +644,60 @@ function guessMime(fileName) {
   return types[ext] || 'application/octet-stream'
 }
 
-async function downloadToTemp(stream, tempPath, expectedSize, watchdog, signal, update) {
-  const meter = makeMeter({
-    label: 'Descargando de Transfer.it',
-    emoji: '📥',
-    total: expectedSize,
-    maxBytes: MAX_BYTES,
-    watchdog,
-    onTick: (text) => { void update(text) },
-  })
-  await pipeline(stream, meter, fs.createWriteStream(tempPath, { flags: 'wx' }), { signal })
-  const realSize = fs.statSync(tempPath).size
-  if (!realSize || (expectedSize > 0 && realSize < expectedSize)) {
-    throw new TransferItError('La descarga quedó incompleta; inténtalo de nuevo.')
+async function downloadToTemp(first, reopen, tempPath, expectedSize, exact, watchdog, signal, update) {
+  const total = exact ? expectedSize : (first.size || expectedSize)
+  let current = first
+  let written = 0
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const meter = makeMeter({
+      label: 'Descargando de Transfer.it',
+      emoji: '📥',
+      total,
+      maxBytes: MAX_BYTES,
+      watchdog,
+      offset: written,
+      onTick: (text) => { void update(text) },
+    })
+    try {
+      await pipeline(
+        current.stream,
+        meter,
+        fs.createWriteStream(tempPath, { flags: written ? 'a' : 'wx' }),
+        { signal },
+      )
+    } catch (error) {
+      if (signal.aborted || isAbortError(error) || error instanceof TransferItError || !exact) throw error
+      console.warn(`[TRANSFERIT] descarga interrumpida: ${error.message}`)
+    }
+    written = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
+    if (!exact || written >= total || attempt === 5) break
+    console.warn(`[TRANSFERIT] reanudando desde ${fmtBytes(written)} de ${fmtBytes(total)}`)
+    current = await reopen(written)
+  }
+  const realSize = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
+  if (!realSize || (total > 0 && realSize < total)) {
+    throw new TransferItError(
+      `La descarga quedó incompleta (${fmtBytes(realSize)} de ${fmtBytes(total)}); inténtalo de nuevo.`,
+    )
   }
   return realSize
 }
 
 async function sendDocument(conn, m, tempPath, target, realSize, update) {
   await update('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
+  const pass = new PassThrough()
+  const meter = makeMeter({
+    label: 'Subiendo a WhatsApp',
+    emoji: '📤',
+    total: realSize,
+    onTick: (text) => { void update(text) },
+  })
+  pipeline(fs.createReadStream(tempPath), meter, pass).catch((error) => pass.destroy(error))
+
   await conn.sendMessage(
     m.chat,
     {
-      document: { url: tempPath },
+      document: { stream: pass },
       fileName: target.name,
       mimetype: guessMime(target.name),
       caption: `✅ *${target.name}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
@@ -731,11 +854,13 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const download = await openDownload(input.xh, target, activeToken, signal)
     tempPath = join(tmpdir(), `transferit_${randomUUID()}_${cleanFileName(target.name, 'archivo.bin')}`)
 
-    const sizeForProgress = download.size || expectedSize
+    const exact = target.kind === 'file' && target.size > 0
     const realSize = await downloadToTemp(
-      download.stream,
+      download,
+      (offset) => openDownload(input.xh, target, activeToken, signal, offset),
       tempPath,
-      sizeForProgress,
+      expectedSize,
+      exact,
       watchdog,
       signal,
       update,
