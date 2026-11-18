@@ -665,7 +665,33 @@ async function downloadToTemp(stream, tempPath, expectedSize, watchdog, signal, 
   return realSize
 }
 
+function sniffVideoExt(filePath) {
+  let fd
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buf = Buffer.alloc(64)
+    const read = fs.readSync(fd, buf, 0, 64, 0)
+    const head = buf.subarray(0, read)
+    if (head.length >= 4 && head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) {
+      return head.includes(Buffer.from('webm')) ? 'webm' : 'mkv'
+    }
+    if (head.length >= 12 && head.subarray(4, 8).toString('latin1') === 'ftyp') return 'mp4'
+    return ''
+  } catch {
+    return ''
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+
+function fixVideoName(fileName, realExt) {
+  const current = String(fileName).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || ''
+  if (!realExt || !['mp4', 'mkv', 'webm', 'm4v'].includes(current) || current === realExt) return fileName
+  return String(fileName).replace(/\.[a-z0-9]+$/i, `.${realExt}`)
+}
+
 async function sendDocument(conn, m, tempPath, target, realSize, update) {
+  const sendName = fixVideoName(target.name, sniffVideoExt(tempPath))
   await update('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
   const pass = new PassThrough()
   const meter = makeMeter({
@@ -680,9 +706,9 @@ async function sendDocument(conn, m, tempPath, target, realSize, update) {
     m.chat,
     {
       document: { stream: pass },
-      fileName: target.name,
-      mimetype: guessMime(target.name),
-      caption: `✅ *${target.name}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
+      fileName: sendName,
+      mimetype: guessMime(sendName),
+      caption: `✅ *${sendName}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
     },
     { quoted: m },
   )
