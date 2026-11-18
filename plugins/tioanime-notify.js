@@ -29,7 +29,8 @@ const GOOGLE_DRIVE_PUBLIC_FOLDERS = String(process.env.GOOGLE_DRIVE_PUBLIC_FOLDE
   .split(',')
   .map(value => value.trim())
   .filter(Boolean)
-const CENTRAL_CHAT_ID         = process.env.TIO_CENTRAL_CHAT_ID || '120363410712581446@g.us'
+const TIO_CENTRAL_CHAT_ID_ENV = String(process.env.TIO_CENTRAL_CHAT_ID || '').trim()
+let CENTRAL_CHAT_ID           = TIO_CENTRAL_CHAT_ID_ENV || null
 const ERROR_OWNER_JID         = process.env.TIO_ERROR_OWNER_JID || '51925092348@s.whatsapp.net'
 const httpCache = new Map()
 
@@ -153,6 +154,36 @@ function loadSeen()   { return loadJson(SEEN_FILE) }
 function saveSeen(d)  { saveJsonAtomic(SEEN_FILE, d) }
 function loadState()  { return loadJson(STATE_FILE) }
 function saveState(d) { saveJsonAtomic(STATE_FILE, d) }
+function resolveCentralChatId() {
+  if (TIO_CENTRAL_CHAT_ID_ENV) return (CENTRAL_CHAT_ID = TIO_CENTRAL_CHAT_ID_ENV)
+  if (CENTRAL_CHAT_ID) return CENTRAL_CHAT_ID
+
+  const state = loadState()
+  const configured = state.__config?.centralChatId
+  const isValidGroup = value => typeof value === 'string' && value.endsWith('@g.us')
+  const firstRegisteredGroup = Object.keys(state).find(chatId => chatId !== '__config' && chatId.endsWith('@g.us'))
+  const centralChatId = isValidGroup(configured) ? configured : firstRegisteredGroup
+  if (!centralChatId) return null
+
+  CENTRAL_CHAT_ID = centralChatId
+  if (!isValidGroup(configured)) {
+    state.__config = { ...(state.__config || {}), centralChatId }
+    saveState(state)
+  }
+  return CENTRAL_CHAT_ID
+}
+function setCentralChatId(chatId) {
+  const existing = resolveCentralChatId()
+  if (existing) return existing
+  if (TIO_CENTRAL_CHAT_ID_ENV || typeof chatId !== 'string' || !chatId.endsWith('@g.us')) return null
+
+  const state = loadState()
+  CENTRAL_CHAT_ID = chatId
+  state.__config = { ...(state.__config || {}), centralChatId: chatId }
+  saveState(state)
+  console.log(`[tioanime-notify] Grupo central establecido: ${chatId}`)
+  return CENTRAL_CHAT_ID
+}
 function getGlobalIntervalSec() {
   const state = loadState()
   const configured = Number(state.__config?.intervalSec)
@@ -169,7 +200,7 @@ function setGlobalIntervalSec(intervalSec) {
 function getRecipientChatIds(extra = []) {
   const state = loadState()
   const configured = Object.keys(state).filter(chatId => chatId !== '__config' && chatId.endsWith('@g.us'))
-  return [...new Set([CENTRAL_CHAT_ID, ...configured, ...extra].filter(Boolean))]
+  return [...new Set([resolveCentralChatId(), ...configured, ...extra].filter(Boolean))]
 }
 
 async function avisarNuevosEpisodiosAlCentral(nuevos, conn) {
@@ -1608,6 +1639,7 @@ async function procesarCola() {
 }
 
 async function checkNuevosEpisodios(_chatId, conn) {
+  if (!resolveCentralChatId()) return
   const recipients = getRecipientChatIds()
   if (global.tioCheckingChats.has(CENTRAL_CHAT_ID)) return
   global.tioCheckingChats.add(CENTRAL_CHAT_ID)
@@ -1753,6 +1785,9 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiostart') {
+    if (!m.chat?.endsWith('@g.us')) return m.reply('⚠️ Usa `/tiostart` dentro del grupo que quieras registrar.')
+    const centralChatId = resolveCentralChatId() || setCentralChatId(m.chat)
+    if (!centralChatId) return m.reply('❌ No se pudo establecer el grupo central.')
     const secondsArg = Number.parseInt(text?.trim(), 10)
     const intervalSec = Number.isInteger(secondsArg) && secondsArg >= MIN_INTERVAL_SECONDS && secondsArg <= MAX_INTERVAL_SECONDS
       ? secondsArg
@@ -1772,7 +1807,7 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       void reportTioError(conn, `Activación del notificador en ${m.chat}`, err)
     }
     await conn.sendMessage(m.chat, {
-      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
+      text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🎯 *Grupo central:* ${centralChatId === m.chat ? 'este grupo' : centralChatId}\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
     }, { quoted: m })
     return
   }
@@ -1814,11 +1849,26 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tioflush') {
+    const centralChatId = resolveCentralChatId()
+    const flushGlobal = Boolean(centralChatId && m.chat === centralChatId)
     const antes = global.tioEpisodeQueue.length
-    const eliminados = global.tioEpisodeQueue.filter(i => i.chatId === m.chat)
-    global.tioEpisodeQueue = global.tioEpisodeQueue.filter(i => i.chatId !== m.chat)
+    const eliminados = global.tioEpisodeQueue.filter(i => flushGlobal || i.chatId === m.chat)
+    global.tioEpisodeQueue = global.tioEpisodeQueue.filter(i => !flushGlobal && i.chatId !== m.chat)
     for (const item of eliminados) global.tioQueuedIds.delete(`${item.chatId}:${item.ep.id}`)
-    return m.reply(`🗑️ *${antes - global.tioEpisodeQueue.length}* episodio(s) eliminado(s).`)
+    if (flushGlobal && centralChatId) {
+      const seen = loadSeen()
+      const centralSeen = Array.isArray(seen[centralChatId]) ? seen[centralChatId] : []
+      for (const item of eliminados) {
+        if (!item.ep?.id) continue
+        centralSeen.push(item.ep.id)
+        if (item.ep.fuente === 'latanime') centralSeen.push(item.ep.id.replace(/-(?:castellano|latino)$/, ''))
+      }
+      seen[centralChatId] = [...new Set(centralSeen)].slice(-500)
+      saveSeen(seen)
+    }
+    const cantidad = antes - global.tioEpisodeQueue.length
+    const alcance = flushGlobal ? 'de toda la cola' : 'de este grupo'
+    return m.reply(`🗑️ *${cantidad}* episodio(s) eliminado(s) ${alcance}. Los envíos que ya comenzaron no se cancelan.${flushGlobal ? ' Los episodios vaciados quedan marcados como vistos para que no vuelvan a entrar en cola.' : ''}`)
   }
 
   if (command === 'tiounblock') {
@@ -1924,14 +1974,17 @@ handler.before = async (m, { conn }) => {
     global.tioRestoreCheckAt = ahora
     restaurarNotificadores(conn)
   }
-  if (conn && !global.tioCentralTimer) iniciarSondeoCentral(conn, getGlobalIntervalSec())
+  if (conn && resolveCentralChatId() && !global.tioCentralTimer) iniciarSondeoCentral(conn, getGlobalIntervalSec())
 }
+
+// Restaura el grupo central persistido o migra el primer grupo ya registrado.
+resolveCentralChatId()
 
 // El grupo central activa el sondeo automáticamente, aunque no haya otros grupos suscritos.
 if (global.conn) {
   global.tioConn = global.conn
   restaurarNotificadores(global.conn)
-  if (!global.tioCentralTimer) iniciarSondeoCentral(global.conn, getGlobalIntervalSec())
+  if (CENTRAL_CHAT_ID && !global.tioCentralTimer) iniciarSondeoCentral(global.conn, getGlobalIntervalSec())
 }
 
 export default handler
