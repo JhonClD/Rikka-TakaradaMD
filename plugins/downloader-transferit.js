@@ -18,7 +18,7 @@ import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PassThrough, Readable, Transform } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
@@ -690,19 +690,13 @@ async function downloadToTemp(stream, tempPath, expectedSize, watchdog, signal, 
 
 async function sendDocument(conn, m, tempPath, target, realSize, update) {
   await update('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
-  const pass = new PassThrough()
-  const meter = makeMeter({
-    label: 'Subiendo a WhatsApp',
-    emoji: '📤',
-    total: realSize,
-    onTick: (text) => { void update(text) },
-  })
-  pipeline(fs.createReadStream(tempPath), meter, pass).catch((error) => pass.destroy(error))
-
   await conn.sendMessage(
     m.chat,
     {
-      document: { stream: pass },
+      // El fork de Baileys convierte streams web con Readable.fromWeb(); un
+      // PassThrough de Node provoca `readableStream must be ReadableStream`.
+      // Pasar la ruta permite que Baileys abra y gestione el archivo local.
+      document: { url: tempPath },
       fileName: target.name,
       mimetype: guessMime(target.name),
       caption: `✅ *${target.name}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
