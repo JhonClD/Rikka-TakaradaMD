@@ -1,3 +1,19 @@
+/**
+ * Descargador de transfer.it en un solo archivo y sin dependencias nuevas.
+ *
+ * transfer.it está respaldado por la API de MEGA. En lugar de raspar HTML:
+ *   1. `xi` entrega metadatos públicos (título, tamaño, password, ZIP).
+ *   2. `f` entrega el árbol de nodos; los nombres se descifran en local
+ *      con AES-CBC (IV=0) y la clave XOR-reducida de cada nodo.
+ *   3. `GET /cs/g?x=<xh>&n=<handle>&fn=<nombre>` devuelve los bytes en
+ *      claro (el servidor ya descifra); exige Referer/Origin de transfer.it.
+ *
+ * Contraseñas: jamás se envía la contraseña en claro. Se deriva un token
+ * PBKDF2-HMAC-SHA256(100000, 32) con una sal de 18 bytes construida desde
+ * el handle, se valida con `xv` y se adjunta como `pw=` en `f` y `/cs/g`.
+ *
+ * El registro central de descargas permite cancelar con `.cancelar`.
+ */
 import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { join } from 'node:path'
@@ -57,6 +73,7 @@ function decodeText(value) {
   }
 }
 
+/** Clave de atributos: clave de 16 bytes, o XOR de las dos mitades de 32. */
 function foldKey(key) {
   if (!Buffer.isBuffer(key)) return null
   if (key.length === 16) return Buffer.from(key)
@@ -66,6 +83,7 @@ function foldKey(key) {
   return out
 }
 
+/** Descifra blobs de clave MEGA: AES-CBC bloque a bloque, IV=0, sin padding. */
 function decryptKeyBlocks(encrypted, wrappingKey) {
   if (!encrypted.length || encrypted.length % 16 !== 0) return null
   if (wrappingKey.length !== 16 && wrappingKey.length !== 32) return null
@@ -82,6 +100,7 @@ function decryptKeyBlocks(encrypted, wrappingKey) {
   return out
 }
 
+/** Claves candidatas: `k` plano de transfer.it o `owner:clave` envuelta. */
 function keyCandidates(rawKey, wrappingKey = null) {
   const candidates = []
   for (const entry of String(rawKey || '').split('/').filter(Boolean)) {
@@ -118,6 +137,7 @@ function decryptAttrs(encryptedAttrs, aesKey) {
   }
 }
 
+/** Exportado para poder probar el descifrado con fixtures reales. */
 export function decryptNodeAttributes(encryptedAttrs, key) {
   const keys = Buffer.isBuffer(key) ? [key] : keyCandidates(key)
   for (const candidate of keys) {
@@ -127,10 +147,12 @@ export function decryptNodeAttributes(encryptedAttrs, key) {
   throw new TransferItError('No se pudieron descifrar los atributos del nodo.')
 }
 
+/** Token PBKDF2 que la API espera en `xv`, `f` y `/cs/g`. */
 export function derivePasswordToken(xh, password) {
   const raw = base64urlDecode(xh)
   let salt = raw.subarray(Math.max(0, raw.length - 6))
   if (String(xh).length > 12) {
+    // Variante "open sesame" del webclient: handle codificado dos veces.
     const inner = base64urlDecode(raw.toString('latin1'))
     if (inner.length >= 7) salt = inner.subarray(inner.length - 7, inner.length - 1)
   }
@@ -177,6 +199,10 @@ function tokenize(text) {
   return tokens
 }
 
+/**
+ * Acepta URL completa, URL sin esquema, `/t/<xh>`, handle suelto,
+ * `#<handle>`, `/t/<xh>/<handle>` y opciones después del enlace.
+ */
 export function parseTransferInput(raw) {
   const source = String(raw || '').trim()
   const found = source.match(/(?:https?:\/\/)?(?:www\.)?transfer\.it\/t\/[A-Za-z0-9_-]+[^\s]*/i)
@@ -345,6 +371,7 @@ function firstObject(value) {
   return result && typeof result === 'object' ? result : null
 }
 
+/** POST /cs: siempre un array de comandos, con reintentos y hosts de respaldo. */
 async function apiCommand(command, { x = '', pw = '', signal } = {}) {
   let lastError = null
   const remember = (error) => {
@@ -417,6 +444,7 @@ async function fetchInfo(xh, signal) {
     return firstObject(await apiCommand({ a: 'xi', xh }, { signal })) || {}
   } catch (error) {
     if (signal.aborted || isAbortError(error)) throw error
+    // Algunos clusters no responden `xi`; `f` sigue siendo autoritativo.
     console.warn(`[TRANSFERIT] metadatos no disponibles: ${error.message}`)
     return {}
   }
@@ -438,6 +466,7 @@ async function validatePassword(xh, pwToken, signal) {
     if (signal.aborted || isAbortError(error)) throw error
     if (error.code === -14) throw new TransferItError('La contraseña del transfer es incorrecta.', -14)
     if (error.code === -8 || error.code === -9 || error.code === -16) throw error
+    // `xv` puede no existir en algún cluster; `f` validará el token igualmente.
   }
 }
 
@@ -491,6 +520,7 @@ function zipTarget(info, xh) {
   }
 }
 
+/** URL directa del webclient: sirve bytes en claro y sigue redirecciones. */
 export function buildDownloadUrl(host, xh, handle, fileName, pwToken = '') {
   const base = `${host.replace(/\/+$/, '')}/cs/g?x=${encodeURIComponent(xh)}&n=${encodeURIComponent(handle)}&fn=${encodeURIComponent(fileName)}`
   return pwToken ? `${base}&pw=${encodeURIComponent(pwToken)}` : base
@@ -542,20 +572,12 @@ async function openDownload(xh, target, pwToken, signal) {
       const declared = Number(response.headers.get('content-length')) || 0
       const size = declared || target.size || 0
       if (size > MAX_BYTES) {
-        if (typeof response.body.cancel === 'function') {
-          const cancelled = response.body.cancel()
-          cancelled?.catch?.(() => {})
-        } else {
-          response.body.destroy?.()
-        }
+        const cancelled = response.body.cancel?.()
+        cancelled?.catch?.(() => {})
         throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
       }
 
-      const stream = typeof response.body.getReader === 'function'
-        ? Readable.fromWeb(response.body)
-        : response.body
-
-      return { stream, size, contentType }
+      return { stream: Readable.fromWeb(response.body), size, contentType }
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastError = error
@@ -604,6 +626,7 @@ function makeWatchdog(controller) {
   }
 }
 
+/** Transform que cuenta bytes, vigila el límite y reporta progreso. */
 function makeMeter({ label, emoji, total, maxBytes, watchdog, onTick }) {
   let bytes = 0
   const started = Date.now()
@@ -665,33 +688,7 @@ async function downloadToTemp(stream, tempPath, expectedSize, watchdog, signal, 
   return realSize
 }
 
-function sniffVideoExt(filePath) {
-  let fd
-  try {
-    fd = fs.openSync(filePath, 'r')
-    const buf = Buffer.alloc(64)
-    const read = fs.readSync(fd, buf, 0, 64, 0)
-    const head = buf.subarray(0, read)
-    if (head.length >= 4 && head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) {
-      return head.includes(Buffer.from('webm')) ? 'webm' : 'mkv'
-    }
-    if (head.length >= 12 && head.subarray(4, 8).toString('latin1') === 'ftyp') return 'mp4'
-    return ''
-  } catch {
-    return ''
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd)
-  }
-}
-
-function fixVideoName(fileName, realExt) {
-  const current = String(fileName).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || ''
-  if (!realExt || !['mp4', 'mkv', 'webm', 'm4v'].includes(current) || current === realExt) return fileName
-  return String(fileName).replace(/\.[a-z0-9]+$/i, `.${realExt}`)
-}
-
 async function sendDocument(conn, m, tempPath, target, realSize, update) {
-  const sendName = fixVideoName(target.name, sniffVideoExt(tempPath))
   await update('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
   const pass = new PassThrough()
   const meter = makeMeter({
@@ -706,9 +703,9 @@ async function sendDocument(conn, m, tempPath, target, realSize, update) {
     m.chat,
     {
       document: { stream: pass },
-      fileName: sendName,
-      mimetype: guessMime(sendName),
-      caption: `✅ *${sendName}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
+      fileName: target.name,
+      mimetype: guessMime(target.name),
+      caption: `✅ *${target.name}*\n📦 *Tamaño:* ${fmtBytes(realSize)}\n🚀 _Descargado de Transfer.it._`,
     },
     { quoted: m },
   )
