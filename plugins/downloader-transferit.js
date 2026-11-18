@@ -18,7 +18,7 @@ import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { Transform } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
@@ -572,15 +572,20 @@ async function openDownload(xh, target, pwToken, signal) {
       const declared = Number(response.headers.get('content-length')) || 0
       const size = declared || target.size || 0
       if (size > MAX_BYTES) {
-        const cancelled = response.body.cancel?.()
-        cancelled?.catch?.(() => {})
+        if (typeof response.body.cancel === 'function') {
+          const cancelled = response.body.cancel()
+          cancelled?.catch?.(() => {})
+        } else {
+          response.body.destroy?.()
+        }
         throw new TransferItError(`El archivo (${fmtBytes(size)}) supera el límite de ${MAX_MB} MB.`)
       }
 
-      // pipeline() en Node 22 admite ReadableStream web directamente. No
-      // envolverlo con Readable.fromWeb: algunas implementaciones de fetch
-      // devuelven ya un stream de Node (p. ej. PassThrough).
-      return { stream: response.body, size, contentType }
+      const stream = typeof response.body.getReader === 'function'
+        ? Readable.fromWeb(response.body)
+        : response.body
+
+      return { stream, size, contentType }
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastError = error
