@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
+const API_KEY = String(process.env.ONEFICHIER_API_KEY || 'fpTg_gSBp98_cN=r=psWx72=BTxL0tEh').trim()
 const MAX_DOWNLOAD_BYTES = Math.min(4096, Math.max(20, Number(process.env.ONEFICHIER_MAX_MB) || 4096)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ONEFICHIER_TIMEOUT_MS) || 60 * 60_000)
 const MAX_HTML_BYTES = 2 * 1024 * 1024
@@ -161,6 +162,24 @@ function isHtmlResponse(response) {
   return /text\/html|application\/xhtml\+xml/i.test(getHeader(response.headers, 'content-type'))
 }
 
+async function getPremiumDownloadUrl(inputUrl) {
+  if (!API_KEY) return null
+  const res = await fetch('https://api.1fichier.com/v1/download/get_token.cgi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ url: inputUrl, no_ssl: 0 }),
+    signal: AbortSignal.timeout(30_000),
+  })
+  let data = null
+  try { data = await res.json() } catch (_) {}
+  if (data?.status === 'OK' && data.url) {
+    const target = new URL(data.url)
+    if (!allowedHost(target.hostname)) throw new Error('la API devolvió un dominio no permitido')
+    return target.href
+  }
+  throw new Error(data?.message || `HTTP ${res.status}`)
+}
+
 async function requestStream(url, session, referer, method = 'GET', fields = null) {
   const headers = { Accept: '*/*', Referer: referer || 'https://1fichier.com/' }
   if (method === 'POST') headers['Content-Type'] = 'application/x-www-form-urlencoded'
@@ -192,6 +211,19 @@ async function requestStream(url, session, referer, method = 'GET', fields = nul
 }
 
 async function getDownloadStream(inputUrl, session) {
+  if (API_KEY) {
+    try {
+      const premiumUrl = await getPremiumDownloadUrl(inputUrl)
+      console.log('[1FICHIER] Enlace obtenido con la API premium.')
+      const premium = await requestStream(premiumUrl, session, 'https://1fichier.com/')
+      if (!isHtmlResponse(premium.response) && premium.response.status >= 200 && premium.response.status < 400) return premium
+      premium.response.data.destroy()
+      console.log('[1FICHIER] El enlace de la API no devolvió un archivo; se usa el método normal.')
+    } catch (error) {
+      console.log(`[1FICHIER] API no disponible (${error?.message || error}); se usa el método normal.`)
+    }
+  }
+
   let currentUrl = inputUrl
   let referer = 'https://1fichier.com/'
   for (let step = 0; step < 5; step++) {
@@ -222,7 +254,7 @@ async function getDownloadStream(inputUrl, session) {
 
     const waitSeconds = findWaitSeconds(html)
     if (waitSeconds > 0) {
-    if (waitSeconds > 180) throw new Error(`1fichier solicita esperar ${waitSeconds} segundos; supera el máximo automático de 180 segundos.`)
+      if (waitSeconds > 180) throw new Error(`1fichier solicita esperar ${waitSeconds} segundos; supera el máximo automático de 180 segundos.`)
       await waitWithProgress(waitSeconds)
     }
 
@@ -393,3 +425,4 @@ handler.command = /^(1fichier|fichier|onefichier)$/i
 handler.limit = false
 
 export default handler
+  
