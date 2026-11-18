@@ -81,8 +81,8 @@ function log(event, details = {}) {
 }
 
 async function getPage(parsed, signal) {
-  const response = await axios.get(parsed.url, {
-    headers: { ...UA_HEADERS, Referer: parsed.url },
+  const obtener = async (url, referer) => axios.get(url, {
+    headers: { ...UA_HEADERS, Referer: referer || url },
     timeout: 20_000,
     maxRedirects: 6,
     maxContentLength: 8 * 1024 * 1024,
@@ -90,9 +90,23 @@ async function getPage(parsed, signal) {
     signal,
     validateStatus: status => status >= 200 && status < 400,
   })
-  const finalUrl = response.request?.res?.responseUrl || parsed.url
+  let response = await obtener(parsed.url, parsed.url)
+  let finalUrl = response.request?.res?.responseUrl || parsed.url
   if (!allowedYourUploadHost(new URL(finalUrl).hostname)) throw new Error('YourUpload redirigió la página fuera de su dominio.')
-  return { html: String(response.data || ''), finalUrl }
+  let html = String(response.data || '')
+
+  // La página /watch/ es solo una envoltura; el reproductor y la URL MP4 viven
+  // en un iframe /embed/{id}. Seguir únicamente iframes del mismo proveedor.
+  const frame = html.match(/<iframe\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/i)
+  if (frame?.[1]) {
+    const embedUrl = isPublicHttpUrl(new URL(frame[1], finalUrl).href)
+    if (!embedUrl || !allowedYourUploadHost(embedUrl.hostname)) throw new Error('YourUpload mostró un iframe fuera de su dominio; se rechazó por seguridad.')
+    response = await obtener(embedUrl.href, finalUrl)
+    finalUrl = response.request?.res?.responseUrl || embedUrl.href
+    if (!allowedYourUploadHost(new URL(finalUrl).hostname)) throw new Error('El reproductor de YourUpload redirigió fuera de su dominio.')
+    html = String(response.data || '')
+  }
+  return { html, finalUrl }
 }
 
 async function downloadVideo(mediaUrl, pageUrl, destPath, signal) {
