@@ -1,6 +1,7 @@
 import { loadEnv } from '../src/funcion/env.js'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import createTerminalLogger from '../src/libraries/terminal-log.cjs'
 
 // El .env lo carga config.js (src/funcion/env.js) antes de importar los
 // plugins; este duplicado leía el archivo desde process.cwd() y, según el
@@ -22,9 +23,7 @@ const PROVIDER_API_KEYS = {
 global.nidlSessions = global.nidlSessions || new Map()
 global.nidlDownloadLocks = global.nidlDownloadLocks || new Set()
 
-function terminalLog(event, details = {}) {
-  console.log(`[NIDL][${new Date().toISOString()}] ${event} ${JSON.stringify(details)}`)
-}
+const terminalLog = createTerminalLogger('NIDL')
 
 function formatBytes(value) {
   const bytes = Number(value) || 0

@@ -12,6 +12,7 @@ const axios = require('axios')
 const cheerio = require('cheerio')
 const { File: MegaFile } = require('megajs')
 const animeV1 = require('./animev1.cjs')
+const createTerminalLogger = require('./terminal-log.cjs')
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
@@ -21,9 +22,7 @@ const PRIORITY = ['mp4upload', 'byse', 'voe', 'mega', 'hls', 'upnshare', '1fichi
 const DISABLED_SERVERS = ['yourupload', 'pixeldrain', 'pdrain', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
-function downloadLog(event, details = {}) {
-  console.log(`[NIDL-DL][${new Date().toISOString()}] ${event} ${JSON.stringify(details)}`)
-}
+const downloadLog = createTerminalLogger('NIDL-DL')
 
 function hostOf(value) {
   try { return new URL(value).host } catch (_) { return 'host-desconocido' }
