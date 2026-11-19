@@ -11,6 +11,13 @@ import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/
 const MAX_SIZE = 2 * 1024 ** 3
 const IDLE_TIMEOUT = 60000
 const EDIT_INTERVAL = 3000
+const CONSOLE_INTERVAL = 1000
+const SPEED_WINDOW_MS = 5000
+const MAX_LISTED_FILES = 25
+// Mismo ajuste que usan dbs-notify y tioanime-notify (megajs usa 4 por defecto).
+const MEGA_MAX_CONNECTIONS = Math.min(Math.max(Number(process.env.MEGA_MAX_CONNECTIONS) || 16, 4), 32)
+
+const MEGA_URL_RE = /https?:\/\/(?:www\.)?mega\.(?:nz|co\.nz)\/[^\s]+/i
 
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
@@ -19,7 +26,7 @@ function fmtBytes(b) {
 }
 
 function progressBar(pct, width = 16) {
-  const filled = Math.round(width * pct / 100)
+  const filled = Math.max(0, Math.min(width, Math.round(width * pct / 100)))
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
 
@@ -40,7 +47,7 @@ function buildStatus(emoji, label, pct, done, total, speed) {
 }
 
 function sanitize(name) {
-  return name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200)
+  return String(name).replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 200) || 'archivo_mega'
 }
 
 function isAbort(e) {
@@ -53,14 +60,21 @@ function isAbort(e) {
   )
 }
 
-function createSpeedSampler(windowSize = 5) {
+function abortError() {
+  return Object.assign(new Error('Aborted'), { name: 'AbortError' })
+}
+
+// Velocidad instantánea: bytes transferidos dentro de una ventana deslizante,
+// en lugar de promediar la media acumulada desde el inicio.
+function createSpeedSampler(windowMs = SPEED_WINDOW_MS) {
   const samples = []
   return {
-    sample(bytes, elapsedMs) {
-      const speed = bytes / (elapsedMs / 1000 || 0.001)
-      samples.push(speed)
-      if (samples.length > windowSize) samples.shift()
-      return samples.reduce((a, b) => a + b, 0) / samples.length
+    sample(totalBytes, now = Date.now()) {
+      samples.push([now, totalBytes])
+      while (samples.length > 2 && now - samples[0][0] > windowMs) samples.shift()
+      const [t0, b0] = samples[0]
+      const elapsed = now - t0
+      return elapsed > 0 ? ((totalBytes - b0) / elapsed) * 1000 : 0
     }
   }
 }
@@ -80,23 +94,62 @@ function makeWatchdog(controller) {
   }
 }
 
+function extractMegaUrl(args) {
+  const match = args.join(' ').match(MEGA_URL_RE)
+  return match ? match[0] : null
+}
+
+// Un enlace sin clave de descifrado (#...) no se puede descargar.
+function hasDecryptionKey(url) {
+  return /#[^\s]+/.test(url)
+}
+
 function parseMegaError(err) {
   const msg = err?.message || String(err)
-  if (msg.includes('EOVERQUOTA') || msg.includes('-18')) return '❌ Cuota de Mega excedida. Intenta más tarde.'
-  if (msg.includes('ENOENT') || msg.includes('-9')) return '❌ Archivo no encontrado en Mega.'
-  if (msg.includes('EACCESS') || msg.includes('-11')) return '❌ Sin acceso al archivo (puede ser privado).'
+  const code = (n) => new RegExp(`(^|[^\\d])-${n}([^\\d]|$)`).test(msg)
+  if (/EOVERQUOTA/i.test(msg) || code(17)) return '❌ Cuota de transferencia de Mega excedida. Intenta más tarde.'
+  if (/ETEMPUNAVAIL/i.test(msg) || code(18)) return '❌ Archivo temporalmente no disponible en Mega. Intenta más tarde.'
+  if (/ENOENT/i.test(msg) || code(9)) return '❌ Archivo no encontrado en Mega (puede haber sido eliminado).'
+  if (/EBLOCKED/i.test(msg) || code(16)) return '❌ Mega bloqueó este enlace.'
+  if (/EACCESS/i.test(msg) || code(11)) return '❌ Sin acceso al archivo (puede ser privado).'
+  if (/EKEY/i.test(msg) || code(14) || /invalid.*key|key.*(invalid|defined)/i.test(msg)) return '❌ Clave de descifrado inválida. Revisa que el enlace esté completo.'
+  if (/ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(msg)) return '❌ Error de red al conectar con Mega. Intenta de nuevo.'
   return `❌ Error de Mega: ${msg}`
 }
 
+// Aplana una carpeta de Mega en una lista de archivos con su ruta relativa.
+function collectFiles(node, prefix = '') {
+  const out = []
+  for (const child of node.children || []) {
+    const rel = prefix ? `${prefix}/${child.name}` : String(child.name)
+    if (child.directory) out.push(...collectFiles(child, rel))
+    else out.push({ node: child, rel })
+  }
+  return out.sort((a, b) => a.rel.localeCompare(b.rel))
+}
+
+function freeDiskBytes(dir) {
+  try {
+    const s = fs.statfsSync(dir)
+    return s.bavail * s.bsize
+  } catch {
+    return Infinity
+  }
+}
+
 const handler = async (m, { conn, args, usedPrefix, command }) => {
-  const url = args[0]
-  if (!url || !/mega\.nz/i.test(url)) {
+  const url = extractMegaUrl(args)
+  if (!url) {
     throw (
       `☁️ *Mega Downloader*\n\n` +
-      `Envía el enlace de Mega.\n` +
-      `_Ej: ${usedPrefix + command} https://mega.nz/file/XXXXX#YYYYY_\n\n` +
+      `Envía el enlace de Mega (archivo o carpeta).\n` +
+      `_Ej: ${usedPrefix + command} https://mega.nz/file/XXXXX#YYYYY_\n` +
+      `_Carpeta: ${usedPrefix + command} https://mega.nz/folder/XXXXX#YYYYY 2_\n\n` +
       `Para cancelar, envía *.cancelar*`
     )
+  }
+  if (!hasDecryptionKey(url)) {
+    throw '❌ El enlace está incompleto: falta la clave de descifrado (la parte después de *#*).'
   }
 
   const userKey = downloadKey(m)
@@ -104,31 +157,64 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     return m.reply('⚠️ Ya tienes una descarga en curso. Usa *.cancelar* para detenerla.')
   }
 
+  // Se registra antes de cualquier await para que dos comandos seguidos no se
+  // cuelen y para que *.cancelar* funcione desde la primera fase.
   const controller = new AbortController()
   const { signal } = controller
+  startDownload(userKey, 'mega', controller, { label: '☁️ Mega' })
+
   let tempPath
   let watchdog
-  let statusKey
 
   const statusMsg = await conn.sendMessage(m.chat, {
     text: '🔄 _Obteniendo información del archivo..._',
   })
-  statusKey = statusMsg.key
+  const statusKey = statusMsg.key
 
   const editStatus = async (txt) => {
     try {
       await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
     } catch {}
   }
+  const throwIfAborted = () => { if (signal.aborted) throw abortError() }
 
   try {
-    let file
+    let root
     try {
-      file = MegaFile.fromURL(url)
-      await file.loadAttributes()
+      root = MegaFile.fromURL(url)
+      await root.loadAttributes()
     } catch (err) {
       if (isAbort(err)) throw err
       throw parseMegaError(err)
+    }
+    throwIfAborted()
+
+    let file = root
+    if (root.directory) {
+      const files = collectFiles(root)
+      if (!files.length) {
+        await editStatus('❌ La carpeta de Mega está vacía.')
+        return
+      }
+
+      const pick = args.map(Number).find((n) => Number.isInteger(n) && n > 0)
+      if (!pick && files.length > 1) {
+        const list = files
+          .slice(0, MAX_LISTED_FILES)
+          .map((f, i) => `*${i + 1}.* ${f.rel} _(${fmtBytes(f.node.size || 0)})_`)
+          .join('\n')
+        const extra = files.length > MAX_LISTED_FILES ? `\n_…y ${files.length - MAX_LISTED_FILES} más_` : ''
+        await editStatus(
+          `📁 *${root.name || 'Carpeta de Mega'}* — ${files.length} archivos\n\n${list}${extra}\n\n` +
+          `Elige uno con:\n_${usedPrefix + command} <enlace> <número>_`
+        )
+        return
+      }
+      if (pick && pick > files.length) {
+        await editStatus(`❌ Número inválido. La carpeta tiene ${files.length} archivos.`)
+        return
+      }
+      file = files[(pick || 1) - 1].node
     }
 
     const name = file.name || 'archivo_mega'
@@ -139,6 +225,12 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       return
     }
 
+    // El archivo se guarda completo en disco antes de subirlo.
+    if (sizeBytes > 0 && freeDiskBytes(tmpdir()) < sizeBytes * 1.1) {
+      await editStatus('❌ No hay espacio libre suficiente en el servidor para descargar este archivo.')
+      return
+    }
+
     await editStatus(
       `☁️ *${name}*\n` +
       (sizeBytes > 0 ? `⚖️ ${fmtBytes(sizeBytes)}\n` : '⚖️ _Tamaño desconocido_\n') +
@@ -146,17 +238,13 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       `_Usa_ *.cancelar* _para detener._`
     )
 
-    startDownload(userKey, 'mega', controller, { label: '☁️ Mega' })
+    tempPath = path.join(tmpdir(), `mega_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${sanitize(name)}`)
 
-    tempPath = path.join(tmpdir(), `mega_${Date.now()}_${sanitize(name)}`)
-
-    const fileStream = file.download({ signal })
+    const fileStream = file.download({ maxConnections: MEGA_MAX_CONNECTIONS, signal })
     signal.addEventListener(
       'abort',
       () => {
-        try {
-          fileStream.destroy(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
-        } catch {}
+        try { fileStream.destroy(abortError()) } catch {}
       },
       { once: true }
     )
@@ -164,8 +252,8 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     watchdog = makeWatchdog(controller)
 
     let dlBytes = 0
-    const dlStart = Date.now()
     let lastWAUpdate = 0
+    let lastConsole = 0
     const dlSampler = createSpeedSampler()
 
     const dlStream = new Transform({
@@ -173,12 +261,15 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
         dlBytes += chunk.length
         watchdog.ping()
         const now = Date.now()
-        const speed = dlSampler.sample(dlBytes, now - dlStart)
-        const pct = sizeBytes > 0 ? (dlBytes / sizeBytes) * 100 : 0
+        const speed = dlSampler.sample(dlBytes, now)
+        const pct = sizeBytes > 0 ? Math.min((dlBytes / sizeBytes) * 100, 100) : 0
 
-        process.stdout.write(
-          `\r[Mega] 📥 ${pct.toFixed(1)}% | ${fmtBytes(dlBytes)} | ${fmtBytes(speed)}/s`
-        )
+        if (now - lastConsole > CONSOLE_INTERVAL) {
+          lastConsole = now
+          process.stdout.write(
+            `\r[Mega] 📥 ${pct.toFixed(1)}% | ${fmtBytes(dlBytes)} | ${fmtBytes(speed)}/s`
+          )
+        }
 
         if (now - lastWAUpdate > EDIT_INTERVAL) {
           lastWAUpdate = now
@@ -197,25 +288,29 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     watchdog.stop()
     watchdog = null
     console.log(`\n[Mega] ✅ Descarga completa: ${name}`)
+    throwIfAborted()
 
     await editStatus('✅ _Descarga completa._\n📤 _Subiendo a WhatsApp..._')
 
     const realSize = fs.statSync(tempPath).size
     let upBytes = 0
-    const upStart = Date.now()
     let lastUpWA = 0
+    let lastUpConsole = 0
     const upSampler = createSpeedSampler()
 
     const upStream = new Transform({
       transform(chunk, _, cb) {
         upBytes += chunk.length
         const now = Date.now()
-        const speed = upSampler.sample(upBytes, now - upStart)
-        const pct = realSize > 0 ? (upBytes / realSize) * 100 : 0
+        const speed = upSampler.sample(upBytes, now)
+        const pct = realSize > 0 ? Math.min((upBytes / realSize) * 100, 100) : 0
 
-        process.stdout.write(
-          `\r[Mega] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(realSize)} | ${fmtBytes(speed)}/s`
-        )
+        if (now - lastUpConsole > CONSOLE_INTERVAL) {
+          lastUpConsole = now
+          process.stdout.write(
+            `\r[Mega] 📤 ${pct.toFixed(1)}% | ${fmtBytes(upBytes)}/${fmtBytes(realSize)} | ${fmtBytes(speed)}/s`
+          )
+        }
 
         if (now - lastUpWA > EDIT_INTERVAL) {
           lastUpWA = now
@@ -225,13 +320,15 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
       },
     })
 
-    const pass = new PassThrough()
-    pipeline(fs.createReadStream(tempPath), upStream, pass).catch(err => pass.destroy(err))
+    const upload = new PassThrough()
+    // *.cancelar* también debe detener la subida.
+    signal.addEventListener('abort', () => upload.destroy(abortError()), { once: true })
+    pipeline(fs.createReadStream(tempPath), upStream, upload).catch((err) => upload.destroy(err))
 
     await conn.sendMessage(
       m.chat,
       {
-        document: { stream: pass },
+        document: { stream: upload },
         fileName: name,
         mimetype: mimeLookup(name) || 'application/octet-stream',
         caption:
@@ -245,7 +342,7 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
     console.log(`\n[Mega] 🚀 Enviado a ${m.sender}`)
     await editStatus('✅ *¡Listo!* Archivo enviado correctamente.')
   } catch (e) {
-    if (isAbort(e)) {
+    if (isAbort(e) || signal.aborted) {
       console.log('\n[Mega] 🛑 Descarga cancelada.')
       await editStatus('🚫 *Descarga cancelada.*')
     } else {
@@ -256,13 +353,11 @@ const handler = async (m, { conn, args, usedPrefix, command }) => {
   } finally {
     if (watchdog) watchdog.stop()
     finishDownload(userKey, 'mega', controller)
-    if (tempPath && fs.existsSync(tempPath)) {
-      try { fs.unlinkSync(tempPath) } catch {}
-    }
+    if (tempPath) fs.rm(tempPath, { force: true }, () => {})
   }
 }
 
-handler.help = ['mega <enlace>', 'mg <enlace>']
+handler.help = ['mega <enlace> [n]', 'mg <enlace> [n]']
 handler.tags = ['downloader']
 handler.command = /^(mega|mg)$/i
 
