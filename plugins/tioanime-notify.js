@@ -13,6 +13,7 @@ import https        from 'https'
 import { File as MegaFile } from 'megajs'
 import { listFiles, getFileMetadata } from 'better-gdrive'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 import { downloadVoeWithMirrorFailover, isKnownVoeMirrorUrl, parseVoeUrl } from './voe-dl.js'
 
@@ -1369,8 +1370,8 @@ async function enviarEpisodio(chatIds, ep, conn) {
       await compressDw4(videoPath, video360Path, { label: 'DW4 TioAnime' })
       console.log(`[tioanime-notify] ✅ Compresión /dw4 360p terminada: ${fileName360}`)
       const video360Size = fs.statSync(video360Path).size
-      const jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath)
-      const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
+      const jpegThumbnail = await jpegThumbnailLibrary.createJpegThumbnail(videoPath)
+      const jpegThumbnail360 = await jpegThumbnailLibrary.createJpegThumbnail(video360Path)
 
       if (!coverBuffer && imgUrl) {
         try {

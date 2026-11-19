@@ -30,6 +30,7 @@ import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import { File as MegaFile } from 'megajs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
@@ -1662,7 +1663,7 @@ async function enviarEpisodio(chatId, ep, conn, { preview = false } = {}) {
   //    abra el archivo con createReadStream: no se duplica en memoria.
   const sizeTexto = fmtBytes(fs.statSync(videoPath).size)
   let jpegThumbnail
-  try { jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath) } catch (_) {}
+  try { jpegThumbnail = await jpegThumbnailLibrary.createJpegThumbnail(videoPath) } catch (_) {}
   const originalMessage = await conn.sendMessage(central, {
       document: { url: videoPath },
       fileName: downloadedFileName,
@@ -1685,7 +1686,7 @@ async function enviarEpisodio(chatId, ep, conn, { preview = false } = {}) {
   const video360Path = path.join(tmpDir, fileName360)
   try {
     await compressDw4(videoPath, video360Path, { label: 'DW4 AnimeDBS' })
-    const jpegThumbnail360 = await animeV1Downloader.createJpegThumbnail(video360Path)
+    const jpegThumbnail360 = await jpegThumbnailLibrary.createJpegThumbnail(video360Path)
     const reducedMessage = await conn.sendMessage(central, {
         document: { url: video360Path },
         fileName: fileName360,

@@ -1,5 +1,6 @@
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnail from '../src/libraries/jpeg-thumbnail.cjs'
 
 const SESSION_TTL = 10 * 60 * 1000
 const MAX_RESULTS = 8
@@ -260,7 +261,7 @@ async function downloadEpisode(m, conn, text) {
           mimetype: file.mimetype,
           fileName: file.fileName,
           caption,
-          jpegThumbnail: await animeV1Downloader.createJpegThumbnail(file.filePath),
+          jpegThumbnail: await jpegThumbnail.createJpegThumbnail(file.filePath),
         }
     await conn.sendMessage(m.chat, payload, { quoted: m })
     await update(`✅ Descarga enviada: ${file.fileName}`)

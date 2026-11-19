@@ -1,6 +1,7 @@
 import { loadEnv } from '../src/funcion/env.js'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import createTerminalLogger from '../src/libraries/terminal-log.cjs'
 
 // El .env lo carga config.js (src/funcion/env.js) antes de importar los
@@ -371,7 +372,7 @@ async function downloadSelection(m, conn, session, season, episode, option = nul
           mimetype: file.mimetype,
           fileName: file.fileName,
           caption,
-          jpegThumbnail: await animeV1Downloader.createJpegThumbnail(file.filePath),
+          jpegThumbnail: await jpegThumbnailLibrary.createJpegThumbnail(file.filePath),
         }
     terminalLog('envío a WhatsApp iniciado', {
       tipo: isSmallVideo ? 'video' : 'documento',

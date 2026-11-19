@@ -8,6 +8,7 @@ import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 import animeInfoHandler from './search-animeinfo.js'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { buildAniDDriveMetadata } from '../src/libraries/anid-drive-info.js'
 
 async function compatibleDriveFetch(...args) {
@@ -453,7 +454,7 @@ const handler = async (m, { conn, args, usedPrefix, command, isOwner }) => {
           if (realSize > MAX_SIZE) throw SIZE_LIMIT_MESSAGE
           await editStatus(`📤 *${index + 1}/${details.length}* — ${file.fileName}\n_Subiendo a WhatsApp..._`)
           const jpegThumbnail = animeDriveCommand
-            ? await animeV1Downloader.createJpegThumbnail(folderPath)
+            ? await jpegThumbnailLibrary.createJpegThumbnail(folderPath)
             : null
           if (animeDriveCommand) console.log(`${logPrefix} 🖼️ Miniatura JPEG ${jpegThumbnail ? 'generada' : 'no disponible'}: ${file.fileName}`)
           console.log(`${logPrefix} 📤 Enviando ${index + 1}/${details.length} a WhatsApp: ${file.fileName}`)

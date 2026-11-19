@@ -10,6 +10,7 @@ import { pipeline } from 'stream/promises'
 import { File as MegaFile } from 'megajs'
 import { extractJkAnimeLinks, extractJkAnimeM3u8Candidates, parseJkAnimeEpisodeUrl } from '../src/libraries/jkanime-extractors.js'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const HEADERS = {
@@ -634,7 +635,7 @@ async function enviarEpisodio(chatId, ep, conn) {
     const sizeMB = (fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)
     const videoBuffer = fs.readFileSync(videoPath)
     let jpegThumbnail
-    try { jpegThumbnail = await animeV1Downloader.createJpegThumbnail(videoPath) } catch (_) {}
+    try { jpegThumbnail = await jpegThumbnailLibrary.createJpegThumbnail(videoPath) } catch (_) {}
     await conn.sendMessage(chatId, {
       document: videoBuffer,
       fileName,

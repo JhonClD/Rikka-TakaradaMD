@@ -8,6 +8,7 @@ import axios from 'axios'
 import * as cheerio from 'cheerio'
 import animeV1 from '../src/libraries/animev1.cjs'
 import animeV1Downloader from '../src/libraries/animev1-download.cjs'
+import jpegThumbnail from '../src/libraries/jpeg-thumbnail.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 const DB_DIR = DATA_DIR
@@ -229,7 +230,7 @@ async function sendEpisode(chatId, item, conn) {
     const originalName = buildFileName(ep, subscription, file.extension)
     const originalPath = path.join(tmpDir, originalName)
     fs.renameSync(file.filePath, originalPath)
-    const thumbnail = await animeV1Downloader.createJpegThumbnail(originalPath)
+    const thumbnail = await jpegThumbnail.createJpegThumbnail(originalPath)
     await conn.sendMessage(chatId, {
       document: { url: originalPath },
       fileName: originalName,
@@ -241,7 +242,7 @@ async function sendEpisode(chatId, item, conn) {
     const lowPath = path.join(tmpDir, lowName)
     try {
       await compressDw4(originalPath, lowPath, { label: 'DW4 AnimeV1' })
-      const lowThumbnail = await animeV1Downloader.createJpegThumbnail(lowPath)
+      const lowThumbnail = await jpegThumbnail.createJpegThumbnail(lowPath)
       await conn.sendMessage(chatId, {
         document: { url: lowPath },
         fileName: lowName,
