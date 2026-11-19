@@ -106,7 +106,7 @@
 - **npm**
 - **FFmpeg** y **ffprobe** disponibles en el sistema (`sticker`, `dw`, conversores)
 - **ImageMagick** o **GraphicsMagick** (`convert`/`magick`/`gm`) para stickers y pósters
-- **python3**, solo para `speedtest` (usa `src/libraries/ookla-speedtest.py`)
+- **Sin Python**: `speedtest` (`plugins/speedtest.js`) mide con JavaScript nativo contra servidores de Ookla
 - **Git**, si quieres clonar o actualizar el repositorio
 
 El bot comprueba esas herramientas al arrancar (`_quickTest` en `main.js`) y los

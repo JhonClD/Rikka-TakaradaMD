@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import util from 'util';
 import path from 'path';
 import { TMP_DIR } from '../src/funcion/paths.js';
+import { speedtestReport } from './speedtest.js';
 
 const execAsync = util.promisify(exec);
 
@@ -141,12 +142,12 @@ async function getSoftwareVersions() {
 
 // ── Speedtest ─────────────────────────────────────────────────────────────────
 
+// La medición vive en plugins/speedtest.js: aquí solo se reutiliza su reporte
+// para no tener dos implementaciones ni depender de Python.
 async function runSpeedtest() {
   try {
-    const { stdout, stderr } = await execAsync('python3 ./src/libraries/ookla-speedtest.py --secure --share');
-    const raw    = (stdout + stderr).trim();
-    const imgUrl = raw.match(/https?:\/\/\S+\.png/)?.[0] ?? null;
-    return { text: raw, imgUrl };
+    const report = await speedtestReport({ title: null, share: false });
+    return { text: report.text, imgUrl: report.image };
   } catch (e) {
     return { text: `❌ *Speedtest falló:* ${e.message}`, imgUrl: null };
   }
