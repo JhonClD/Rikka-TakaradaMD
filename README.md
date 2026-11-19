@@ -204,12 +204,12 @@ Rikka-TakaradaMD/
 ├── api.js                # Shim de globales heredado (axios/fetch/moment/cheerio)
 ├── eslint.config.js      # Reglas de análisis del código
 ├── .env.example          # Plantilla de variables
-├── THIRD-PARTY-NOTICES.md# Avisos de código de terceros y licencia pendiente
+├── .github/workflows/  # CI: check, lint y tests
 ├── scripts/              # Herramientas de desarrollo (check-ghost-identifiers)
 ├── tests/                # node --test
 ├── plugins/              # 58 plugins, un archivo por función, en kebab-case
 └── src/
-    ├── assets/           # Imágenes (menú, avatares, svg de bienvenida)
+    ├── assets/           # Imágenes (imagen del menú)
     ├── funcion/          # Funciones auxiliares (rutas, .env, validación, LID)
     └── libraries/        # Librerías internas (Baileys simple, store, stickers…)
 ```

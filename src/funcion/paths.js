@@ -16,7 +16,7 @@ export const fromRoot = (...parts) => join(ROOT, ...parts);
 export const SRC_DIR = fromRoot('src');
 export const TMP_DIR = fromRoot('src', 'tmp');
 
-/** Carpeta con las imágenes del proyecto (menú, avatares, svg de bienvenida). */
+/** Carpeta con las imágenes del proyecto (imagen del menú). */
 export const ASSETS_DIR = fromRoot('src', 'assets');
 
 /**
@@ -37,7 +37,6 @@ export const MENU_IMAGE = firstExisting(
 export const ANTI_ARAB_JSON = fromRoot('src', 'antiArab.json');
 export const PACKAGE_JSON = fromRoot('package.json');
 export const ENV_FILE = fromRoot('.env');
-/** El speedtest es 100% JavaScript: plugins/speedtest.js (no usa Python). */
 /** donde los plugins *-notify guardan su estado (episodios ya avisados, colas). */
 export const DATA_DIR = fromRoot('database');
 export const TEMP_VIDEOS_DIR = fromRoot('temp_videos');
