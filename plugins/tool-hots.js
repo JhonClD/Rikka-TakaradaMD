@@ -8,7 +8,7 @@ import fs from 'fs/promises';
 import util from 'util';
 import path from 'path';
 import { TMP_DIR } from '../src/funcion/paths.js';
-import { speedtestReport } from './speedtest.js';
+import { runSpeedtest as measureSpeed, speedtestReport } from '../src/libraries/speedtest.js';
 
 const execAsync = util.promisify(exec);
 
@@ -142,11 +142,12 @@ async function getSoftwareVersions() {
 
 // ── Speedtest ─────────────────────────────────────────────────────────────────
 
-// La medición vive en plugins/speedtest.js: aquí solo se reutiliza su reporte
-// para no tener dos implementaciones ni depender de Python.
+// La medición vive en src/libraries/speedtest.js: aquí solo se reutiliza su
+// reporte para no tener dos implementaciones ni depender de Python.
 async function runSpeedtest() {
   try {
-    const report = await speedtestReport({ title: null, share: false });
+    const result = await measureSpeed({ share: false });
+    const report = speedtestReport(result, { title: null });
     return { text: report.text, imgUrl: report.image };
   } catch (e) {
     return { text: `❌ *Speedtest falló:* ${e.message}`, imgUrl: null };

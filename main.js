@@ -12,7 +12,6 @@ import yargs from 'yargs';
 import { spawn } from 'child_process';
 import lodash from 'lodash';
 import chalk from 'chalk';
-import syntaxerror from 'syntax-error';
 import { format } from 'util';
 import pino from 'pino';
 import Pino from 'pino';
@@ -773,24 +772,22 @@ global.reload = async (_ev, filename) => {
         return delete global.plugins[filename];
       }
     } else conn.logger.info(`new plugin - '${filename}'`);
-    const err = syntaxerror(readFileSync(dir), filename, {
-      sourceType: 'module',
-      allowAwaitOutsideFunction: true,
-    });
-    if (err) {
-      conn.logger.error(`syntax error while loading '${filename}'\n${format(err)}`);
-      global.notifyOwnerError?.(`Error de sintaxis en el plugin ${filename}:`, err);
-    }
-    else {
-      try {
-        const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-        global.plugins[filename] = module.default || module;
-      } catch (e) {
-        conn.logger.error(`error require plugin '${filename}\n${format(e)}'`);
-        global.notifyOwnerError?.(`No se pudo recargar el plugin ${filename}:`, e);
-      } finally {
-        global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
-      }
+    // La validación previa con `syntax-error` se retiró a propósito: usa acorn
+    // con ecmaVersion 2020 y marcaba como error sintaxis que Node ya ejecuta
+    // sin problema (`||=`, `&&=`, `??=`, separadores numéricos `1_000`). Con un
+    // falso positivo el plugin ni siquiera se importaba, así que un `||=`
+    // dejaba `speedtest.js` fuera y rompía también a quien lo importara.
+    // Node es el único juez válido: si el import falla, `import()` ya devuelve
+    // el SyntaxError con línea y columna exactas.
+    try {
+      const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
+      global.plugins[filename] = module.default || module;
+    } catch (e) {
+      const esSintaxis = e instanceof SyntaxError;
+      conn.logger.error(`${esSintaxis ? 'syntax error while loading' : 'error require plugin'} '${filename}'\n${format(e)}`);
+      global.notifyOwnerError?.(`${esSintaxis ? 'Error de sintaxis en el plugin' : 'No se pudo recargar el plugin'} ${filename}:`, e);
+    } finally {
+      global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
     }
   }
 };
