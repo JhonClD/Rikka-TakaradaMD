@@ -59,3 +59,37 @@ test('.gitignore protege la sesión y el estado local', () => {
     assert.ok(ignore.includes(entry), `.gitignore debería incluir ${entry}`);
   }
 });
+
+test('la recarga de plugins no los rechaza por sintaxis que Node sí acepta', () => {
+  // main.js validaba cada plugin con `syntax-error`, que usa acorn con
+  // ecmaVersion 2020: marcaba como error `||=`, `&&=`, `??=` y los separadores
+  // numéricos (`1_000`). Un falso positivo impedía el import del plugin, así que
+  // `speedtest.js` quedaba fuera y a la vez rompía a `tool-hots.js`, que lo
+  // importa. Node debe ser el único juez.
+  const main = fs.readFileSync(fromRoot('main.js'), 'utf8');
+  assert.ok(
+    !/from\s+'syntax-error'/.test(main),
+    'main.js vuelve a validar plugins con syntax-error (acorn ES2020): no entiende `||=` ni `1_000`',
+  );
+  assert.match(
+    main,
+    /const module = \(await import\(/,
+    'la recarga de plugins debería dejar que import() valide la sintaxis',
+  );
+});
+
+test('la medición del speedtest vive fuera de plugins/ para la recarga en caliente', () => {
+  // Un plugin que importa a otro plugin falla al recargarse: main.js reimporta
+  // con `?update=`, pero el `import './speedtest.js'` interno sigue apuntando al
+  // módulo viejo en caché. La lógica va en src/libraries/ y los plugins la importan.
+  const lib = fromRoot('src', 'libraries', 'speedtest.js');
+  assert.ok(fs.existsSync(lib), 'falta src/libraries/speedtest.js');
+  assert.ok(
+    !fs.existsSync(fromRoot('src', 'libraries', 'ookla-speedtest.py')),
+    'el speedtest ya no debe depender de Python',
+  );
+  const plugin = fs.readFileSync(fromRoot('plugins', 'speedtest.js'), 'utf8');
+  assert.match(plugin, /from '\.\.\/src\/libraries\/speedtest\.js'/, 'el plugin debe importar la librería');
+  // Se ignora el texto comentado: la cabecera menciona que no usa Python.
+  assert.ok(!/python/i.test(stripComments(plugin)), 'el plugin no debe invocar Python');
+});
