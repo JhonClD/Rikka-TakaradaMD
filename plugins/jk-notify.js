@@ -729,8 +729,5 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 handler.command = /^(?:jkstart|jkstop|jkstatus|jkcheck|jkqueue|jkflush|jkunblock|jkinterval|jkexample)$/i
 handler.tags = ['anime', 'notificaciones']
 handler.help = ["'jkstart'", "'jkstop'", "'jkstatus'", "'jkcheck'", "'jkqueue'", "'jkflush'", "'jkunblock'", "'jkinterval <min>'", "'jkexample [N]'"]
-handler.exp = 0
-handler.level = 0
-handler.limit = false
 handler.before = async (m, { conn }) => { if (conn) global.jkConn = conn; restaurarNotificadores(conn) }
 export default handler

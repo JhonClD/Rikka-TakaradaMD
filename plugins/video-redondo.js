@@ -116,6 +116,5 @@ const handler = async (m, { conn }) => {
 handler.command = /^(ptv|orbe|cvid)$/i
 handler.help = ['ptv', 'orbe', 'cvid']
 handler.tags = ['tools', 'media']
-handler.limit = false
 
 export default handler

@@ -24,9 +24,6 @@ function loadAntiArabPrefixes() {
 }
 const antiArabPrefixes = loadAntiArabPrefixes();
 
-import _printModule from './src/libraries/print.js';
-const _printMessage = _printModule?.default ?? _printModule;
-
 const _recentMessages = new Map();
 const _DUPLICATE_TIMEOUT = 3000;
 const _MAX_CACHE_SIZE = 150;
@@ -48,15 +45,7 @@ setInterval(() => {
 
 let mconn;
 
-const isNumber = (x) => typeof x === 'number' && !isNaN(x);
-const delay = (ms) => isNumber(ms) && new Promise((resolve) => setTimeout(function () {
-  clearTimeout(this);
-  resolve();
-}, ms));
-
 export async function handler(chatUpdate) {
-  this.msgqueque = this.msgqueque || [];
-  this.uptime = this.uptime || Date.now();
   if (!chatUpdate) return;
 
   const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
@@ -85,10 +74,6 @@ export async function handler(chatUpdate) {
 
     global.mconn = m;
     mconn = m;
-    m.exp = 0;
-    m.money = false;
-    m.limit = false;
-
     try {
       const user = global.db.data.users[m.sender];
       if (typeof user !== 'object') {
@@ -104,36 +89,16 @@ export async function handler(chatUpdate) {
           antispam: 0,
           antispamlastclaim: 0,
           atm: 0,
-          autolevelup: true,
           banned: false,
           BannedReason: '',
           Banneduser: false,
           bank: 0,
           coin: 0,
-          exp: 0,
           expired: 0,
-          health: 100,
-          hero: 1,
-          job: 'Pengangguran',
-          joincount: 2,
-          joinlimit: 1,
-          judilast: 0,
-          lastclaim: 0,
-          lastduel: 0,
-          lastwork: 0,
-          lastseen: 0,
-          laper: 100,
-          haus: 100,
-          level: 0,
-          limit: 20,
-          limitjoinfree: 1,
-          mana: 20,
           money: 15,
           mute: false,
           name: m.name,
           note: 0,
-          pasangan: '',
-          pet: 0,
           premium: false,
           premiumTime: 0,
           registered: false,
@@ -142,11 +107,7 @@ export async function handler(chatUpdate) {
           role: 'Novato',
           rtrofi: 'bronce',
           sewa: false,
-          skill: '',
-          skillexp: 0,
           spammer: 0,
-          stamina: 100,
-          strength: 30,
           title: '',
           trofi: 0,
           unreglast: 0,
@@ -154,33 +115,6 @@ export async function handler(chatUpdate) {
           language: 'es',
           wallet: 0,
           wait: 0,
-          intelligence: 10,
-          agility: 16,
-          pointxp: 0,
-          potion: 10,
-          tprem: 0,
-          tigame: 50,
-          snlast: 0,
-          spinlast: 0,
-          ssapi: 0,
-          lastSetStatus: 0,
-          lastspam: 0,
-          lastngocok: 0,
-          lastbunga: 0,
-          lastcoins: 0,
-          lastcode: 0,
-          lastcrusade: 0,
-          lastdagang: 0,
-          lasthourly: 0,
-          lastmining: 0,
-          lastmisi: 0,
-          lastmonthly: 0,
-          lastpago: 0,
-          lastrob: 0,
-          lastweekly: 0,
-          lbars: '[▒▒▒▒▒▒▒▒▒]',
-          misi: '',
-          gameglx: {},
         };
         Object.assign(user, { ...defaults, ...user });
       }
@@ -211,7 +145,6 @@ export async function handler(chatUpdate) {
           antiArab2: false,
           modoadmin: false,
           simi: false,
-          game: true,
           expired: 0,
           language: 'es',
         };
@@ -312,20 +245,7 @@ export async function handler(chatUpdate) {
 
     const isPrems = isROwner || isOwner || isMods || isPremium;
 
-    if (opts['queque'] && m.text && !(isMods || isPrems)) {
-      const queque = this.msgqueque;
-      const time = 1000 * 5;
-      const previousID = queque[queque.length - 1];
-      queque.push(m.id || m.key.id);
-      setInterval(async function () {
-        if (queque.indexOf(previousID) === -1) clearInterval(this);
-        await delay(time);
-      }, time);
-    }
-
     if (m.isBaileys) return;
-
-    m.exp += Math.ceil(Math.random() * 10);
 
     let usedPrefix;
     const _user = global.db.data && global.db.data.users && global.db.data.users[m.sender];
@@ -495,7 +415,6 @@ export async function handler(chatUpdate) {
 
         if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return;
 
-        m.plugin = name;
         if (m.chat in global.db.data.chats || m.sender in global.db.data.users) {
           const chat = global.db.data.chats[m.chat];
           const user = global.db.data.users[m.sender];
@@ -549,22 +468,6 @@ export async function handler(chatUpdate) {
         if (plugin.register == true && _user.registered == false) { fail('unreg', m, this); continue; }
 
         m.isCommand = true;
-        const xp = 'exp' in plugin ? parseInt(plugin.exp) : 17;
-        if (xp > 200) {
-          m.reply('Ngecit -_-');
-        } else {
-          m.exp += xp;
-        }
-
-        if (!isPrems && plugin.limit && global.db.data.users[m.sender].limit < plugin.limit * 1) {
-          mconn.conn.reply(m.chat, `_${usedPrefix}buyall_`, m);
-          continue;
-        }
-        if (plugin.level > _user.level) {
-          mconn.conn.reply(m.chat, `Necesitas nivel ${plugin.level} (tienes ${_user.level})`, m);
-          continue;
-        }
-
         const extra = {
           match,
           usedPrefix,
@@ -591,9 +494,6 @@ export async function handler(chatUpdate) {
         };
         try {
           await plugin.call(this, m, extra);
-          if (!isPrems) {
-            m.limit = m.limit || plugin.limit || false;
-          }
         } catch (e) {
           m.error = e;
           console.error(e);
@@ -616,49 +516,6 @@ export async function handler(chatUpdate) {
   } catch (e) {
     console.error(e);
   } finally {
-    if (opts['queque'] && m.text) {
-      const quequeIndex = this.msgqueque.indexOf(m.id || m.key.id);
-      if (quequeIndex !== -1) this.msgqueque.splice(quequeIndex, 1);
-    }
-
-    let user;
-    const stats = global.db.data.stats;
-    if (m) {
-      if (m.sender && (user = global.db.data.users[m.sender])) {
-        user.exp += m.exp;
-        user.limit -= m.limit * 1;
-      }
-      let stat;
-      if (m.plugin) {
-        const now = +new Date;
-        if (m.plugin in stats) {
-          stat = stats[m.plugin];
-          if (!isNumber(stat.total)) stat.total = 1;
-          if (!isNumber(stat.success)) stat.success = m.error != null ? 0 : 1;
-          if (!isNumber(stat.last)) stat.last = now;
-          if (!isNumber(stat.lastSuccess)) stat.lastSuccess = m.error != null ? 0 : now;
-        } else {
-          stat = stats[m.plugin] = {
-            total: 1,
-            success: m.error != null ? 0 : 1,
-            last: now,
-            lastSuccess: m.error != null ? 0 : now,
-          };
-        }
-        stat.total += 1;
-        stat.last = now;
-        if (m.error == null) {
-          stat.success += 1;
-          stat.lastSuccess = now;
-        }
-      }
-    }
-
-    try {
-      if (!opts['noprint']) await _printMessage(m, this);
-    } catch (e) {
-      console.log(m, m.quoted, e);
-    }
     const settingsREAD = global.db.data.settings[mconn.conn.user.jid] || {};
     if (opts['autoread']) await mconn.conn.readMessages([m.key]);
     if (settingsREAD.autoread2) await mconn.conn.readMessages([m.key]);

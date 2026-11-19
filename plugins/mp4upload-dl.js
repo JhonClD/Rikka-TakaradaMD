@@ -250,6 +250,5 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 handler.help = ['mp4upload <enlace>']
 handler.tags = ['downloader']
 handler.command = /^(mp4upload|mp4u|mp4down)$/i
-handler.limit = false
 
 export default handler

@@ -2141,8 +2141,5 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 handler.command = /^(dbsstart|dbsstop|dbsstatus|dbscheck|dbsqueue|dbsflush|dbsunblock|dbsinterval|dbsexample)$/i
 handler.tags = ['anime', 'notificaciones']
 handler.help = ['dbsstart [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
-handler.exp = 0
-handler.level = 0
-handler.limit = false
 handler.before = async (_m, { conn }) => { if (conn) global.dbsConn = conn }
 export default handler

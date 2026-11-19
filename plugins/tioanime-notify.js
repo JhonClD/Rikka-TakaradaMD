@@ -1913,9 +1913,6 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 handler.command = /^(tiostart|tiostop|tiostatus|tiocheck|tioqueue|tioflush|tiounblock|tiointerval|tioexample|latexample)$/i
 handler.tags    = ['anime', 'notificaciones']
 handler.help    = ['tiostart [segundos]', 'tiostop', 'tiostatus', 'tiocheck', 'tioqueue', 'tioflush', 'tiounblock', 'tiointerval <segundos>', 'tioexample [N]', 'latexample [N]']
-handler.exp     = 0
-handler.level   = 0
-handler.limit   = false
 
 handler.before = async (m, { conn }) => {
   if (conn) global.tioConn = conn

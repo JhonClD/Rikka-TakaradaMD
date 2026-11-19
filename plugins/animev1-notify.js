@@ -472,8 +472,6 @@ Usa *${usedPrefix}animev1stop* para detenerlo.`)
 handler.command = /^(animev1start|animev1stop|animev1list|animev1status|animev1check|animev1interval|animev1queue|animev1flush|animev1unblock|animev1example)$/i
 handler.tags = ['anime', 'notificaciones']
 handler.help = ['animev1start [intervalo]', 'animev1stop', 'animev1list', 'animev1status', 'animev1check', 'animev1interval <tiempo>', 'animev1queue', 'animev1flush', 'animev1unblock', 'animev1example']
-handler.exp = 0
-handler.limit = false
 
 handler.before = async (m, { conn }) => {
   if (conn) global.animeV1NotifyConn = conn

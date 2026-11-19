@@ -476,7 +476,6 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 handler.help = ['1fichier <enlace>']
 handler.tags = ['downloader']
 handler.command = /^(1fichier|fichier|onefichier)$/i
-handler.limit = false
 
 export default handler
   

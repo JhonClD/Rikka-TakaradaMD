@@ -32,8 +32,6 @@ const handler = async (m, { conn, client, args, text, command, isOwner }) => {
     )
 
   const _text = (command === 'e' ? 'return ' : '') + text
-  const old = m.exp * 1
-
   let _return, _syntax = ''
 
   try {
@@ -78,7 +76,6 @@ const handler = async (m, { conn, client, args, text, command, isOwner }) => {
       { text: _syntax + format(_return) },
       { quoted: m }
     )
-    m.exp = old
   }
 }
 

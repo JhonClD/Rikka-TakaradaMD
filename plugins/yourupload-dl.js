@@ -261,6 +261,5 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
 handler.help = ['yourupload <enlace>']
 handler.tags = ['downloader']
 handler.command = /^(yourupload|yourdl|youdl)$/i
-handler.limit = false
 
 export default handler

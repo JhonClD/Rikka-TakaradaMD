@@ -936,6 +936,5 @@ handler.help = [
 ]
 handler.tags = ['downloader']
 handler.command = /^(transferit|transfer|titdl)$/i
-handler.limit = false
 
 export default handler
