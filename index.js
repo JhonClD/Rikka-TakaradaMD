@@ -1,46 +1,65 @@
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { createInterface } from 'node:readline/promises';
 import cfonts from 'cfonts';
-import readline from 'readline';
 import chalk from 'chalk';
-import fs from 'fs';
+import fs from 'node:fs';
 import './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { say } = cfonts;
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const instanceLock = join('/tmp', 'rikka-takarada-md.lock');
+const instanceLock = join(tmpdir(), 'rikka-takarada-md.lock');
 let lockAcquired = false;
 
-function acquireInstanceLock() {
+function acquireInstanceLock(attempt = 0) {
+  if (attempt >= 3) {
+    throw new Error('No se pudo adquirir el bloqueo de instancia.');
+  }
+
   try {
     const fd = fs.openSync(instanceLock, 'wx');
-    fs.writeSync(fd, String(process.pid));
-    fs.closeSync(fd);
-    lockAcquired = true;
-  } catch (error) {
     try {
-      const pid = Number(fs.readFileSync(instanceLock, 'utf8').trim());
-      if (pid && pid !== process.pid) {
-        try {
-          process.kill(pid, 0);
+      fs.writeSync(fd, String(process.pid));
+    } finally {
+      fs.closeSync(fd);
+    }
+    lockAcquired = true;
+    return;
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+
+    let pid = NaN;
+    try {
+      pid = Number(fs.readFileSync(instanceLock, 'utf8').trim());
+    } catch (readError) {
+      if (readError.code === 'ENOENT') {
+        return acquireInstanceLock(attempt + 1);
+      }
+      throw readError;
+    }
+
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      try {
+        process.kill(pid, 0);
+        throw new Error(`Ya existe otra instancia de Rikka (PID ${pid}).`);
+      } catch (probeError) {
+        if (probeError.code === 'EPERM') {
           throw new Error(`Ya existe otra instancia de Rikka (PID ${pid}).`);
-        } catch (probeError) {
-          if (probeError.code === 'ESRCH') {
-            fs.unlinkSync(instanceLock);
-            return acquireInstanceLock();
-          }
-          if (probeError.message?.startsWith('Ya existe otra instancia')) throw probeError;
+        }
+        if (probeError.code !== 'ESRCH') {
           throw probeError;
         }
       }
-      fs.unlinkSync(instanceLock);
-      return acquireInstanceLock();
-    } catch (lockError) {
-      if (lockError.message?.startsWith('Ya existe otra instancia')) throw lockError;
-      try { fs.unlinkSync(instanceLock); } catch {}
-      return acquireInstanceLock();
     }
+
+    try {
+      fs.unlinkSync(instanceLock);
+    } catch (unlinkError) {
+      if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    }
+
+    return acquireInstanceLock(attempt + 1);
   }
 }
 
@@ -56,7 +75,6 @@ function releaseInstanceLock() {
 
 process.once('exit', releaseInstanceLock);
 
-const ask = (text) => new Promise((resolve) => rl.question(text, resolve));
 const mint = '#b2f7ef';
 const celeste = '#8ecae6';
 const softViolet = '#dec0f1';
@@ -73,7 +91,8 @@ function printBanner() {
 }
 
 function hasCredentials() {
-  return fs.existsSync(join(__dirname, global.authFile, 'creds.json'));
+  if (!global.authFile) return false;
+  return fs.existsSync(resolve(__dirname, global.authFile, 'creds.json'));
 }
 
 function normalizePhone(value) {
@@ -82,34 +101,39 @@ function normalizePhone(value) {
 }
 
 async function choosePairingMethod() {
-  while (true) {
-    const choice = (await ask(
-      chalk.hex(softViolet)('  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n') +
-      chalk.hex(mint).bold('  ⟬ ✦ ⟭ Seleccione un método de vinculación:\n') +
-      chalk.hex(white)('  1. ✧ Escanear código QR\n') +
-      chalk.hex(white)('  2. ✧ Código de 8 dígitos\n') +
-      chalk.hex(celeste)('  ──> ')
-    )).trim();
-
-    if (choice === '1') {
-      process.argv.push('--method=qr');
-      return;
-    }
-    if (choice === '2') {
-      const rawPhone = await ask(
-        chalk.hex(mint).bold('\n  ⟬ ✧ ⟭ Ingrese su número de WhatsApp:\n') +
-        chalk.hex(softViolet)('  Ej: +51925092348\n') +
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const choice = (await rl.question(
+        chalk.hex(softViolet)('  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n') +
+        chalk.hex(mint).bold('  ⟬ ✦ ⟭ Seleccione un método de vinculación:\n') +
+        chalk.hex(white)('  1. ✧ Escanear código QR\n') +
+        chalk.hex(white)('  2. ✧ Código de 8 dígitos\n') +
         chalk.hex(celeste)('  ──> ')
-      );
-      const phone = normalizePhone(rawPhone);
-      if (!phone) {
-        console.log(chalk.bgHex('#e63946').white.bold('\n [ ERROR ] Número inválido; usa el formato internacional, por ejemplo +51925092348.\n'));
-        continue;
+      )).trim();
+
+      if (choice === '1') {
+        process.argv.push('--method=qr');
+        return;
       }
-      process.argv.push(`--phone=${phone}`, '--method=code');
-      return;
+      if (choice === '2') {
+        const rawPhone = await rl.question(
+          chalk.hex(mint).bold('\n  ⟬ ✧ ⟭ Ingrese su número de WhatsApp:\n') +
+          chalk.hex(softViolet)('  Ej: +51925092348\n') +
+          chalk.hex(celeste)('  ──> ')
+        );
+        const phone = normalizePhone(rawPhone);
+        if (!phone) {
+          console.log(chalk.bgHex('#e63946').white.bold('\n [ ERROR ] Número inválido; usa el formato internacional, por ejemplo +51925092348.\n'));
+          continue;
+        }
+        process.argv.push(`--phone=${phone}`, '--method=code');
+        return;
+      }
+      console.log(chalk.hex('#e63946')('Opción no válida. Selecciona 1 o 2.\n'));
     }
-    console.log(chalk.hex('#e63946')('Opción no válida. Selecciona 1 o 2.\n'));
+  } finally {
+    rl.close();
   }
 }
 
@@ -121,11 +145,6 @@ async function main() {
     await choosePairingMethod();
   }
 
-  // Evita que la interfaz del menú compita por stdin con el proceso principal.
-  rl.close();
-
-  // Baileys, la base de datos, los plugins y los eventos corren en este proceso.
-  // No hay worker, cluster ni canal IPC que pueda tragarse la salida o los comandos.
   await import('./main.js');
 }
 
