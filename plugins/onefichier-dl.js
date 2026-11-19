@@ -302,11 +302,11 @@ function contentDispositionFilename(header) {
   return value.match(/filename\s*=\s*"?([^";]+)"?/i)?.[1] || ''
 }
 
-async function saveFile(response, outputPath) {
+async function saveFile(response, outputPath, maxBytes = MAX_DOWNLOAD_BYTES) {
   const expected = Number(getHeader(response.headers, 'content-length') || 0)
-  if (expected > MAX_DOWNLOAD_BYTES) {
+  if (expected > maxBytes) {
     response.data.destroy()
-    throw new Error(`El archivo supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`)
+    throw new Error(`El archivo supera el límite configurado de ${Math.round(maxBytes / 1024 / 1024)} MB.`)
   }
   const startedAt = Date.now()
   let bytes = 0
@@ -336,7 +336,7 @@ async function saveFile(response, outputPath) {
   const limiter = new Transform({
     transform(chunk, _encoding, callback) {
       bytes += chunk.length
-      if (bytes > MAX_DOWNLOAD_BYTES) callback(new Error(`El archivo supera el límite configurado de ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB.`))
+      if (bytes > maxBytes) callback(new Error(`El archivo supera el límite configurado de ${Math.round(maxBytes / 1024 / 1024)} MB.`))
       else { render(); callback(null, chunk) }
     },
   })
@@ -356,6 +356,60 @@ async function saveFile(response, outputPath) {
   }
   console.log(`[1FICHIER] Descarga completa · ${formatBytes(stat.size)} · ${formatDuration((Date.now() - startedAt) / 1000)}`)
   return stat
+}
+
+export async function downloadOneFichierFile(inputUrl, outputBasePath, options = {}) {
+  const url = parseOneFichierUrl(inputUrl)
+  const requestedMaxBytes = Number(options.maxBytes) || MAX_DOWNLOAD_BYTES
+  const maxBytes = Math.min(MAX_DOWNLOAD_BYTES, requestedMaxBytes)
+  let session = null
+  let outputPath = ''
+  try {
+    await fs.promises.mkdir(path.dirname(outputBasePath), { recursive: true })
+    session = await createSession({ browser: 'chrome_149', os: 'windows', timeout: 30_000 })
+    console.log(`[1FICHIER] Inicio integrado con AnimeV1 · host=${new URL(url).hostname}`)
+    const { response, finalUrl } = await getDownloadStream(url, session)
+    const contentType = getHeader(response.headers, 'content-type').split(';')[0].trim().toLowerCase()
+    if (/text\/html|application\/json|javascript/i.test(contentType)) {
+      response.data.destroy()
+      throw new Error('1fichier no devolvió un archivo descargable.')
+    }
+
+    const originalName = cleanFilename(
+      contentDispositionFilename(getHeader(response.headers, 'content-disposition')),
+      `1fichier-${Date.now()}.bin`,
+    )
+    const originalExtension = path.extname(originalName).toLowerCase()
+    const videoExtensions = new Set(['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi', '.flv'])
+    const mimeExtension = {
+      'video/mp4': '.mp4',
+      'video/webm': '.webm',
+      'video/x-matroska': '.mkv',
+      'video/quicktime': '.mov',
+      'video/x-msvideo': '.avi',
+      'video/x-flv': '.flv',
+    }[contentType]
+    const extension = videoExtensions.has(originalExtension)
+      ? originalExtension
+      : (mimeExtension || '.bin')
+    outputPath = path.extname(outputBasePath)
+      ? outputBasePath
+      : `${outputBasePath}${extension}`
+
+    await saveFile(response, outputPath, maxBytes)
+    console.log(`[1FICHIER] Descarga integrada completada · ${path.basename(outputPath)} · host=${new URL(finalUrl).hostname}`)
+    return {
+      filePath: outputPath,
+      fileName: originalName,
+      extension,
+      mimetype: contentType || 'application/octet-stream',
+    }
+  } catch (error) {
+    if (outputPath) await fs.promises.rm(outputPath, { force: true }).catch(() => {})
+    throw error
+  } finally {
+    if (session) await session.close().catch(() => {})
+  }
 }
 
 function getInput(m, text, args) {

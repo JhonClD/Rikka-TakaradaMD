@@ -18,8 +18,9 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MAX_DOWNLOAD_BYTES = Math.min(2048, Math.max(20, Number(process.env.ANIMEV1_MAX_DOWNLOAD_MB) || 2048)) * 1024 * 1024
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.ANIMEV1_DOWNLOAD_TIMEOUT_MS) || 15 * 60_000)
 const MIN_VALID_BYTES = 256 * 1024
-const PRIORITY = ['hls', 'byse', 'voe']
+const PRIORITY = ['voe', 'byse', 'mp4upload', '1fichier', 'hls', 'upnshare']
 const ENABLED_SERVERS = new Set(PRIORITY)
+const COMPATIBLE_VIDEO_SERVERS = new Set(['mp4upload', '1fichier', 'hls', 'upnshare'])
 const DISABLED_SERVERS = ['yourupload', 'pixeldrain', 'pdrain', 'zilla']
 const TEMP_DIR = path.resolve(process.env.ANIMEV1_TEMP_DIR || path.join(os.tmpdir(), 'rikka-animev1'))
 
@@ -145,6 +146,88 @@ function getFfmpegPath() {
   return fallback
 }
 
+function needsWhatsAppCompatibility(candidate) {
+  const server = String(candidate?.server || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  return COMPATIBLE_VIDEO_SERVERS.has(server)
+}
+
+async function normalizeVideoForWhatsApp(inputPath, basePath, onStatus) {
+  const outputPath = `${basePath}.compatible.mp4`
+  const finalPath = `${basePath}.mp4`
+  const startedAt = Date.now()
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats_period', '5', '-progress', 'pipe:2', '-nostats',
+    '-i', inputPath,
+    '-map', '0:v:0', '-map', '0:a:0?',
+    '-map_metadata', '0', '-map_chapters', '-1',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level:v', '4.1', '-tag:v', 'avc1',
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
+    '-brand', 'mp42', '-movflags', '+faststart', '-y', outputPath,
+  ]
+  downloadLog('conversión compatible iniciada', {
+    entrada: path.basename(inputPath), salida: path.basename(finalPath),
+    video: 'H.264 8-bit (yuv420p)', audio: 'AAC estéreo 128 kb/s',
+  })
+  onStatus?.('Convirtiendo a H.264/AAC compatible…')
+
+  const child = spawn(getFfmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+  let stderr = ''
+  let progressBuffer = ''
+  let progressFields = {}
+  let lastProgressAt = 0
+  child.stderr.on('data', chunk => {
+    const text = chunk.toString()
+    stderr = (stderr + text).slice(-4000)
+    progressBuffer += text
+    const lines = progressBuffer.split(/\r?\n/)
+    progressBuffer = lines.pop() || ''
+    for (const line of lines) {
+      const separator = line.indexOf('=')
+      if (separator < 0) continue
+      const key = line.slice(0, separator).trim()
+      const value = line.slice(separator + 1).trim()
+      if (!key || !value) continue
+      progressFields[key] = value
+      if (key === 'progress' && Date.now() - lastProgressAt >= 15_000) {
+        lastProgressAt = Date.now()
+        downloadLog('conversión compatible en curso', {
+          tiempoVideo: progressFields.out_time || 'calculando',
+          velocidad: progressFields.speed || 'n/d',
+          tiempoTranscurridoSeg: Math.round((Date.now() - startedAt) / 1000),
+        })
+        Promise.resolve(onStatus?.(`Preparando video compatible… ${progressFields.out_time || ''}`)).catch(() => {})
+      }
+    }
+  })
+
+  const timer = setTimeout(() => child.kill('SIGKILL'), DOWNLOAD_TIMEOUT_MS)
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', code => code === 0
+        ? resolve()
+        : reject(new Error(`FFmpeg no pudo convertir el video a H.264 (código ${code}): ${stderr.trim().slice(-700)}`)))
+    })
+    const stat = await fs.promises.stat(outputPath)
+    if (stat.size < MIN_VALID_BYTES || stat.size >= MAX_DOWNLOAD_BYTES) {
+      throw new Error('El MP4 convertido no tiene un tamaño válido.')
+    }
+    await fs.promises.rename(outputPath, finalPath)
+    if (inputPath !== finalPath) await fs.promises.rm(inputPath, { force: true })
+    downloadLog('conversión compatible completada', {
+      archivo: path.basename(finalPath), tamaño: formatBytes(stat.size),
+      tiempoSeg: Math.round((Date.now() - startedAt) / 1000),
+    })
+    return { filePath: finalPath, extension: '.mp4', mimetype: 'video/mp4' }
+  } catch (error) {
+    await fs.promises.rm(outputPath, { force: true })
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function downloadHls(url, filePath, referer, extraHeaders = {}) {
   const extra = Object.entries(extraHeaders)
     .filter(([name, value]) => value && !/^(user-agent|referer)$/i.test(name))
@@ -242,13 +325,13 @@ async function resolveWithBrowser(url, referer, onStatus) {
     page.on('request', request => {
       const requestUrl = request.url()
       const type = request.resourceType()
-      if (!mediaUrl && !requestUrl.startsWith('blob:') && /\.(?:m3u8|mp4)(?:[?#]|$)/i.test(requestUrl)) mediaUrl = requestUrl
+      if (!mediaUrl && !requestUrl.startsWith('blob:') && /\.(?:m3u8|mp4)(?:[?#]|$)|\/m3u8\//i.test(requestUrl)) mediaUrl = requestUrl
       if (['image', 'stylesheet', 'font'].includes(type)) request.abort().catch(() => {})
       else request.continue().catch(() => {})
     })
     page.on('response', response => {
       const responseUrl = response.url()
-      if (!mediaUrl && /\.(?:m3u8|mp4)(?:[?#]|$)/i.test(responseUrl)) mediaUrl = responseUrl
+      if (!mediaUrl && /\.(?:m3u8|mp4)(?:[?#]|$)|\/m3u8\//i.test(responseUrl)) mediaUrl = responseUrl
     })
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     for (const selector of ['.play-button', '.vjs-big-play-button', '.plyr__control--overlaid', '[role="button"]']) {
@@ -279,18 +362,64 @@ async function resolveWithBrowser(url, referer, onStatus) {
   }
 }
 
-async function downloadHlsWithFallback(candidate, url, basePath, referer, onStatus) {
-  try {
-    return await downloadHls(url, `${basePath}.mp4`, referer, candidate.headers)
-  } catch (firstError) {
-    downloadLog('HLS directo falló; intentando fallback headless', { servidor: candidate.server || 'servidor', host: hostOf(url), error: firstError.message })
-    const browserResult = await resolveWithBrowser(candidate.url || url, referer, onStatus)
-    if (!browserResult?.url) {
-      downloadLog('fallback headless no resolvió el HLS', { servidor: candidate.server || 'servidor' })
-      throw firstError
+async function downloadHlsWithEngines(url, outputPath, referer, headers, onStatus) {
+  const engines = [
+    {
+      name: 'Byse',
+      run: async () => {
+        const plugin = await import('../../plugins/byse-dl.js')
+        return plugin.downloadHlsManifest(url, outputPath, referer, {
+          headers,
+          timeoutMs: 30_000,
+          reconnectHttpErrors: '408,429,500,502,503,504',
+        })
+      },
+    },
+    {
+      name: 'Voe',
+      run: async () => {
+        const plugin = await import('../../plugins/voe-dl.js')
+        return plugin.downloadHlsManifest(url, outputPath, referer, {
+          ...headers,
+          timeoutMs: 30_000,
+          reconnectHttpErrors: '408,429,500,502,503,504',
+        })
+      },
+    },
+    { name: 'AnimeV1', run: () => downloadHls(url, outputPath, referer, headers) },
+  ]
+  const errors = []
+  for (const engine of engines) {
+    await fs.promises.rm(outputPath, { force: true })
+    onStatus?.(`Resolviendo el HLS de AnimeV1 con el motor ${engine.name}…`)
+    try {
+      const result = await engine.run()
+      return result?.filePath || result || outputPath
+    } catch (error) {
+      await fs.promises.rm(outputPath, { force: true })
+      errors.push(`${engine.name}: ${error.message}`)
+      downloadLog('motor HLS no pudo descargar el mismo manifiesto', { motor: engine.name, host: hostOf(url), error: error.message })
     }
+  }
+  throw new Error(errors.join(' | '))
+}
+
+async function downloadHlsWithFallback(candidate, url, basePath, referer, onStatus) {
+  const outputPath = `${basePath}.mp4`
+  try {
+    return await downloadHlsWithEngines(url, outputPath, referer, candidate.headers || {}, onStatus)
+  } catch (firstError) {
+    downloadLog('motores HLS no resolvieron el manifiesto; intentando resolver el reproductor en navegador', { servidor: candidate.server || 'servidor', host: hostOf(url), error: firstError.message })
+    const browserResult = await resolveWithBrowser(candidate.url || url, referer, onStatus)
+    if (!browserResult?.url) throw firstError
     if (browserResult.url === url || isHlsUrl(browserResult.url)) {
-      return downloadHls(browserResult.url, `${basePath}.mp4`, browserResult.headers?.Referer || referer, browserResult.headers)
+      return downloadHlsWithEngines(
+        browserResult.url,
+        outputPath,
+        browserResult.headers?.Referer || referer,
+        { ...(candidate.headers || {}), ...(browserResult.headers || {}) },
+        onStatus,
+      )
     }
     const resolved = await fetchCandidate({ ...candidate, url: browserResult.url }, basePath, onStatus)
     return resolved.filePath
@@ -365,6 +494,11 @@ async function fetchWithExistingDownloader(candidate, url, basePath, onStatus) {
     onStatus?.('Descargando con el plugin MP4Upload…')
     return plugin.downloadMp4UploadFile(url, outputPath)
   }
+  if (/1\s?fichier|onefichier|1fichier\./i.test(identity)) {
+    const plugin = await import('../../plugins/onefichier-dl.js')
+    onStatus?.('Descargando con el plugin 1fichier…')
+    return plugin.downloadOneFichierFile(url, basePath, { maxBytes: MAX_DOWNLOAD_BYTES })
+  }
   return null
 }
 
@@ -378,7 +512,14 @@ async function fetchCandidate(candidate, basePath, onStatus) {
     host: hostOf(url),
   })
   const origin = new URL(url).origin
-  const referer = `${origin}/`
+  let referer = `${origin}/`
+  try {
+    const playerPage = new URL(candidate.url)
+    if (String(candidate.server || '').trim().toLowerCase() === 'hls' &&
+      playerPage.hostname === new URL(url).hostname && playerPage.pathname.startsWith('/play/')) {
+      referer = playerPage.href
+    }
+  } catch (_) {}
   let filePath = `${basePath}.mp4`
 
   const pluginDownload = await fetchWithExistingDownloader(candidate, url, basePath, onStatus)
@@ -497,7 +638,8 @@ function listCandidates(data, variant, preferredQuality = null) {
   ]
     .filter(item => {
       if (!item?.url) return false
-      const serverName = String(item.server || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+      const rawServerName = String(item.server || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+      const serverName = rawServerName === 'onefichier' ? '1fichier' : rawServerName
       if (!ENABLED_SERVERS.has(serverName)) return false
       const identity = `${item.server || ''} ${item.url}`.toLowerCase()
       let isAnimeV1HlsPlayer = false
@@ -568,7 +710,10 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     })
     options.onStatus?.(`Probando ${candidate.server || 'servidor'} (${variant})…`)
     try {
-      const file = await fetchCandidate(candidate, basePath, options.onStatus)
+      const downloadedFile = await fetchCandidate(candidate, basePath, options.onStatus)
+      const file = needsWhatsAppCompatibility(candidate)
+        ? await normalizeVideoForWhatsApp(downloadedFile.filePath, basePath, options.onStatus)
+        : downloadedFile
       const stat = await fs.promises.stat(file.filePath)
       if (stat.size < MIN_VALID_BYTES || stat.size >= MAX_DOWNLOAD_BYTES) {
         await fs.promises.rm(file.filePath, { force: true })
@@ -589,7 +734,7 @@ async function downloadEpisodeFile(episodeUrl, options = {}) {
     } catch (error) {
       downloadLog('candidato fallido', { servidor: candidate.server || 'servidor', error: error.message })
       errors.push(`${candidate.server || 'servidor'}: ${error.message}`)
-      for (const extension of ['.mp4', '.webm', '.mkv', '.mov']) {
+      for (const extension of ['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi', '.flv', '.bin', '.compatible.mp4']) {
         await fs.promises.rm(`${basePath}${extension}`, { force: true })
       }
     }
