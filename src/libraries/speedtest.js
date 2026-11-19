@@ -211,11 +211,12 @@ async function measureDownload(server) {
           throw new Error(`Descarga rechazada por el servidor (HTTP ${response.status}).`);
         }
 
-        const reader = response.body.getReader();
-        while (!controller.signal.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          state.bytes += value.byteLength;
+        // `main.js` carga api.js, que reemplaza `global.fetch` por `node-fetch`:
+        // su `body` es un stream de Node sin `getReader()`. La iteración
+        // asíncrona funciona igual con ese stream y con el ReadableStream web.
+        for await (const chunk of response.body) {
+          if (controller.signal.aborted) break;
+          state.bytes += chunk.byteLength ?? chunk.length;
         }
       } catch (error) {
         if (!controller.signal.aborted) state.error ||= error;
@@ -379,11 +380,20 @@ export function buildCaption(result, { title = '📡 *Speedtest de Ookla complet
 }
 
 /** Medición completa. Devuelve métricas crudas (bits/s, ms, bytes). */
-export async function runSpeedtest({ share = true } = {}) {
+export async function runSpeedtest({ share = true, onProgress } = {}) {
+  const notify = (phase, data) => {
+    try { onProgress?.(phase, data); } catch { /* un callback roto no debe frenar la medición */ }
+  };
+
+  notify('servers');
   const [client, servers] = await Promise.all([getClientInfo(), getServers()]);
+  notify('ping');
   const server = await selectBestServer(servers);
+  notify('download', server);
   const download = await measureDownload(server);
+  notify('upload', server);
   const upload = await measureUpload(server);
+  notify('share', server);
   const result = { client, server, download, upload, timestamp: new Date() };
   result.share = share ? await createShareResult(result) : null;
   return result;
