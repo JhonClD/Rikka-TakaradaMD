@@ -362,64 +362,18 @@ async function resolveWithBrowser(url, referer, onStatus) {
   }
 }
 
-async function downloadHlsWithEngines(url, outputPath, referer, headers, onStatus) {
-  const engines = [
-    {
-      name: 'Byse',
-      run: async () => {
-        const plugin = await import('../../plugins/byse-dl.js')
-        return plugin.downloadHlsManifest(url, outputPath, referer, {
-          headers,
-          timeoutMs: 30_000,
-          reconnectHttpErrors: '408,429,500,502,503,504',
-        })
-      },
-    },
-    {
-      name: 'Voe',
-      run: async () => {
-        const plugin = await import('../../plugins/voe-dl.js')
-        return plugin.downloadHlsManifest(url, outputPath, referer, {
-          ...headers,
-          timeoutMs: 30_000,
-          reconnectHttpErrors: '408,429,500,502,503,504',
-        })
-      },
-    },
-    { name: 'AnimeV1', run: () => downloadHls(url, outputPath, referer, headers) },
-  ]
-  const errors = []
-  for (const engine of engines) {
-    await fs.promises.rm(outputPath, { force: true })
-    onStatus?.(`Resolviendo el HLS de AnimeV1 con el motor ${engine.name}…`)
-    try {
-      const result = await engine.run()
-      return result?.filePath || result || outputPath
-    } catch (error) {
-      await fs.promises.rm(outputPath, { force: true })
-      errors.push(`${engine.name}: ${error.message}`)
-      downloadLog('motor HLS no pudo descargar el mismo manifiesto', { motor: engine.name, host: hostOf(url), error: error.message })
-    }
-  }
-  throw new Error(errors.join(' | '))
-}
-
 async function downloadHlsWithFallback(candidate, url, basePath, referer, onStatus) {
-  const outputPath = `${basePath}.mp4`
   try {
-    return await downloadHlsWithEngines(url, outputPath, referer, candidate.headers || {}, onStatus)
+    return await downloadHls(url, `${basePath}.mp4`, referer, candidate.headers)
   } catch (firstError) {
-    downloadLog('motores HLS no resolvieron el manifiesto; intentando resolver el reproductor en navegador', { servidor: candidate.server || 'servidor', host: hostOf(url), error: firstError.message })
+    downloadLog('HLS directo falló; intentando fallback headless', { servidor: candidate.server || 'servidor', host: hostOf(url), error: firstError.message })
     const browserResult = await resolveWithBrowser(candidate.url || url, referer, onStatus)
-    if (!browserResult?.url) throw firstError
+    if (!browserResult?.url) {
+      downloadLog('fallback headless no resolvió el HLS', { servidor: candidate.server || 'servidor' })
+      throw firstError
+    }
     if (browserResult.url === url || isHlsUrl(browserResult.url)) {
-      return downloadHlsWithEngines(
-        browserResult.url,
-        outputPath,
-        browserResult.headers?.Referer || referer,
-        { ...(candidate.headers || {}), ...(browserResult.headers || {}) },
-        onStatus,
-      )
+      return downloadHls(browserResult.url, `${basePath}.mp4`, browserResult.headers?.Referer || referer, browserResult.headers)
     }
     const resolved = await fetchCandidate({ ...candidate, url: browserResult.url }, basePath, onStatus)
     return resolved.filePath

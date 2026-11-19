@@ -976,15 +976,11 @@ async function getFfmpeg() {
   return rutaFfmpeg
 }
 
-function cabecerasFfmpeg(url, referer, extras = {}) {
+function cabecerasFfmpeg(url, referer) {
   const origen = (() => {
     try { return new URL(referer || url).origin + '/' } catch (_) { return '' }
   })()
   const pares = { 'User-Agent': UA, Referer: referer || origen, Origin: origen.replace(/\/$/, '') }
-  for (const [nombre, valor] of Object.entries(extras)) {
-    if (!valor || /^(user-agent|referer|origin)$/i.test(nombre)) continue
-    pares[nombre] = valor
-  }
   return Object.entries(pares)
     .filter(([, valor]) => valor)
     .map(([nombre, valor]) => `${nombre}: ${String(valor).replace(/[\r\n]/g, '')}\r\n`)
@@ -1117,7 +1113,7 @@ function errorReintentable(error) {
  * reintenta sin el `-bsf` de audio y, al final, sin `+faststart` (el mp4 queda
  * reproducible igual, solo que el índice va al final).
  */
-async function descargarHls({ url, referer, salida, signal, alProgresar, headers = {}, reconnectHttpErrors = '403,408,429,500,502,503,504' }) {
+async function descargarHls({ url, referer, salida, signal, alProgresar }) {
   const binario = await getFfmpeg()
   const inicioFfmpeg = Date.now()
   log('FFmpeg iniciado: uniendo segmentos HLS sin recodificar', { binario, contenedor: 'MP4' })
@@ -1125,10 +1121,10 @@ async function descargarHls({ url, referer, salida, signal, alProgresar, headers
     '-hide_banner', '-loglevel', 'info', '-nostdin', '-y',
     '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
     '-user_agent', UA,
-    '-headers', cabecerasFfmpeg(url, referer, headers),
+    '-headers', cabecerasFfmpeg(url, referer),
     '-rw_timeout', '20000000',
     '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1',
-    '-reconnect_on_network_error', '1', '-reconnect_on_http_error', reconnectHttpErrors,
+    '-reconnect_on_network_error', '1', '-reconnect_on_http_error', '403,408,429,500,502,503,504',
     '-reconnect_delay_max', '5',
     '-progress', 'pipe:2', '-stats_period', '2',
     '-i', url,
@@ -1168,39 +1164,6 @@ async function descargarHls({ url, referer, salida, signal, alProgresar, headers
   const error = new Error(ultimoError?.message || 'ffmpeg no pudo procesar el HLS.')
   error.intentos = errores
   throw error
-}
-
-export async function downloadHlsManifest(url, outputPath, referer, options = {}) {
-  const parsed = new URL(String(url || ''))
-  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('La URL HLS debe usar HTTP o HTTPS.')
-  if (!/\.m3u8(?:[?#]|$)|\/m3u8\//i.test(parsed.href)) throw new Error('La URL no parece ser un manifiesto HLS.')
-  const controller = new AbortController()
-  let timedOut = false
-  const timeoutMs = Math.max(1_000, Number(options.timeoutMs) || TIEMPO_MAX_DESCARGA_MS)
-  const timer = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs)
-  const abortFromCaller = () => controller.abort()
-  if (options.signal) {
-    if (options.signal.aborted) controller.abort()
-    else options.signal.addEventListener('abort', abortFromCaller, { once: true })
-  }
-  try {
-    await descargarHls({
-      url: parsed.href,
-      referer: referer || `${parsed.origin}/`,
-      salida: outputPath,
-      signal: controller.signal,
-      alProgresar: options.onProgress,
-      headers: options.headers,
-      reconnectHttpErrors: options.reconnectHttpErrors,
-    })
-  } catch (error) {
-    if (timedOut) throw new Error(`El motor HLS Byse superó el límite de ${Math.ceil(timeoutMs / 1000)} segundos.`)
-    throw error
-  } finally {
-    clearTimeout(timer)
-    options.signal?.removeEventListener?.('abort', abortFromCaller)
-  }
-  return { filePath: outputPath, extension: '.mp4', mimetype: 'video/mp4' }
 }
 
 /** Baja un mp4 directo por streaming, con límite de tamaño y progreso. */

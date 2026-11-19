@@ -819,24 +819,19 @@ function runFfmpegWithProgress(args, options = {}) {
   })
 }
 
-async function downloadVoeStream(pageData, outputPath, voe, attemptSignal, options = {}) {
+async function downloadVoeStream(pageData, outputPath, voe, attemptSignal) {
   if (pageData.streamType === 'mp4') {
     await downloadDirectMp4(pageData.streamUrl, pageData, outputPath, attemptSignal)
     return
   }
 
-  const extraHeaders = Object.entries(pageData.extraHeaders || {})
-    .filter(([name, value]) => value && !/^(user-agent|referer|origin|cookie)$/i.test(name))
-    .map(([name, value]) => `${name}: ${String(value).replace(/[\r\n]/g, '')}`)
   const headers = [
     'Referer: ' + (pageData.referer || voe.pageUrl),
-    pageData.origin ? 'Origin: ' + pageData.origin : '',
-    pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : '',
-    ...extraHeaders
+    pageData.cookieHeader ? 'Cookie: ' + pageData.cookieHeader : ''
   ].filter(Boolean).join('\r\n') + '\r\n'
 
   try {
-    const args = [
+    await runFfmpegWithProgress([
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
       '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
       '-user_agent', FFMPEG_USER_AGENT,
@@ -847,7 +842,7 @@ async function downloadVoeStream(pageData, outputPath, voe, attemptSignal, optio
       '-reconnect_streamed', '1',
       '-reconnect_at_eof', '1',
       '-reconnect_on_network_error', '1',
-      ...(options.reconnectHttpErrors === '' ? [] : ['-reconnect_on_http_error', options.reconnectHttpErrors || '403,408,429,500,502,503,504']),
+      '-reconnect_on_http_error', '403,408,429,500,502,503,504',
       '-reconnect_delay_max', '5',
       '-progress', 'pipe:2',
       '-stats_period', '1',
@@ -858,33 +853,11 @@ async function downloadVoeStream(pageData, outputPath, voe, attemptSignal, optio
       '-movflags', '+faststart',
       '-f', 'mp4',
       outputPath
-    ]
-    await runFfmpegWithProgress(args, { timeout: options.timeoutMs || FFMPEG_TIMEOUT_MS, killSignal: 'SIGKILL' })
+    ], { timeout: FFMPEG_TIMEOUT_MS, killSignal: 'SIGKILL' })
   } catch (error) {
     const detail = String(error?.stderr || error?.stdout || error?.message || 'Error desconocido de FFmpeg').trim()
     throw new Error(`FFmpeg no pudo descargar el HLS: ${detail.slice(-2500)}`)
   }
-}
-
-export async function downloadHlsManifest(url, outputPath, referer, headers = {}) {
-  const parsed = new URL(String(url || ''))
-  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('La URL HLS debe usar HTTP o HTTPS.')
-  if (!/\.m3u8(?:[?#]|$)|\/m3u8\//i.test(parsed.href)) throw new Error('La URL no parece ser un manifiesto HLS.')
-  const { timeoutMs, reconnectHttpErrors, ...requestHeaders } = headers
-  const pageUrl = referer || `${parsed.origin}/`
-  const cookieHeader = requestHeaders.Cookie || requestHeaders.cookie || ''
-  await downloadVoeStream({
-    streamType: 'hls',
-    streamUrl: parsed.href,
-    referer: pageUrl,
-    origin: requestHeaders.Origin || requestHeaders.origin || parsed.origin,
-    cookieHeader,
-    extraHeaders: requestHeaders,
-  }, outputPath, { pageUrl }, null, {
-    timeoutMs,
-    reconnectHttpErrors,
-  })
-  return { filePath: outputPath, extension: '.mp4', mimetype: 'video/mp4' }
 }
 
 export async function downloadVoeWithMirrorFailover(voe, tempDir) {
