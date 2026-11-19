@@ -1,10 +1,8 @@
-import { generateWAMessageFromContent } from "baileys";
 import { smsg } from './src/libraries/simple.js';
 import { format } from 'util';
 import { fileURLToPath } from 'url';
 import path, { join } from 'path';
-import { unwatchFile, watchFile } from 'fs';
-import fs from 'fs';
+import fs, { unwatchFile, watchFile } from 'fs';
 import chalk from 'chalk';
 import { isDuplicate, isValidMessage, extractMessageText } from './src/funcion/messageValidation.js';
 import { ANTI_ARAB_JSON } from './src/funcion/paths.js';
@@ -24,47 +22,189 @@ function loadAntiArabPrefixes() {
 }
 const antiArabPrefixes = loadAntiArabPrefixes();
 
-const _recentMessages = new Map();
-const _DUPLICATE_TIMEOUT = 3000;
-const _MAX_CACHE_SIZE = 150;
+const PLUGINS_DIR = join(path.dirname(fileURLToPath(import.meta.url)), 'plugins');
+const DEFAULT_PROFILE_PICTURE = 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60';
 
-const _initializedUsers = new Map();
-const _USER_INIT_TTL = 60 * 60 * 1000;
+const DUPLICATE_TIMEOUT = 3000;
+const MAX_CACHE_SIZE = 150;
+const USER_INIT_TTL = 60 * 60 * 1000;
+const META_TTL = 5 * 60 * 1000;
+const ANTISPAM_WINDOW = 5000;
 
-const _prefixRegexCache = new Map();
+const recentMessages = new Map();
+const initializedUsers = new Map();
+const prefixRegexCache = new Map();
 
-setInterval(() => {
+// handler.js se reimporta al editarlo (ver global.reloadHandler en main.js).
+// Un setInterval a nivel de módulo se acumulaba en cada recarga, así que se
+// descarta el anterior antes de crear el nuevo.
+clearInterval(global.__handlerCleanupTimer);
+global.__handlerCleanupTimer = setInterval(() => {
   const now = Date.now();
-  for (const [key, ts] of _recentMessages.entries()) {
-    if (now - ts > _DUPLICATE_TIMEOUT * 3) _recentMessages.delete(key);
+  for (const [key, ts] of recentMessages) {
+    if (now - ts > DUPLICATE_TIMEOUT * 3) recentMessages.delete(key);
   }
-  for (const [key, ts] of _initializedUsers.entries()) {
-    if (now - ts > _USER_INIT_TTL) _initializedUsers.delete(key);
+  for (const [key, ts] of initializedUsers) {
+    if (now - ts > USER_INIT_TTL) initializedUsers.delete(key);
   }
 }, 30000);
+global.__handlerCleanupTimer.unref?.();
 
-let mconn;
+const USER_DEFAULTS = {
+  afk: -1,
+  afkReason: '',
+  age: -1,
+  antispam: 0,
+  antispamlastclaim: 0,
+  atm: 0,
+  banned: false,
+  BannedReason: '',
+  Banneduser: false,
+  bank: 0,
+  coin: 0,
+  expired: 0,
+  money: 15,
+  mute: false,
+  note: 0,
+  premium: false,
+  premiumTime: 0,
+  registered: false,
+  reglast: 0,
+  regTime: -1,
+  role: 'Novato',
+  rtrofi: 'bronce',
+  sewa: false,
+  spammer: 0,
+  title: '',
+  trofi: 0,
+  unreglast: 0,
+  warn: 0,
+  language: 'es',
+  wallet: 0,
+  wait: 0,
+};
+
+const CHAT_DEFAULTS = {
+  isBanned: false,
+  welcome: false,
+  detect: true,
+  detect2: false,
+  sWelcome: '',
+  sBye: '',
+  sPromote: '',
+  sDemote: '',
+  antidelete: false,
+  autosticker: false,
+  audios: true,
+  antiLink: false,
+  antiLink2: false,
+  antiviewonce: false,
+  antiToxic: false,
+  antiTraba: false,
+  antiArab: false,
+  antiArab2: false,
+  modoadmin: false,
+  simi: false,
+  expired: 0,
+  language: 'es',
+};
+
+const SETTINGS_DEFAULTS = {
+  self: false,
+  autoread: false,
+  autoread2: false,
+  restrict: false,
+  antiCall: false,
+  antiPrivate: false,
+  antispam: false,
+  audios_bot: true,
+  modoia: false,
+};
+
+/** Crea el registro si falta (o no es un objeto) y devuelve el objeto vivo de la base. */
+function ensureRecord(collection, key) {
+  const current = collection[key];
+  if (!current || typeof current !== 'object') collection[key] = {};
+  return collection[key];
+}
+
+const escapeRegex = (str) => String(str).replace(/[|\\{}()[\]^$+*?.]/g, '\\$&');
+
+function prefixToRegex(str) {
+  const key = String(str);
+  let re = prefixRegexCache.get(key);
+  if (!re) {
+    re = new RegExp('^' + escapeRegex(key));
+    prefixRegexCache.set(key, re);
+  }
+  return re;
+}
+
+/**
+ * Busca el prefijo al inicio del texto. Devuelve `[resultadoRegExp, regex]` del
+ * primer prefijo que coincide, o undefined si ninguno lo hace.
+ */
+function matchPrefix(prefix, text) {
+  let candidates;
+  if (prefix instanceof RegExp) candidates = [prefix];
+  else if (Array.isArray(prefix)) candidates = prefix.map((p) => (p instanceof RegExp ? p : prefixToRegex(p)));
+  else if (typeof prefix === 'string') candidates = [prefixToRegex(prefix)];
+  else return undefined;
+
+  for (const re of candidates) {
+    re.lastIndex = 0;
+    const result = re.exec(text);
+    if (result) return [result, re];
+  }
+  return undefined;
+}
+
+/** Respuestas de botones/listas interactivas: el id elegido se trata como texto del comando. */
+function applyInteractiveResponse(m) {
+  const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage;
+  if (nativeFlow?.paramsJson) {
+    try {
+      const params = JSON.parse(nativeFlow.paramsJson);
+      if (typeof params?.id === 'string' && params.id) m.text = params.id;
+    } catch { /* paramsJson no es JSON: se ignora */ }
+  }
+  if (!m.text) {
+    const listId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId;
+    if (listId) m.text = listId;
+  }
+}
+
+// Mensajes enviados por otros bots/clientes conocidos: nunca deben ejecutar comandos.
+function isForeignClientMessage(id) {
+  const value = String(id || '');
+  return value.startsWith('EVO')
+    || value.startsWith('Lyru-')
+    || (value.startsWith('BAE5') && value.length === 16)
+    || value.startsWith('B24E')
+    || (value.startsWith('8SCO') && value.length === 20)
+    || value.startsWith('FizzxyTheGreat-');
+}
 
 export async function handler(chatUpdate) {
-  if (!chatUpdate) return;
+  if (!chatUpdate?.messages?.length) return;
 
   const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
-  if (chatUpdate.messages?.length) {
-    chatUpdate.messages = chatUpdate.messages.filter(msg => {
-      const msgTs = (msg.messageTimestamp || 0) * 1000;
-      return msgTs >= connectionTime - 60000;
-    });
-    if (!chatUpdate.messages.length) return;
-  }
+  chatUpdate.messages = chatUpdate.messages.filter(msg => {
+    const msgTs = (msg.messageTimestamp || 0) * 1000;
+    return msgTs >= connectionTime - 60000;
+  });
+  if (!chatUpdate.messages.length) return;
 
   this.pushMessage(chatUpdate.messages).catch(console.error);
   let m = chatUpdate.messages[chatUpdate.messages.length - 1];
   if (!m) return;
 
   if (!isValidMessage(m)) return;
-  const _msgText = extractMessageText(m);
-  const _sender = m.key?.fromMe ? (this?.user?.jid || '') : (m.key?.participantAlt || m.key?.participantPN || m.key?.participant || m.key?.remoteJidAlt || m.key?.remoteJidPN || m.key?.remoteJid || '');
-  if (isDuplicate(m.key?.id, _sender, _msgText, _recentMessages, _DUPLICATE_TIMEOUT, _MAX_CACHE_SIZE)) return;
+  const msgText = extractMessageText(m);
+  const rawSender = m.key?.fromMe
+    ? (this?.user?.jid || '')
+    : (m.key?.participantAlt || m.key?.participantPN || m.key?.participant || m.key?.remoteJidAlt || m.key?.remoteJidPN || m.key?.remoteJid || '');
+  if (isDuplicate(m.key?.id, rawSender, msgText, recentMessages, DUPLICATE_TIMEOUT, MAX_CACHE_SIZE)) return;
 
   if (global.db.data == null) await global.loadDatabase();
 
@@ -73,113 +213,36 @@ export async function handler(chatUpdate) {
     if (!m) return;
 
     global.mconn = m;
-    mconn = m;
+
+    let dbUser;
+    let dbChat;
+    let settings;
     try {
-      const user = global.db.data.users[m.sender];
-      if (typeof user !== 'object') {
-        global.db.data.users[m.sender] = {};
+      // Se vuelve a leer el registro tras crearlo: antes la variable quedaba en
+      // `undefined` en el primer mensaje y los valores por defecto de un
+      // usuario/chat nuevo solo se aplicaban desde el segundo.
+      dbUser = ensureRecord(global.db.data.users, m.sender);
+      if (!initializedUsers.has(m.sender)) {
+        initializedUsers.set(m.sender, Date.now());
+        Object.assign(dbUser, { ...USER_DEFAULTS, name: m.name, ...dbUser });
       }
 
-      if (user && !_initializedUsers.has(m.sender)) {
-        _initializedUsers.set(m.sender, Date.now());
-        const defaults = {
-          afk: -1,
-          afkReason: '',
-          age: -1,
-          antispam: 0,
-          antispamlastclaim: 0,
-          atm: 0,
-          banned: false,
-          BannedReason: '',
-          Banneduser: false,
-          bank: 0,
-          coin: 0,
-          expired: 0,
-          money: 15,
-          mute: false,
-          name: m.name,
-          note: 0,
-          premium: false,
-          premiumTime: 0,
-          registered: false,
-          reglast: 0,
-          regTime: -1,
-          role: 'Novato',
-          rtrofi: 'bronce',
-          sewa: false,
-          spammer: 0,
-          title: '',
-          trofi: 0,
-          unreglast: 0,
-          warn: 0,
-          language: 'es',
-          wallet: 0,
-          wait: 0,
-        };
-        Object.assign(user, { ...defaults, ...user });
-      }
+      dbChat = ensureRecord(global.db.data.chats, m.chat);
+      Object.assign(dbChat, { ...CHAT_DEFAULTS, ...dbChat });
 
-      const chat = global.db.data.chats[m.chat];
-      if (typeof chat !== 'object') {
-        global.db.data.chats[m.chat] = {};
-      }
-      if (chat) {
-        const chats = {
-          isBanned: false,
-          welcome: false,
-          detect: true,
-          detect2: false,
-          sWelcome: '',
-          sBye: '',
-          sPromote: '',
-          sDemote: '',
-          antidelete: false,
-          autosticker: false,
-          audios: true,
-          antiLink: false,
-          antiLink2: false,
-          antiviewonce: false,
-          antiToxic: false,
-          antiTraba: false,
-          antiArab: false,
-          antiArab2: false,
-          modoadmin: false,
-          simi: false,
-          expired: 0,
-          language: 'es',
-        };
-        Object.assign(chat, { ...chats, ...chat });
-      }
+      settings = ensureRecord(global.db.data.settings, this.user.jid);
+      Object.assign(settings, { ...SETTINGS_DEFAULTS, ...settings });
 
-      const settings = global.db.data.settings[this.user.jid] ??= {};
-      if (settings) {
-        const setttings = {
-          self: false,
-          autoread: false,
-          autoread2: false,
-          restrict: false,
-          antiCall: false,
-          antiPrivate: false,
-          antispam: false,
-          audios_bot: true,
-          modoia: false,
-        };
-        Object.assign(settings, { ...setttings, ...settings });
-        // Aplicar prefijo guardado al conn
-        if (settings.prefix !== undefined) {
-          if (settings.prefix === true) {
-            // noprefix mode: acepta cualquier texto como comando
-            this.prefix = /^[\s\S]?/;
-          } else if (Array.isArray(settings.prefix)) {
-            this.prefix = settings.prefix;
-          } else if (typeof settings.prefix === 'string' && settings.prefix.length) {
-            this.prefix = [settings.prefix];
-          } else {
-            this.prefix = global.prefix;
-          }
-        } else {
-          this.prefix = global.prefix;
-        }
+      // Aplicar prefijo guardado al conn
+      if (settings.prefix === true) {
+        // noprefix mode: acepta comandos sin prefijo o con cualquiera de los estándar
+        this.prefix = /^[#!/.]?/;
+      } else if (Array.isArray(settings.prefix)) {
+        this.prefix = settings.prefix;
+      } else if (typeof settings.prefix === 'string' && settings.prefix.length) {
+        this.prefix = [settings.prefix];
+      } else {
+        this.prefix = global.prefix;
       }
     } catch (e) {
       console.error(e);
@@ -192,124 +255,101 @@ export async function handler(chatUpdate) {
     if (opts['swonly'] && m.chat !== 'status@broadcast') return;
     if (typeof m.text !== 'string') m.text = '';
 
-    {
-      const _iResp = m.message?.interactiveResponseMessage;
-      if (_iResp) {
-        const _nfResp = _iResp.nativeFlowResponseMessage;
-        if (_nfResp?.paramsJson) {
-          try {
-            const _nfParams = JSON.parse(_nfResp.paramsJson);
-            if (typeof _nfParams?.id === 'string' && _nfParams.id) {
-              m.text = _nfParams.id;
-            }
-          } catch (_) {}
-        }
-      }
-      if (!m.text) {
-        const _listId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId;
-        if (_listId) m.text = _listId;
-      }
-    }
+    applyInteractiveResponse(m);
 
-    const _resolveLidJid = (jid) => {
+    const resolveLidJid = (jid) => {
       if (!jid?.endsWith('@lid')) return jid;
       const lidKey = jid.split('@')[0];
       const pnUser = this?.signalRepository?.lidMapping?.mappingCache?.get(`lid:${lidKey}`);
       if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
       return jid;
     };
-    const _phoneOnly = (jid) => typeof jid === 'string' ? jid.split('@')[0].replace(/:\d+$/, '').replace(/\D/g, '') : '';
-    const _senderJid = _resolveLidJid(m.sender);
-    const _ownerList = [...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-    const _normalizeLid = (jid) => typeof jid === 'string' && jid.endsWith('@lid') ? jid.replace(/:\d+@lid$/, '@lid') : jid;
-    const _senderLid = [m.sender, m.key?.participant, m.key?.remoteJid].map(_normalizeLid).find(jid => typeof jid === 'string' && jid.endsWith('@lid'));
-    const _ownerLids = global.owner.map(([, , , lid]) => _normalizeLid(lid)).filter(lid => typeof lid === 'string' && lid.endsWith('@lid'));
-    const _senderPhone = _phoneOnly(_senderJid);
-    const isROwner = _ownerList.some(ownerJid => {
-      if (ownerJid === _senderJid) return true;
-      const ownerPhone = _phoneOnly(ownerJid);
-      return ownerPhone && _senderPhone && ownerPhone === _senderPhone;
-    }) || _ownerLids.includes(_senderLid) || m.fromMe;
-    const isOwner = isROwner || m.fromMe;
-    const _modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-    const isMods = isOwner || _modsList.some(modJid => {
-      if (modJid === _senderJid) return true;
-      return _phoneOnly(modJid) === _senderPhone && _senderPhone !== '';
+    const phoneOnly = (jid) => typeof jid === 'string' ? jid.split('@')[0].replace(/:\d+$/, '').replace(/\D/g, '') : '';
+    const normalizeLid = (jid) => typeof jid === 'string' && jid.endsWith('@lid') ? jid.replace(/:\d+@lid$/, '@lid') : jid;
+    const senderJid = resolveLidJid(m.sender);
+    const ownerList = global.owner.map(([number]) => number.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+    const senderLid = [m.sender, m.key?.participant, m.key?.remoteJid].map(normalizeLid).find(jid => typeof jid === 'string' && jid.endsWith('@lid'));
+    const ownerLids = global.owner.map(([, , , lid]) => normalizeLid(lid)).filter(lid => typeof lid === 'string' && lid.endsWith('@lid'));
+    const senderPhone = phoneOnly(senderJid);
+    const isROwner = ownerList.some(ownerJid => {
+      if (ownerJid === senderJid) return true;
+      const ownerPhone = phoneOnly(ownerJid);
+      return ownerPhone && senderPhone && ownerPhone === senderPhone;
+    }) || ownerLids.includes(senderLid) || m.fromMe;
+    const isOwner = isROwner;
+    const modsList = global.mods.map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+    const isMods = isOwner || modsList.some(modJid => {
+      if (modJid === senderJid) return true;
+      return phoneOnly(modJid) === senderPhone && senderPhone !== '';
     });
 
-    const _userDb = global.db.data.users[m.sender] || {};
-    const _premExpiry = typeof _userDb.premiumTime === 'number' ? _userDb.premiumTime : 0;
-    const isPremium = _premExpiry > Date.now();
-    if (_premExpiry > 0 && !isPremium) { _userDb.premiumTime = 0; _userDb.premium = false; }
+    const premiumExpiry = typeof dbUser?.premiumTime === 'number' ? dbUser.premiumTime : 0;
+    const isPremium = premiumExpiry > Date.now();
+    if (dbUser && premiumExpiry > 0 && !isPremium) { dbUser.premiumTime = 0; dbUser.premium = false; }
 
-
-    const isPrems = isROwner || isOwner || isMods || isPremium;
+    const isPrems = isMods || isPremium;
 
     if (m.isBaileys) return;
 
-    let usedPrefix;
-    const _user = global.db.data && global.db.data.users && global.db.data.users[m.sender];
-
-    const _META_TTL = 5 * 60 * 1000;
-    let _cachedMeta = conn.chats[m.chat]?.metadata || null;
-    let _freshMeta = null;
+    let cachedMeta = this.chats[m.chat]?.metadata || null;
+    let freshMeta = null;
     if (m.isGroup) {
-      const _lastFetch = conn.chats[m.chat]?._metaFetchedAt || 0;
-      if (!_cachedMeta || (Date.now() - _lastFetch) > _META_TTL) {
+      const lastFetch = this.chats[m.chat]?._metaFetchedAt || 0;
+      if (!cachedMeta || (Date.now() - lastFetch) > META_TTL) {
         try {
-          _freshMeta = await this.groupMetadata(m.chat);
-          if (_freshMeta && conn.chats[m.chat]) {
-            conn.chats[m.chat].metadata = _freshMeta;
-            conn.chats[m.chat]._metaFetchedAt = Date.now();
+          freshMeta = await this.groupMetadata(m.chat);
+          if (freshMeta && this.chats[m.chat]) {
+            this.chats[m.chat].metadata = freshMeta;
+            this.chats[m.chat]._metaFetchedAt = Date.now();
           }
-        } catch (_) {}
+        } catch { /* sin metadata fresca: se usa la cacheada */ }
       }
     }
-    const _rawMeta = m.isGroup ? (_freshMeta || _cachedMeta || {}) : {};
-    const _rawParticipants = (_rawMeta.participants || []).map(p => ({
+    const rawMeta = m.isGroup ? (freshMeta || cachedMeta || {}) : {};
+    const rawParticipants = (rawMeta.participants || []).map(p => ({
       ...p,
       id: p.id || p.jid,
       jid: p.id || p.jid,
       lid: p.lid || null,
     }));
-    const groupMetadata = m.isGroup ? { ..._rawMeta, participants: _rawParticipants } : {};
-    const participants = _rawParticipants.map(participant => ({
+    const groupMetadata = m.isGroup ? { ...rawMeta, participants: rawParticipants } : {};
+    const participants = rawParticipants.map(participant => ({
       id: participant.id || participant.jid,
       jid: participant.id || participant.jid,
       lid: participant.lid,
       admin: participant.admin,
     }));
 
-    let resolvedSender = _senderJid;
+    const botPhone = phoneOnly(this.user?.jid || this.user?.id || '');
     const user = (m.isGroup ? (
       participants.find((u) => {
-        const uId = conn.decodeJid(u.id || u.jid || '');
-        if (uId && uId === resolvedSender) return true;
-        if (uId && _phoneOnly(uId) === _phoneOnly(resolvedSender)) return true;
+        const uId = this.decodeJid(u.id || u.jid || '');
+        if (uId && uId === senderJid) return true;
+        if (uId && senderPhone && phoneOnly(uId) === senderPhone) return true;
         if (u.lid) {
-          const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
-          if (resolvedLid === resolvedSender) return true;
-          if (_phoneOnly(resolvedLid) === _phoneOnly(resolvedSender)) return true;
+          const resolvedLid = resolveLidJid(this.decodeJid(u.lid));
+          if (resolvedLid === senderJid) return true;
+          if (senderPhone && phoneOnly(resolvedLid) === senderPhone) return true;
         }
         return false;
       }) ||
-      participants.find((u) => conn.decodeJid(u.id || u.jid || '') === m.sender) ||
+      participants.find((u) => this.decodeJid(u.id || u.jid || '') === m.sender) ||
       participants.find((u) => u.lid && (u.lid === m.sender || u.lid?.split('@')[0] === m.sender?.split('@')[0]))
     ) : {}) || {};
     const bot = (m.isGroup ? (
       participants.find((u) => {
-        const uId = conn.decodeJid(u.id || u.jid || '');
+        const uId = this.decodeJid(u.id || u.jid || '');
         if (uId && uId === this.user?.jid) return true;
-        if (uId && _phoneOnly(uId) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+        if (uId && phoneOnly(uId) === botPhone) return true;
         if (uId?.endsWith('@lid')) {
-          const resolvedUId = _resolveLidJid(uId);
-          if (resolvedUId && resolvedUId !== uId && _phoneOnly(resolvedUId) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
-          const contactJid = conn.contacts?.[uId]?.id || conn.contacts?.[uId]?.jid || '';
-          if (contactJid && _phoneOnly(contactJid) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+          const resolvedUId = resolveLidJid(uId);
+          if (resolvedUId && resolvedUId !== uId && phoneOnly(resolvedUId) === botPhone) return true;
+          const contactJid = this.contacts?.[uId]?.id || this.contacts?.[uId]?.jid || '';
+          if (contactJid && phoneOnly(contactJid) === botPhone) return true;
         }
         if (u.lid) {
-          const resolvedLid = _resolveLidJid(conn.decodeJid(u.lid));
-          if (resolvedLid && _phoneOnly(resolvedLid) === _phoneOnly(this.user?.jid || this.user?.id || '')) return true;
+          const resolvedLid = resolveLidJid(this.decodeJid(u.lid));
+          if (resolvedLid && phoneOnly(resolvedLid) === botPhone) return true;
         }
         return false;
       })
@@ -318,18 +358,17 @@ export async function handler(chatUpdate) {
     const isAdmin = isRAdmin || user?.admin === 'admin' || isROwner || false;
     const isBotAdmin = bot?.admin === 'admin' || bot?.admin === 'superadmin' || false;
 
-    const ___dirname = handler._pluginsDir ??= path.join(path.dirname(fileURLToPath(import.meta.url)), './plugins');
     for (const name in global.plugins) {
       const plugin = global.plugins[name];
       if (!plugin) continue;
       if (plugin.disabled) continue;
 
-      const __filename = join(___dirname, name);
+      const __filename = join(PLUGINS_DIR, name);
       if (typeof plugin.all === 'function') {
         try {
           await plugin.all.call(this, m, {
             chatUpdate,
-            __dirname: ___dirname,
+            __dirname: PLUGINS_DIR,
             __filename,
           });
         } catch (e) {
@@ -341,65 +380,48 @@ export async function handler(chatUpdate) {
         if (plugin.tags && plugin.tags.includes('admin')) continue;
       }
 
-      const _str2Regex = (str) => {
-        const key = String(str);
-        if (_prefixRegexCache.has(key)) return _prefixRegexCache.get(key);
-        const re = new RegExp('^' + key.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'));
-        _prefixRegexCache.set(key, re);
-        return re;
-      };
-      const _execPrefix = (prefix) => {
-        if (!(prefix instanceof RegExp)) return _str2Regex(prefix).exec(m.text);
-        prefix.lastIndex = 0;
-        return prefix.exec(m.text);
-      };
-      const _prefix = plugin.customPrefix ? plugin.customPrefix : conn.prefix ? conn.prefix : global.prefix;
-      const match = (_prefix instanceof RegExp ?
-        [[_execPrefix(_prefix), _prefix]] :
-        Array.isArray(_prefix) ?
-          _prefix.map((p) => {
-            const re = p instanceof RegExp ? p : _str2Regex(p);
-            return [_execPrefix(re), re];
-          }) :
-        typeof _prefix === 'string' ?
-            [[_execPrefix(_prefix), _str2Regex(_prefix)]] :
-            [[[], new RegExp]]
-      ).find((p) => p[0]);
+      const _prefix = plugin.customPrefix ? plugin.customPrefix : this.prefix ? this.prefix : global.prefix;
+      const match = matchPrefix(_prefix, m.text);
 
       if (typeof plugin.before === 'function') {
-        const _beforeResult = await plugin.before.call(this, m, {
-          match,
-          conn: this,
-          participants,
-          groupMetadata,
-          user,
-          bot,
-          isROwner,
-          isOwner,
-          isRAdmin,
-          isAdmin,
-          isBotAdmin,
-          isPrems,
-          chatUpdate,
-          __dirname: ___dirname,
-          __filename,
-        });
-        if (_beforeResult) {
-          if (opts['debug']) console.log('[debug] plugin.before cortó el flujo en:', name);
-          continue;
+        try {
+          const _beforeResult = await plugin.before.call(this, m, {
+            match,
+            conn: this,
+            participants,
+            groupMetadata,
+            user,
+            bot,
+            isROwner,
+            isOwner,
+            isRAdmin,
+            isAdmin,
+            isBotAdmin,
+            isPrems,
+            chatUpdate,
+            __dirname: PLUGINS_DIR,
+            __filename,
+          });
+          if (_beforeResult) {
+            if (opts['debug']) console.log('[debug] plugin.before cortó el flujo en:', name);
+            continue;
+          }
+        } catch (e) {
+          console.error(e);
         }
       }
 
       if (typeof plugin !== 'function') continue;
 
-      if ((usedPrefix = match?.[0]?.[0] || '')) {
-        const matchedPrefix = match[0][0];
-        const noPrefix = m.text.slice(matchedPrefix.length);
-        let [command, ...args] = noPrefix.trim().split` `.filter((v) => v);
-        args = args || [];
-        const _args = noPrefix.trim().split` `.slice(1);
-        const text = _args.join` `;
-        command = (command || '').toLowerCase();
+      const hasPrefixMatch = Boolean(match?.[0]) && m.text.length > 0;
+      const usedPrefix = match?.[0]?.[0] || '';
+      if (hasPrefixMatch) {
+        const noPrefix = m.text.slice(usedPrefix.length);
+        const words = noPrefix.trim().split(' ');
+        const args = words.filter((v) => v).slice(1);
+        const _args = words.slice(1);
+        const text = _args.join(' ');
+        const command = (words.find((v) => v) || '').toLowerCase();
         const fail = plugin.fail || global.dfail;
         const isAccept = plugin.command instanceof RegExp ?
           plugin.command.test(command) :
@@ -412,51 +434,27 @@ export async function handler(chatUpdate) {
         if (!isAccept) continue;
         if (opts['debug']) console.log('[debug] comando', command, '→', name);
 
+        if (isForeignClientMessage(m.id)) return;
 
-        if (m.id.startsWith('EVO') || m.id.startsWith('Lyru-') || (m.id.startsWith('BAE5') && m.id.length === 16) || m.id.startsWith('B24E') || (m.id.startsWith('8SCO') && m.id.length === 20) || m.id.startsWith('FizzxyTheGreat-')) return;
+        // Chat baneado: solo el owner real puede seguir usando el bot ahí.
+        if (dbChat?.isBanned && !isROwner) return;
+        // Usuario baneado: se ignoran sus mensajes en silencio.
+        if (m.text && dbUser?.banned && !isROwner) return;
 
-        if (m.chat in global.db.data.chats || m.sender in global.db.data.users) {
-          const chat = global.db.data.chats[m.chat];
-          const user = global.db.data.users[m.sender];
-          const botSpam = global.db.data.settings[mconn.conn.user.jid];
-
-          if (!['owner-update.js'].includes(name) && chat && chat?.isBanned && !isROwner) return;
-          if (name != 'owner-update.js' && chat?.isBanned && !isROwner) return;
-
-          if (m.text && user.banned && !isROwner) {
-            if (typeof user.bannedMessageCount === 'undefined') user.bannedMessageCount = 0;
-            if (user.bannedMessageCount < 3) {
-              user.bannedMessageCount++;
-            } else if (user.bannedMessageCount === 3) {
-              user.bannedMessageSent = true;
-            } else {
-              return;
-            }
+        if (settings?.antispam && m.text && dbUser?.lastCommandTime && (Date.now() - dbUser.lastCommandTime) < ANTISPAM_WINDOW && !isROwner) {
+          if (dbUser.commandCount === 2) {
+            const remainingTime = Math.ceil((dbUser.lastCommandTime + ANTISPAM_WINDOW - Date.now()) / 1000);
+            m.reply(`*[ ℹ️ ] Espera* _${remainingTime} segundos_ *antes de utilizar otro comando.*`)?.catch?.(console.error);
             return;
           }
-
-          if (botSpam.antispam && m.text && user && user.lastCommandTime && (Date.now() - user.lastCommandTime) < 5000 && !isROwner) {
-            if (user.commandCount === 2) {
-              const remainingTime = Math.ceil((user.lastCommandTime + 5000 - Date.now()) / 1000);
-              if (remainingTime > 0) {
-                m.reply(`*[ ℹ️ ] Espera* _${remainingTime} segundos_ *antes de utilizar otro comando.*`);
-                return;
-              } else {
-                user.commandCount = 0;
-              }
-            } else {
-              user.commandCount += 1;
-            }
-          } else {
-            user.lastCommandTime = Date.now();
-            user.commandCount = 1;
-          }
+          dbUser.commandCount = (dbUser.commandCount || 0) + 1;
+        } else if (dbUser) {
+          dbUser.lastCommandTime = Date.now();
+          dbUser.commandCount = 1;
         }
 
-        const adminMode = global.db.data.chats[m.chat].modoadmin;
-        if (adminMode && !isOwner && !isROwner && m.isGroup && !isAdmin) return;
+        if (dbChat?.modoadmin && !isOwner && m.isGroup && !isAdmin) return;
 
-        if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) { fail('owner', m, this); continue; }
         if (plugin.rowner && !isROwner) { fail('rowner', m, this); continue; }
         if (plugin.owner && !isOwner) { fail('owner', m, this); continue; }
         if (plugin.mods && !isMods) { fail('mods', m, this); continue; }
@@ -465,7 +463,7 @@ export async function handler(chatUpdate) {
         else if (plugin.botAdmin && !isBotAdmin) { fail('botAdmin', m, this); continue; }
         else if (plugin.admin && !isAdmin) { fail('admin', m, this); continue; }
         if (plugin.private && m.isGroup) { fail('private', m, this); continue; }
-        if (plugin.register == true && _user.registered == false) { fail('unreg', m, this); continue; }
+        if (plugin.register == true && dbUser?.registered === false) { fail('unreg', m, this); continue; }
 
         m.isCommand = true;
         const extra = {
@@ -489,7 +487,7 @@ export async function handler(chatUpdate) {
           isPrems,
           isPremium,
           chatUpdate,
-          __dirname: ___dirname,
+          __dirname: PLUGINS_DIR,
           __filename,
         };
         try {
@@ -516,176 +514,191 @@ export async function handler(chatUpdate) {
   } catch (e) {
     console.error(e);
   } finally {
-    const settingsREAD = global.db.data.settings[mconn.conn.user.jid] || {};
-    if (opts['autoread']) await mconn.conn.readMessages([m.key]);
-    if (settingsREAD.autoread2) await mconn.conn.readMessages([m.key]);
+    // Se usa `this` y no un `mconn` compartido: con mensajes concurrentes (o
+    // tras una reconexión) apuntaba al socket o al mensaje de otro handler. Un
+    // fallo al marcar como leído tampoco debe escapar como promesa rechazada.
+    try {
+      const settingsRead = global.db.data?.settings?.[this.user?.jid] || {};
+      if (m?.key && (opts['autoread'] || settingsRead.autoread2)) await this.readMessages([m.key]);
+    } catch (e) {
+      console.error(e);
+    }
   }
 }
 
-export async function participantsUpdate({ id, participants: _rawParticipants, action }) {
-  const m = mconn;
+export async function participantsUpdate({ id, participants: rawParticipants, action }) {
   if (opts['self']) return;
-  if (global.db.data == null) await loadDatabase();
-  const chat = global.db.data.chats[id] || {};
-  const botTt = global.db.data.settings[mconn?.conn?.user?.jid] || {};
-  let text = '';
+  try {
+    if (global.db.data == null) await global.loadDatabase();
+    const chat = global.db.data.chats[id] || {};
+    const botSettings = global.db.data.settings[this.user?.jid] || {};
 
-  const _normalizeJidEntry = (p) => {
-    if (typeof p === 'string') {
-      try {
-        const parsed = JSON.parse(p);
-        if (parsed && typeof parsed === 'object') {
-          const phone = parsed.phoneNumber || parsed.id || parsed.jid || p;
-          return typeof phone === 'string' ? phone : p;
+    const normalizeJidEntry = (p) => {
+      if (typeof p === 'string') {
+        try {
+          const parsed = JSON.parse(p);
+          if (parsed && typeof parsed === 'object') {
+            const phone = parsed.phoneNumber || parsed.id || parsed.jid || p;
+            return typeof phone === 'string' ? phone : p;
+          }
+        } catch { /* no es JSON: es un jid normal */ }
+        if (p.endsWith('@lid')) {
+          const mappingCache = this.signalRepository?.lidMapping?.mappingCache;
+          if (mappingCache) {
+            const lidKey = p.split('@')[0];
+            const pnUser = mappingCache.get(`lid:${lidKey}`);
+            if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
+          }
         }
-      } catch (_) {}
-      if (p.endsWith('@lid')) {
-        const mappingCache = mconn?.conn?.signalRepository?.lidMapping?.mappingCache;
-        if (mappingCache) {
-          const lidKey = p.split('@')[0];
-          const pnUser = mappingCache.get(`lid:${lidKey}`);
-          if (pnUser && typeof pnUser === 'string') return `${pnUser}@s.whatsapp.net`;
-        }
+        return p;
       }
-      return p;
-    }
-    if (p && typeof p === 'object') {
-      const phone = p.phoneNumber ? (p.phoneNumber.includes('@') ? p.phoneNumber : p.phoneNumber + '@s.whatsapp.net') : '';
-      const id = p.id || p.jid || '';
-      return phone || id || '';
-    }
-    return String(p);
-  };
-  const participants = _rawParticipants.map(_normalizeJidEntry).filter(Boolean);
+      if (p && typeof p === 'object') {
+        const phone = p.phoneNumber ? (p.phoneNumber.includes('@') ? p.phoneNumber : p.phoneNumber + '@s.whatsapp.net') : '';
+        const entryId = p.id || p.jid || '';
+        return phone || entryId || '';
+      }
+      return String(p);
+    };
+    const participants = rawParticipants.map(normalizeJidEntry).filter(Boolean);
 
-  switch (action) {
-    case 'add':
-    case 'remove':
-      if (chat.welcome && !chat?.isBanned) {
-        if (action === 'remove' && participants.includes(m?.conn?.user?.jid)) return;
-        const groupMetadata = await m?.conn?.groupMetadata(id) || (conn?.chats[id] || {}).metadata;
+    switch (action) {
+      case 'add':
+      case 'remove': {
+        if (!chat.welcome || chat?.isBanned) break;
+        if (action === 'remove' && participants.includes(this.user?.jid)) return;
+
+        const groupMetadata = await this.groupMetadata(id).catch(() => null) || (this.chats[id] || {}).metadata;
+        const botJid = this.user?.jid || '';
+        const botPhone = botJid.replace(/[^0-9]/g, '');
+        const botParticipant = groupMetadata?.participants?.find((u) => {
+          const uId = this.decodeJid(u.id || u.jid || '');
+          if (uId === botJid) return true;
+          const uPhone = uId.replace(/[^0-9]/g, '');
+          if (uPhone && botPhone && uPhone === botPhone) return true;
+          if (u.lid) {
+            const resolvedPhone = normalizeJidEntry(u.lid).replace(/[^0-9]/g, '');
+            if (resolvedPhone && botPhone && resolvedPhone === botPhone) return true;
+          }
+          return false;
+        }) || {};
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin' || false;
+        const subject = action === 'add' ? await this.getName(id) : '';
+
         for (const userJid of participants) {
           try {
-            let pp = await m?.conn?.profilePictureUrl(userJid, 'image').catch(_ => 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60');
-            const apii = await mconn?.conn?.getFile(pp);
-            const userPrefix = antiArabPrefixes.some((prefix) => userJid.startsWith(prefix));
-            const botJidClean = m?.conn?.user?.jid || '';
-            const botPhoneClean = botJidClean.replace(/[^0-9]/g, '');
-            const botTt2 = groupMetadata?.participants?.find((u) => {
-              const uId = m?.conn?.decodeJid(u.id || u.jid || '');
-              if (uId === botJidClean) return true;
-              const uPhone = uId.replace(/[^0-9]/g, '');
-              if (uPhone && botPhoneClean && uPhone === botPhoneClean) return true;
-              if (u.lid) {
-                const resolvedLid = _normalizeJidEntry(u.lid);
-                const resolvedPhone = resolvedLid.replace(/[^0-9]/g, '');
-                if (resolvedPhone && botPhoneClean && resolvedPhone === botPhoneClean) return true;
-              }
-              return false;
-            }) || {};
-            const isBotAdminNn = botTt2?.admin === 'admin' || botTt2?.admin === 'superadmin' || false;
-            text = (action === 'add'
-              ? (chat.sWelcome || conn.welcome || 'Welcome, @user!')
-                  .replace('@subject', await m?.conn?.getName(id))
-                  .replace('@desc', groupMetadata?.desc?.toString() || '*SIN DESCRIPCIÓN*')
-                  .replace('@user', '@' + userJid.split('@')[0])
-              : (chat.sBye || conn.bye || 'Bye, @user!')
-            ).replace('@user', '@' + userJid.split('@')[0]);
-            if (userPrefix && chat.antiArab && botTt.restrict && isBotAdminNn && action === 'add') {
-              const responseb = await m.conn.groupParticipantsUpdate(id, [userJid], 'remove');
-              if (responseb[0].status === '404') return;
-              const fkontak2 = { 'key': { 'participants': '0@s.whatsapp.net', 'remoteJid': 'status@broadcast', 'fromMe': false, 'id': 'Halo' }, 'message': { 'contactMessage': { 'vcard': `BEGIN:VCARD\nVERSION:3.0\nN:Sy;Bot;;;\nFN:y\nitem1.TEL;waid=${userJid.split('@')[0]}:${userJid.split('@')[0]}\nitem1.X-ABLabel:Ponsel\nEND:VCARD` } }, 'participant': '0@s.whatsapp.net' };
-              await m?.conn?.sendMessage(id, { text: `*[❗] @${userJid.split('@')[0]} no se permiten números árabes o raros, serás removido*`, mentions: [userJid] }, { quoted: fkontak2 });
-              return;
+            const userNumber = userJid.split('@')[0];
+
+            if (action === 'add' && antiArabPrefixes.some((prefix) => userJid.startsWith(prefix)) && chat.antiArab && botSettings.restrict && isBotAdmin) {
+              const removal = await this.groupParticipantsUpdate(id, [userJid], 'remove');
+              if (removal[0].status === '404') continue;
+              const fkontak = { 'key': { 'participants': '0@s.whatsapp.net', 'remoteJid': 'status@broadcast', 'fromMe': false, 'id': 'Halo' }, 'message': { 'contactMessage': { 'vcard': `BEGIN:VCARD\nVERSION:3.0\nN:Sy;Bot;;;\nFN:y\nitem1.TEL;waid=${userNumber}:${userNumber}\nitem1.X-ABLabel:Ponsel\nEND:VCARD` } }, 'participant': '0@s.whatsapp.net' };
+              await this.sendMessage(id, { text: `*[❗] @${userNumber} no se permiten números árabes o raros, serás removido*`, mentions: [userJid] }, { quoted: fkontak });
+              continue;
             }
-            await m?.conn?.sendFile(id, apii.data, 'pp.jpg', text, null, false, { mentions: [userJid] });
+
+            const template = action === 'add'
+              ? (chat.sWelcome || this.welcome || 'Welcome, @user!')
+                  // Funciones como reemplazo: un `$&` dentro de la descripción no debe interpretarse.
+                  .replace('@subject', () => subject)
+                  .replace('@desc', () => groupMetadata?.desc?.toString() || '*SIN DESCRIPCIÓN*')
+              : (chat.sBye || this.bye || 'Bye, @user!');
+            const text = template.replace('@user', () => '@' + userNumber);
+
+            const pp = await this.profilePictureUrl(userJid, 'image').catch(() => DEFAULT_PROFILE_PICTURE);
+            const file = await this.getFile(pp);
+            await this.sendFile(id, file.data, 'pp.jpg', text, null, false, { mentions: [userJid] });
           } catch (e) {
             console.log(e);
           }
         }
+        break;
       }
-      break;
-    case 'promote':
-    case 'daradmin':
-    case 'darpoder':
-      text = (chat.sPromote || conn?.spromote || '@user ```es ahora Admin```');
-      break;
-    case 'demote':
-    case 'quitarpoder':
-    case 'quitaradmin': {
-      if (!text) text = (chat?.sDemote || conn?.sdemote || '@user ```ya no es Admin```');
-      let _p0 = participants[0] || '';
-      try {
-        const _parsed = JSON.parse(_p0);
-        if (_parsed && typeof _parsed === 'object') _p0 = _parsed.phoneNumber || _parsed.id || _p0;
-      } catch (_) {}
-      const _p0Number = _p0.includes('@') ? _p0.split('@')[0] : _p0;
-      text = text.replace('@user', '@' + _p0Number);
-      if (chat.detect && !chat?.isBanned) {
-        mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
+      // `promote` no envía aviso aquí: el comando group-promote ya responde, y
+      // el caso estaba armado sin llegar a enviar nada.
+      case 'demote':
+      case 'quitarpoder':
+      case 'quitaradmin': {
+        if (!chat.detect || chat?.isBanned) break;
+        const template = chat?.sDemote || this.sdemote || '@user ```ya no es Admin```';
+        for (const target of participants) {
+          const text = template.replace('@user', () => '@' + target.split('@')[0]);
+          await this.sendMessage(id, { text, mentions: this.parseMention(text) });
+        }
+        break;
       }
-      break;
     }
-  }
-}
-
-export async function groupsUpdate(groupsUpdate) {
-  if (opts['self']) return;
-  for (const groupUpdate of groupsUpdate) {
-    const id = groupUpdate.id;
-    if (!id) continue;
-    if (groupUpdate.size == NaN) continue;
-    if (groupUpdate.subjectTime) continue;
-    const chats = global.db.data.chats[id];
-    let text = '';
-    if (!chats?.detect) continue;
-    if (groupUpdate?.desc) text = (chats?.sDesc || conn?.sDesc || '```Descripción cambiada a```\n@desc').replace('@desc', groupUpdate.desc);
-    if (groupUpdate?.subject) text = (chats?.sSubject || conn?.sSubject || '```Nombre cambiado a```\n@subject').replace('@subject', groupUpdate.subject);
-    if (groupUpdate?.icon) text = (chats?.sIcon || conn?.sIcon || '```Ícono cambiado```').replace('@icon', groupUpdate.icon);
-    if (groupUpdate?.revoke) text = (chats?.sRevoke || conn?.sRevoke || '```Link del grupo cambiado a```\n@revoke').replace('@revoke', groupUpdate.revoke);
-    if (!text) continue;
-    await mconn?.conn?.sendMessage(id, { text, mentions: mconn?.conn?.parseMention(text) });
-  }
-}
-
-export async function callUpdate(callUpdate) {}
-
-export async function deleteUpdate(message) {
-  let d = new Date(new Date() + 3600000);
-  let date = d.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' });
-  let time = d.toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true });
-  try {
-    const fromMe = message?.key?.fromMe;
-    const msgId = message?.key?.id;
-    const participant = message?.participant || message?.key?.participant || '';
-    if (fromMe) return;
-    if (!msgId) return;
-    let msg = mconn.conn.serializeM(mconn.conn.loadMessage(msgId));
-    if (!msg) return;
-    let chat = global.db.data.chats[msg?.chat] || {};
-    if (!chat?.antidelete) return;
-    if (!msg?.isGroup) return;
-    const participantNum = participant.split('@')[0];
-    const antideleteMessage = `Mensaje eliminado de @${participantNum}\nHora: ${time}\nFecha: ${date}`.trim();
-    await mconn.conn.sendMessage(msg.chat, { text: antideleteMessage, mentions: participant ? [participant] : [] }, { quoted: msg });
-    mconn.conn.copyNForward(msg.chat, msg).catch(e => console.log(e, msg));
   } catch (e) {
     console.error(e);
   }
 }
 
-global.dfail = (type, m, conn) => {
-  const msg = '';
-  const warn = ['', '', ''];
-  const aa = { quoted: m, userJid: conn.user.jid };
-  const prep = generateWAMessageFromContent(m.chat, { extendedTextMessage: { text: msg, contextInfo: { externalAdReply: { title: warn[0], body: warn[1], thumbnail: imagen1, sourceUrl: warn[2] } } } }, aa);
+export async function groupsUpdate(groupsUpdate) {
+  if (opts['self']) return;
+  if (global.db.data == null) await global.loadDatabase();
+  for (const groupUpdate of groupsUpdate) {
+    const id = groupUpdate.id;
+    if (!id) continue;
+    if (groupUpdate.subjectTime) continue;
+    const chats = global.db.data?.chats?.[id];
+    let text = '';
+    if (!chats?.detect) continue;
+    if (groupUpdate?.desc) text = (chats?.sDesc || this.sDesc || '```Descripción cambiada a```\n@desc').replace('@desc', () => groupUpdate.desc);
+    if (groupUpdate?.subject) text = (chats?.sSubject || this.sSubject || '```Nombre cambiado a```\n@subject').replace('@subject', () => groupUpdate.subject);
+    if (groupUpdate?.icon) text = (chats?.sIcon || this.sIcon || '```Ícono cambiado```').replace('@icon', () => groupUpdate.icon);
+    if (groupUpdate?.revoke) text = (chats?.sRevoke || this.sRevoke || '```Link del grupo cambiado a```\n@revoke').replace('@revoke', () => groupUpdate.revoke);
+    if (!text) continue;
+    try {
+      await this.sendMessage(id, { text, mentions: this.parseMention(text) });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+}
 
-  if (msg) return conn.relayMessage(m.chat, prep.message, { messageId: prep.key.id });
-};
+export async function deleteUpdate(message) {
+  try {
+    const fromMe = message?.key?.fromMe;
+    const msgId = message?.key?.id;
+    const participant = message?.participant || message?.key?.participant || '';
+    if (fromMe || !msgId) return;
+    if (global.db.data == null) await global.loadDatabase();
+    const loaded = this.loadMessage(msgId);
+    if (!loaded) return;
+    const msg = this.serializeM(loaded);
+    if (!msg) return;
+    const chat = global.db.data?.chats?.[msg?.chat] || {};
+    if (!chat?.antidelete) return;
+    if (!msg?.isGroup) return;
 
-const file = global.__filename(import.meta.url, true);
-watchFile(file, async () => {
-  unwatchFile(file);
-  console.log(chalk.redBright("Update 'handler.js'"));
-  if (global.reloadHandler) console.log(await global.reloadHandler());
-});
+    // `new Date(new Date() + 3600000)` concatenaba un texto y producía
+    // «Invalid Date» en el aviso. Se formatea el instante actual en hora de Lima.
+    const now = new Date();
+    const date = now.toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Lima' });
+    const time = now.toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true, timeZone: 'America/Lima' });
+    const participantNum = participant.split('@')[0];
+    const antideleteMessage = `Mensaje eliminado de @${participantNum}\nHora: ${time}\nFecha: ${date}`.trim();
+    await this.sendMessage(msg.chat, { text: antideleteMessage, mentions: participant ? [participant] : [] }, { quoted: msg });
+    this.copyNForward(msg.chat, msg).catch(e => console.log(e, msg));
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// Los avisos de permiso denegado (owner, admin, group…) se descartan en
+// silencio a propósito; un plugin puede definir su propio `plugin.fail`.
+global.dfail = () => {};
+
+if (process.argv.includes('--dev')) {
+  const file = fileURLToPath(import.meta.url);
+  watchFile(file, async () => {
+    unwatchFile(file);
+    console.log(chalk.redBright("Update 'handler.js'"));
+    if (global.reloadHandler) {
+      try {
+        await global.reloadHandler();
+      } catch (e) {
+        console.error('[handler] no se pudo recargar:', e);
+      }
+    }
+  });
+}

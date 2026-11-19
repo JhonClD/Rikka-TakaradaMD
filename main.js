@@ -1,20 +1,18 @@
 process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1';
 import './config.js';
 import './api.js';
-import { createRequire } from 'module';
 import path, { join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { platform } from 'process';
-import os from 'os';
 import fs, { readdirSync, statSync, unlinkSync, existsSync, watch } from 'fs';
 import https from 'https';
+import { createInterface } from 'node:readline/promises';
 import yargs from 'yargs';
-import { spawn } from 'child_process';
-import lodash from 'lodash';
 import chalk from 'chalk';
 import { format } from 'util';
 import pino from 'pino';
-import Pino from 'pino';
+import qrcodeTerminal from 'qrcode-terminal';
+import NodeCache from 'node-cache';
 import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
@@ -23,12 +21,8 @@ import { dbFile, TMP_DIR } from './src/funcion/paths.js';
 import { STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
 
 const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
-// PHONENUMBER_MCC fue removido en itsliaaa/baileys — validacion por regex de codigo de pais
-const _isValidCountryCode = (num) => /^[1-9]\d{0,14}$/.test(num);
-import readline from 'readline';
-import qrcodeTerminal from 'qrcode-terminal';
-import NodeCache from 'node-cache';
-const { chain } = lodash;
+// PHONENUMBER_MCC fue removido en itsliaaa/baileys — validación E.164 básica (7 a 15 dígitos sin cero inicial)
+const isValidPhoneNumber = (num) => /^[1-9]\d{6,14}$/.test(num);
 let stopped = 'close';
 protoType();
 serialize();
@@ -48,6 +42,7 @@ const mediaUploadAgent = new https.Agent({
   maxFreeSockets: 4,
   scheduling: 'lifo',
 });
+let shutdownStarted = false;
 let socketReloadInProgress = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
@@ -68,14 +63,12 @@ global.__filename = function filename(pathURL = import.meta.url, rmPrefix = plat
   return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
 }; global.__dirname = function dirname(pathURL) {
   return path.dirname(global.__filename(pathURL, true));
-}; global.__require = function require(dir = import.meta.url) {
-  return createRequire(dir);
 };
 global.timestamp = { start: new Date };
-const __dirname = global.__dirname(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmpDir = TMP_DIR;
 fs.mkdirSync(tmpDir, { recursive: true });
-global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
+global.opts = yargs(process.argv.slice(2)).exitProcess(false).parse();
 global.prefix = new RegExp('^[#!/.]')
 // --db con URL apuntaba a un cloudDBAdapter que nunca se importó (y que además
 // pide `got`, ausente en package.json): reventaba con ReferenceError al
@@ -84,45 +77,51 @@ const dbOption = String(global.opts['db'] || '');
 if (/^https?:\/\//.test(dbOption)) {
   console.warn(chalk.yellow('[ ⚠️ ] --db con URL no está soportado en esta versión; se usará la base de datos local.'));
 }
-global.db = new Low(new JSONFile(dbFile(global.opts._?.[0] || '')), null);
+const dbPrefix = (global.opts._ || []).find((arg) => !['qr', 'code'].includes(String(arg).toLowerCase())) || '';
+global.db = new Low(new JSONFile(dbFile(dbPrefix)), null);
 
+let loadDbPromise = null;
 global.loadDatabase = async function loadDatabase() {
-  if (global.db.READ) {
-    // Esperar con un setInterval dentro de `new Promise` dejaba un temporizador
-    // vivo para siempre si la carga nunca terminaba (y la promesa no se
-    // resolvía, congelando el handler). Se sondea con un tope de 30s.
-    for (let attempt = 0; attempt < 120 && global.db.READ; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
+  if (global.db.data !== null) return global.db.data;
+  if (loadDbPromise) return loadDbPromise;
+  loadDbPromise = (async () => {
+    try {
+      await global.db.read().catch(console.error);
+      global.db.data = {
+        users: {},
+        chats: {},
+        stats: {},
+        msgs: {},
+        sticker: {},
+        settings: {},
+        ...(global.db.data || {}),
+      };
+      return global.db.data;
+    } finally {
+      loadDbPromise = null;
     }
-    return global.db.data == null ? global.loadDatabase() : global.db.data;
-  }
-  if (global.db.data !== null) return;
-  global.db.READ = true;
-  await global.db.read().catch(console.error);
-  global.db.READ = null;
-  global.db.data = {
-    users: {},
-    chats: {},
-    stats: {},
-    msgs: {},
-    sticker: {},
-    settings: {},
-    ...(global.db.data || {}),
-  };
-  global.db.chain = chain(global.db.data);
+  })();
+  return loadDbPromise;
 };
-loadDatabase();
+void global.loadDatabase();
 
 let { state, saveCreds } = await useMultiFileAuthState(global.authFilePath);
-const version22 = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1033893291] }));
-const version = version22?.version || [2, 3000, 1033893291];
+const FALLBACK_WA_VERSION = [2, 3000, 1033893291];
+const version = (await fetchLatestBaileysVersion().catch(() => null))?.version || FALLBACK_WA_VERSION;
 console.log(chalk.gray(`[ ℹ️ ] Versión de WhatsApp: ${version.join('.')}`));
-let phoneNumber = global.botnumber || process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
-const methodCodeQR = process.argv.includes('--method=qr');
-const methodCode = !!phoneNumber || process.argv.includes('--method=code');
-const MethodMobile = process.argv.includes("mobile");
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
+const phoneFlag = global.opts.phone ?? process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
+const phoneNumber = global.botnumber || (phoneFlag ? String(phoneFlag) : '');
+const methodCodeQR = process.argv.includes('--method=qr') || process.argv.some(arg => arg.toLowerCase() === 'qr');
+const methodCode = Boolean(phoneNumber) || process.argv.includes('--method=code') || process.argv.some(arg => arg.toLowerCase() === 'code');
+
+async function question(texto) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(texto)).trim();
+  } finally {
+    rl.close();
+  }
+}
 
 let opcion;
 // Variables de estado para el pairing code (sobreviven reconexiones)
@@ -137,7 +136,7 @@ if (!methodCodeQR && !methodCode && !fs.existsSync(join(global.authFilePath, 'cr
     if (!/^[1-2]$/.test(opcion)) {
       console.log('[ ⚠️ ] Por favor, seleccione solo 1 o 2.\n');
     }
-  } while (opcion !== '1' && opcion !== '2' || fs.existsSync(join(global.authFilePath, 'creds.json')));
+  } while (opcion !== '1' && opcion !== '2' && !fs.existsSync(join(global.authFilePath, 'creds.json')));
 }
 
 const filterStrings = [
@@ -149,16 +148,19 @@ const filterStrings = [
   "RGVjcnlwdGVkIG1lc3NhZ2U="
 ];
 
+const decodedFilterStrings = filterStrings
+  .map((value) => Buffer.from(value, 'base64').toString())
+  .filter(Boolean);
+
 console.info = () => { };
 console.debug = () => { };
 ['log', 'warn', 'error'].forEach(methodName => {
   const originalMethod = console[methodName];
-  console[methodName] = function () {
-    const message = arguments[0];
-    if (typeof message === 'string' && filterStrings.some(filterString => message.includes(Buffer.from(filterString, 'base64').toString()))) {
-      arguments[0] = "";
+  console[methodName] = function (...args) {
+    if (typeof args[0] === 'string' && decodedFilterStrings.some(noise => args[0].includes(noise))) {
+      args[0] = '';
     }
-    originalMethod.apply(console, arguments);
+    originalMethod.apply(console, args);
   };
 });
 
@@ -244,16 +246,6 @@ console.warn = function (...args) {
   }
 };
 
-const decodedFilterStrings = filterStrings
-  .map((value) => {
-    try {
-      return Buffer.from(value, 'base64').toString();
-    } catch {
-      return '';
-    }
-  })
-  .filter(Boolean);
-
 // Ruido conocido de Baileys (sesiones cerradas, MAC inválida) que no aporta
 // nada en la consola. err.message puede no ser un string: Buffer.from() dentro
 // del propio handler mataba el proceso, así que aquí se normaliza primero.
@@ -271,22 +263,21 @@ const connectionOptions = {
   logger: baileysLogger(),
   // El QR se imprime manualmente en connectionUpdate para evitar duplicados.
   printQRInTerminal: false,
-  mobile: MethodMobile,
-  browser: opcion === '1' ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
+  browser: opcion === '1' || methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
   auth: {
     creds: state.creds,
-    keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
+    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }).child({ level: 'fatal' })),
   },
   markOnlineOnConnect: false,
   generateHighQualityLinkPreview: false,
   syncFullHistory: false,
   getMessage: async (key) => {
     try {
-      let jid = jidNormalizedUser(key.remoteJid);
-      let msg = await store.loadMessage(jid, key.id);
-      return msg?.message || "";
-    } catch (error) {
-      return "";
+      const jid = jidNormalizedUser(key.remoteJid);
+      const msg = await store.loadMessage(jid, key.id);
+      return msg?.message || undefined;
+    } catch {
+      return undefined;
     }
   },
   msgRetryCounterCache,
@@ -319,28 +310,24 @@ if (methodCode && !state.creds.registered) {
 if (!fs.existsSync(join(global.authFilePath, 'creds.json'))) {
   if (opcion === '2' || methodCode) {
     opcion = '2';
-    if (!conn.authState.creds.registered) {
-      if (MethodMobile) throw new Error('No se puede usar un código de emparejamiento con la API móvil');
-
+    if (!global.conn.authState.creds.registered) {
       let numeroTelefono;
-      if (!!phoneNumber) {
+      if (phoneNumber) {
         numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
-        if (!_isValidCountryCode(numeroTelefono)) {
+        if (!isValidPhoneNumber(numeroTelefono)) {
           console.log(chalk.bgBlack(chalk.bold.redBright("Comience con el código de país de su número de WhatsApp.\nEjemplo: +5219992095479\n")));
-          process.exit(0);
+          process.exit(1);
         }
       } else {
         while (true) {
           numeroTelefono = await question(chalk.bgBlack(chalk.bold.yellowBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479\n')));
           numeroTelefono = numeroTelefono.replace(/[^0-9]/g, '');
-          if (_isValidCountryCode(numeroTelefono)) break;
+          if (isValidPhoneNumber(numeroTelefono)) break;
           console.log(chalk.bgBlack(chalk.bold.redBright("Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479.\n")));
         }
-        rl.close();
       }
 
-      // Guardar número — el código se pedirá dentro de connectionUpdate
-      // para sobrevivir reconexiones por badSession u otros errores
+      // El código se pide una vez creado el socket (ver requestPairingCodeOnce).
       pairingPhoneNumber = numeroTelefono;
       console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
     }
@@ -380,82 +367,85 @@ if (pairingPhoneNumber && !state.creds.registered) {
   pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
 }
 
-conn.isInit = false;
-conn.well = false;
-conn.logger.info(`[　ℹ️　] Cargando...\n`);
-
+let dbWriteTimer = null;
 if (!opts['test']) {
-  if (global.db) {
-    setInterval(async () => {
+  // La limpieza de temporales vive en clearTmp(): el bloque `autocleartmp` que
+  // había aquí dependía de `global.support.find`, que sticker.js fija en false,
+  // así que nunca se ejecutaba.
+  dbWriteTimer = setInterval(async () => {
+    try {
       if (global.db.data) await global.db.write();
-      if (opts['autocleartmp'] && (global.support || {}).find) {
-        // os y cp no estaban importados: el `find` nunca se ejecutaba y el
-        // ReferenceError quedaba tapado por el handler de unhandledRejection.
-        const tmp = [os.tmpdir(), TMP_DIR].filter((dir) => dir && existsSync(dir));
-        tmp.forEach((dir) => {
-          spawn('find', [dir, '-amin', '3', '-type', 'f', '-delete']).on('error', (error) => {
-            console.warn('[ ⚠️ ] No se pudo limpiar ', dir, error?.message || error);
-          });
-        });
-      }
-    }, 30 * 1000);
-  }
+    } catch (error) {
+      console.error('[db] No se pudo guardar la base local:', error);
+    }
+  }, 30 * 1000);
 }
 
 function clearTmp() {
-  const tmp = [tmpDir];
-  const filename = [];
-  tmp.forEach((dirname) => {
-    if (!existsSync(dirname)) return;
-    readdirSync(dirname).forEach((file) => filename.push(join(dirname, file)));
-  });
-  return filename.map((file) => {
-    const stats = statSync(file);
-    if (stats.isFile() && (Date.now() - stats.mtimeMs >= 1000 * 60 * 3)) return unlinkSync(file);
-    return false;
-  });
+  if (!existsSync(tmpDir)) return;
+  for (const name of readdirSync(tmpDir)) {
+    const file = join(tmpDir, name);
+    try {
+      const stats = statSync(file);
+      if (stats.isFile() && (Date.now() - stats.mtimeMs >= 1000 * 60 * 3)) unlinkSync(file);
+    } catch {
+      // El archivo desapareció entre el listado y el borrado: nada que limpiar.
+    }
+  }
 }
 
-const dirToWatchccc = path.join(__dirname, './');
-function deleteCoreFiles(filePath) {
-  const coreFilePattern = /^core\.\d+$/i;
-  const filename = path.basename(filePath);
-  if (coreFilePattern.test(filename)) {
-    fs.unlink(filePath, (err) => {
-      if (err) console.error(`Error eliminando el archivo ${filePath}:`, err);
+// Borra los volcados `core.<pid>` que aparezcan en la carpeta del bot. En
+// algunas plataformas `filename` llega vacío, y path.join(dir, null) lanzaba un
+// TypeError dentro del callback del watcher.
+const CORE_FILE_PATTERN = /^core\.\d+$/i;
+const coreWatcher = fs.watch(__dirname, (eventType, filename) => {
+  if (eventType !== 'rename' || !filename || !CORE_FILE_PATTERN.test(filename)) return;
+  const filePath = path.join(__dirname, filename);
+  fs.stat(filePath, (err, stats) => {
+    if (err || !stats.isFile()) return;
+    fs.unlink(filePath, (unlinkError) => {
+      if (unlinkError) console.error(`Error eliminando el archivo ${filePath}:`, unlinkError);
     });
-  }
-}
-fs.watch(dirToWatchccc, (eventType, filename) => {
-  if (eventType === 'rename') {
-    const filePath = path.join(dirToWatchccc, filename);
-    fs.stat(filePath, (err, stats) => {
-      if (!err && stats.isFile()) deleteCoreFiles(filePath);
-    });
-  }
+  });
 });
 
-
+// Limita cuántas veces se muestra cada motivo de desconexión. Estaba declarado
+// dentro de connectionUpdate, así que se reiniciaba en cada evento y el límite
+// nunca se aplicaba.
+const errorCounters = {};
+function shouldLogError(errorType) {
+  if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };
+  const now = Date.now();
+  const errorData = errorCounters[errorType];
+  if (errorData.count >= 5) return false;
+  if (now - errorData.lastShown < 2000) return false;
+  errorData.count++;
+  errorData.lastShown = now;
+  return true;
+}
 
 async function connectionUpdate(update) {
   // Un socket viejo puede emitir eventos durante su cierre. Ignóralos para
   // evitar que vuelva a programar una reconexión después de crear el nuevo.
   if (this && this !== global.conn) return;
-  const { connection, lastDisconnect, isNewLogin } = update;
-  stopped = connection;
-  if (isNewLogin) conn.isInit = true;
+  const { connection, lastDisconnect } = update;
+  // Baileys emite eventos parciales (p. ej. `receivedPendingNotifications`) sin
+  // campo `connection`: sobrescribir con `undefined` borraba `'open'` y rompía
+  // el vigilante y el envío de avisos al owner.
+  if (connection) stopped = connection;
 
-  if (global.db.data == null) loadDatabase();
+  if (global.db.data == null) void global.loadDatabase();
   if (update.qr && (opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       console.log(qr);
       console.log(chalk.yellow('[　ℹ️　　] Escanea el código QR.'));
     });
   }
-  if (connection == 'open') {
+  if (connection === 'open') {
     const recoveredAfter = reconnectAttempt;
     reconnectAttempt = 0;
     terminalSession = false;
+    for (const key of Object.keys(errorCounters)) delete errorCounters[key];
     clearPendingReconnect();
     if (recoveredAfter >= RECONNECT_POLICY.alertAfterAttempts) {
       console.log(chalk.yellow(`[　✅　　] Reconectado tras ${recoveredAfter} intentos.`));
@@ -471,17 +461,6 @@ async function connectionUpdate(update) {
   }
   const reason = lastDisconnect?.error?.output?.statusCode
     ?? lastDisconnect?.error?.output?.payload?.statusCode;
-  const errorCounters = {};
-  function shouldLogError(errorType) {
-    if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };
-    const now = Date.now();
-    const errorData = errorCounters[errorType];
-    if (errorData.count >= 5) return false;
-    if (now - errorData.lastShown < 2000) return false;
-    errorData.count++;
-    errorData.lastShown = now;
-    return true;
-  }
   if (reason == 405 || reason == 440 || reason === DisconnectReason.connectionReplaced) {
     // No reintentar aquí: cada socket nuevo invalida el anterior y mantiene
     // el conflicto activo (405/440). El usuario debe cerrar las sesiones
@@ -494,40 +473,38 @@ async function connectionUpdate(update) {
   if (connection === 'close') {
     if (reason === DisconnectReason.badSession) {
       if (shouldLogError('badSession')) {
-        conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
+        global.conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
       markTerminalSession('sesión inválida (badSession)');
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogError('connectionClosed')) {
-        conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
       }
       scheduleSocketReconnect('connectionClosed');
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogError('connectionLost')) {
-        conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
       }
       scheduleSocketReconnect('connectionLost');
-    } else if (reason === DisconnectReason.connectionReplaced) {
-      // Ya manejado por el bloque reason == 405 con delay
     } else if (reason === DisconnectReason.loggedOut) {
       if (shouldLogError('loggedOut')) {
-        conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
+        global.conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
       markTerminalSession('sesión cerrada desde el teléfono (loggedOut)');
     } else if (reason === DisconnectReason.restartRequired) {
       if (shouldLogError('restartRequired')) {
-        conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
+        global.conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
       }
       scheduleSocketReconnect('restartRequired');
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogError('timedOut')) {
-        conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
       }
       scheduleSocketReconnect('timedOut');
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogError(unknownError)) {
-        conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
+        global.conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
       }
       // Motivo que no conocemos: se consulta la misma tabla que usan los
       // anteriores, porque WhatsApp inventa códigos nuevos de vez en cuando y
@@ -662,7 +639,7 @@ async function refreshAuthState() {
   saveCreds = freshAuth.saveCreds
   connectionOptions.auth = {
     creds: state.creds,
-    keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: 'fatal' }).child({ level: 'fatal' })),
+    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }).child({ level: 'fatal' })),
   }
 }
 
@@ -714,7 +691,6 @@ global.reloadHandler = async function (restatConn) {
     activeConn.ev.off('group-participants.update', activeConn.participantsUpdate);
     activeConn.ev.off('groups.update', activeConn.groupsUpdate);
     activeConn.ev.off('message.delete', activeConn.onDelete);
-    activeConn.ev.off('call', activeConn.onCall);
     activeConn.ev.off('connection.update', activeConn.connectionUpdate);
     activeConn.ev.off('creds.update', activeConn.credsUpdate);
   }
@@ -724,27 +700,23 @@ global.reloadHandler = async function (restatConn) {
   activeConn.participantsUpdate = handler.participantsUpdate.bind(activeConn);
   activeConn.groupsUpdate = handler.groupsUpdate.bind(activeConn);
   activeConn.onDelete = handler.deleteUpdate.bind(activeConn);
-  activeConn.onCall = handler.callUpdate.bind(activeConn);
   activeConn.connectionUpdate = connectionUpdate.bind(activeConn);
-  activeConn.credsUpdate = saveCreds.bind(activeConn, true);
+  activeConn.credsUpdate = saveCreds.bind(activeConn);
 
   activeConn.ev.on('messages.upsert', activeConn.handler);
   activeConn.ev.on('group-participants.update', activeConn.participantsUpdate);
   activeConn.ev.on('groups.update', activeConn.groupsUpdate);
   activeConn.ev.on('message.delete', activeConn.onDelete);
-  activeConn.ev.on('call', activeConn.onCall);
   activeConn.ev.on('connection.update', activeConn.connectionUpdate);
   activeConn.ev.on('creds.update', activeConn.credsUpdate);
-
 
   isInit = false;
   return true;
 };
-;
 
 // Los plugins viven directamente en ./plugins; no existe una subcarpeta index.
 const pluginFolder = join(__dirname, './plugins');
-const pluginFilter = (filename) => /\.js$/.test(filename);
+const pluginFilter = (filename) => typeof filename === 'string' && /\.js$/.test(filename);
 global.plugins = {};
 
 async function filesInit() {
@@ -754,7 +726,7 @@ async function filesInit() {
       const module = await import(file);
       global.plugins[filename] = module.default || module;
     } catch (e) {
-      conn.logger.error(e);
+      global.conn.logger.error(e);
       global.notifyOwnerError?.(`No se pudo importar el plugin ${filename}:`, e);
       delete global.plugins[filename];
     }
@@ -763,61 +735,69 @@ async function filesInit() {
 await filesInit();
 
 global.reload = async (_ev, filename) => {
-  if (pluginFilter(filename)) {
-    const dir = global.__filename(join(pluginFolder, filename), true);
-    if (filename in global.plugins) {
-      if (existsSync(dir)) conn.logger.info(` updated plugin - '${filename}'`);
-      else {
-        conn.logger.warn(`deleted plugin - '${filename}'`);
-        return delete global.plugins[filename];
-      }
-    } else conn.logger.info(`new plugin - '${filename}'`);
-    // La validación previa con `syntax-error` se retiró a propósito: usa acorn
-    // con ecmaVersion 2020 y marcaba como error sintaxis que Node ya ejecuta
-    // sin problema (`||=`, `&&=`, `??=`, separadores numéricos `1_000`). Con un
-    // falso positivo el plugin ni siquiera se importaba, así que un `||=`
-    // dejaba `speedtest.js` fuera y rompía también a quien lo importara.
-    // Node es el único juez válido: si el import falla, `import()` ya devuelve
-    // el SyntaxError con línea y columna exactas.
-    try {
-      const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-      global.plugins[filename] = module.default || module;
-    } catch (e) {
-      const esSintaxis = e instanceof SyntaxError;
-      conn.logger.error(`${esSintaxis ? 'syntax error while loading' : 'error require plugin'} '${filename}'\n${format(e)}`);
-      global.notifyOwnerError?.(`${esSintaxis ? 'Error de sintaxis en el plugin' : 'No se pudo recargar el plugin'} ${filename}:`, e);
-    } finally {
-      global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
+  if (!pluginFilter(filename)) return;
+  const dir = global.__filename(join(pluginFolder, filename), true);
+  if (filename in global.plugins) {
+    if (existsSync(dir)) global.conn.logger.info(` updated plugin - '${filename}'`);
+    else {
+      global.conn.logger.warn(`deleted plugin - '${filename}'`);
+      return delete global.plugins[filename];
     }
+  } else global.conn.logger.info(`new plugin - '${filename}'`);
+  // La validación previa con `syntax-error` se retiró a propósito: usa acorn
+  // con ecmaVersion 2020 y marcaba como error sintaxis que Node ya ejecuta
+  // sin problema (`||=`, `&&=`, `??=`, separadores numéricos `1_000`). Con un
+  // falso positivo el plugin ni siquiera se importaba, así que un `||=`
+  // dejaba `speedtest.js` fuera y rompía también a quien lo importara.
+  // Node es el único juez válido: si el import falla, `import()` ya devuelve
+  // el SyntaxError con línea y columna exactas.
+  try {
+    const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
+    global.plugins[filename] = module.default || module;
+  } catch (e) {
+    const esSintaxis = e instanceof SyntaxError;
+    global.conn.logger.error(`${esSintaxis ? 'syntax error while loading' : 'error require plugin'} '${filename}'\n${format(e)}`);
+    global.notifyOwnerError?.(`${esSintaxis ? 'Error de sintaxis en el plugin' : 'No se pudo recargar el plugin'} ${filename}:`, e);
+  } finally {
+    global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
   }
 };
 Object.freeze(global.reload);
-watch(pluginFolder, global.reload);
+
+// Un guardado de editor suele disparar varios eventos fs.watch seguidos en
+// pocos milisegundos; el debounce evita importar dos veces el mismo plugin.
+const pluginReloadTimers = new Map();
+const pluginWatcher = watch(pluginFolder, (ev, filename) => {
+  if (!pluginFilter(filename)) return;
+  clearTimeout(pluginReloadTimers.get(filename));
+  pluginReloadTimers.set(filename, setTimeout(() => {
+    pluginReloadTimers.delete(filename);
+    void global.reload(ev, filename);
+  }, 150));
+});
+
 await global.reloadHandler();
 
-setInterval(async () => {
-  if (stopped === 'close' || !conn || !conn?.user) return;
-  await clearTmp();
-}, 180000);
+const tmpTimer = setInterval(() => {
+  if (stopped === 'close' || !global.conn?.user) return;
+  clearTmp();
+}, 180_000);
 
-setInterval(async () => {
-  if (stopped === 'close' || !conn || !conn?.user) return;
-  const _uptime = process.uptime() * 1000;
-  const uptime = clockString(_uptime);
+const bioTimer = setInterval(async () => {
+  if (stopped === 'close' || !global.conn?.user) return;
+  const uptime = clockString(process.uptime() * 1000);
   const bio = `• Activo: ${uptime} | Rikka-TakaradaMD`;
-  await conn?.updateProfileStatus(bio).catch((_) => _);
+  await global.conn.updateProfileStatus(bio).catch(() => {});
 }, 10 * 60 * 1000); // cada 10 minutos (antes: 60s)
-
 
 function clockString(ms) {
   const d = isNaN(ms) ? '--' : Math.floor(ms / 86400000);
   const h = isNaN(ms) ? '--' : Math.floor(ms / 3600000) % 24;
   const m = isNaN(ms) ? '--' : Math.floor(ms / 60000) % 60;
   const s = isNaN(ms) ? '--' : Math.floor(ms / 1000) % 60;
-  return [d, 'd ', h, 'h ', m, 'm ', s, 's '].map((v) => v.toString().padStart(2, 0)).join('');
+  return [d, 'd ', h, 'h ', m, 'm ', s, 's '].map((v) => v.toString().padStart(2, '0')).join('');
 }
 
-let shutdownStarted = false;
 async function gracefulShutdown(signal) {
   if (shutdownStarted) return;
   shutdownStarted = true;
@@ -826,6 +806,13 @@ async function gracefulShutdown(signal) {
   // `close` provocado por nuestro propio cierre entraba aquí y reprogramaba).
   terminalSession = true;
   clearPendingReconnect();
+  if (dbWriteTimer) clearInterval(dbWriteTimer);
+  clearInterval(tmpTimer);
+  clearInterval(bioTimer);
+  for (const timer of pluginReloadTimers.values()) clearTimeout(timer);
+  pluginReloadTimers.clear();
+  try { pluginWatcher.close(); } catch {}
+  try { coreWatcher.close(); } catch {}
   console.log(`[ SHUTDOWN ] ${signal}: guardando datos y cerrando WhatsApp...`);
   if (pairingRequestTimer) {
     clearTimeout(pairingRequestTimer);
@@ -856,28 +843,3 @@ process.on('unhandledRejection', (reason) => {
   const isLidError = /\blid\b/i.test(error.message || '');
   console.error(isLidError ? '❌ Error no manejado relacionado con LID:' : '❌ Promesa rechazada sin manejo:', error);
 });
-
-async function _quickTest() {
-  const test = await Promise.all([
-    spawn('ffmpeg'),
-    spawn('ffprobe'),
-    spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-filter_complex', 'color', '-frames:v', '1', '-f', 'webp', '-']),
-    spawn('convert'),
-    spawn('magick'),
-    spawn('gm'),
-    spawn('find', ['--version']),
-  ].map((p) => {
-    return Promise.race([
-      new Promise((resolve) => {
-        p.on('close', (code) => {
-          resolve(code !== 127);
-        });
-      }),
-      new Promise((resolve) => {
-        p.on('error', (_) => resolve(false));
-      })]);
-  }));
-  const [ffmpeg, ffprobe, ffmpegWebp, convert, magick, gm, find] = test;
-  global.support = { ffmpeg, ffprobe, ffmpegWebp, convert, magick, gm, find };
-  Object.freeze(global.support);
-}

@@ -1,5 +1,4 @@
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import cfonts from 'cfonts';
@@ -7,7 +6,6 @@ import chalk from 'chalk';
 import fs from 'node:fs';
 import './config.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const { say } = cfonts;
 const instanceLock = join(tmpdir(), 'rikka-takarada-md.lock');
 let lockAcquired = false;
@@ -91,25 +89,77 @@ function printBanner() {
 }
 
 function hasCredentials() {
-  if (!global.authFile) return false;
-  return fs.existsSync(resolve(__dirname, global.authFile, 'creds.json'));
+  if (!global.authFilePath) return false;
+  return fs.existsSync(join(global.authFilePath, 'creds.json'));
 }
 
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
-  return /^\d{7,15}$/.test(digits) ? `+${digits}` : null;
+  return /^[1-9]\d{6,14}$/.test(digits) ? `+${digits}` : null;
 }
 
-async function choosePairingMethod() {
+/**
+ * Convierte los alias posicionales (`npm run qr` → `qr`, `npm run code` → `code`)
+ * a `--method=...` y los retira de `process.argv` para que `yargs` en `main.js`
+ * no los tome como prefijo de base de datos (`qr_database.json`).
+ */
+function normalizeCliArgs() {
+  const args = process.argv.slice(2);
+  const cleaned = [];
+  let positionalMethod = null;
+
+  for (const arg of args) {
+    const lower = arg.toLowerCase();
+    if (lower === 'qr' || lower === 'code') {
+      positionalMethod ||= lower;
+      continue;
+    }
+    cleaned.push(arg);
+  }
+
+  const hasMethodFlag = cleaned.some((arg) => arg.startsWith('--method='));
+  const hasPhoneFlag = cleaned.some((arg) => arg === '--phone' || arg.startsWith('--phone='));
+  if (!hasMethodFlag) {
+    if (positionalMethod) cleaned.push(`--method=${positionalMethod}`);
+    else if (hasPhoneFlag || global.botnumber) cleaned.push('--method=code');
+  }
+
+  process.argv.splice(2, process.argv.length - 2, ...cleaned);
+}
+
+async function askPhone(rl, signal) {
+  while (true) {
+    const rawPhone = await rl.question(
+      chalk.hex(mint).bold('\n  ⟬ ✧ ⟭ Ingrese su número de WhatsApp:\n') +
+      chalk.hex(softViolet)('  Ej: +51925092348\n') +
+      chalk.hex(celeste)('  ──> '),
+      { signal }
+    );
+    const phone = normalizePhone(rawPhone);
+    if (phone) return phone;
+    console.log(chalk.bgHex('#e63946').white.bold('\n [ ERROR ] Número inválido; usa el formato internacional, por ejemplo +51925092348.\n'));
+  }
+}
+
+async function promptPairing({ phoneOnly = false } = {}) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ac = new AbortController();
+  rl.once('close', () => ac.abort());
   try {
+    if (phoneOnly) {
+      const phone = await askPhone(rl, ac.signal);
+      process.argv.push(`--phone=${phone}`);
+      return;
+    }
+
     while (true) {
       const choice = (await rl.question(
         chalk.hex(softViolet)('  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n') +
         chalk.hex(mint).bold('  ⟬ ✦ ⟭ Seleccione un método de vinculación:\n') +
         chalk.hex(white)('  1. ✧ Escanear código QR\n') +
         chalk.hex(white)('  2. ✧ Código de 8 dígitos\n') +
-        chalk.hex(celeste)('  ──> ')
+        chalk.hex(celeste)('  ──> '),
+        { signal: ac.signal }
       )).trim();
 
       if (choice === '1') {
@@ -117,32 +167,51 @@ async function choosePairingMethod() {
         return;
       }
       if (choice === '2') {
-        const rawPhone = await rl.question(
-          chalk.hex(mint).bold('\n  ⟬ ✧ ⟭ Ingrese su número de WhatsApp:\n') +
-          chalk.hex(softViolet)('  Ej: +51925092348\n') +
-          chalk.hex(celeste)('  ──> ')
-        );
-        const phone = normalizePhone(rawPhone);
-        if (!phone) {
-          console.log(chalk.bgHex('#e63946').white.bold('\n [ ERROR ] Número inválido; usa el formato internacional, por ejemplo +51925092348.\n'));
-          continue;
-        }
+        const phone = await askPhone(rl, ac.signal);
         process.argv.push(`--phone=${phone}`, '--method=code');
         return;
       }
       console.log(chalk.hex('#e63946')('Opción no válida. Selecciona 1 o 2.\n'));
     }
+  } catch (error) {
+    if (error?.code === 'ERR_USE_AFTER_CLOSE' || error?.name === 'AbortError') {
+      throw new Error('Se cerró la entrada estándar antes de elegir el método de vinculación. Usa --method=qr o --method=code --phone=+...');
+    }
+    throw error;
   } finally {
     rl.close();
   }
 }
 
 async function main() {
+  normalizeCliArgs();
   acquireInstanceLock();
   printBanner();
 
-  if (!hasCredentials() && !process.argv.some((arg) => arg.startsWith('--method='))) {
-    await choosePairingMethod();
+  // Antes de cargar main.js (que instala gracefulShutdown), Ctrl+C no dispara
+  // el evento 'exit' y dejaría el archivo de bloqueo en disco.
+  const onEarlySignal = (code) => () => {
+    releaseInstanceLock();
+    process.exit(code);
+  };
+  const onSigInt = onEarlySignal(130);
+  const onSigTerm = onEarlySignal(143);
+  process.once('SIGINT', onSigInt);
+  process.once('SIGTERM', onSigTerm);
+
+  try {
+    if (!hasCredentials()) {
+      const methodArg = process.argv.find((arg) => arg.startsWith('--method='));
+      const hasPhone = Boolean(global.botnumber) || process.argv.some((arg) => arg === '--phone' || arg.startsWith('--phone='));
+      if (!methodArg) {
+        await promptPairing();
+      } else if (methodArg === '--method=code' && !hasPhone) {
+        await promptPairing({ phoneOnly: true });
+      }
+    }
+  } finally {
+    process.off('SIGINT', onSigInt);
+    process.off('SIGTERM', onSigTerm);
   }
 
   await import('./main.js');
