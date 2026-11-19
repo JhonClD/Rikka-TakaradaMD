@@ -29,7 +29,6 @@ import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import { File as MegaFile } from 'megajs'
-import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 

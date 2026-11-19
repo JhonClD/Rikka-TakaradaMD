@@ -151,6 +151,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 handler.help = ['fetch <url>', 'get <url>'];
 handler.tags = ['tools'];
 handler.command = /^(fetch|get)$/i;
+handler.owner = true; // evita SSRF: solo el owner puede pedir URLs arbitrarias
 
 export default handler;
                                                                               

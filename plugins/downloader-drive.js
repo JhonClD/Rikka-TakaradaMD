@@ -7,7 +7,6 @@ import { pipeline } from 'stream/promises'
 import { Readable, Transform } from 'stream'
 import { listFiles, downloadFile, getFileMetadata } from 'better-gdrive'
 import animeInfoHandler from './search-animeinfo.js'
-import animeV1Downloader from '../src/libraries/animev1-download.cjs'
 import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { buildAniDDriveMetadata } from '../src/libraries/anid-drive-info.js'
 
