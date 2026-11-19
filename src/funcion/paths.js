@@ -37,7 +37,7 @@ export const MENU_IMAGE = firstExisting(
 export const ANTI_ARAB_JSON = fromRoot('src', 'antiArab.json');
 export const PACKAGE_JSON = fromRoot('package.json');
 export const ENV_FILE = fromRoot('.env');
-export const SPEEDTEST_SCRIPT = fromRoot('src', 'libraries', 'ookla-speedtest.py');
+/** El speedtest es 100% JavaScript: plugins/speedtest.js (no usa Python). */
 /** donde los plugins *-notify guardan su estado (episodios ya avisados, colas). */
 export const DATA_DIR = fromRoot('database');
 export const TEMP_VIDEOS_DIR = fromRoot('temp_videos');
