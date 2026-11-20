@@ -1,7 +1,7 @@
 /*
- ☆ Plugin: TikTok Search — Búsqueda de videos e imágenes agrupados en álbum
+ ☆ Plugin: TikTok Search — Búsqueda rápida de videos e imágenes en álbum
  ☆ Uso:
- ☆   .tts <búsqueda>            → 1 resultado
+ ☆   .tts <búsqueda>            → 1 resultado rápido
  ☆   .tts <cantidad> <búsqueda> → hasta 20 resultados enviados juntos en un solo álbum
 */
 
@@ -25,12 +25,8 @@ const MAX_ALBUM_ITEMS = 100;
 const VIDEO_INLINE_LIMIT = 50 * 1024 * 1024;
 const MAX_DOCUMENT_LIMIT = 100 * 1024 * 1024;
 
-const REQUEST_HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  Accept: 'application/json, text/plain, */*',
-  Referer: 'https://www.tikwm.com/',
-};
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 // ─── Utilidades ───────────────────────────────────────────────
 
@@ -45,6 +41,16 @@ const formatBytes = (bytes) => {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
+};
+
+const toAbsoluteUrl = (u, base = 'https://www.tikwm.com') => {
+  if (!u || typeof u !== 'string') return null;
+  const trimmed = u.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  if (trimmed.startsWith('/')) return `${base}${trimmed}`;
+  return null;
 };
 
 const isMp4 = (buffer) =>
@@ -79,6 +85,24 @@ const detectImageMime = (buffer, contentType = '') => {
   return 'image/jpeg';
 };
 
+function buildDownloadHeaders(url) {
+  const headers = { 'User-Agent': UA, Accept: '*/*' };
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('tikwm.com')) {
+      headers.Referer = 'https://www.tikwm.com/';
+    } else if (
+      host.includes('tiktok.com') ||
+      host.includes('tiktokcdn') ||
+      host.includes('byteoversea') ||
+      host.includes('muscdn')
+    ) {
+      headers.Referer = 'https://www.tiktok.com/';
+    }
+  } catch {}
+  return headers;
+}
+
 async function safeReact(conn, m, emoji) {
   if (!conn?.sendMessage || !m?.key) return;
   try {
@@ -86,7 +110,7 @@ async function safeReact(conn, m, emoji) {
   } catch {}
 }
 
-// ─── Compresión segura (solo si supera el límite inline) ──────
+// ─── Compresión segura (solo si supera 50 MB) ─────────────────
 
 async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   const { stdout } = await execFileAsync(
@@ -134,88 +158,139 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   return readFileSync(outputPath);
 }
 
-// ─── Búsqueda multi-fuente (videos + imágenes) ────────────────
+// ─── Búsqueda paralela multi-fuente (videos + imágenes) ───────
+
+function parseSearchList(list, base = 'https://www.tikwm.com') {
+  if (!Array.isArray(list)) return [];
+  const items = [];
+  for (const v of list) {
+    if (!v || typeof v !== 'object') continue;
+    if (Array.isArray(v.images) && v.images.length) {
+      for (const raw of v.images) {
+        const imgUrl = toAbsoluteUrl(typeof raw === 'string' ? raw : raw?.url, base);
+        if (imgUrl) items.push({ kind: 'photo', url: imgUrl, title: v.title || '' });
+      }
+      continue;
+    }
+    // Priorizamos `play` (sin marca de agua y ligero) para entrega rápida; `hdplay`/`wmplay` como respaldo
+    const urls = [v.play, v.hdplay, v.video, v.no_watermark, v.wmplay]
+      .map((u) => toAbsoluteUrl(u, base))
+      .filter((u) => u && !/\.mp3(\?|$)/i.test(u));
+    if (urls.length) {
+      items.push({ kind: 'video', urls: [...new Set(urls)], title: v.title || '' });
+    }
+  }
+  return items;
+}
 
 async function searchTikTok(query, count, signal) {
+  const fetchCount = Math.min(30, Math.max(12, count + 6));
+
   const providers = [
+    // 1. TikWM GET (sin headers extra que disparen bloqueos)
     async () => {
       const { data } = await axios.get('https://www.tikwm.com/api/feed/search', {
-        params: { keywords: query, count: Math.min(30, count + 8), cursor: 0, hd: 1 },
-        headers: REQUEST_HEADERS,
-        timeout: 15_000,
+        params: { keywords: query, count: fetchCount, cursor: 0, hd: 1 },
+        timeout: 10_000,
         signal,
       });
-      const list = data?.data?.videos;
-      if (!Array.isArray(list)) return [];
-      const items = [];
-      for (const v of list) {
-        if (Array.isArray(v.images) && v.images.length) {
-          for (const imgUrl of v.images) {
-            if (imgUrl) items.push({ kind: 'photo', url: imgUrl, title: v.title || '' });
-          }
-        } else if (v.hdplay || v.play) {
-          items.push({
-            kind: 'video',
-            urls: [v.hdplay, v.play].filter(Boolean),
-            title: v.title || '',
-          });
-        }
-      }
+      const items = parseSearchList(data?.data?.videos);
+      if (!items.length) throw new Error('TikWM GET vacío');
       return items;
     },
+    // 2. TikWM POST (formato web)
+    async () => {
+      const form = new URLSearchParams({
+        keywords: query,
+        count: String(fetchCount),
+        cursor: '0',
+        web: '1',
+        hd: '1',
+      });
+      const { data } = await axios.post('https://www.tikwm.com/api/feed/search', form.toString(), {
+        headers: {
+          'User-Agent': UA,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        },
+        timeout: 10_000,
+        signal,
+      });
+      const items = parseSearchList(data?.data?.videos);
+      if (!items.length) throw new Error('TikWM POST vacío');
+      return items;
+    },
+    // 3. Siputzx
     async () => {
       const { data } = await axios.get(
         `https://api.siputzx.my.id/api/s/tiktok?query=${encodeURIComponent(query)}`,
-        { headers: REQUEST_HEADERS, timeout: 15_000, signal },
+        { headers: { 'User-Agent': UA }, timeout: 10_000, signal },
       );
-      const list = Array.isArray(data?.data) ? data.data : [];
-      const items = [];
-      for (const v of list) {
-        if (Array.isArray(v.images) && v.images.length) {
-          for (const imgUrl of v.images) {
-            if (imgUrl) items.push({ kind: 'photo', url: imgUrl, title: v.title || '' });
-          }
-        } else if (v.hdplay || v.play || v.video) {
-          items.push({
-            kind: 'video',
-            urls: [v.hdplay, v.play, v.video].filter(Boolean),
-            title: v.title || '',
-          });
-        }
-      }
+      const list = Array.isArray(data?.data) ? data.data : data?.data?.videos || [];
+      const items = parseSearchList(list);
+      if (!items.length) throw new Error('Siputzx vacío');
+      return items;
+    },
+    // 4. Ryzendesu
+    async () => {
+      const { data } = await axios.get(
+        `https://api.ryzendesu.vip/api/search/tiktok?query=${encodeURIComponent(query)}`,
+        { headers: { 'User-Agent': UA }, timeout: 10_000, signal },
+      );
+      const list = Array.isArray(data?.data) ? data.data : data?.data?.videos || [];
+      const items = parseSearchList(list);
+      if (!items.length) throw new Error('Ryzendesu vacío');
       return items;
     },
   ];
 
-  for (const provider of providers) {
+  // Carrera en paralelo: responde tan pronto el proveedor más rápido entregue resultados
+  try {
+    return await Promise.any(providers.map((fn) => fn()));
+  } catch (err) {
     if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
-    try {
-      const results = await provider();
-      if (results.length) return results;
-    } catch (err) {
-      if (isAbortError(err) && signal?.aborted) throw err;
-    }
+    return [];
   }
-  return [];
 }
 
-// ─── Descarga de resultados ───────────────────────────────────
+// ─── Descarga rápida de resultados ────────────────────────────
+
+async function fetchMediaBuffer(url, { signal, maxBytes }) {
+  const attempts = [buildDownloadHeaders(url), { 'User-Agent': UA, Accept: '*/*' }];
+  let lastErr = null;
+
+  for (const headers of attempts) {
+    try {
+      const res = await axios.get(url, {
+        responseType: 'arraybuffer',
+        headers,
+        timeout: 60_000,
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes,
+        validateStatus: (s) => s >= 200 && s < 300,
+        signal,
+      });
+      const buffer = Buffer.from(res.data);
+      const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
+      if (!buffer.length || isLikelyHtml(buffer, contentType)) {
+        throw new Error('Respuesta inválida');
+      }
+      return { buffer, contentType };
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+      const status = err?.response?.status;
+      if (status !== 403 && status !== 401) break;
+    }
+  }
+  throw lastErr || new Error('Error al descargar');
+}
 
 async function downloadResult(item, index, ts, signal) {
   if (item.kind === 'photo') {
-    const res = await axios.get(item.url, {
-      responseType: 'arraybuffer',
-      headers: REQUEST_HEADERS,
-      timeout: 45_000,
-      maxContentLength: VIDEO_INLINE_LIMIT,
-      maxBodyLength: VIDEO_INLINE_LIMIT,
+    const { buffer, contentType } = await fetchMediaBuffer(item.url, {
       signal,
+      maxBytes: VIDEO_INLINE_LIMIT,
     });
-    const buffer = Buffer.from(res.data);
-    const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
-    if (!buffer.length || isLikelyHtml(buffer, contentType)) {
-      throw new Error('Imagen inválida');
-    }
     return {
       kind: 'photo',
       buffer,
@@ -235,19 +310,10 @@ async function downloadResult(item, index, ts, signal) {
     for (const url of item.urls || []) {
       if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
       try {
-        const res = await axios.get(url, {
-          responseType: 'arraybuffer',
-          headers: REQUEST_HEADERS,
-          timeout: 90_000,
-          maxContentLength: MAX_DOCUMENT_LIMIT,
-          maxBodyLength: MAX_DOCUMENT_LIMIT,
+        const { buffer: candidate, contentType } = await fetchMediaBuffer(url, {
           signal,
+          maxBytes: MAX_DOCUMENT_LIMIT,
         });
-        const candidate = Buffer.from(res.data);
-        const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
-        if (!candidate.length || isLikelyHtml(candidate, contentType)) {
-          throw new Error('Respuesta no es un video válido');
-        }
         if (!isMp4(candidate) && !contentType.includes('video/')) {
           throw new Error(`Contenido inesperado (${contentType || 'desconocido'})`);
         }
@@ -261,7 +327,7 @@ async function downloadResult(item, index, ts, signal) {
 
     if (!buffer) throw lastErr || new Error('No se pudo descargar el video');
 
-    // Solo recomprime si realmente supera el límite inline de WhatsApp
+    // Solo recomprime si realmente supera el límite inline de WhatsApp (50 MB)
     if (buffer.length > VIDEO_INLINE_LIMIT) {
       writeFileSync(tmpInput, buffer);
       try {
@@ -287,6 +353,31 @@ async function downloadResult(item, index, ts, signal) {
       }
     }
   }
+}
+
+/** Descarga exactamente `targetCount` resultados sin desperdiciar ancho de banda. */
+async function downloadExactCount(results, targetCount, ts, signal) {
+  const downloaded = [];
+  let cursor = 0;
+
+  while (downloaded.length < targetCount && cursor < results.length) {
+    if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
+    const needed = targetCount - downloaded.length;
+    const batch = results.slice(cursor, cursor + needed);
+    const startIdx = cursor;
+    cursor += batch.length;
+
+    const settled = await Promise.allSettled(
+      batch.map((item, i) => downloadResult(item, startIdx + i, ts, signal)),
+    );
+
+    for (const r of settled) {
+      if (r.status === 'fulfilled') downloaded.push(r.value);
+      else if (isAbortError(r.reason) && signal?.aborted) throw r.reason;
+    }
+  }
+
+  return downloaded;
 }
 
 async function sendMediaGroup(conn, chat, items, caption, quoted) {
@@ -416,20 +507,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     await safeReact(conn, m, '⬇️');
 
     const ts = Date.now();
-    const candidates = results.slice(0, Math.min(results.length, cantidad + 3));
-    const settled = await Promise.allSettled(
-      candidates.map((item, i) => downloadResult(item, i, ts, controller.signal)),
-    );
-
-    const downloaded = [];
-    for (const r of settled) {
-      if (r.status === 'fulfilled') {
-        downloaded.push(r.value);
-        if (downloaded.length >= cantidad) break;
-      } else if (isAbortError(r.reason) && controller.signal.aborted) {
-        throw r.reason;
-      }
-    }
+    const downloaded = await downloadExactCount(results, cantidad, ts, controller.signal);
 
     if (!downloaded.length) {
       await safeReact(conn, m, '❌');
