@@ -89,6 +89,15 @@ global.tioAnimeCoverNegTime = global.tioAnimeCoverNegTime || new Map()
 global.tioDriveCoverFiles = global.tioDriveCoverFiles || null
 global.tioDriveCoverFilesAt = global.tioDriveCoverFilesAt || 0
 global.tioDriveCoverWarned = global.tioDriveCoverWarned || false
+global.tioLastCheckAt     = global.tioLastCheckAt     || 0
+global.tioNextCheckAt     = global.tioNextCheckAt     || 0
+global.tioCheckCount      = global.tioCheckCount      || 0
+global.tioCurrentJob      = global.tioCurrentJob      || null
+global.tioLastSent        = global.tioLastSent        || null
+global.tioSourceStatus    = global.tioSourceStatus    || {
+  tioanime: { status: 'pendiente', count: 0, at: 0, error: null },
+  latanime: { status: 'pendiente', count: 0, at: 0, error: null },
+}
 
 async function reportTioError(conn, context, error) {
   const message = error instanceof Error ? error.message : String(error || 'Error desconocido')
@@ -419,16 +428,29 @@ async function getAniListCover(titulo, slug = '', epNum = 0) {
   }
 }
 
-async function describeRecipientGroups(conn) {
+async function describeRecipientGroups(conn, currentChatId = null) {
   const groups = getRecipientChatIds()
-  const descriptions = await Promise.all(groups.map(async jid => {
-    if (jid === CENTRAL_CHAT_ID) return `🎯 *Central* — \`${jid}\``
-    try {
-      const metadata = await conn?.groupMetadata?.(jid)
-      return `📣 *${metadata?.subject || 'Grupo sin nombre'}* — \`${jid}\``
-    } catch (_) {
-      return `📣 *Grupo receptor* — \`${jid}\``
+  const state = loadState()
+  const descriptions = await Promise.all(groups.map(async (jid, index) => {
+    const cachedName = conn?.chats?.[jid]?.subject || conn?.chats?.[jid]?.metadata?.subject || ''
+    let subject = cachedName
+    if (!subject && typeof conn?.groupMetadata === 'function') {
+      try {
+        const metadata = await conn.groupMetadata(jid)
+        subject = metadata?.subject || ''
+      } catch (_) {}
     }
+    const isCentral = jid === CENTRAL_CHAT_ID
+    const entry = global.tioActiveChats.get(jid) || state[jid] || null
+    const sentCount = Number(entry?.sentCount) || 0
+    const metaParts = []
+    if (entry?.startedAt) metaParts.push(`activo ${formatDurationDetailed(Date.now() - Number(entry.startedAt))}`)
+    metaParts.push(`${sentCount} envío${sentCount === 1 ? '' : 's'}`)
+    const marker = currentChatId && jid === currentChatId ? ' ⬅️' : ''
+    const title = isCentral
+      ? `🎯 *Central${subject ? ` (${subject})` : ''}*`
+      : `📣 *${subject || 'Grupo receptor'}*`
+    return `${index + 1}. ${title}${marker}\n   └ \`${jid}\` · ${metaParts.join(' · ')}`
   }))
   return descriptions
 }
@@ -523,6 +545,58 @@ function formatActiveTime(startedAt) {
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
+}
+function formatDurationDetailed(ms) {
+  const totalSec = Math.max(0, Math.floor(Number(ms || 0) / 1000))
+  if (totalSec < 60) return `${totalSec}s`
+  const days = Math.floor(totalSec / 86_400)
+  const hours = Math.floor((totalSec % 86_400) / 3600)
+  const minutes = Math.floor((totalSec % 3600) / 60)
+  const seconds = totalSec % 60
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+}
+function formatClockLima(timestamp) {
+  if (!timestamp) return '--:--:--'
+  try {
+    return new Date(timestamp).toLocaleTimeString('es-PE', {
+      timeZone: 'America/Lima',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+  } catch (_) {
+    return new Date(timestamp).toISOString().slice(11, 19)
+  }
+}
+function formatSourceStatusLine(label, info) {
+  const state = info || { status: 'pendiente', count: 0, at: 0, error: null }
+  if (state.status === 'ok') {
+    return `${label}: ✅ OK (${state.count} eps · ${formatClockLima(state.at)})`
+  }
+  if (state.status === '304') {
+    const countText = state.count ? `${state.count} eps · ` : ''
+    return `${label}: ⚡ Sin cambios 304 (${countText}${formatClockLima(state.at)})`
+  }
+  if (state.status === 'error') {
+    const reason = String(state.error || 'fallo').slice(0, 60)
+    return `${label}: ❌ Error (${reason} · ${formatClockLima(state.at)})`
+  }
+  return `${label}: ⏳ Pendiente`
+}
+function countActiveFailedEpisodes() {
+  const now = Date.now()
+  let active = 0
+  for (const [id, at] of global.tioFailedEpisodes.entries()) {
+    if (now - at > FALLO_RETRY_TTL_MS) {
+      global.tioFailedEpisodes.delete(id)
+    } else {
+      active++
+    }
+  }
+  return active
 }
 function safeFile(s) { return s.replace(/[\\/\\*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() }
 const ROMAN_SEASONS = { I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10 }
@@ -1535,6 +1609,16 @@ async function procesarCola() {
           sinConexion = true
           break
         }
+        global.tioCurrentJob = {
+          titulo: ep.titulo,
+          epNum: ep.epNum,
+          fuente: ep.fuente || 'tioanime',
+          intento: intentos,
+          maxIntentos: MAX_REINTENTOS,
+          recipientsCount: recipients.length,
+          startedAt: Date.now(),
+          manual,
+        }
         try {
           const enviado = await enviarEpisodio(recipients, ep, connActivo)
           if (!enviado) {
@@ -1545,6 +1629,14 @@ async function procesarCola() {
             break
           }
           exito = true
+          global.tioLastSent = {
+            titulo: ep.titulo,
+            epNum: ep.epNum,
+            fuente: ep.fuente || 'tioanime',
+            at: Date.now(),
+            recipientsCount: recipients.length,
+            manual,
+          }
           if (!manual) {
             const seen = loadSeen()
             if (!seen[CENTRAL_CHAT_ID]) seen[CENTRAL_CHAT_ID] = []
@@ -1588,6 +1680,7 @@ async function procesarCola() {
           }
         }
       }
+      global.tioCurrentJob = null
       if (sinConexion) {
         // El ítem sigue en cabeza: reanudar la cola sola cuando haya conexión.
         console.warn('[tioanime-notify] Conexión no disponible; la cola se reanudará en 5 minutos.')
@@ -1603,6 +1696,7 @@ async function procesarCola() {
     console.error(`[tioanime-notify] Error fatal en la cola: ${fatalErr.message}`)
     void reportTioError(global.tioConn, 'Error fatal en la cola', fatalErr)
   } finally {
+    global.tioCurrentJob = null
     global.tioQueueRunning = false
   }
 }
@@ -1618,14 +1712,24 @@ async function checkNuevosEpisodios(_chatId, conn) {
       fetchLatestEpisodes(),
       fetchLatestEpisodesLatAnime(),
     ])
-    for (const [source, result] of [['TioAnime', tioRes], ['LatAnime', latRes]]) {
+    const checkedAt = Date.now()
+    global.tioLastCheckAt = checkedAt
+    global.tioCheckCount = (Number(global.tioCheckCount) || 0) + 1
+    if (global.tioCentralTimer && global.tioCentralTimerInterval > 0) {
+      global.tioNextCheckAt = checkedAt + global.tioCentralTimerInterval * 1000
+    }
+    for (const [key, source, result] of [['tioanime', 'TioAnime', tioRes], ['latanime', 'LatAnime', latRes]]) {
+      const prev = global.tioSourceStatus[key] || { count: 0 }
       if (result.status === 'fulfilled') {
         lista = lista.concat(result.value)
+        global.tioSourceStatus[key] = { status: 'ok', count: result.value.length, at: checkedAt, error: null }
       } else if (result.reason instanceof NotModified) {
         // El servidor confirma que la portada no cambió desde el último GET.
+        global.tioSourceStatus[key] = { ...prev, status: '304', at: checkedAt, error: null }
       } else {
         consultasCompletas = false
         const error = result.reason instanceof Error ? result.reason : new Error(String(result.reason))
+        global.tioSourceStatus[key] = { ...prev, status: 'error', at: checkedAt, error: error.message.slice(0, 80) }
         console.error(`[tioanime-notify] ${source}: ${error.message}`)
         void reportTioError(conn, `Consulta de episodios ${source}`, error)
       }
@@ -1679,12 +1783,14 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
   }
   if (global.tioCentralTimer) clearInterval(global.tioCentralTimer)
   global.tioCentralTimer = setInterval(() => {
+    global.tioNextCheckAt = Date.now() + intervalSec * 1000
     if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
       void reportTioError(global.tioConn, 'Sondeo automático central', err)
     })
   }, intervalSec * 1000)
   if (typeof global.tioCentralTimer.unref === 'function') global.tioCentralTimer.unref()
   global.tioCentralTimerInterval = intervalSec
+  global.tioNextCheckAt = Date.now() + intervalSec * 1000
   if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
     void reportTioError(global.tioConn, 'Sondeo inicial central', err)
   })
@@ -1810,6 +1916,9 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     try {
       tio = await fetchLatestEpisodes()
       lat = await fetchLatestEpisodesLatAnime()
+      const fetchedAt = Date.now()
+      global.tioSourceStatus.tioanime = { status: 'ok', count: tio.length, at: fetchedAt, error: null }
+      global.tioSourceStatus.latanime = { status: 'ok', count: lat.length, at: fetchedAt, error: null }
       const lista = [...tio, ...lat]
       const seen  = loadSeen()
       if (!seen[CENTRAL_CHAT_ID]) {
@@ -1847,24 +1956,115 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiostatus') {
-    const activo = global.tioActiveChats.has(m.chat)
-    const entry  = global.tioActiveChats.get(m.chat)
-    const cola   = global.tioEpisodeQueue.filter(i => i.chatId === m.chat)
-    const vistos = (loadSeen()[CENTRAL_CHAT_ID] || []).length
-    const gruposActivos = await describeRecipientGroups(conn)
-    let txt = `📡 *Estado TioAnime*\n\n`
-    txt += global.tioCentralTimer
-      ? `✅ *Sondeo central activo* — cada ${entry?.intervalSec || getGlobalIntervalSec()} segundos\n`
-      : `🔴 *Sondeo central inactivo*\n`
-    txt += m.chat === CENTRAL_CHAT_ID
-      ? `👤 Este grupo: *receptor central permanente*\n`
-      : activo ? `👤 Este grupo: *receptor activo*\n` : `👤 Este grupo: *no registrado*\n`
-    txt += `📋 Cola: *${cola.length}* pendiente(s)\n`
-    txt += `🔵 Procesando: *${global.tioQueueRunning ? 'Sí' : 'No'}*\n`
-    txt += `👁️ Vistos: *${vistos}*\n`
-    txt += `\n🎯 *Grupos activos (${gruposActivos.length}):*\n${gruposActivos.join('\n')}`
-    if (cola.length > 0) txt += `\n\n*En cola:*\n` + cola.slice(0, 5).map((i, n) => `  ${n + 1}. ${i.ep.titulo} ep ${zeroPad(i.ep.epNum)}`).join('\n')
-    return m.reply(txt)
+    const now = Date.now()
+    const state = loadState()
+    const entry = global.tioActiveChats.get(m.chat) || state[m.chat] || null
+    const recipientsLive = getRecipientChatIds()
+    const isRecipientChat = recipientsLive.includes(m.chat)
+    const colaGlobal = global.tioEpisodeQueue
+    const colaEsteChat = colaGlobal.filter(item =>
+      item.chatId === m.chat
+      || (Array.isArray(item.recipients) && item.recipients.includes(m.chat))
+      || (!item.manual && isRecipientChat),
+    )
+    const seenList = loadSeen()[CENTRAL_CHAT_ID] || []
+    const vistosLat = seenList.filter(id => String(id).startsWith('lat-')).length
+    const vistosTio = seenList.length - vistosLat
+    const fallosActivos = countActiveFailedEpisodes()
+    const gruposActivos = await describeRecipientGroups(conn, m.chat)
+
+    const sondeoActivo = Boolean(global.tioCentralTimer)
+    const escaneando = global.tioCheckingChats.has(CENTRAL_CHAT_ID)
+    const intervalSec = global.tioCentralTimerInterval || getGlobalIntervalSec()
+    const intervaloTexto = intervalSec >= 60 && intervalSec % 60 === 0
+      ? `\`${formatInterval(intervalSec)}\` (${intervalSec}s)`
+      : `\`${formatInterval(intervalSec)}\``
+    const estadoSondeo = !sondeoActivo
+      ? '🔴 Inactivo'
+      : escaneando ? '✅ Activo (escaneando ahora...)' : '✅ Activo (en espera)'
+    const ultimoChequeo = global.tioLastCheckAt
+      ? `hace ${formatDurationDetailed(now - global.tioLastCheckAt)} (${formatClockLima(global.tioLastCheckAt)}) · #${global.tioCheckCount}`
+      : 'pendiente'
+    const proximoChequeo = !sondeoActivo
+      ? 'detenido'
+      : escaneando
+        ? 'en curso...'
+        : global.tioNextCheckAt > now
+          ? `en ${formatDurationDetailed(global.tioNextCheckAt - now)} (${formatClockLima(global.tioNextCheckAt)})`
+          : 'inminente'
+
+    const sondeoLines = [
+      '╭━━━〔 ⚙️ *SONDEO CENTRAL* 〕━━━⬣',
+      `┃ • *Estado:* ${estadoSondeo}`,
+      `┃ • *Intervalo:* ${intervaloTexto} │ *Watchdog:* ${global.tioWatchdog ? '✅' : '🔴'}`,
+      `┃ • *Último chequeo:* ${ultimoChequeo}`,
+      `┃ • *Próximo chequeo:* ${proximoChequeo}`,
+      `┃ • ${formatSourceStatusLine('🇯🇵 *TioAnime*', global.tioSourceStatus?.tioanime)}`,
+      `┃ • ${formatSourceStatusLine('🇲🇽🇪🇸 *LatAnime*', global.tioSourceStatus?.latanime)}`,
+      '╰━━━━━━━━━━━━━━━━━━━━━━⬣',
+    ]
+
+    const currentJob = global.tioCurrentJob
+    const lastSent = global.tioLastSent
+    const colaLines = [
+      '╭━━━〔 📦 *COLA Y PROCESO* 〕━━━⬣',
+      `┃ • *Procesando:* ${global.tioQueueRunning ? '🔵 Sí' : '⚪ No'}`,
+    ]
+    if (currentJob) {
+      const srcTag = currentJob.fuente === 'latanime' ? 'LatAnime' : 'TioAnime'
+      colaLines.push(
+        `┃ • *En curso:* *${currentJob.titulo}* Ep ${zeroPad(currentJob.epNum)} [${srcTag}] (intento ${currentJob.intento}/${currentJob.maxIntentos} · ${formatDurationDetailed(now - currentJob.startedAt)} · ${currentJob.recipientsCount} grupo${currentJob.recipientsCount === 1 ? '' : 's'})`,
+      )
+    }
+    colaLines.push(
+      `┃ • *Cola global:* *${colaGlobal.length}* pendiente(s) │ *Este chat:* *${colaEsteChat.length}*`,
+      `┃ • *Fallos en enfriamiento (6h):* *${fallosActivos}*`,
+      `┃ • *Base vistos:* *${seenList.length}* (*${vistosTio}* TioAnime · *${vistosLat}* LatAnime)`,
+    )
+    if (lastSent) {
+      const lastSrc = lastSent.fuente === 'latanime' ? 'LatAnime' : 'TioAnime'
+      colaLines.push(
+        `┃ • *Último enviado:* *${lastSent.titulo}* Ep ${zeroPad(lastSent.epNum)} [${lastSrc}] (hace ${formatDurationDetailed(now - lastSent.at)} · ${lastSent.recipientsCount} grupo${lastSent.recipientsCount === 1 ? '' : 's'})`,
+      )
+    }
+    colaLines.push('╰━━━━━━━━━━━━━━━━━━━━━━⬣')
+
+    const rolChat = m.chat === CENTRAL_CHAT_ID
+      ? '🎯 Receptor central permanente'
+      : entry ? '✅ Receptor activo' : '⚪ No registrado'
+    const chatLines = [
+      '╭━━━〔 💬 *ESTE CHAT* 〕━━━⬣',
+      `┃ • *Rol:* ${rolChat}`,
+      `┃ • *ID:* \`${m.chat}\``,
+    ]
+    if (entry) {
+      const activoHace = entry.startedAt ? formatDurationDetailed(now - Number(entry.startedAt)) : 'N/D'
+      chatLines.push(`┃ • *Activo hace:* ${activoHace} │ *Avisos enviados:* *${Number(entry.sentCount) || 0}*`)
+    }
+    chatLines.push('╰━━━━━━━━━━━━━━━━━━━━━━⬣')
+
+    const sections = [
+      '📡 *Estado Notificador TioAnime + LatAnime*',
+      sondeoLines.join('\n'),
+      colaLines.join('\n'),
+      chatLines.join('\n'),
+      `🎯 *Grupos activos (${gruposActivos.length}):*\n${gruposActivos.join('\n')}`,
+    ]
+
+    if (colaGlobal.length > 0) {
+      const preview = colaGlobal.slice(0, 5).map((item, idx) => {
+        const srcTag = item.ep?.fuente === 'latanime' ? 'LatAnime' : 'TioAnime'
+        const manualTag = item.manual ? ' [manual]' : ''
+        const destCount = item.manual ? (item.recipients?.length || 1) : recipientsLive.length
+        return `${idx + 1}. *${item.ep.titulo}* Ep ${zeroPad(item.ep.epNum)} [${srcTag}]${manualTag} → ${destCount} grupo${destCount === 1 ? '' : 's'}`
+      })
+      if (colaGlobal.length > 5) {
+        preview.push(`_... y ${colaGlobal.length - 5} más (usa \`${usedPrefix}tioqueue\`)_`)
+      }
+      sections.push(`⏳ *Próximos en cola (${colaGlobal.length}):*\n${preview.join('\n')}`)
+    }
+
+    return m.reply(sections.join('\n\n'))
   }
 
   if (command === 'tioqueue') {
