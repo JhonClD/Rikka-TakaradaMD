@@ -314,7 +314,7 @@ async function fetchRyzendesu(url, signal) {
 }
 
 async function fetchTikTokDirect(url, signal) {
-  const { data: html } = await axios.get(url, {
+  const res = await axios.get(url, {
     headers: {
       'User-Agent': REQUEST_HEADERS['User-Agent'],
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -324,6 +324,7 @@ async function fetchTikTokDirect(url, signal) {
     signal,
   });
 
+  const html = res.data;
   if (typeof html !== 'string') return null;
   const match = html.match(
     /<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
@@ -345,6 +346,11 @@ async function fetchTikTokDirect(url, signal) {
 
   if (!images.length && !videoCandidates.length && !audio) return null;
 
+  const rawCookies = res.headers?.['set-cookie'];
+  const cookieHeader = Array.isArray(rawCookies)
+    ? rawCookies.map((c) => c.split(';')[0]).filter(Boolean).join('; ')
+    : '';
+
   return {
     title: cleanText(detail.desc, 100),
     author: cleanText(detail.author?.nickname || detail.author?.uniqueId, 50),
@@ -358,72 +364,97 @@ async function fetchTikTokDirect(url, signal) {
     images,
     videoCandidates,
     audio,
+    downloadHeaders: {
+      Referer: 'https://www.tiktok.com/',
+      Origin: 'https://www.tiktok.com',
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    },
   };
 }
 
-async function resolveTikTok(rawUrl, { audioOnly = false, signal } = {}) {
+async function buildProviderTasks(rawUrl, signal) {
   const expandedUrl = await expandTikTokUrl(rawUrl, signal);
   const urlsToTry = expandedUrl !== rawUrl ? [expandedUrl, rawUrl] : [rawUrl];
 
-  const hasWantedMedia = (info) =>
-    audioOnly
-      ? Boolean(info?.audio)
-      : Boolean(info?.images?.length || info?.videoCandidates?.length);
-
-  let audioFallback = null;
-
+  const tasks = [];
   for (const targetUrl of urlsToTry) {
-    const providers = [
+    tasks.push(
       () => fetchTikwmGet(targetUrl, signal),
       () => fetchTikwmPost(targetUrl, signal),
       () => fetchTiklydown(targetUrl, signal),
       () => fetchSiputzx(targetUrl, signal),
       () => fetchRyzendesu(targetUrl, signal),
       () => fetchTikTokDirect(targetUrl, signal),
-    ];
-
-    for (const provider of providers) {
-      if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
-      try {
-        const result = await provider();
-        if (!result) continue;
-        if (hasWantedMedia(result)) return result;
-        if (!audioFallback && result.audio) audioFallback = result;
-      } catch (err) {
-        if (isAbortError(err) && signal?.aborted) throw err;
-      }
-    }
+    );
   }
-
-  return audioOnly ? audioFallback : null;
+  return tasks;
 }
 
 // ─── Descarga y procesamiento de media ────────────────────────
 
-async function fetchBuffer(url, { signal, maxBytes = MAX_DOCUMENT_LIMIT } = {}) {
-  const res = await axios.get(url, {
-    responseType: 'arraybuffer',
-    headers: MEDIA_HEADERS,
-    timeout: 90_000,
-    maxContentLength: maxBytes,
-    maxBodyLength: maxBytes,
-    validateStatus: (s) => s >= 200 && s < 300,
-    signal,
-  });
-
-  const buffer = Buffer.from(res.data);
-  if (!buffer.length) throw new Error('Respuesta vacía');
-  if (buffer.length > maxBytes) throw new Error(`Archivo supera ${formatBytes(maxBytes)}`);
-
-  const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
-  if (isLikelyHtml(buffer, contentType)) {
-    throw new Error('La fuente devolvió HTML en lugar de media');
-  }
-
-  return { buffer, contentType };
+function buildDownloadHeaders(url, extraHeaders = {}) {
+  const base = {
+    'User-Agent': REQUEST_HEADERS['User-Agent'],
+    Accept: '*/*',
+  };
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('tikwm.com')) {
+      base.Referer = 'https://www.tikwm.com/';
+    } else if (
+      host.includes('tiktok.com') ||
+      host.includes('tiktokcdn') ||
+      host.includes('byteoversea') ||
+      host.includes('muscdn')
+    ) {
+      base.Referer = 'https://www.tiktok.com/';
+      base.Origin = 'https://www.tiktok.com';
+    }
+  } catch {}
+  return { ...base, ...extraHeaders };
 }
 
-async function downloadBestVideo(candidates, signal) {
+async function fetchBuffer(url, { headers = {}, signal, maxBytes = MAX_DOCUMENT_LIMIT } = {}) {
+  const attempts = [
+    buildDownloadHeaders(url, headers),
+    { 'User-Agent': REQUEST_HEADERS['User-Agent'], Accept: '*/*' },
+  ];
+
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const res = await axios.get(url, {
+        responseType: 'arraybuffer',
+        headers: attempts[i],
+        timeout: 90_000,
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes,
+        validateStatus: (s) => s >= 200 && s < 300,
+        signal,
+      });
+
+      const buffer = Buffer.from(res.data);
+      if (!buffer.length) throw new Error('Respuesta vacía');
+      if (buffer.length > maxBytes) throw new Error(`Archivo supera ${formatBytes(maxBytes)}`);
+
+      const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
+      if (isLikelyHtml(buffer, contentType)) {
+        throw new Error('La fuente devolvió HTML en lugar de media');
+      }
+
+      return { buffer, contentType };
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+      const status = err?.response?.status;
+      if (status !== 403 && status !== 401) break;
+    }
+  }
+
+  throw lastErr || new Error('No se pudo descargar el archivo');
+}
+
+async function downloadBestVideo(candidates, { headers = {}, signal } = {}) {
   let oversizedFallback = null;
   let lastError = null;
 
@@ -431,6 +462,7 @@ async function downloadBestVideo(candidates, signal) {
     if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
     try {
       const { buffer, contentType } = await fetchBuffer(videoUrl, {
+        headers,
         signal,
         maxBytes: MAX_DOCUMENT_LIMIT,
       });
@@ -590,136 +622,145 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   try {
     await safeReact(conn, m, '⏳');
 
-    const info = await resolveTikTok(url, { audioOnly, signal: controller.signal });
-    if (!info) {
-      await safeReact(conn, m, '❌');
-      return conn.sendMessage(
-        m.chat,
-        { text: '❌ No se pudo obtener el contenido de ese TikTok. Verifica el enlace e intenta de nuevo.' },
-        { quoted: m },
-      );
-    }
+    const tasks = await buildProviderTasks(url, controller.signal);
+    let lastError = null;
 
-    // ── Modo solo audio (.tiktokaudio) ───────────────────────
-    if (audioOnly) {
-      if (!info.audio) {
-        await safeReact(conn, m, '❌');
-        return conn.sendMessage(
-          m.chat,
-          { text: '❌ Este TikTok no tiene pista de audio descargable.' },
-          { quoted: m },
-        );
+    for (const runProvider of tasks) {
+      if (controller.signal.aborted) throw new DOMException('Cancelado', 'AbortError');
+
+      let info;
+      try {
+        info = await runProvider();
+      } catch (err) {
+        if (isAbortError(err) && controller.signal.aborted) throw err;
+        lastError = err;
+        continue;
       }
+      if (!info) continue;
 
-      const { buffer } = await fetchBuffer(info.audio, {
-        signal: controller.signal,
-        maxBytes: VIDEO_INLINE_LIMIT,
-      });
+      const dlHeaders = info.downloadHeaders || {};
 
-      await conn.sendMessage(
-        m.chat,
-        {
-          audio: buffer,
-          mimetype: 'audio/mpeg',
-          fileName: `${sanitizeFileName(info.title || info.username)}.mp3`,
-        },
-        { quoted: m },
-      );
-      await safeReact(conn, m, '✅');
-      return;
-    }
-
-    // ── Modo imágenes / slideshow (álbum único) ──────────────
-    if (info.images.length) {
-      const settled = await Promise.allSettled(
-        info.images.map(async (imgUrl) => {
-          const { buffer, contentType } = await fetchBuffer(imgUrl, {
+      // ── Modo solo audio (.tiktokaudio) ─────────────────────
+      if (audioOnly) {
+        if (!info.audio) continue;
+        try {
+          const { buffer } = await fetchBuffer(info.audio, {
+            headers: dlHeaders,
             signal: controller.signal,
             maxBytes: VIDEO_INLINE_LIMIT,
           });
-          return {
-            buffer,
-            size: buffer.length,
-            mimetype: detectImageMime(buffer, contentType),
-          };
-        }),
-      );
-
-      const downloadedImages = [];
-      for (const r of settled) {
-        if (r.status === 'fulfilled') downloadedImages.push(r.value);
-        else if (isAbortError(r.reason) && controller.signal.aborted) throw r.reason;
+          await conn.sendMessage(
+            m.chat,
+            {
+              audio: buffer,
+              mimetype: 'audio/mpeg',
+              fileName: `${sanitizeFileName(info.title || info.username)}.mp3`,
+            },
+            { quoted: m },
+          );
+          await safeReact(conn, m, '✅');
+          return;
+        } catch (err) {
+          if (isAbortError(err) && controller.signal.aborted) throw err;
+          lastError = err;
+          continue;
+        }
       }
 
-      if (!downloadedImages.length) {
-        await safeReact(conn, m, '❌');
-        return conn.sendMessage(
-          m.chat,
-          { text: '❌ No se pudieron descargar las imágenes de ese TikTok.' },
-          { quoted: m },
+      // ── Modo imágenes / slideshow (álbum único) ────────────
+      if (info.images.length) {
+        const settled = await Promise.allSettled(
+          info.images.map(async (imgUrl) => {
+            const { buffer, contentType } = await fetchBuffer(imgUrl, {
+              headers: dlHeaders,
+              signal: controller.signal,
+              maxBytes: VIDEO_INLINE_LIMIT,
+            });
+            return {
+              buffer,
+              size: buffer.length,
+              mimetype: detectImageMime(buffer, contentType),
+            };
+          }),
         );
+
+        const downloadedImages = [];
+        for (const r of settled) {
+          if (r.status === 'fulfilled') downloadedImages.push(r.value);
+          else if (isAbortError(r.reason) && controller.signal.aborted) throw r.reason;
+          else lastError = r.reason;
+        }
+
+        if (!downloadedImages.length) continue;
+
+        const totalBytes = downloadedImages.reduce((acc, img) => acc + img.size, 0);
+        const caption = buildCaption(info, {
+          size: formatBytes(totalBytes),
+          typeLabel:
+            downloadedImages.length > 1
+              ? `Álbum (${downloadedImages.length} imágenes)`
+              : downloadedImages[0].mimetype,
+          url,
+        });
+
+        await sendImageGroup(conn, m.chat, downloadedImages, caption, m);
+        await safeReact(conn, m, '✅');
+        return;
       }
 
-      const totalBytes = downloadedImages.reduce((acc, img) => acc + img.size, 0);
-      const caption = buildCaption(info, {
-        size: formatBytes(totalBytes),
-        typeLabel:
-          downloadedImages.length > 1
-            ? `Álbum (${downloadedImages.length} imágenes)`
-            : downloadedImages[0].mimetype,
-        url,
-      });
+      // ── Modo video ─────────────────────────────────────────
+      if (!info.videoCandidates.length) continue;
 
-      await sendImageGroup(conn, m.chat, downloadedImages, caption, m);
-      await safeReact(conn, m, '✅');
-      return;
+      try {
+        const { buffer: rawVideo, oversized } = await downloadBestVideo(info.videoCandidates, {
+          headers: dlHeaders,
+          signal: controller.signal,
+        });
+        const finalBuffer = await remuxFaststart(rawVideo);
+        const caption = buildCaption(info, {
+          size: formatBytes(finalBuffer.length),
+          typeLabel: 'Video HD (MP4)',
+          url,
+        });
+
+        if (oversized || finalBuffer.length > VIDEO_INLINE_LIMIT) {
+          await conn.sendMessage(
+            m.chat,
+            {
+              document: finalBuffer,
+              mimetype: 'video/mp4',
+              fileName: `${sanitizeFileName(info.title || info.username)}.mp4`,
+              caption,
+            },
+            { quoted: m },
+          );
+        } else {
+          await conn.sendMessage(
+            m.chat,
+            {
+              video: finalBuffer,
+              mimetype: 'video/mp4',
+              caption,
+            },
+            { quoted: m },
+          );
+        }
+
+        await safeReact(conn, m, '✅');
+        return;
+      } catch (err) {
+        if (isAbortError(err) && controller.signal.aborted) throw err;
+        lastError = err;
+      }
     }
 
-    // ── Modo video ───────────────────────────────────────────
-    if (!info.videoCandidates.length) {
-      await safeReact(conn, m, '❌');
-      return conn.sendMessage(
-        m.chat,
-        { text: '❌ No se encontró ningún video ni imagen en ese enlace de TikTok.' },
-        { quoted: m },
-      );
-    }
-
-    const { buffer: rawVideo, oversized } = await downloadBestVideo(
-      info.videoCandidates,
-      controller.signal,
+    await safeReact(conn, m, '❌');
+    const detail = lastError?.message ? `\n\`${lastError.message}\`` : '';
+    return conn.sendMessage(
+      m.chat,
+      { text: `❌ No se pudo descargar ese TikTok desde ninguna fuente disponible.${detail}` },
+      { quoted: m },
     );
-    const finalBuffer = await remuxFaststart(rawVideo);
-    const caption = buildCaption(info, {
-      size: formatBytes(finalBuffer.length),
-      typeLabel: 'Video HD (MP4)',
-      url,
-    });
-
-    if (oversized || finalBuffer.length > VIDEO_INLINE_LIMIT) {
-      await conn.sendMessage(
-        m.chat,
-        {
-          document: finalBuffer,
-          mimetype: 'video/mp4',
-          fileName: `${sanitizeFileName(info.title || info.username)}.mp4`,
-          caption,
-        },
-        { quoted: m },
-      );
-    } else {
-      await conn.sendMessage(
-        m.chat,
-        {
-          video: finalBuffer,
-          mimetype: 'video/mp4',
-          caption,
-        },
-        { quoted: m },
-      );
-    }
-
-    await safeReact(conn, m, '✅');
   } catch (e) {
     if (isAbortError(e) && controller.signal.aborted) {
       await safeReact(conn, m, '🛑');
