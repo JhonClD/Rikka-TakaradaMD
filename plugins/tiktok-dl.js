@@ -125,11 +125,69 @@ async function safeReact(conn, m, emoji) {
 
 // ─── Proveedores de TikTok (videos + imágenes + audio) ────────
 
+const toAbsoluteUrl = (u, base = 'https://www.tikwm.com') => {
+  if (!u || typeof u !== 'string') return null;
+  const trimmed = u.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  if (trimmed.startsWith('/')) return `${base}${trimmed}`;
+  return null;
+};
+
+const flattenUrls = (value, base) => {
+  const out = [];
+  const walk = (item) => {
+    if (!item) return;
+    if (Array.isArray(item)) {
+      for (const el of item) walk(el);
+    } else if (typeof item === 'string') {
+      const abs = toAbsoluteUrl(item, base);
+      if (abs) out.push(abs);
+    } else if (typeof item === 'object') {
+      const candidate =
+        item.url || item.image_url || item.play || item.hdplay || item.noWatermark || item.src;
+      if (candidate) walk(candidate);
+      if (Array.isArray(item.urlList)) walk(item.urlList[0]);
+    }
+  };
+  walk(value);
+  return [...new Set(out)];
+};
+
+async function expandTikTokUrl(rawUrl, signal) {
+  if (!/^https?:\/\/(?:vm|vt|t|lite)\.tiktok\.com\//i.test(rawUrl)) {
+    return rawUrl;
+  }
+  try {
+    const res = await axios.get(rawUrl, {
+      maxRedirects: 5,
+      timeout: 12_000,
+      headers: {
+        'User-Agent': REQUEST_HEADERS['User-Agent'],
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      validateStatus: () => true,
+      signal,
+    });
+    const finalUrl = res.request?.res?.responseUrl || res.headers?.location || rawUrl;
+    if (finalUrl && /tiktok\.com\/.*\/(?:video|photo)\/\d+/i.test(finalUrl)) {
+      return finalUrl.split('?')[0];
+    }
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+  }
+  return rawUrl;
+}
+
 function normalizeTikwmData(d) {
   if (!d) return null;
-  const images = Array.isArray(d.images) ? d.images.filter(Boolean) : [];
-  const videoCandidates = [d.hdplay, d.play, d.wmplay].filter(Boolean);
-  const audio = d.music || d.music_info?.play || null;
+  const images = flattenUrls(d.images, 'https://www.tikwm.com');
+  const videoCandidates = flattenUrls(
+    [d.hdplay, d.play, d.wmplay, d.video],
+    'https://www.tikwm.com',
+  ).filter((u) => !/\.mp3(\?|$)/i.test(u));
+  const audio = toAbsoluteUrl(d.music || d.music_info?.play, 'https://www.tikwm.com');
 
   if (!images.length && !videoCandidates.length && !audio) return null;
 
@@ -174,6 +232,39 @@ async function fetchTikwmPost(url, signal) {
   return normalizeTikwmData(data.data);
 }
 
+async function fetchTiklydown(url, signal) {
+  const { data } = await axios.get(
+    `https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`,
+    { headers: REQUEST_HEADERS, timeout: 15_000, signal },
+  );
+  if (!data) return null;
+
+  const images = flattenUrls(data.images);
+  const videoCandidates = flattenUrls([
+    data.video?.noWatermark,
+    data.video?.watermark,
+    data.videoUrl,
+  ]).filter((u) => !/\.mp3(\?|$)/i.test(u));
+  const audio = toAbsoluteUrl(data.music?.play_url || data.music?.url);
+
+  if (!images.length && !videoCandidates.length && !audio) return null;
+
+  return {
+    title: cleanText(data.title, 100),
+    author: cleanText(data.author?.name || data.author?.unique_id, 50),
+    username: data.author?.unique_id || null,
+    duration: null,
+    stats: {
+      likes: Number.isFinite(data.stats?.likeCount) ? data.stats.likeCount : null,
+      views: Number.isFinite(data.stats?.playCount) ? data.stats.playCount : null,
+      comments: Number.isFinite(data.stats?.commentCount) ? data.stats.commentCount : null,
+    },
+    images,
+    videoCandidates,
+    audio,
+  };
+}
+
 async function fetchSiputzx(url, signal) {
   const { data } = await axios.get(
     `https://api.siputzx.my.id/api/d/tiktok?url=${encodeURIComponent(url)}`,
@@ -182,17 +273,21 @@ async function fetchSiputzx(url, signal) {
   const d = data?.data;
   if (!d) return null;
 
-  const urls = Array.isArray(d.urls) ? d.urls.filter(Boolean) : [];
+  const flatUrls = flattenUrls(d.urls);
+  const explicitImages = flattenUrls([d.images, d.slides, d.slide, d.photos]);
   const isPhoto =
     d.type === 'image' ||
     d.type === 'slide' ||
-    (urls.length > 1 && urls.every((u) => !/\.mp4(\?|$)/i.test(u)));
+    explicitImages.length > 0 ||
+    (flatUrls.length > 1 && flatUrls.every((u) => !/\.mp4(\?|$)/i.test(u)));
 
-  const images = isPhoto ? urls : Array.isArray(d.images) ? d.images.filter(Boolean) : [];
+  const images = explicitImages.length ? explicitImages : isPhoto ? flatUrls : [];
   const videoCandidates = isPhoto
     ? []
-    : [d.hdplay, d.play, ...urls].filter(Boolean);
-  const audio = d.music || d.audio || null;
+    : flattenUrls([d.hdplay, d.play, d.video, d.videos, flatUrls]).filter(
+        (u) => !/\.mp3(\?|$)/i.test(u),
+      );
+  const audio = toAbsoluteUrl(d.music || d.audio);
 
   if (!images.length && !videoCandidates.length && !audio) return null;
 
@@ -218,24 +313,89 @@ async function fetchRyzendesu(url, signal) {
   return normalizeTikwmData(d);
 }
 
-async function resolveTikTok(url, signal) {
-  const providers = [
-    () => fetchTikwmGet(url, signal),
-    () => fetchTikwmPost(url, signal),
-    () => fetchSiputzx(url, signal),
-    () => fetchRyzendesu(url, signal),
-  ];
+async function fetchTikTokDirect(url, signal) {
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': REQUEST_HEADERS['User-Agent'],
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    },
+    timeout: 15_000,
+    signal,
+  });
 
-  for (const provider of providers) {
-    if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
-    try {
-      const result = await provider();
-      if (result) return result;
-    } catch (err) {
-      if (isAbortError(err) && signal?.aborted) throw err;
+  if (typeof html !== 'string') return null;
+  const match = html.match(
+    /<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
+  );
+  if (!match?.[1]) return null;
+
+  const json = JSON.parse(match[1]);
+  const detail =
+    json?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct ||
+    json?.__DEFAULT_SCOPE__?.['webapp.photo-detail']?.itemInfo?.itemStruct;
+  if (!detail) return null;
+
+  const images = flattenUrls(detail.imagePost?.images?.map((img) => img?.imageURL?.urlList?.[0]));
+  const videoCandidates = flattenUrls([
+    detail.video?.playAddr,
+    detail.video?.downloadAddr,
+  ]).filter((u) => !/\.mp3(\?|$)/i.test(u));
+  const audio = toAbsoluteUrl(detail.music?.playUrl);
+
+  if (!images.length && !videoCandidates.length && !audio) return null;
+
+  return {
+    title: cleanText(detail.desc, 100),
+    author: cleanText(detail.author?.nickname || detail.author?.uniqueId, 50),
+    username: detail.author?.uniqueId || null,
+    duration: Number.isFinite(detail.video?.duration) ? detail.video.duration : null,
+    stats: {
+      likes: Number.isFinite(detail.stats?.diggCount) ? detail.stats.diggCount : null,
+      views: Number.isFinite(detail.stats?.playCount) ? detail.stats.playCount : null,
+      comments: Number.isFinite(detail.stats?.commentCount) ? detail.stats.commentCount : null,
+    },
+    images,
+    videoCandidates,
+    audio,
+  };
+}
+
+async function resolveTikTok(rawUrl, { audioOnly = false, signal } = {}) {
+  const expandedUrl = await expandTikTokUrl(rawUrl, signal);
+  const urlsToTry = expandedUrl !== rawUrl ? [expandedUrl, rawUrl] : [rawUrl];
+
+  const hasWantedMedia = (info) =>
+    audioOnly
+      ? Boolean(info?.audio)
+      : Boolean(info?.images?.length || info?.videoCandidates?.length);
+
+  let audioFallback = null;
+
+  for (const targetUrl of urlsToTry) {
+    const providers = [
+      () => fetchTikwmGet(targetUrl, signal),
+      () => fetchTikwmPost(targetUrl, signal),
+      () => fetchTiklydown(targetUrl, signal),
+      () => fetchSiputzx(targetUrl, signal),
+      () => fetchRyzendesu(targetUrl, signal),
+      () => fetchTikTokDirect(targetUrl, signal),
+    ];
+
+    for (const provider of providers) {
+      if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
+      try {
+        const result = await provider();
+        if (!result) continue;
+        if (hasWantedMedia(result)) return result;
+        if (!audioFallback && result.audio) audioFallback = result;
+      } catch (err) {
+        if (isAbortError(err) && signal?.aborted) throw err;
+      }
     }
   }
-  return null;
+
+  return audioOnly ? audioFallback : null;
 }
 
 // ─── Descarga y procesamiento de media ────────────────────────
@@ -430,7 +590,7 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   try {
     await safeReact(conn, m, '⏳');
 
-    const info = await resolveTikTok(url, controller.signal);
+    const info = await resolveTikTok(url, { audioOnly, signal: controller.signal });
     if (!info) {
       await safeReact(conn, m, '❌');
       return conn.sendMessage(
