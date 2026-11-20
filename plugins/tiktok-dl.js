@@ -6,11 +6,18 @@
 */
 
 import axios from 'axios';
+import { execFile } from 'child_process';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { promisify } from 'util';
 import {
   downloadKey,
   hasDownload,
   startDownload,
 } from '../src/funcion/download-registry.js';
+
+const execFileAsync = promisify(execFile);
 
 const SERVICE = 'tiktok';
 const VIDEO_INLINE_LIMIT = 50 * 1024 * 1024;
@@ -250,9 +257,15 @@ async function fetchTikTokDirect(url, signal) {
   if (!detail) return null;
 
   const images = flattenUrls(detail.imagePost?.images?.map((img) => img?.imageURL?.urlList?.[0]));
+  const bitrateUrls = Array.isArray(detail.video?.bitrateInfo)
+    ? [...detail.video.bitrateInfo]
+        .sort((a, b) => (Number(b?.Bitrate) || 0) - (Number(a?.Bitrate) || 0))
+        .flatMap((b) => b?.PlayAddr?.UrlList || [])
+    : [];
   const videoCandidates = flattenUrls([
-    detail.video?.playAddr,
+    ...bitrateUrls,
     detail.video?.downloadAddr,
+    detail.video?.playAddr,
   ]).filter((u) => !/\.mp3(\?|$)/i.test(u));
   const audio = toAbsoluteUrl(detail.music?.playUrl);
 
@@ -299,7 +312,7 @@ async function fetchTikwm(url, signal) {
 
   const images = flattenUrls(d.images, 'https://www.tikwm.com');
   const videoCandidates = flattenUrls(
-    [d.play, d.hdplay, d.wmplay],
+    [d.hdplay, d.play, d.wmplay],
     'https://www.tikwm.com',
   ).filter((u) => !/\.mp3(\?|$)/i.test(u));
   const audio = toAbsoluteUrl(d.music || d.music_info?.play, 'https://www.tikwm.com');
@@ -426,11 +439,12 @@ async function downloadFromProvider(info, { audioOnly, signal }) {
           maxBytes: MAX_DOCUMENT_LIMIT,
         });
         if (!isMp4(buffer) && !contentType.includes('video/')) continue;
-        if (buffer.length <= VIDEO_INLINE_LIMIT) {
-          return { kind: 'video', buffer, oversized: false };
+        const remuxed = await remuxFaststart(buffer);
+        if (remuxed.length <= VIDEO_INLINE_LIMIT) {
+          return { kind: 'video', buffer: remuxed, oversized: false };
         }
-        if (!oversizedFallback || buffer.length < oversizedFallback.buffer.length) {
-          oversizedFallback = { kind: 'video', buffer, oversized: true };
+        if (!oversizedFallback || remuxed.length < oversizedFallback.buffer.length) {
+          oversizedFallback = { kind: 'video', buffer: remuxed, oversized: true };
         }
       } catch (err) {
         if (isAbortError(err) && signal?.aborted) throw err;
@@ -440,6 +454,44 @@ async function downloadFromProvider(info, { audioOnly, signal }) {
   }
 
   throw new Error('No se pudo descargar la media');
+}
+
+async function remuxFaststart(buffer) {
+  const ts = `${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const tmpInput = join(tmpdir(), `tiktok_in_${ts}.mp4`);
+  const tmpOutput = join(tmpdir(), `tiktok_out_${ts}.mp4`);
+  try {
+    writeFileSync(tmpInput, buffer);
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-i', tmpInput,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        '-movflags', '+faststart',
+        tmpOutput,
+      ],
+      { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    if (existsSync(tmpOutput)) {
+      const remuxed = readFileSync(tmpOutput);
+      if (isMp4(remuxed)) return remuxed;
+    }
+  } catch (err) {
+    console.warn('[TikTok-DL] Remux omitido, usando MP4 original:', err?.message || err);
+  } finally {
+    for (const file of [tmpInput, tmpOutput]) {
+      if (existsSync(file)) {
+        try {
+          unlinkSync(file);
+        } catch {}
+      }
+    }
+  }
+  return buffer;
 }
 
 async function sendImageGroup(conn, chat, images, quoted) {
