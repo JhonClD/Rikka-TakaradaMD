@@ -191,35 +191,112 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
 
 /**
  * Convierte un sticker WebP a PNG (si es estático) o MP4 (si es animado).
+ * FFmpeg no decodifica WebP animados (chunks ANIM/ANMF) de forma nativa, así que
+ * para stickers animados primero extraemos los frames con `node-webpmux`.
  */
 async function stickerToMedia(webpBuffer, { forceVideo = false } = {}) {
   const input = toBuffer(webpBuffer);
   if (!isValidWebp(input)) throw new Error('El archivo no es un sticker WebP válido');
 
   const animated = isAnimatedWebp(input);
-  const tmpIn = uniqueTmpPath('stk_rev_in', 'webp');
-  const outExt = animated || forceVideo ? 'mp4' : 'png';
-  const tmpOut = uniqueTmpPath('stk_rev_out', outExt);
+  const bin = await getFfmpegBin();
+
+  if (!animated) {
+    const tmpIn = uniqueTmpPath('stk_rev_in', 'webp');
+    const outExt = forceVideo ? 'mp4' : 'png';
+    const tmpOut = uniqueTmpPath('stk_rev_out', outExt);
+    try {
+      await fs.promises.writeFile(tmpIn, input);
+      if (!forceVideo) {
+        const png = await runFfmpegConvert(tmpIn, tmpOut, ['-vframes', '1']);
+        return { kind: 'image', buffer: png, mimetype: 'image/png' };
+      }
+      await execFileAsync(
+        bin,
+        [
+          '-y',
+          '-loop', '1',
+          '-i', tmpIn,
+          '-t', '2',
+          '-movflags', '+faststart',
+          '-pix_fmt', 'yuv420p',
+          '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '22',
+          tmpOut,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      );
+      const mp4 = await fs.promises.readFile(tmpOut);
+      return { kind: 'video', buffer: mp4, mimetype: 'video/mp4' };
+    } finally {
+      await cleanUp(tmpIn, tmpOut);
+    }
+  }
+
+  // Sticker animado: demux de frames con node-webpmux → concat en FFmpeg → MP4
+  const frameDir = path.join(
+    os.tmpdir(),
+    `stk_frames_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+  );
+  const tmpOut = uniqueTmpPath('stk_rev_out', 'mp4');
 
   try {
-    await fs.promises.writeFile(tmpIn, input);
+    await fs.promises.mkdir(frameDir, { recursive: true });
+    const img = new webp.Image();
+    await img.load(input);
+    await img.demux({ path: frameDir, prefix: 'f_' });
 
-    if (outExt === 'png') {
-      const png = await runFfmpegConvert(tmpIn, tmpOut, ['-vframes', '1']);
-      return { kind: 'image', buffer: png, mimetype: 'image/png' };
+    const files = (await fs.promises.readdir(frameDir))
+      .filter((f) => f.endsWith('.webp'))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+    if (!files.length) throw new Error('No se pudieron extraer frames del sticker animado');
+
+    const canvasW = Math.max(2, Math.floor((img.width || 512) / 2) * 2);
+    const canvasH = Math.max(2, Math.floor((img.height || 512) / 2) * 2);
+    const frameMeta = Array.isArray(img.frames) ? img.frames : [];
+
+    const concatLines = [];
+    for (let i = 0; i < files.length; i++) {
+      const filePath = path.join(frameDir, files[i]).replace(/'/g, "'\\''");
+      const delayMs = Number(frameMeta[i]?.delay);
+      const durationSec = (Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 67) / 1000;
+      concatLines.push(`file '${filePath}'`);
+      concatLines.push(`duration ${durationSec.toFixed(4)}`);
     }
+    // El demuxer concat requiere repetir la última entrada para respetar su duración
+    const lastFilePath = path.join(frameDir, files[files.length - 1]).replace(/'/g, "'\\''");
+    concatLines.push(`file '${lastFilePath}'`);
 
-    const mp4 = await runFfmpegConvert(tmpIn, tmpOut, [
-      '-movflags', '+faststart',
-      '-pix_fmt', 'yuv420p',
-      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '22',
-    ]);
+    const listPath = path.join(frameDir, 'list.txt');
+    await fs.promises.writeFile(listPath, concatLines.join('\n'), 'utf8');
+
+    await execFileAsync(
+      bin,
+      [
+        '-y',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', listPath,
+        '-vsync', 'vfr',
+        '-movflags', '+faststart',
+        '-pix_fmt', 'yuv420p',
+        '-vf', `scale=${canvasW}:${canvasH}:force_original_aspect_ratio=decrease,pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=black`,
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '22',
+        tmpOut,
+      ],
+      { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+    );
+
+    const mp4 = await fs.promises.readFile(tmpOut);
     return { kind: 'video', buffer: mp4, mimetype: 'video/mp4' };
   } finally {
-    await cleanUp(tmpIn, tmpOut);
+    await cleanUp(tmpOut);
+    await fs.promises.rm(frameDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
