@@ -70,8 +70,38 @@ const isAbortError = (err) =>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function requestJson(url, { method = 'GET', headers = {}, body = null, timeout = 15_000, signal } = {}) {
-  const reqHeaders = { Accept: 'application/json, text/plain, */*', ...headers };
+function extractCookies(headersObj) {
+  if (!headersObj) return '';
+  if (typeof headersObj.getSetCookie === 'function') {
+    const list = headersObj.getSetCookie();
+    if (Array.isArray(list) && list.length) {
+      return list.map((c) => c.split(';')[0]).filter(Boolean).join('; ');
+    }
+  }
+  const raw =
+    typeof headersObj.get === 'function'
+      ? headersObj.get('set-cookie')
+      : headersObj['set-cookie'];
+  if (!raw) return '';
+  if (Array.isArray(raw)) {
+    return raw.map((c) => c.split(';')[0]).filter(Boolean).join('; ');
+  }
+  return String(raw)
+    .split(/,(?=\s*[^;]+=)/)
+    .map((c) => c.split(';')[0].trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+async function requestText(
+  url,
+  { method = 'GET', headers = {}, body = null, timeout = 15_000, signal } = {},
+) {
+  const reqHeaders = {
+    Accept: 'text/html,application/xhtml+xml,application/json,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    ...headers,
+  };
   let lastErr = null;
 
   const wreq = await getWreq();
@@ -88,7 +118,7 @@ async function requestJson(url, { method = 'GET', headers = {}, body = null, tim
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`wreq HTTP ${res.status}`);
-      return JSON.parse(text);
+      return { text, cookies: extractCookies(res.headers) };
     } catch (err) {
       if (isAbortError(err) && signal?.aborted) throw err;
       lastErr = err;
@@ -106,7 +136,7 @@ async function requestJson(url, { method = 'GET', headers = {}, body = null, tim
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`impit HTTP ${res.status}`);
-      return JSON.parse(text);
+      return { text, cookies: extractCookies(res.headers) };
     } catch (err) {
       if (isAbortError(err) && signal?.aborted) throw err;
       lastErr = err;
@@ -119,14 +149,24 @@ async function requestJson(url, { method = 'GET', headers = {}, body = null, tim
       method,
       headers: { 'User-Agent': UA, ...reqHeaders },
       data: body ?? undefined,
+      responseType: 'text',
       timeout,
       signal,
     });
-    return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    const text = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+    return { text, cookies: extractCookies(res.headers) };
   } catch (err) {
     if (isAbortError(err) && signal?.aborted) throw err;
     throw lastErr || err;
   }
+}
+
+async function requestJson(url, opts = {}) {
+  const { text } = await requestText(url, {
+    ...opts,
+    headers: { Accept: 'application/json, text/plain, */*', ...(opts.headers || {}) },
+  });
+  return JSON.parse(text);
 }
 
 // ─── Utilidades ───────────────────────────────────────────────
@@ -180,7 +220,7 @@ const detectImageMime = (buffer, contentType = '') => {
   return 'image/jpeg';
 };
 
-function buildDownloadHeaders(url) {
+function buildDownloadHeaders(url, extra = {}) {
   const headers = { 'User-Agent': UA, Accept: '*/*' };
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -193,9 +233,10 @@ function buildDownloadHeaders(url) {
       host.includes('muscdn')
     ) {
       headers.Referer = 'https://www.tiktok.com/';
+      headers.Origin = 'https://www.tiktok.com';
     }
   } catch {}
-  return headers;
+  return { ...headers, ...extra };
 }
 
 async function safeReact(conn, m, emoji) {
@@ -253,52 +294,53 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   return readFileSync(outputPath);
 }
 
-// ─── Búsqueda multi-fuente con TLS de Chrome ──────────────────
+// ─── Búsqueda multi-fuente (TikWM + DuckDuckGo + Bing + TikTok) ─
 
-function extractListFromPayload(data) {
-  if (!data) return [];
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.data?.videos)) return data.data.videos;
-  if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.result?.videos)) return data.result.videos;
-  if (Array.isArray(data?.result)) return data.result;
-  if (Array.isArray(data?.results)) return data.results;
-  return [];
+function extractTikTokPostUrls(html) {
+  const seenIds = new Set();
+  const urls = [];
+
+  const addUrl = (raw) => {
+    if (!raw) return;
+    let clean = raw;
+    try {
+      clean = decodeURIComponent(raw);
+    } catch {}
+    const m = clean.match(/https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([A-Za-z0-9._-]+)\/(video|photo)\/(\d{10,25})/i);
+    if (!m) return;
+    const id = m[3];
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
+    urls.push(`https://www.tiktok.com/@${m[1]}/${m[2].toLowerCase()}/${id}`);
+  };
+
+  // Enlaces directos en HTML
+  for (const m of html.matchAll(/https?:\/\/(?:www\.|m\.)?tiktok\.com\/@[A-Za-z0-9._-]+\/(?:video|photo)\/\d{10,25}/gi)) {
+    addUrl(m[0]);
+  }
+  // Enlaces codificados (ej. DuckDuckGo uddg=https%3A%2F%2Fwww.tiktok.com...)
+  for (const m of html.matchAll(/https%3A%2F%2F(?:www\.|m\.)?tiktok\.com%2F%40[A-Za-z0-9._%-]+%2F(?:video|photo)%2F\d{10,25}/gi)) {
+    addUrl(m[0]);
+  }
+
+  return urls;
 }
 
-function parseSearchList(list, base = 'https://www.tikwm.com') {
+function parseTikwmList(list) {
   if (!Array.isArray(list)) return [];
   const items = [];
   for (const v of list) {
     if (!v || typeof v !== 'object') continue;
-    const rawImages = v.images || v.slides || v.photos;
-    if (Array.isArray(rawImages) && rawImages.length) {
-      for (const raw of rawImages) {
-        const imgUrl = toAbsoluteUrl(
-          typeof raw === 'string' ? raw : raw?.url || raw?.image_url,
-          base,
-        );
+    if (Array.isArray(v.images) && v.images.length) {
+      for (const raw of v.images) {
+        const imgUrl = toAbsoluteUrl(typeof raw === 'string' ? raw : raw?.url);
         if (imgUrl) items.push({ kind: 'photo', url: imgUrl, title: v.title || '' });
       }
       continue;
     }
-
-    // Priorizamos `play`/`nowm` (sin marca de agua y ligero) para entrega rápida
-    const candidates = [
-      v.play,
-      v.nowm,
-      v.no_watermark,
-      v.hdplay,
-      v.hd,
-      v.video_url,
-      typeof v.video === 'string' ? v.video : v.video?.play || v.video?.noWatermark,
-      v.media?.play,
-      v.wm,
-      v.wmplay,
-    ]
-      .map((u) => toAbsoluteUrl(u, base))
+    const candidates = [v.play, v.hdplay, v.wmplay]
+      .map((u) => toAbsoluteUrl(u))
       .filter((u) => u && !/\.mp3(\?|$)/i.test(u));
-
     if (candidates.length) {
       items.push({ kind: 'video', urls: [...new Set(candidates)], title: v.title || '' });
     }
@@ -309,74 +351,65 @@ function parseSearchList(list, base = 'https://www.tikwm.com') {
 async function searchTikwm(query, fetchCount, signal) {
   const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(query)}&count=${fetchCount}&cursor=0&hd=1`;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const data = await requestJson(url, { timeout: 15_000, signal });
-    const items = parseSearchList(extractListFromPayload(data), 'https://www.tikwm.com');
+    const data = await requestJson(url, { timeout: 10_000, signal });
+    const items = parseTikwmList(data?.data?.videos);
     if (items.length) return items;
     if (data?.code === -1 && attempt === 0 && !signal?.aborted) {
       await sleep(1100);
       continue;
-    }
-    // Respaldo POST a TikWM (formato web)
-    if (attempt === 0 && !signal?.aborted) {
-      const form = new URLSearchParams({
-        keywords: query,
-        count: String(fetchCount),
-        cursor: '0',
-        web: '1',
-        hd: '1',
-      });
-      const postData = await requestJson('https://www.tikwm.com/api/feed/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          Origin: 'https://www.tikwm.com',
-          Referer: 'https://www.tikwm.com/',
-        },
-        body: form.toString(),
-        timeout: 15_000,
-        signal,
-      });
-      const postItems = parseSearchList(extractListFromPayload(postData), 'https://www.tikwm.com');
-      if (postItems.length) return postItems;
     }
     throw new Error(data?.msg || 'TikWM vacío');
   }
   throw new Error('TikWM vacío');
 }
 
+async function searchDuckDuckGo(query, signal) {
+  const q = encodeURIComponent(`site:tiktok.com ${query}`);
+  const { text: html } = await requestText(`https://html.duckduckgo.com/html/?q=${q}`, {
+    timeout: 12_000,
+    signal,
+  });
+  const urls = extractTikTokPostUrls(html);
+  if (!urls.length) throw new Error('DuckDuckGo sin enlaces de TikTok');
+  return urls.map((url) => ({ kind: 'post', url }));
+}
+
+async function searchBing(query, signal) {
+  const q = encodeURIComponent(`site:tiktok.com ${query}`);
+  const { text: html } = await requestText(`https://www.bing.com/search?q=${q}&count=30`, {
+    timeout: 12_000,
+    signal,
+  });
+  const urls = extractTikTokPostUrls(html);
+  if (!urls.length) throw new Error('Bing sin enlaces de TikTok');
+  return urls.map((url) => ({ kind: 'post', url }));
+}
+
+async function searchTikTokTag(query, signal) {
+  const tag = query
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .toLowerCase();
+  if (!tag) throw new Error('Tag vacío');
+
+  const { text: html } = await requestText(`https://www.tiktok.com/tag/${encodeURIComponent(tag)}`, {
+    timeout: 12_000,
+    signal,
+  });
+  const urls = extractTikTokPostUrls(html);
+  if (!urls.length) throw new Error('TikTok tag sin resultados');
+  return urls.map((url) => ({ kind: 'post', url }));
+}
+
 async function searchTikTok(query, count, signal) {
   const fetchCount = Math.min(30, Math.max(15, count + 6));
-  const encoded = encodeURIComponent(query);
 
   const providers = [
-    {
-      name: 'TikWM',
-      run: () => searchTikwm(query, fetchCount, signal),
-    },
-    {
-      name: 'Ryzumi',
-      run: async () => {
-        const data = await requestJson(
-          `https://api.ryzumi.vip/api/search/tiktok?query=${encoded}`,
-          { timeout: 12_000, signal },
-        );
-        const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Ryzumi vacío');
-        return items;
-      },
-    },
-    {
-      name: 'Vreden',
-      run: async () => {
-        const data = await requestJson(
-          `https://api.vreden.my.id/api/tiktoksearch?query=${encoded}`,
-          { timeout: 12_000, signal },
-        );
-        const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Vreden vacío');
-        return items;
-      },
-    },
+    { name: 'TikWM', run: () => searchTikwm(query, fetchCount, signal) },
+    { name: 'DuckDuckGo', run: () => searchDuckDuckGo(query, signal) },
+    { name: 'Bing', run: () => searchBing(query, signal) },
+    { name: 'TikTokTag', run: () => searchTikTokTag(query, signal) },
   ];
 
   try {
@@ -398,17 +431,76 @@ async function searchTikTok(query, count, signal) {
   }
 }
 
+// ─── Resolución directa de un post de TikTok (video o fotos) ──
+
+async function resolvePostUrl(postUrl, signal) {
+  // 1. Scraping directo del HTML del post (con cookies para el CDN oficial)
+  try {
+    const { text: html, cookies } = await requestText(postUrl, { timeout: 15_000, signal });
+    const match = html.match(
+      /<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
+    );
+    if (match?.[1]) {
+      const json = JSON.parse(match[1]);
+      const detail =
+        json?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct ||
+        json?.__DEFAULT_SCOPE__?.['webapp.photo-detail']?.itemInfo?.itemStruct;
+
+      if (detail) {
+        const dlHeaders = {
+          Referer: 'https://www.tiktok.com/',
+          Origin: 'https://www.tiktok.com',
+          ...(cookies ? { Cookie: cookies } : {}),
+        };
+
+        const photos = (detail.imagePost?.images || [])
+          .map((img) => img?.imageURL?.urlList?.[0])
+          .filter(Boolean);
+        if (photos.length) {
+          return { kind: 'photo', url: photos[0], headers: dlHeaders };
+        }
+
+        const videoUrls = [detail.video?.playAddr, detail.video?.downloadAddr].filter(Boolean);
+        if (videoUrls.length) {
+          return { kind: 'video', urls: videoUrls, headers: dlHeaders };
+        }
+      }
+    }
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+  }
+
+  // 2. Respaldo Tiklydown
+  try {
+    const data = await requestJson(
+      `https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(postUrl)}`,
+      { timeout: 12_000, signal },
+    );
+    const photos = (Array.isArray(data?.images) ? data.images : [])
+      .map((i) => (typeof i === 'string' ? i : i?.url))
+      .filter(Boolean);
+    if (photos.length) return { kind: 'photo', url: photos[0], headers: {} };
+
+    const videoUrls = [data?.video?.noWatermark, data?.video?.watermark].filter(Boolean);
+    if (videoUrls.length) return { kind: 'video', urls: videoUrls, headers: {} };
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+  }
+
+  throw new Error('No se pudo extraer media del post');
+}
+
 // ─── Descarga rápida de resultados ────────────────────────────
 
-async function fetchMediaBuffer(url, { signal, maxBytes }) {
-  const headers = buildDownloadHeaders(url);
+async function fetchMediaBuffer(url, { headers = {}, signal, maxBytes }) {
+  const reqHeaders = buildDownloadHeaders(url, headers);
   let lastErr = null;
 
-  // 1. Axios directo (más rápido para binarios grandes si no hay bloqueo TLS)
+  // 1. Axios directo (más rápido para binarios)
   try {
     const res = await axios.get(url, {
       responseType: 'arraybuffer',
-      headers,
+      headers: reqHeaders,
       timeout: 60_000,
       maxContentLength: maxBytes,
       maxBodyLength: maxBytes,
@@ -434,7 +526,7 @@ async function fetchMediaBuffer(url, { signal, maxBytes }) {
         browser: 'chrome_136',
         os: 'windows',
         method: 'GET',
-        headers,
+        headers: reqHeaders,
         redirect: 'follow',
         signal: combineSignal(signal, 60_000),
       });
@@ -454,9 +546,13 @@ async function fetchMediaBuffer(url, { signal, maxBytes }) {
   throw lastErr || new Error('Error al descargar');
 }
 
-async function downloadResult(item, index, ts, signal) {
+async function downloadResult(rawItem, index, ts, signal) {
+  const item = rawItem.kind === 'post' ? await resolvePostUrl(rawItem.url, signal) : rawItem;
+  const headers = item.headers || {};
+
   if (item.kind === 'photo') {
     const { buffer, contentType } = await fetchMediaBuffer(item.url, {
+      headers,
       signal,
       maxBytes: VIDEO_INLINE_LIMIT,
     });
@@ -480,6 +576,7 @@ async function downloadResult(item, index, ts, signal) {
       if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
       try {
         const { buffer: candidate, contentType } = await fetchMediaBuffer(url, {
+          headers,
           signal,
           maxBytes: MAX_DOCUMENT_LIMIT,
         });
