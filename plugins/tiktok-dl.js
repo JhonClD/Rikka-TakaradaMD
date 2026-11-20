@@ -33,10 +33,40 @@ const REQUEST_HEADERS = {
   Accept: 'application/json, text/plain, */*',
 };
 
-const MEDIA_HEADERS = {
-  ...REQUEST_HEADERS,
-  Referer: 'https://www.tikwm.com/',
-};
+
+// ─── Capa HTTP con huella Chrome (wreq-js → impit → axios) ────
+
+let wreqMod = null;
+let wreqFailed = false;
+async function getWreq() {
+  if (wreqMod || wreqFailed) return wreqMod;
+  try {
+    wreqMod = await import('wreq-js');
+  } catch {
+    wreqFailed = true;
+  }
+  return wreqMod;
+}
+
+let impitClient = null;
+let impitFailed = false;
+async function getImpit() {
+  if (impitClient || impitFailed) return impitClient;
+  try {
+    const { Impit } = await import('impit');
+    impitClient = new Impit({ browser: 'chrome136', timeout: 20_000 });
+  } catch {
+    impitFailed = true;
+  }
+  return impitClient;
+}
+
+function combineSignal(signal, timeoutMs) {
+  const own = AbortSignal.timeout(timeoutMs);
+  if (!signal) return own;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, own]);
+  return signal;
+}
 
 // ─── Utilidades ───────────────────────────────────────────────
 
@@ -45,6 +75,65 @@ const isAbortError = (err) =>
   err?.name === 'CanceledError' ||
   err?.code === 'ERR_CANCELED' ||
   err?.code === 'ABORT_ERR';
+
+async function requestJson(url, { method = 'GET', headers = {}, body = null, timeout = 20_000, signal } = {}) {
+  const reqHeaders = { Accept: 'application/json, text/plain, */*', ...headers };
+  let lastErr = null;
+
+  const wreq = await getWreq();
+  if (wreq?.fetch) {
+    try {
+      const res = await wreq.fetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        method,
+        headers: reqHeaders,
+        redirect: 'follow',
+        ...(body == null ? {} : { body }),
+        signal: combineSignal(signal, timeout),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`wreq HTTP ${res.status}`);
+      return JSON.parse(text);
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+    }
+  }
+
+  const impit = await getImpit();
+  if (impit) {
+    try {
+      const res = await impit.fetch(url, {
+        method,
+        headers: reqHeaders,
+        ...(body == null ? {} : { body }),
+        signal: combineSignal(signal, timeout),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`impit HTTP ${res.status}`);
+      return JSON.parse(text);
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+    }
+  }
+
+  try {
+    const res = await axios.request({
+      url,
+      method,
+      headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'], ...reqHeaders },
+      data: body ?? undefined,
+      timeout,
+      signal,
+    });
+    return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+    throw lastErr || err;
+  }
+}
 
 const formatBytes = (bytes) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return 'N/A';
@@ -208,23 +297,24 @@ function normalizeTikwmData(d) {
 }
 
 async function fetchTikwmGet(url, signal) {
-  const { data } = await axios.get('https://www.tikwm.com/api/', {
-    params: { url, hd: 1 },
-    headers: MEDIA_HEADERS,
-    timeout: 20_000,
-    signal,
-  });
+  const data = await requestJson(
+    `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`,
+    { timeout: 20_000, signal },
+  );
   if (data?.code !== 0) return null;
   return normalizeTikwmData(data.data);
 }
 
 async function fetchTikwmPost(url, signal) {
   const form = new URLSearchParams({ url, hd: '1' });
-  const { data } = await axios.post('https://www.tikwm.com/api/', form.toString(), {
+  const data = await requestJson('https://www.tikwm.com/api/', {
+    method: 'POST',
     headers: {
-      ...MEDIA_HEADERS,
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      Origin: 'https://www.tikwm.com',
+      Referer: 'https://www.tikwm.com/',
     },
+    body: form.toString(),
     timeout: 20_000,
     signal,
   });
@@ -448,6 +538,32 @@ async function fetchBuffer(url, { headers = {}, signal, maxBytes = MAX_DOCUMENT_
       lastErr = err;
       const status = err?.response?.status;
       if (status !== 403 && status !== 401) break;
+    }
+  }
+
+  const wreq = await getWreq();
+  if (wreq?.fetch) {
+    try {
+      const res = await wreq.fetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        method: 'GET',
+        headers: attempts[0],
+        redirect: 'follow',
+        signal: combineSignal(signal, 90_000),
+      });
+      if (!res.ok) throw new Error(`wreq HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (!buffer.length) throw new Error('Respuesta vacía');
+      if (buffer.length > maxBytes) throw new Error(`Archivo supera ${formatBytes(maxBytes)}`);
+      const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
+      if (isLikelyHtml(buffer, contentType)) {
+        throw new Error('La fuente devolvió HTML en lugar de media');
+      }
+      return { buffer, contentType };
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
     }
   }
 

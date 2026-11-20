@@ -26,15 +26,110 @@ const VIDEO_INLINE_LIMIT = 50 * 1024 * 1024;
 const MAX_DOCUMENT_LIMIT = 100 * 1024 * 1024;
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
 
-// ─── Utilidades ───────────────────────────────────────────────
+// ─── Capa HTTP con huella Chrome (wreq-js → impit → axios) ────
+
+let wreqMod = null;
+let wreqFailed = false;
+async function getWreq() {
+  if (wreqMod || wreqFailed) return wreqMod;
+  try {
+    wreqMod = await import('wreq-js');
+  } catch {
+    wreqFailed = true;
+  }
+  return wreqMod;
+}
+
+let impitClient = null;
+let impitFailed = false;
+async function getImpit() {
+  if (impitClient || impitFailed) return impitClient;
+  try {
+    const { Impit } = await import('impit');
+    impitClient = new Impit({ browser: 'chrome136', timeout: 15_000 });
+  } catch {
+    impitFailed = true;
+  }
+  return impitClient;
+}
+
+function combineSignal(signal, timeoutMs) {
+  const own = AbortSignal.timeout(timeoutMs);
+  if (!signal) return own;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, own]);
+  return signal;
+}
 
 const isAbortError = (err) =>
   err?.name === 'AbortError' ||
   err?.name === 'CanceledError' ||
   err?.code === 'ERR_CANCELED' ||
   err?.code === 'ABORT_ERR';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function requestJson(url, { method = 'GET', headers = {}, body = null, timeout = 15_000, signal } = {}) {
+  const reqHeaders = { Accept: 'application/json, text/plain, */*', ...headers };
+  let lastErr = null;
+
+  const wreq = await getWreq();
+  if (wreq?.fetch) {
+    try {
+      const res = await wreq.fetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        method,
+        headers: reqHeaders,
+        redirect: 'follow',
+        ...(body == null ? {} : { body }),
+        signal: combineSignal(signal, timeout),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`wreq HTTP ${res.status}`);
+      return JSON.parse(text);
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+    }
+  }
+
+  const impit = await getImpit();
+  if (impit) {
+    try {
+      const res = await impit.fetch(url, {
+        method,
+        headers: reqHeaders,
+        ...(body == null ? {} : { body }),
+        signal: combineSignal(signal, timeout),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`impit HTTP ${res.status}`);
+      return JSON.parse(text);
+    } catch (err) {
+      if (isAbortError(err) && signal?.aborted) throw err;
+      lastErr = err;
+    }
+  }
+
+  try {
+    const res = await axios.request({
+      url,
+      method,
+      headers: { 'User-Agent': UA, ...reqHeaders },
+      data: body ?? undefined,
+      timeout,
+      signal,
+    });
+    return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+    throw lastErr || err;
+  }
+}
+
+// ─── Utilidades ───────────────────────────────────────────────
 
 const formatBytes = (bytes) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return 'N/A';
@@ -158,16 +253,13 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
   return readFileSync(outputPath);
 }
 
-// ─── Búsqueda paralela multi-fuente (videos + imágenes) ───────
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// ─── Búsqueda multi-fuente con TLS de Chrome ──────────────────
 
 function extractListFromPayload(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.data?.videos)) return data.data.videos;
   if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.meta)) return data.meta;
   if (Array.isArray(data?.result?.videos)) return data.result.videos;
   if (Array.isArray(data?.result)) return data.result;
   if (Array.isArray(data?.results)) return data.results;
@@ -217,13 +309,35 @@ function parseSearchList(list, base = 'https://www.tikwm.com') {
 async function searchTikwm(query, fetchCount, signal) {
   const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(query)}&count=${fetchCount}&cursor=0&hd=1`;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const { data } = await axios.get(url, { timeout: 15_000, signal });
+    const data = await requestJson(url, { timeout: 15_000, signal });
     const items = parseSearchList(extractListFromPayload(data), 'https://www.tikwm.com');
     if (items.length) return items;
-    // TikWM limita a 1 req/seg; si responde code -1, reintentamos una vez tras 1.1s
     if (data?.code === -1 && attempt === 0 && !signal?.aborted) {
       await sleep(1100);
       continue;
+    }
+    // Respaldo POST a TikWM (formato web)
+    if (attempt === 0 && !signal?.aborted) {
+      const form = new URLSearchParams({
+        keywords: query,
+        count: String(fetchCount),
+        cursor: '0',
+        web: '1',
+        hd: '1',
+      });
+      const postData = await requestJson('https://www.tikwm.com/api/feed/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Origin: 'https://www.tikwm.com',
+          Referer: 'https://www.tikwm.com/',
+        },
+        body: form.toString(),
+        timeout: 15_000,
+        signal,
+      });
+      const postItems = parseSearchList(extractListFromPayload(postData), 'https://www.tikwm.com');
+      if (postItems.length) return postItems;
     }
     throw new Error(data?.msg || 'TikWM vacío');
   }
@@ -240,57 +354,31 @@ async function searchTikTok(query, count, signal) {
       run: () => searchTikwm(query, fetchCount, signal),
     },
     {
-      name: 'Delirius',
+      name: 'Ryzumi',
       run: async () => {
-        const { data } = await axios.get(
-          `https://delirius-apiofc.vercel.app/search/tiktoksearch?query=${encoded}`,
-          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
+        const data = await requestJson(
+          `https://api.ryzumi.vip/api/search/tiktok?query=${encoded}`,
+          { timeout: 12_000, signal },
         );
         const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Delirius vacío');
+        if (!items.length) throw new Error('Ryzumi vacío');
         return items;
       },
     },
     {
-      name: 'Causa',
+      name: 'Vreden',
       run: async () => {
-        const { data } = await axios.get(
-          `https://rest.apicausas.xyz/api/v1/buscadores/tiktok?apikey=causa-db9690e010e31139&q=${encoded}`,
-          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
+        const data = await requestJson(
+          `https://api.vreden.my.id/api/tiktoksearch?query=${encoded}`,
+          { timeout: 12_000, signal },
         );
         const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Causa vacío');
-        return items;
-      },
-    },
-    {
-      name: 'Siputzx',
-      run: async () => {
-        const { data } = await axios.post(
-          'https://api.siputzx.my.id/api/s/tiktok',
-          { query },
-          { headers: { 'User-Agent': UA, 'Content-Type': 'application/json' }, timeout: 12_000, signal },
-        );
-        const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Siputzx vacío');
-        return items;
-      },
-    },
-    {
-      name: 'Ryzendesu',
-      run: async () => {
-        const { data } = await axios.get(
-          `https://api.ryzendesu.vip/api/search/tiktok?query=${encoded}`,
-          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
-        );
-        const items = parseSearchList(extractListFromPayload(data));
-        if (!items.length) throw new Error('Ryzendesu vacío');
+        if (!items.length) throw new Error('Vreden vacío');
         return items;
       },
     },
   ];
 
-  // Carrera en paralelo entre hosts distintos: responde tan pronto el primero entregue resultados
   try {
     return await Promise.any(
       providers.map(async ({ name, run }) => {
@@ -313,33 +401,56 @@ async function searchTikTok(query, count, signal) {
 // ─── Descarga rápida de resultados ────────────────────────────
 
 async function fetchMediaBuffer(url, { signal, maxBytes }) {
-  const attempts = [buildDownloadHeaders(url), { 'User-Agent': UA, Accept: '*/*' }];
+  const headers = buildDownloadHeaders(url);
   let lastErr = null;
 
-  for (const headers of attempts) {
+  // 1. Axios directo (más rápido para binarios grandes si no hay bloqueo TLS)
+  try {
+    const res = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers,
+      timeout: 60_000,
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes,
+      validateStatus: (s) => s >= 200 && s < 300,
+      signal,
+    });
+    const buffer = Buffer.from(res.data);
+    const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
+    if (!buffer.length || isLikelyHtml(buffer, contentType)) {
+      throw new Error('Respuesta inválida');
+    }
+    return { buffer, contentType };
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) throw err;
+    lastErr = err;
+  }
+
+  // 2. Respaldo con huella Chrome (wreq-js) si el CDN devolvió 403 a axios
+  const wreq = await getWreq();
+  if (wreq?.fetch) {
     try {
-      const res = await axios.get(url, {
-        responseType: 'arraybuffer',
+      const res = await wreq.fetch(url, {
+        browser: 'chrome_136',
+        os: 'windows',
+        method: 'GET',
         headers,
-        timeout: 60_000,
-        maxContentLength: maxBytes,
-        maxBodyLength: maxBytes,
-        validateStatus: (s) => s >= 200 && s < 300,
-        signal,
+        redirect: 'follow',
+        signal: combineSignal(signal, 60_000),
       });
-      const buffer = Buffer.from(res.data);
-      const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
-      if (!buffer.length || isLikelyHtml(buffer, contentType)) {
+      if (!res.ok) throw new Error(`wreq HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
+      if (!buffer.length || buffer.length > maxBytes || isLikelyHtml(buffer, contentType)) {
         throw new Error('Respuesta inválida');
       }
       return { buffer, contentType };
     } catch (err) {
       if (isAbortError(err) && signal?.aborted) throw err;
       lastErr = err;
-      const status = err?.response?.status;
-      if (status !== 403 && status !== 401) break;
     }
   }
+
   throw lastErr || new Error('Error al descargar');
 }
 
