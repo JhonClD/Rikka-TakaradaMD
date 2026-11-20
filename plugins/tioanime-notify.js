@@ -1702,12 +1702,54 @@ function iniciarNotificador(chatId, conn, intervalSec = null, checkNow = true) {
   iniciarSondeoCentral(conn, intervalSec, checkNow)
 }
 
+function parseGroupTargetId(rawToken) {
+  const cleaned = String(rawToken || '').trim().replace(/^[`'"<>]+|[`'"<>.,;]+$/g, '')
+  if (!cleaned) return null
+  if (/^[0-9]+(?:-[0-9]+)?@g\.us$/i.test(cleaned)) {
+    return cleaned.toLowerCase()
+  }
+  if (/^[0-9]{8,}-[0-9]{6,}$/.test(cleaned)) {
+    return `${cleaned}@g.us`
+  }
+  if (/^[0-9]{12,}$/.test(cleaned)) {
+    return `${cleaned}@g.us`
+  }
+  return null
+}
+
+function parseStartArgs(rawText) {
+  const tokens = String(rawText || '').trim().split(/\s+/).filter(Boolean)
+  let targetGroupId = null
+  let secondsArg = null
+  let invalidToken = null
+
+  for (const token of tokens) {
+    const groupId = parseGroupTargetId(token)
+    if (groupId && !targetGroupId) {
+      targetGroupId = groupId
+      continue
+    }
+    if (/^\d+$/.test(token) && secondsArg === null) {
+      secondsArg = Number.parseInt(token, 10)
+      continue
+    }
+    invalidToken = token
+  }
+
+  return { targetGroupId, secondsArg, invalidToken }
+}
+
 function detenerNotificador(chatId) {
   const entry = global.tioActiveChats.get(chatId)
   if (entry) global.tioActiveChats.delete(chatId)
   const pendientes = global.tioEpisodeQueue.filter(item => item.chatId === chatId)
   global.tioEpisodeQueue = global.tioEpisodeQueue.filter(item => item.chatId !== chatId)
   for (const item of pendientes) global.tioQueuedIds.delete(`${chatId}:${item.ep.id}`)
+  for (const item of global.tioEpisodeQueue) {
+    if (Array.isArray(item.recipients)) {
+      item.recipients = item.recipients.filter(id => id !== chatId)
+    }
+  }
   const state = loadState()
   delete state[chatId]
   saveState(state)
@@ -1753,11 +1795,17 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
   }
 
   if (command === 'tiostart') {
-    const secondsArg = Number.parseInt(text?.trim(), 10)
+    const { targetGroupId, secondsArg, invalidToken } = parseStartArgs(text)
+    if (invalidToken) {
+      return m.reply(`❌ ID de grupo no válido: \`${invalidToken}\`\nUsa un ID de grupo terminado en \`@g.us\` (ej: \`${usedPrefix}tiostart 120363410712581446@g.us\`).`)
+    }
+    const targetChatId = targetGroupId || m.chat
+    const responseChatId = targetGroupId ? CENTRAL_CHAT_ID : m.chat
+    const quoteOpt = responseChatId === m.chat ? { quoted: m } : {}
     const intervalSec = Number.isInteger(secondsArg) && secondsArg >= MIN_INTERVAL_SECONDS && secondsArg <= MAX_INTERVAL_SECONDS
       ? secondsArg
-      : CHECK_INTERVAL_SECONDS
-    iniciarNotificador(m.chat, conn, intervalSec, false)
+      : getGlobalIntervalSec()
+    iniciarNotificador(targetChatId, conn, intervalSec, false)
     let tio = [], lat = []
     try {
       tio = await fetchLatestEpisodes()
@@ -1769,22 +1817,33 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
       }
       saveSeen(seen)
     } catch (err) {
-      void reportTioError(conn, `Activación del notificador en ${m.chat}`, err)
+      void reportTioError(conn, `Activación del notificador en ${targetChatId}`, err)
     }
-    await conn.sendMessage(m.chat, {
+    await conn.sendMessage(responseChatId, {
       text: `✅ *Notificador TioAnime + LatAnime activado*\n\n┃ ⏱️ *Intervalo:* \`${formatInterval(intervalSec)}\`\n┃ 🇯🇵 *TioAnime* — \`Sub japonés\`\n┃ 🇲🇽🇪🇸 *LatAnime* — \`Latino / Castellano\`\n┃ 💬 *Chat Activo*\n📋 *${tio.length}* ep TioAnime - *${lat.length}* ep LatAnime\n> registrados como base. Solo los nuevos se enviarán.\n*Usa \`${usedPrefix}tiostop\` para detener*\n*Usa \`${usedPrefix}tiostatus\` para ver el estado*`
-    }, { quoted: m })
+    }, quoteOpt)
     return
   }
 
   if (command === 'tiostop') {
-    if (m.chat === CENTRAL_CHAT_ID) return m.reply(`ℹ️ El grupo central es receptor permanente; su sondeo no se detiene con este comando.`)
-    if (!global.tioActiveChats.has(m.chat)) return m.reply(`ℹ️ El notificador no estaba activo.`)
-    const entry = global.tioActiveChats.get(m.chat)
+    const rawArg = String(text || '').trim()
+    const targetGroupId = rawArg ? parseGroupTargetId(rawArg) : null
+    if (rawArg && !targetGroupId) {
+      return m.reply(`❌ ID de grupo no válido: \`${rawArg}\`\nUsa un ID de grupo terminado en \`@g.us\` (ej: \`${usedPrefix}tiostop 120363410712581446@g.us\`).`)
+    }
+    const targetChatId = targetGroupId || m.chat
+    const responseChatId = targetGroupId ? CENTRAL_CHAT_ID : m.chat
+    const quoteOpt = responseChatId === m.chat ? { quoted: m } : {}
+    if (targetChatId === CENTRAL_CHAT_ID) return m.reply(`ℹ️ El grupo central es receptor permanente; su sondeo no se detiene con este comando.`)
+    const entry = global.tioActiveChats.get(targetChatId) || loadState()[targetChatId]
+    if (!entry) return m.reply(`ℹ️ El notificador no estaba activo.`)
     const activeTime = formatActiveTime(entry.startedAt)
     const sentCount = Number(entry.sentCount) || 0
-    detenerNotificador(m.chat)
-    return m.reply(`🛑 *Notificador detenido*\n\n ├ Activo: *${activeTime}*\n └ Avisos enviados: *${sentCount}*\n\n*Usa ${usedPrefix}tiostart para reactivarlo.*`)
+    detenerNotificador(targetChatId)
+    await conn.sendMessage(responseChatId, {
+      text: `🛑 *Notificador detenido*\n\n ├ Activo: *${activeTime}*\n └ Avisos enviados: *${sentCount}*\n\n*Usa ${usedPrefix}tiostart para reactivarlo.*`
+    }, quoteOpt)
+    return
   }
 
   if (command === 'tiostatus') {
@@ -1911,7 +1970,7 @@ const handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
 
 handler.command = /^(tiostart|tiostop|tiostatus|tiocheck|tioqueue|tioflush|tiounblock|tiointerval|tioexample|latexample)$/i
 handler.tags    = ['anime', 'notificaciones']
-handler.help    = ['tiostart [segundos]', 'tiostop', 'tiostatus', 'tiocheck', 'tioqueue', 'tioflush', 'tiounblock', 'tiointerval <segundos>', 'tioexample [N]', 'latexample [N]']
+handler.help    = ['tiostart [id_grupo|segundos]', 'tiostop [id_grupo]', 'tiostatus', 'tiocheck', 'tioqueue', 'tioflush', 'tiounblock', 'tiointerval <segundos>', 'tioexample [N]', 'latexample [N]']
 
 handler.before = async (m, { conn }) => {
   if (conn) global.tioConn = conn
