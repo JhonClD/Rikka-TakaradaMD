@@ -51,13 +51,6 @@ const cleanMetadata = (value, fallback) => {
 
 const getMediaMessage = (message) => message?.msg || message || {};
 
-async function safeReact(conn, m, emoji) {
-  if (!conn?.sendMessage || !m?.key) return;
-  try {
-    await conn.sendMessage(m.chat, { react: { text: emoji, key: m.key } });
-  } catch {}
-}
-
 function parseModeAndText(command, rawText) {
   const cmd = String(command || '').toLowerCase();
   let mode = 'default';
@@ -160,7 +153,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       return m.reply(`✖ Responde a un *sticker* con *${usedPrefix + cmd}* para convertirlo.`);
     }
 
-    await safeReact(conn, m, '⏳');
     try {
       const webpBuf = toBuffer(await quoted.download());
       const out = await stickerToMedia(webpBuf, { forceVideo: cmd === 'tovid' });
@@ -178,10 +170,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
           { quoted: m },
         );
       }
-      await safeReact(conn, m, '✅');
     } catch (error) {
       console.error(`[${cmd}] Error:`, error?.message || error);
-      await safeReact(conn, m, '❌');
       return m.reply('❌ No se pudo convertir el sticker.');
     }
     return;
@@ -195,21 +185,17 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       );
     }
 
-    await safeReact(conn, m, '⏳');
     try {
       const webpBuf = toBuffer(await quoted.download());
       if (!isValidWebp(webpBuf)) {
-        await safeReact(conn, m, '❌');
         return m.reply('❌ El mensaje citado no es un sticker WebP válido.');
       }
 
       const { packname, author } = await buildMetadata(m, conn, text);
       const stamped = await addExif(webpBuf, packname, author, ['✨']);
       await conn.sendMessage(m.chat, { sticker: stamped }, { quoted: m });
-      await safeReact(conn, m, '✅');
     } catch (error) {
       console.error(`[${cmd}] Error:`, error?.message || error);
-      await safeReact(conn, m, '❌');
       return m.reply('❌ No se pudo actualizar el pack/autor del sticker.');
     }
     return;
@@ -233,8 +219,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     );
   }
 
-  await safeReact(conn, m, '⏳');
-
   let mediaBuffer;
   let effectiveMime = mime;
 
@@ -248,16 +232,11 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     }
   } catch (error) {
     console.error('[sticker] Error al descargar:', error?.message || error);
-    await safeReact(conn, m, '❌');
     return m.reply(`❌ No se pudo descargar el archivo.\n\`${error?.message || error}\``);
   }
 
-  if (!mediaBuffer?.length) {
-    await safeReact(conn, m, '❌');
-    return m.reply('❌ El archivo está vacío.');
-  }
+  if (!mediaBuffer?.length) return m.reply('❌ El archivo está vacío.');
   if (mediaBuffer.length > MAX_INPUT_BYTES) {
-    await safeReact(conn, m, '❌');
     return m.reply('❌ El archivo supera el límite máximo de 30 MB.');
   }
 
@@ -268,7 +247,6 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   const isAnimated = isVideo || isGif || (isWebpInput && isAnimatedWebp(mediaBuffer));
 
   if (!isImage && !isVideo && !isGif) {
-    await safeReact(conn, m, '❌');
     return m.reply('❌ Formato no soportado. Usa una imagen, video, GIF o sticker.');
   }
 
@@ -290,21 +268,17 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     }
   } catch (error) {
     console.error('[sticker] Error en conversión:', error?.stack || error);
-    await safeReact(conn, m, '❌');
     return m.reply('❌ No se pudo convertir el archivo a sticker. Verifica que FFmpeg esté disponible.');
   }
 
   if (!Buffer.isBuffer(webpBuffer) || !webpBuffer.length) {
-    await safeReact(conn, m, '❌');
     return m.reply('❌ La conversión no produjo un sticker válido.');
   }
 
   try {
     await conn.sendMessage(m.chat, { sticker: webpBuffer }, { quoted: m });
-    await safeReact(conn, m, '✅');
   } catch (error) {
     console.error('[sticker] Error al enviar:', error?.message || error);
-    await safeReact(conn, m, '❌');
     return m.reply('❌ El sticker se generó, pero no se pudo enviar.');
   }
 };
