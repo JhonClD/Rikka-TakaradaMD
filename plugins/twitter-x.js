@@ -1,233 +1,253 @@
-import axios from 'axios'
+import {
+  downloadKey,
+  hasDownload,
+  startDownload,
+} from '../src/funcion/download-registry.js'
+import {
+  buildAlbumChunks,
+  buildCaption,
+  describeMediaType,
+  downloadAllMedia,
+  extractTwitterUrl,
+  fetchTweetData,
+  formatBytes,
+  formatDate,
+  isAbortError,
+  resolveTwitterUrl,
+  sanitizeFileName,
+} from '../src/libraries/twitter-dl.js'
 
-const SIZE_LIMIT = 20 * 1024 * 1024
+const SERVICE = 'twitter'
 
-const formatBytes = (b) => {
-  if (!b || b === 0) return 'N/A'
-  if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB'
-  if (b >= 1024)        return (b / 1024).toFixed(1) + ' KB'
-  return b + ' B'
+async function safeReact(conn, m, emoji) {
+  if (!conn?.sendMessage || !m?.key) return
+  try {
+    await conn.sendMessage(m.chat, { react: { text: emoji, key: m.key } })
+  } catch {}
 }
 
-const formatDate = (iso) => {
-  if (!iso) return 'N/A'
-  const d = new Date(iso)
-  return d.toLocaleDateString('es-PE', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()
-}
+async function sendSingleInlineItem(conn, chat, item, caption, quoted) {
+  if (item.kind === 'photo') {
+    return conn.sendMessage(
+      chat,
+      {
+        image: item.buffer,
+        mimetype: item.mimetype || 'image/jpeg',
+        ...(caption ? { caption } : {}),
+      },
+      { quoted },
+    )
+  }
 
-const sanitize = (str = '') => str.replace(/[\\/:*?"<>|]/g, '').trim() || 'twitter_video'
-
-const buildCaption = ({ username, name, title, size, type, fecha, url }) =>
-`ִֶָ𓂃 ࣪˖ ִֶָ  *FILE INFO* ִֶָ𓂃 ࣪˖ ִֶָ
-
-⭑ ₊ ⭒  *USER* ꩜  \`${name || username || 'N/A'}\`
-⭑ ₊ ⭒  *TITLE* ꩜  \`${title || 'Sin título'}\`
-⭑ ₊ ⭒  *SIZE* ꩜  \`${size}\`
-⭑ ₊ ⭒  *TYPE* ꩜  \`${type}\`
-⭑ ₊ ⭒  *FECHA* ꩜  \`${fecha}\`
-
-˗ˏˋ ꒰ ✉︎ ꒱ ˎˊ˗  *URL*
-${url}
-
-✧˚ ༘ ⋆｡˚  𖥔 ࣪˖`
-
-const _twitterapi  = (id) => `https://info.tweeload.site/status/${id}.json`
-
-const getAuthorization = async () => {
-  const { data } = await axios.get('https://pastebin.com/raw/SnCfd4ru')
-  return data
-}
-
-const TwitterDL = async (url) => {
-  const id = url.match(/\/([\d]+)/)
-  if (!id) return { status: 'error', message: '❌ URL inválida. Usa un link de X/Twitter con un ID de tweet.' }
-
-  const response = await axios.get(_twitterapi(id[1]), {
-    headers: {
-      Authorization: await getAuthorization(),
-      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Safari/537.36',
+  return conn.sendMessage(
+    chat,
+    {
+      video: item.buffer,
+      mimetype: 'video/mp4',
+      ...(item.kind === 'gif' ? { gifPlayback: true } : {}),
+      ...(caption ? { caption } : {}),
     },
-  })
+    { quoted },
+  )
+}
 
-  if (response.data.code !== 200)
-    return { status: 'error', message: '❌ No se pudo obtener el tweet. Verifica el link.' }
+async function sendInlineMedia(conn, chat, inlineItems, caption, quoted) {
+  if (!inlineItems.length) return
 
-  const tweet  = response.data.tweet
-  const author = {
-    id:       tweet.author?.id,
-    name:     tweet.author?.name,
-    username: tweet.author?.screen_name,
+  if (inlineItems.length === 1) {
+    await sendSingleInlineItem(conn, chat, inlineItems[0], caption, quoted)
+    return
   }
 
-  let media = [], type
+  const chunks = buildAlbumChunks(inlineItems, caption)
+  for (let c = 0; c < chunks.length; c++) {
+    const chunk = chunks[c]
+    if (chunk.length === 1) {
+      await conn.sendMessage(chat, chunk[0], { quoted })
+      continue
+    }
 
-  if (tweet?.media?.videos?.length) {
-    type = 'video'
-    tweet.media.videos.forEach((v) => {
-      const variants = []
-      v.video_urls?.forEach((z) => {
-        const resMatch = z.url.match(/([\d ]{2,5}[x][\d ]{2,5})/)
-        variants.push({ bitrate: z.bitrate || 0, url: z.url, resolution: resMatch ? resMatch[0] : 'HD' })
-      })
-      variants.sort((a, b) => b.bitrate - a.bitrate)
-      if (variants.length) media.push({ type: v.type, result: variants })
-    })
-  } else if (tweet?.media?.photos?.length) {
-    type = 'photo'
-    tweet.media.photos.forEach((v) => media.push(v))
-  }
-
-  return {
-    status: 'success',
-    result: {
-      caption:   tweet.text || '',
-      createdAt: tweet.created_at || null,
-      author,
-      type,
-      media: media.length ? media : null,
-    },
+    try {
+      await conn.sendMessage(
+        chat,
+        { album: chunk },
+        { quoted, albumContinueOnError: true },
+      )
+    } catch (albumErr) {
+      console.warn('[Twitter-DL] Falló el envío en álbum, reintentando por separado:', albumErr?.message || albumErr)
+      for (const entry of chunk) {
+        await conn.sendMessage(chat, entry, { quoted })
+      }
+    }
   }
 }
 
-let enviando = false
+const handler = async (m, { conn, text, args, usedPrefix, command }) => {
+  const rawUrl = extractTwitterUrl(
+    text,
+    args?.join(' '),
+    m.quoted?.text,
+    m.quoted?.caption,
+  )
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
-  if (!text?.trim())
+  if (!rawUrl) {
     return conn.sendMessage(
       m.chat,
-      { text: `⭑ Envía el link de un tweet junto al comando.\n\n*Ejemplo:*\n${usedPrefix + command} https://x.com/usuario/status/123456789` },
-      { quoted: m }
+      {
+        text: `⭑ Envía el link de un tweet junto al comando (o responde a un mensaje con el link).\n\n*Ejemplo:*\n${usedPrefix + command} https://x.com/usuario/status/123456789`,
+      },
+      { quoted: m },
     )
+  }
 
-  if (enviando) return conn.sendMessage(m.chat, { text: '⏳ Ya hay una descarga en curso, espera un momento.' }, { quoted: m })
-  enviando = true
+  const key = downloadKey(m)
+  if (hasDownload(key, SERVICE)) {
+    return conn.sendMessage(
+      m.chat,
+      { text: '⏳ Ya tienes una descarga de X/Twitter en curso. Usa *cancelar* si deseas detenerla.' },
+      { quoted: m },
+    )
+  }
+
+  const controller = new AbortController()
+  const finish = startDownload(key, SERVICE, controller, { label: 'Twitter/X' })
 
   try {
-    await conn.sendMessage(m.chat, { react: { text: '⏳', key: m.key } })
+    await safeReact(conn, m, '⏳')
 
-    let res
+    const resolved = await resolveTwitterUrl(rawUrl, { signal: controller.signal })
+    if (!resolved.tweetId) {
+      await safeReact(conn, m, '❌')
+      return conn.sendMessage(
+        m.chat,
+        { text: '❌ URL inválida. Usa un enlace de X/Twitter que apunte a un tweet específico.' },
+        { quoted: m },
+      )
+    }
+
+    let tweet
     try {
-      res = await TwitterDL(text.trim())
+      tweet = await fetchTweetData(resolved.tweetId, {
+        screenName: resolved.screenName,
+        signal: controller.signal,
+      })
     } catch (e) {
-      enviando = false
-      await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } })
-      return conn.sendMessage(m.chat, { text: `❌ Error al contactar la API de Twitter.\n\`${e.message}\`` }, { quoted: m })
+      if (isAbortError(e) && controller.signal.aborted) throw e
+      await safeReact(conn, m, '❌')
+      return conn.sendMessage(
+        m.chat,
+        { text: `❌ No se pudo obtener el tweet (puede ser privado, eliminado o con restricción).\n\`${e.message}\`` },
+        { quoted: m },
+      )
     }
 
-    if (res.status === 'error') {
-      enviando = false
-      await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } })
-      return conn.sendMessage(m.chat, { text: res.message }, { quoted: m })
+    if (!tweet?.media?.length) {
+      await safeReact(conn, m, '❌')
+      return conn.sendMessage(
+        m.chat,
+        { text: '❌ No se encontró ninguna imagen ni video en ese tweet.' },
+        { quoted: m },
+      )
     }
 
-    if (!res.result?.media?.length) {
-      enviando = false
-      await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } })
-      return conn.sendMessage(m.chat, { text: '❌ No se encontró media en ese tweet.' }, { quoted: m })
+    const { items, errors } = await downloadAllMedia(tweet.media, {
+      signal: controller.signal,
+    })
+
+    if (!items.length) {
+      await safeReact(conn, m, '❌')
+      const detail = errors[0]?.message ? `\n\`${errors[0].message}\`` : ''
+      return conn.sendMessage(
+        m.chat,
+        { text: `❌ No se pudo descargar la media del tweet.${detail}` },
+        { quoted: m },
+      )
     }
 
-    const { result } = res
-    const { author, type, media, caption: tweetText, createdAt } = result
+    const inlineItems = items.filter((item) => !item.oversized)
+    const docItems = items.filter((item) => item.oversized)
+    const cleanUrl = resolved.url
 
-    if (type === 'photo') {
-      for (let i = 0; i < media.length; i++) {
-        const photoUrl = media[i].url || media[i]
-        const infoCaption = buildCaption({
-          username: author.username,
-          name:     author.name,
-          title:    tweetText ? tweetText.slice(0, 60) + (tweetText.length > 60 ? '…' : '') : 'Sin título',
-          size:     'N/A',
-          type:     'image/jpeg',
-          fecha:    formatDate(createdAt),
-          url:      text.trim(),
-        })
+    if (inlineItems.length) {
+      const totalInlineBytes = inlineItems.reduce((acc, it) => acc + (it.size || 0), 0)
+      const infoCaption = buildCaption({
+        username: tweet.author.username,
+        name: tweet.author.name,
+        title: tweet.text || 'Sin título',
+        size: formatBytes(totalInlineBytes),
+        type: describeMediaType(inlineItems),
+        fecha: formatDate(tweet.createdAt),
+        url: cleanUrl,
+        stats: tweet.stats,
+        isQuotedMedia: tweet.isQuotedMedia,
+      })
 
-        await conn.sendMessage(
-          m.chat,
-          { image: { url: photoUrl }, caption: infoCaption },
-          { quoted: m }
-        )
-      }
-
-      await conn.sendMessage(m.chat, { react: { text: '🔗', key: m.key } })
-      enviando = false
-      return
+      await sendInlineMedia(conn, m.chat, inlineItems, infoCaption, m)
     }
 
-    if (type === 'video') {
-      for (let i = 0; i < media.length; i++) {
-        const variants = media[i].result
-        if (!variants?.length) continue
+    for (let i = 0; i < docItems.length; i++) {
+      const item = docItems[i]
+      const suffix = docItems.length > 1 ? `_${i + 1}` : ''
+      const baseName = sanitizeFileName(
+        tweet.text || `tweet_${tweet.author.username || resolved.tweetId}`,
+      )
+      const fileName = `${baseName}${suffix}.mp4`
+      const docCaption = buildCaption({
+        username: tweet.author.username,
+        name: tweet.author.name,
+        title: tweet.text || 'Sin título',
+        size: formatBytes(item.size),
+        type: `video/mp4 (${item.resolution || 'HD'})`,
+        fecha: formatDate(tweet.createdAt),
+        url: cleanUrl,
+        stats: tweet.stats,
+        isQuotedMedia: tweet.isQuotedMedia,
+      })
 
-        const best = variants[0]
-        const videoUrl = best.url
-
-        let buffer, contentSize
-        try {
-          const dl = await axios.get(videoUrl, { responseType: 'arraybuffer' })
-          buffer      = Buffer.from(dl.data)
-          contentSize = buffer.length
-        } catch (e) {
-          await conn.sendMessage(m.chat, { text: `❌ No se pudo descargar el video #${i + 1}.\n\`${e.message}\`` }, { quoted: m })
-          continue
-        }
-
-        const titleRaw  = tweetText ? tweetText.slice(0, 80) : `tweet_${author.username || 'video'}`
-        const fileName  = sanitize(titleRaw) + '.mp4'
-        const infoCaption = buildCaption({
-          username: author.username,
-          name:     author.name,
-          title:    tweetText ? tweetText.slice(0, 60) + (tweetText.length > 60 ? '…' : '') : 'Sin título',
-          size:     formatBytes(contentSize),
-          type:     'video/mp4',
-          fecha:    formatDate(createdAt),
-          url:      text.trim(),
-        })
-
-        if (contentSize > SIZE_LIMIT) {
-          await conn.sendMessage(
-            m.chat,
-            {
-              document: buffer,
-              mimetype: 'video/mp4',
-              fileName,
-              caption:  infoCaption,
-            },
-            { quoted: m }
-          )
-        } else {
-          await conn.sendMessage(
-            m.chat,
-            {
-              video:   buffer,
-              mimetype: 'video/mp4',
-              caption: infoCaption,
-            },
-            { quoted: m }
-          )
-        }
-      }
-
-      await conn.sendMessage(m.chat, { react: { text: '🔗', key: m.key } })
-      enviando = false
-      return
+      await conn.sendMessage(
+        m.chat,
+        {
+          document: item.buffer,
+          mimetype: 'video/mp4',
+          fileName,
+          caption: docCaption,
+        },
+        { quoted: m },
+      )
     }
 
-    enviando = false
-    await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } })
-    conn.sendMessage(m.chat, { text: '❌ Tipo de media no soportado.' }, { quoted: m })
+    if (errors.length) {
+      await conn.sendMessage(
+        m.chat,
+        { text: `⚠️ Se omitieron ${errors.length} archivo(s) porque no se pudieron descargar.` },
+        { quoted: m },
+      )
+    }
 
+    await safeReact(conn, m, '✅')
   } catch (e) {
-    enviando = false
-    await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } })
+    if (isAbortError(e) && controller.signal.aborted) {
+      await safeReact(conn, m, '🛑')
+      return conn.sendMessage(
+        m.chat,
+        { text: '🛑 Descarga de X/Twitter cancelada.' },
+        { quoted: m },
+      )
+    }
     console.error('[Twitter-DL]', e)
-    conn.sendMessage(m.chat, { text: `❌ Error inesperado.\n\`${e.message}\`` }, { quoted: m })
+    await safeReact(conn, m, '❌')
+    return conn.sendMessage(
+      m.chat,
+      { text: `❌ Error inesperado al procesar el tweet.\n\`${e?.message || e}\`` },
+      { quoted: m },
+    )
+  } finally {
+    finish()
   }
 }
 
-handler.help    = ['x <url>', 'twitter <url>']
-handler.tags    = ['downloader']
+handler.help = ['x <url>', 'twitter <url>']
+handler.tags = ['downloader']
 handler.command = /^(x|twitter|xdl|dlx|twdl|twt|twitterdl)$/i
 
 export default handler
-
