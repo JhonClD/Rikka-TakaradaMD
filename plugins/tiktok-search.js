@@ -160,93 +160,151 @@ async function compressForWhatsApp(inputPath, outputPath, targetMB) {
 
 // ─── Búsqueda paralela multi-fuente (videos + imágenes) ───────
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function extractListFromPayload(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.data?.videos)) return data.data.videos;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.meta)) return data.meta;
+  if (Array.isArray(data?.result?.videos)) return data.result.videos;
+  if (Array.isArray(data?.result)) return data.result;
+  if (Array.isArray(data?.results)) return data.results;
+  return [];
+}
+
 function parseSearchList(list, base = 'https://www.tikwm.com') {
   if (!Array.isArray(list)) return [];
   const items = [];
   for (const v of list) {
     if (!v || typeof v !== 'object') continue;
-    if (Array.isArray(v.images) && v.images.length) {
-      for (const raw of v.images) {
-        const imgUrl = toAbsoluteUrl(typeof raw === 'string' ? raw : raw?.url, base);
+    const rawImages = v.images || v.slides || v.photos;
+    if (Array.isArray(rawImages) && rawImages.length) {
+      for (const raw of rawImages) {
+        const imgUrl = toAbsoluteUrl(
+          typeof raw === 'string' ? raw : raw?.url || raw?.image_url,
+          base,
+        );
         if (imgUrl) items.push({ kind: 'photo', url: imgUrl, title: v.title || '' });
       }
       continue;
     }
-    // Priorizamos `play` (sin marca de agua y ligero) para entrega rápida; `hdplay`/`wmplay` como respaldo
-    const urls = [v.play, v.hdplay, v.video, v.no_watermark, v.wmplay]
+
+    // Priorizamos `play`/`nowm` (sin marca de agua y ligero) para entrega rápida
+    const candidates = [
+      v.play,
+      v.nowm,
+      v.no_watermark,
+      v.hdplay,
+      v.hd,
+      v.video_url,
+      typeof v.video === 'string' ? v.video : v.video?.play || v.video?.noWatermark,
+      v.media?.play,
+      v.wm,
+      v.wmplay,
+    ]
       .map((u) => toAbsoluteUrl(u, base))
       .filter((u) => u && !/\.mp3(\?|$)/i.test(u));
-    if (urls.length) {
-      items.push({ kind: 'video', urls: [...new Set(urls)], title: v.title || '' });
+
+    if (candidates.length) {
+      items.push({ kind: 'video', urls: [...new Set(candidates)], title: v.title || '' });
     }
   }
   return items;
 }
 
+async function searchTikwm(query, fetchCount, signal) {
+  const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(query)}&count=${fetchCount}&cursor=0&hd=1`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { data } = await axios.get(url, { timeout: 15_000, signal });
+    const items = parseSearchList(extractListFromPayload(data), 'https://www.tikwm.com');
+    if (items.length) return items;
+    // TikWM limita a 1 req/seg; si responde code -1, reintentamos una vez tras 1.1s
+    if (data?.code === -1 && attempt === 0 && !signal?.aborted) {
+      await sleep(1100);
+      continue;
+    }
+    throw new Error(data?.msg || 'TikWM vacío');
+  }
+  throw new Error('TikWM vacío');
+}
+
 async function searchTikTok(query, count, signal) {
-  const fetchCount = Math.min(30, Math.max(12, count + 6));
+  const fetchCount = Math.min(30, Math.max(15, count + 6));
+  const encoded = encodeURIComponent(query);
 
   const providers = [
-    // 1. TikWM GET (sin headers extra que disparen bloqueos)
-    async () => {
-      const { data } = await axios.get('https://www.tikwm.com/api/feed/search', {
-        params: { keywords: query, count: fetchCount, cursor: 0, hd: 1 },
-        timeout: 10_000,
-        signal,
-      });
-      const items = parseSearchList(data?.data?.videos);
-      if (!items.length) throw new Error('TikWM GET vacío');
-      return items;
+    {
+      name: 'TikWM',
+      run: () => searchTikwm(query, fetchCount, signal),
     },
-    // 2. TikWM POST (formato web)
-    async () => {
-      const form = new URLSearchParams({
-        keywords: query,
-        count: String(fetchCount),
-        cursor: '0',
-        web: '1',
-        hd: '1',
-      });
-      const { data } = await axios.post('https://www.tikwm.com/api/feed/search', form.toString(), {
-        headers: {
-          'User-Agent': UA,
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        },
-        timeout: 10_000,
-        signal,
-      });
-      const items = parseSearchList(data?.data?.videos);
-      if (!items.length) throw new Error('TikWM POST vacío');
-      return items;
+    {
+      name: 'Delirius',
+      run: async () => {
+        const { data } = await axios.get(
+          `https://delirius-apiofc.vercel.app/search/tiktoksearch?query=${encoded}`,
+          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
+        );
+        const items = parseSearchList(extractListFromPayload(data));
+        if (!items.length) throw new Error('Delirius vacío');
+        return items;
+      },
     },
-    // 3. Siputzx
-    async () => {
-      const { data } = await axios.get(
-        `https://api.siputzx.my.id/api/s/tiktok?query=${encodeURIComponent(query)}`,
-        { headers: { 'User-Agent': UA }, timeout: 10_000, signal },
-      );
-      const list = Array.isArray(data?.data) ? data.data : data?.data?.videos || [];
-      const items = parseSearchList(list);
-      if (!items.length) throw new Error('Siputzx vacío');
-      return items;
+    {
+      name: 'Causa',
+      run: async () => {
+        const { data } = await axios.get(
+          `https://rest.apicausas.xyz/api/v1/buscadores/tiktok?apikey=causa-db9690e010e31139&q=${encoded}`,
+          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
+        );
+        const items = parseSearchList(extractListFromPayload(data));
+        if (!items.length) throw new Error('Causa vacío');
+        return items;
+      },
     },
-    // 4. Ryzendesu
-    async () => {
-      const { data } = await axios.get(
-        `https://api.ryzendesu.vip/api/search/tiktok?query=${encodeURIComponent(query)}`,
-        { headers: { 'User-Agent': UA }, timeout: 10_000, signal },
-      );
-      const list = Array.isArray(data?.data) ? data.data : data?.data?.videos || [];
-      const items = parseSearchList(list);
-      if (!items.length) throw new Error('Ryzendesu vacío');
-      return items;
+    {
+      name: 'Siputzx',
+      run: async () => {
+        const { data } = await axios.post(
+          'https://api.siputzx.my.id/api/s/tiktok',
+          { query },
+          { headers: { 'User-Agent': UA, 'Content-Type': 'application/json' }, timeout: 12_000, signal },
+        );
+        const items = parseSearchList(extractListFromPayload(data));
+        if (!items.length) throw new Error('Siputzx vacío');
+        return items;
+      },
+    },
+    {
+      name: 'Ryzendesu',
+      run: async () => {
+        const { data } = await axios.get(
+          `https://api.ryzendesu.vip/api/search/tiktok?query=${encoded}`,
+          { headers: { 'User-Agent': UA }, timeout: 12_000, signal },
+        );
+        const items = parseSearchList(extractListFromPayload(data));
+        if (!items.length) throw new Error('Ryzendesu vacío');
+        return items;
+      },
     },
   ];
 
-  // Carrera en paralelo: responde tan pronto el proveedor más rápido entregue resultados
+  // Carrera en paralelo entre hosts distintos: responde tan pronto el primero entregue resultados
   try {
-    return await Promise.any(providers.map((fn) => fn()));
-  } catch (err) {
+    return await Promise.any(
+      providers.map(async ({ name, run }) => {
+        try {
+          return await run();
+        } catch (err) {
+          if (!signal?.aborted) {
+            console.warn(`[TikTok-TTS] ${name} falló:`, err?.message || err);
+          }
+          throw err;
+        }
+      }),
+    );
+  } catch {
     if (signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
     return [];
   }
