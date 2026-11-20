@@ -246,20 +246,24 @@ test('downloadAllMedia elige variante más ligera si el video HD supera inlineLi
   assert.equal(items[1].resolution, '480x480')
 })
 
-test('buildAlbumChunks agrupa media, pone caption solo en el primer item y divide de a 10', () => {
-  const items = Array.from({ length: 12 }, (_, i) => ({
+test('buildAlbumChunks agrupa 20+ items en un solo álbum, pone caption solo en el primero y divide solo si supera el límite', () => {
+  const items = Array.from({ length: 20 }, (_, i) => ({
     kind: i % 2 === 0 ? 'photo' : 'video',
     buffer: i % 2 === 0 ? JPEG_BYTES : MP4_BYTES,
     mimetype: i % 2 === 0 ? 'image/jpeg' : 'video/mp4',
   }))
 
   const chunks = buildAlbumChunks(items, 'MI CAPTION')
-  assert.equal(chunks.length, 2)
-  assert.equal(chunks[0].length, 10)
-  assert.equal(chunks[1].length, 2)
+  assert.equal(chunks.length, 1)
+  assert.equal(chunks[0].length, 20)
   assert.equal(chunks[0][0].caption, 'MI CAPTION')
   assert.equal(chunks[0][1].caption, undefined)
-  assert.equal(chunks[1][0].caption, undefined)
+
+  const split = buildAlbumChunks(items, 'MI CAPTION', 15)
+  assert.equal(split.length, 2)
+  assert.equal(split[0].length, 15)
+  assert.equal(split[1].length, 5)
+  assert.equal(split[1][0].caption, undefined)
 })
 
 test('utilidades de formato manejan fechas inválidas, mime por magic bytes y descripción de álbumes', () => {

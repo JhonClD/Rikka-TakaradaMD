@@ -3,7 +3,7 @@ const DEFAULT_USER_AGENT =
 
 export const VIDEO_INLINE_LIMIT = 50 * 1024 * 1024 // 50 MB (límite seguro para video/álbum inline en WhatsApp)
 export const MAX_DOCUMENT_LIMIT = 100 * 1024 * 1024 // 100 MB (límite máximo como documento)
-export const MAX_ALBUM_ITEMS = 10
+export const MAX_ALBUM_ITEMS = 100
 
 const API_TIMEOUT_MS = 15_000
 const MEDIA_TIMEOUT_MS = 90_000
