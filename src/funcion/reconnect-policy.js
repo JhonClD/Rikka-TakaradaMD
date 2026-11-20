@@ -61,13 +61,21 @@ export const DEFAULT_POLICY = {
   /** Y luego, recordatorios cada este número de intentos. */
   alertEveryAttempts: 20,
   /**
-   * Un estado terminal (sesión reemplazada, logout, badSession) no se arregla
-   * reintentando, pero tampoco conviene quedarse sordo hasta que alguien
-   * reinicie el proceso: se espera este tiempo y se hace UN reintento, que es
-   * lo que salva el caso "cerré la otra sesión / volví a vincular y no me di
-   * cuenta de que había que reiniciar".
+   * Un estado terminal (sesión reemplazada, logout, badSession repetido) no se
+   * arregla reintentando, pero tampoco conviene quedarse sordo hasta que
+   * alguien reinicie el proceso: se espera este tiempo y se hace UN reintento,
+   * que es lo que salva el caso "cerré la otra sesión / volví a vincular y no
+   * me di cuenta de que había que reiniciar".
    */
   terminalRetryMs: 300_000,
+  /**
+   * En este fork de Baileys (`this-xys/bails`), `badSession` es 500 y también
+   * es el código comodín cuando llega un `stream:error` sin código, un fallo
+   * temporal de servidor o un error genérico de WebSocket. Un solo 500 no
+   * prueba que la sesión esté muerta: se reintenta hasta este número de veces
+   * consecutivas (reparando archivos JSON dañados) antes de pausar.
+   */
+  maxBadSessionRetries: 3,
 };
 
 const clampExponent = (value) => Math.max(0, Math.min(Number.isFinite(value) ? value : 0, 16));
@@ -97,27 +105,45 @@ export function nextReconnectDelay(attempt = 0, policy = {}, rng = Math.random) 
 /**
  * ¿Este motivo de cierre admite reintento automático?
  *
- * `stop` cubre los estados en los que reintentar es activo dañino: con la
+ * `stop` cubre los estados en los que reintentar es activamente dañino: con la
  * sesión rechazada (405/440) cada socket nuevo invalida al anterior y mantiene
- * el conflicto, y con `loggedOut`/`badSession` las credenciales ya no sirven,
- * así que el bucle solo genera ruido y consume el rate limit de pairing.
+ * el conflicto, y con `loggedOut`/`multideviceMismatch` WhatsApp rechazó
+ * explícitamente las credenciales.
+ *
+ * `badSession` (500) es especial: Baileys también lo emite ante errores
+ * transitorios de stream/WebSocket sin código numérico, así que se reintenta
+ * hasta `maxBadSessionRetries` veces seguidas antes de pasar a `stop`.
  *
  * @param {number|string|null|undefined} reason statusCode del cierre
  * @param {Partial<typeof DISCONNECT_CODES>} [codes]
+ * @param {{ badSessionAttempts?: number, maxBadSessionRetries?: number }} [options]
  * @returns {typeof RECONNECT | typeof STOP}
  */
-export function classifyDisconnect(reason, codes = DISCONNECT_CODES) {
+export function classifyDisconnect(reason, codes = DISCONNECT_CODES, options = {}) {
   const d = { ...DISCONNECT_CODES, ...codes };
   if (reason === undefined || reason === null || reason === '') return RECONNECT;
   const numeric = Number(reason);
   const value = Number.isFinite(numeric) ? numeric : String(reason);
-  // Los cuatro (más el 405 "unexpected status") exigen acción humana; 403 y 503
-  // son del propio server y sí se recuperan solos.
-  const terminal = [d.loggedOut, d.badSession, d.connectionReplaced, d.multideviceMismatch, 405];
+  const maxBadSessionRetries = Number.isFinite(options?.maxBadSessionRetries)
+    ? options.maxBadSessionRetries
+    : DEFAULT_POLICY.maxBadSessionRetries;
+  const badSessionAttempts = Number.isFinite(options?.badSessionAttempts)
+    ? options.badSessionAttempts
+    : 0;
+
+  const isBadSession = value === d.badSession
+    || (typeof value === 'string' && /bad.?session/i.test(value));
+  if (isBadSession) {
+    return badSessionAttempts >= maxBadSessionRetries ? STOP : RECONNECT;
+  }
+
+  // Estos cuatro exigen acción humana inmediata; 403 y 503 son del propio
+  // servidor y sí se recuperan solos.
+  const terminal = [d.loggedOut, d.connectionReplaced, d.multideviceMismatch, 405];
   if (terminal.includes(value)) return STOP;
   // `connectionReplaced` puede venir como nombre en lugar de número.
   // Nombres en lugar de números (log de Baileys, forks): 'loggedOut', no 'logout'.
-  if (typeof value === 'string' && /replaced|logged.?out|bad.?session|multi.?device/i.test(value)) return STOP;
+  if (typeof value === 'string' && /replaced|logged.?out|multi.?device/i.test(value)) return STOP;
   return RECONNECT;
 }
 

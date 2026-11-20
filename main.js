@@ -18,11 +18,27 @@ import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
 import { dbFile, TMP_DIR } from './src/funcion/paths.js';
-import { STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
+import { RECONNECT, STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
 
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, withPairingGuard, createQRGuard } = await import("baileys");
+const {
+  Browsers,
+  DEFAULT_CONNECTION_CONFIG,
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchBestWaVersion,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  jidNormalizedUser,
+  repairAuthState,
+  withPairingGuard,
+  createQRGuard,
+} = await import('baileys');
+
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validación E.164 básica (7 a 15 dígitos sin cero inicial)
 const isValidPhoneNumber = (num) => /^[1-9]\d{6,14}$/.test(num);
+const CREDS_FILE = 'creds.json';
+const CREDS_BACKUP_FILE = 'creds.json.bak';
+
 let stopped = 'close';
 protoType();
 serialize();
@@ -46,12 +62,13 @@ let shutdownStarted = false;
 let socketReloadInProgress = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
+let consecutiveBadSessions = 0;
 // Vigilante del handshake: Baileys avisa con `close` casi siempre, pero hay
 // desconexiones que no emiten nada (un TCP que se apaga sin FIN) y sin
 // vigilancia el bot se queda con un socket que ni abre ni cierra.
 let connectWatchdog = null;
 // Sesión en un estado que ningún reintento arregla (logout, sesión reemplazada
-// o inválida). Mientras esté activo no se programa ningún socket nuevo.
+// o badSession persistente). Mientras esté activo no se programa ningún socket nuevo.
 let terminalSession = false;
 let terminalRetryTimer = null;
 const qrGuard = createQRGuard({
@@ -64,12 +81,12 @@ global.__filename = function filename(pathURL = import.meta.url, rmPrefix = plat
 }; global.__dirname = function dirname(pathURL) {
   return path.dirname(global.__filename(pathURL, true));
 };
-global.timestamp = { start: new Date };
+global.timestamp = { start: new Date() };
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmpDir = TMP_DIR;
 fs.mkdirSync(tmpDir, { recursive: true });
 global.opts = yargs(process.argv.slice(2)).exitProcess(false).parse();
-global.prefix = new RegExp('^[#!/.]')
+global.prefix = new RegExp('^[#!/.]');
 // --db con URL apuntaba a un cloudDBAdapter que nunca se importó (y que además
 // pide `got`, ausente en package.json): reventaba con ReferenceError al
 // arrancar. Se degrada a la base local en vez de romper el arranque.
@@ -103,49 +120,15 @@ global.loadDatabase = async function loadDatabase() {
   })();
   return loadDbPromise;
 };
-void global.loadDatabase();
-
-let { state, saveCreds } = await useMultiFileAuthState(global.authFilePath);
-const FALLBACK_WA_VERSION = [2, 3000, 1033893291];
-const version = (await fetchLatestBaileysVersion().catch(() => null))?.version || FALLBACK_WA_VERSION;
-console.log(chalk.gray(`[ ℹ️ ] Versión de WhatsApp: ${version.join('.')}`));
-const phoneFlag = global.opts.phone ?? process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
-const phoneNumber = global.botnumber || (phoneFlag ? String(phoneFlag) : '');
-const methodCodeQR = process.argv.includes('--method=qr') || process.argv.some(arg => arg.toLowerCase() === 'qr');
-const methodCode = Boolean(phoneNumber) || process.argv.includes('--method=code') || process.argv.some(arg => arg.toLowerCase() === 'code');
-
-async function question(texto) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return (await rl.question(texto)).trim();
-  } finally {
-    rl.close();
-  }
-}
-
-let opcion;
-// Variables de estado para el pairing code (sobreviven reconexiones)
-let pairingPhoneNumber = null;
-let pairingCodeDone = false;
-let pairingAttemptCount = 0;
-let pairingRequestTimer = null;
-if (methodCodeQR) opcion = '1';
-if (!methodCodeQR && !methodCode && !fs.existsSync(join(global.authFilePath, 'creds.json'))) {
-  do {
-    opcion = await question('[ ℹ️ ] Seleccione una opción:\n1. Con código QR\n2. Con código de texto de 8 dígitos\n---> ');
-    if (!/^[1-2]$/.test(opcion)) {
-      console.log('[ ⚠️ ] Por favor, seleccione solo 1 o 2.\n');
-    }
-  } while (opcion !== '1' && opcion !== '2' && !fs.existsSync(join(global.authFilePath, 'creds.json')));
-}
+await global.loadDatabase();
 
 const filterStrings = [
-  "Q2xvc2luZyBzdGFsZSBvcGVu",
-  "Q2xvc2luZyBvcGVuIHNlc3Npb24=",
-  "RmFpbGVkIHRvIGRlY3J5cHQ=",
-  "U2Vzc2lvbiBlcnJvcg==",
-  "RXJyb3I6IEJhZCBNQUM=",
-  "RGVjcnlwdGVkIG1lc3NhZ2U="
+  'Q2xvc2luZyBzdGFsZSBvcGVu',
+  'Q2xvc2luZyBvcGVuIHNlc3Npb24=',
+  'RmFpbGVkIHRvIGRlY3J5cHQ=',
+  'U2Vzc2lvbiBlcnJvcg==',
+  'RXJyb3I6IEJhZCBNQUM=',
+  'RGVjcnlwdGVkIG1lc3NhZ2U=',
 ];
 
 const decodedFilterStrings = filterStrings
@@ -259,11 +242,245 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
 
+// ── Integridad y respaldo atómico de la sesión ───────────────────────────────
+// Baileys escribe `creds.json` con `writeFile` directo (no atómico): un corte
+// de luz, OOM o `SIGKILL` a mitad de escritura puede truncarlo o dejar un
+// `session-*.json` roto. Mantenemos un respaldo atómico (`creds.json.bak`) y
+// reparamos archivos corruptos antes de abrir el socket.
+function isValidCredsJson(raw) {
+  if (!raw || !raw.trim()) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    return Boolean(parsed && typeof parsed === 'object' && parsed.noiseKey && parsed.signedIdentityKey);
+  } catch {
+    return false;
+  }
+}
+
+async function prepareAuthFolder(authDir) {
+  if (!existsSync(authDir)) return;
+  const credsPath = join(authDir, CREDS_FILE);
+  const backupPath = join(authDir, CREDS_BACKUP_FILE);
+
+  let credsValid = false;
+  try {
+    credsValid = isValidCredsJson(await fs.promises.readFile(credsPath, 'utf8'));
+  } catch {
+    credsValid = false;
+  }
+
+  if (!credsValid && existsSync(backupPath)) {
+    try {
+      const backupRaw = await fs.promises.readFile(backupPath, 'utf8');
+      if (isValidCredsJson(backupRaw)) {
+        const tmpRestore = `${credsPath}.restore-${process.pid}-${Date.now()}`;
+        await fs.promises.writeFile(tmpRestore, backupRaw, { mode: 0o600 });
+        await fs.promises.rename(tmpRestore, credsPath);
+        console.log(chalk.yellow('[ ⚠️ ] creds.json estaba dañado; restaurado automáticamente desde creds.json.bak.'));
+      }
+    } catch (error) {
+      console.warn('[Auth] No se pudo restaurar creds.json desde respaldo:', error?.message || error);
+    }
+  }
+
+  if (typeof repairAuthState === 'function') {
+    try {
+      const report = await repairAuthState(authDir);
+      if (report?.quarantined?.length) {
+        const preview = report.quarantined.slice(0, 5).join(', ');
+        console.log(chalk.yellow(`[ ⚠️ ] Sesión reparada: se aislaron ${report.quarantined.length} archivo(s) corrupto(s) (${preview}).`));
+      }
+    } catch (error) {
+      console.warn('[Auth] No se pudo verificar integridad de sesión:', error?.message || error);
+    }
+  }
+}
+
+function wrapSafeSaveCreds(rawSaveCreds, authDir) {
+  let pending = Promise.resolve();
+  return () => {
+    pending = pending
+      .catch(() => {})
+      .then(async () => {
+        await rawSaveCreds();
+        const credsPath = join(authDir, CREDS_FILE);
+        const backupPath = join(authDir, CREDS_BACKUP_FILE);
+        try {
+          const raw = await fs.promises.readFile(credsPath, 'utf8');
+          if (!isValidCredsJson(raw)) return;
+          const tmpBak = `${backupPath}.tmp-${process.pid}-${Date.now()}`;
+          await fs.promises.writeFile(tmpBak, raw, { mode: 0o600 });
+          await fs.promises.rename(tmpBak, backupPath);
+        } catch {
+          // El guardado principal ya tuvo éxito; el respaldo se reintentará en el próximo creds.update.
+        }
+      });
+    return pending;
+  };
+}
+
+async function loadAuthState(authDir) {
+  await prepareAuthFolder(authDir);
+  const auth = await useMultiFileAuthState(authDir);
+  return {
+    state: auth.state,
+    saveCreds: wrapSafeSaveCreds(auth.saveCreds, authDir),
+  };
+}
+
+function describeDisconnectError(lastDisconnect) {
+  const err = lastDisconnect?.error;
+  if (!err) return 'sin detalle';
+  const parts = [];
+  if (err.message) parts.push(err.message);
+  const tag = err.data?.tag;
+  const attrReason = err.data?.attrs?.reason ?? err.data?.reason;
+  const attrCode = err.data?.attrs?.code;
+  if (tag && !err.message?.includes(tag)) parts.push(`tag=${tag}`);
+  if (attrReason !== undefined) parts.push(`reason=${attrReason}`);
+  if (attrCode !== undefined) parts.push(`code=${attrCode}`);
+  return parts.join(' | ') || String(err);
+}
+
+// ── Handler y plugins ANTES de abrir el WebSocket ────────────────────────────
+// Antes `makeWASocket()` corría antes de `await filesInit()` (58 plugins): el
+// socket llegaba a conectar y emitir `creds.update` + `connection: 'open'`
+// mientras nadie escuchaba todavía, perdiendo rotaciones de pre-keys (causa de
+// `badSession` 500) y disparando falsos reinicios del vigilante de arranque.
+const handlerPath = join(__dirname, 'handler.js');
+/** mtime de handler.js en el último import real (ver global.reloadHandler). */
+let handlerLoadedAt = statSync(handlerPath).mtimeMs;
+let handler = await import('./handler.js');
+
+// Los plugins viven directamente en ./plugins; no existe una subcarpeta index.
+const pluginFolder = join(__dirname, './plugins');
+const pluginFilter = (filename) => typeof filename === 'string' && /\.js$/.test(filename);
+global.plugins = {};
+
+async function filesInit() {
+  for (const filename of readdirSync(pluginFolder).filter(pluginFilter)) {
+    try {
+      const file = global.__filename(join(pluginFolder, filename));
+      const module = await import(file);
+      global.plugins[filename] = module.default || module;
+    } catch (e) {
+      console.error(`No se pudo importar el plugin ${filename}:`, e);
+      delete global.plugins[filename];
+    }
+  }
+}
+await filesInit();
+
+global.reload = async (_ev, filename) => {
+  if (!pluginFilter(filename)) return;
+  const dir = global.__filename(join(pluginFolder, filename), true);
+  if (filename in global.plugins) {
+    if (existsSync(dir)) global.conn?.logger?.info(` updated plugin - '${filename}'`);
+    else {
+      global.conn?.logger?.warn(`deleted plugin - '${filename}'`);
+      return delete global.plugins[filename];
+    }
+  } else global.conn?.logger?.info(`new plugin - '${filename}'`);
+  // La validación previa con `syntax-error` se retiró a propósito: usa acorn
+  // con ecmaVersion 2020 y marcaba como error sintaxis que Node ya ejecuta
+  // sin problema (`||=`, `&&=`, `??=`, separadores numéricos `1_000`). Con un
+  // falso positivo el plugin ni siquiera se importaba, así que un `||=`
+  // dejaba `speedtest.js` fuera y rompía también a quien lo importara.
+  // Node es el único juez válido: si el import falla, `import()` ya devuelve
+  // el SyntaxError con línea y columna exactas.
+  try {
+    const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
+    global.plugins[filename] = module.default || module;
+  } catch (e) {
+    const esSintaxis = e instanceof SyntaxError;
+    global.conn?.logger?.error(`${esSintaxis ? 'syntax error while loading' : 'error require plugin'} '${filename}'\n${format(e)}`);
+    global.notifyOwnerError?.(`${esSintaxis ? 'Error de sintaxis en el plugin' : 'No se pudo recargar el plugin'} ${filename}:`, e);
+  } finally {
+    global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
+  }
+};
+Object.freeze(global.reload);
+
+// Un guardado de editor suele disparar varios eventos fs.watch seguidos en
+// pocos milisegundos; el debounce evita importar dos veces el mismo plugin.
+const pluginReloadTimers = new Map();
+const pluginWatcher = watch(pluginFolder, (ev, filename) => {
+  if (!pluginFilter(filename)) return;
+  clearTimeout(pluginReloadTimers.get(filename));
+  pluginReloadTimers.set(filename, setTimeout(() => {
+    pluginReloadTimers.delete(filename);
+    void global.reload(ev, filename);
+  }, 150));
+});
+
+// ── Sesión, versión y método de vinculación ──────────────────────────────────
+let { state, saveCreds } = await loadAuthState(global.authFilePath);
+const FALLBACK_WA_VERSION = DEFAULT_CONNECTION_CONFIG?.version || [2, 3000, 1051627909];
+const versionFetcher = fetchBestWaVersion || fetchLatestBaileysVersion;
+const version = (await versionFetcher().catch(() => null))?.version || FALLBACK_WA_VERSION;
+console.log(chalk.gray(`[ ℹ️ ] Versión de WhatsApp: ${version.join('.')}`));
+
+const phoneFlag = global.opts.phone ?? process.argv.find(arg => arg.startsWith('--phone='))?.split('=')[1];
+const phoneNumber = global.botnumber || (phoneFlag ? String(phoneFlag) : '');
+const methodCodeQR = process.argv.includes('--method=qr') || process.argv.some(arg => arg.toLowerCase() === 'qr');
+const methodCode = Boolean(phoneNumber) || process.argv.includes('--method=code') || process.argv.some(arg => arg.toLowerCase() === 'code');
+
+async function question(texto) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(texto)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+let opcion;
+// Variables de estado para el pairing code (sobreviven reconexiones)
+let pairingPhoneNumber = null;
+let pairingCodeDone = false;
+let pairingAttemptCount = 0;
+let pairingRequestTimer = null;
+if (methodCodeQR) opcion = '1';
+if (!methodCodeQR && !methodCode && !state.creds?.registered && !fs.existsSync(join(global.authFilePath, CREDS_FILE))) {
+  do {
+    opcion = await question('[ ℹ️ ] Seleccione una opción:\n1. Con código QR\n2. Con código de texto de 8 dígitos\n---> ');
+    if (!/^[1-2]$/.test(opcion)) {
+      console.log('[ ⚠️ ] Por favor, seleccione solo 1 o 2.\n');
+    }
+  } while (opcion !== '1' && opcion !== '2' && !fs.existsSync(join(global.authFilePath, CREDS_FILE)));
+}
+
+if (!state.creds?.registered && (opcion === '2' || methodCode)) {
+  opcion = '2';
+  let numeroTelefono;
+  if (phoneNumber) {
+    numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
+    if (!isValidPhoneNumber(numeroTelefono)) {
+      console.log(chalk.bgBlack(chalk.bold.redBright('Comience con el código de país de su número de WhatsApp.\nEjemplo: +5219992095479\n')));
+      process.exit(1);
+    }
+  } else {
+    while (true) {
+      numeroTelefono = await question(chalk.bgBlack(chalk.bold.yellowBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479\n')));
+      numeroTelefono = numeroTelefono.replace(/[^0-9]/g, '');
+      if (isValidPhoneNumber(numeroTelefono)) break;
+      console.log(chalk.bgBlack(chalk.bold.redBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479.\n')));
+    }
+  }
+  // El código se pide una vez creado el socket (ver requestPairingCodeOnce).
+  pairingPhoneNumber = numeroTelefono;
+  console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
+}
+
+// Se mantiene el mismo perfil de navegador entre vinculación y reinicios para
+// no cambiar la huella del dispositivo de un arranque a otro.
+const BROWSER_PROFILE = Browsers?.ubuntu?.('Chrome') || ['Ubuntu', 'Chrome', '22.04.4'];
+
 const connectionOptions = {
   logger: baileysLogger(),
   // El QR se imprime manualmente en connectionUpdate para evitar duplicados.
   printQRInTerminal: false,
-  browser: opcion === '1' || methodCodeQR ? ['Rikka-TakaradaMD', 'Safari', '2.0.0'] : ['Ubuntu', 'Chrome', '20.0.04'],
+  browser: BROWSER_PROFILE,
   auth: {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }).child({ level: 'fatal' })),
@@ -284,89 +501,15 @@ const connectionOptions = {
   userDevicesCache,
   defaultQueryTimeoutMs: 20000,
   fetchAgent: mediaUploadAgent,
-  cachedGroupMetadata: (jid) => global.conn.chats[jid]?.metadata ?? {},
+  // Devolver `undefined` (no `{}`) cuando no hay caché: Baileys trata `{}` como
+  // objeto truthy sin `participants` al enviar a grupos/estados.
+  cachedGroupMetadata: async (jid) => global.conn?.chats?.[jid]?.metadata || undefined,
   keepAliveIntervalMs: 30000,
   maxIdleTimeMs: 120000,
   version,
 };
 
-global.conn = makeWASocket(connectionOptions);
-store?.bind(global.conn);
-// El primer handshake también va vigilado: con credenciales válidas pero una
-// red que no termina de conectar, no llegaba ni un `close` y había que
-// reiniciar a mano. Con sesión sin registrar no se arma, que ahí lo que falta
-// es un QR, no un reintento.
-if (state.creds?.registered) armConnectWatchdog('arranque');
-
-if (methodCode && !state.creds.registered) {
-  withPairingGuard(global.conn, {
-    maxPerHour: 3,
-    globalMaxPerHour: 6,
-    minIntervalMs: 60_000,
-    logger: baileysLogger(),
-  });
-}
-
-if (!fs.existsSync(join(global.authFilePath, 'creds.json'))) {
-  if (opcion === '2' || methodCode) {
-    opcion = '2';
-    if (!global.conn.authState.creds.registered) {
-      let numeroTelefono;
-      if (phoneNumber) {
-        numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
-        if (!isValidPhoneNumber(numeroTelefono)) {
-          console.log(chalk.bgBlack(chalk.bold.redBright("Comience con el código de país de su número de WhatsApp.\nEjemplo: +5219992095479\n")));
-          process.exit(1);
-        }
-      } else {
-        while (true) {
-          numeroTelefono = await question(chalk.bgBlack(chalk.bold.yellowBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479\n')));
-          numeroTelefono = numeroTelefono.replace(/[^0-9]/g, '');
-          if (isValidPhoneNumber(numeroTelefono)) break;
-          console.log(chalk.bgBlack(chalk.bold.redBright("Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479.\n")));
-        }
-      }
-
-      // El código se pide una vez creado el socket (ver requestPairingCodeOnce).
-      pairingPhoneNumber = numeroTelefono;
-      console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
-    }
-  }
-}
-
-// Solicitar el código después de crear el socket. Hacerlo desde
-// connection.update puede repetir la solicitud durante el handshake y provocar
-// que WhatsApp reemplace la conexión anterior. Se limita el número de intentos
-// para no martillear el endpoint de pairing cuando WhatsApp devuelve un código
-// inválido (rate limit).
-const MAX_PAIRING_ATTEMPTS = 3;
-const PAIRING_RETRY_DELAY_MS = 5_000;
-
-function requestPairingCodeOnce() {
-  if (pairingCodeDone || pairingAttemptCount >= MAX_PAIRING_ATTEMPTS) return;
-  pairingAttemptCount += 1;
-  void (async () => {
-    try {
-      if (state.creds.registered || !global.conn?.requestPairingCode) return;
-      const raw = await global.conn.requestPairingCode(pairingPhoneNumber);
-      const codigo = String(raw || '').replace(/[^A-Za-z0-9]/g, '');
-      if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
-      pairingCodeDone = true;
-      console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
-      console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
-    } catch (err) {
-      console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/${MAX_PAIRING_ATTEMPTS}): ${err.message}`));
-      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS) {
-        pairingRequestTimer = setTimeout(requestPairingCodeOnce, PAIRING_RETRY_DELAY_MS);
-      }
-    }
-  })();
-}
-
-if (pairingPhoneNumber && !state.creds.registered) {
-  pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
-}
-
+// ── Limpieza de temporales y core dumps ──────────────────────────────────────
 let dbWriteTimer = null;
 if (!opts['test']) {
   // La limpieza de temporales vive en clearTmp(): el bloque `autocleartmp` que
@@ -409,9 +552,9 @@ const coreWatcher = fs.watch(__dirname, (eventType, filename) => {
   });
 });
 
-// Limita cuántas veces se muestra cada motivo de desconexión. Estaba declarado
-// dentro de connectionUpdate, así que se reiniciaba en cada evento y el límite
-// nunca se aplicaba.
+// ── Reconexión y eventos de conexión ─────────────────────────────────────────
+// Limita cuántas veces se muestra cada motivo de desconexión durante una misma
+// caída; se reinicia cuando la conexión vuelve a abrir.
 const errorCounters = {};
 function shouldLogError(errorType) {
   if (!errorCounters[errorType]) errorCounters[errorType] = { count: 0, lastShown: 0 };
@@ -444,6 +587,7 @@ async function connectionUpdate(update) {
   if (connection === 'open') {
     const recoveredAfter = reconnectAttempt;
     reconnectAttempt = 0;
+    consecutiveBadSessions = 0;
     terminalSession = false;
     for (const key of Object.keys(errorCounters)) delete errorCounters[key];
     clearPendingReconnect();
@@ -471,46 +615,62 @@ async function connectionUpdate(update) {
     return;
   }
   if (connection === 'close') {
+    const detail = describeDisconnectError(lastDisconnect);
     if (reason === DisconnectReason.badSession) {
-      if (shouldLogError('badSession')) {
-        global.conn.logger.error(`[ ⚠️ ] Sesión incorrecta, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
+      // En Baileys, 500 (`badSession`) también es el código por defecto ante
+      // stream:error sin código o fallos temporales de servidor/WebSocket.
+      // Se reintenta reparando archivos corruptos antes de declarar la sesión
+      // muerta y dejar al bot sin responder comandos.
+      const decision = classifyDisconnect(reason, DisconnectReason, { badSessionAttempts: consecutiveBadSessions });
+      consecutiveBadSessions += 1;
+      if (decision === RECONNECT) {
+        global.conn.logger.warn(
+          `[ ⚠️ ] Desconexión 500/badSession (intento ${consecutiveBadSessions}/${RECONNECT_POLICY.maxBadSessionRetries}): ${detail}. Reparando y reconectando...`,
+        );
+        scheduleSocketReconnect('badSession');
+      } else {
+        if (shouldLogError('badSession')) {
+          global.conn.logger.error(
+            `[ ⚠️ ] Sesión incorrecta tras ${consecutiveBadSessions} intentos (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`,
+          );
+        }
+        markTerminalSession(`sesión inválida tras ${consecutiveBadSessions} intentos (badSession: ${detail})`);
       }
-      markTerminalSession('sesión inválida (badSession)');
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogError('connectionClosed')) {
-        global.conn.logger.warn(`[ ⚠️ ] Conexión cerrada, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Conexión cerrada (${detail}), reconectando...`);
       }
       scheduleSocketReconnect('connectionClosed');
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogError('connectionLost')) {
-        global.conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor (${detail}), reconectando...`);
       }
       scheduleSocketReconnect('connectionLost');
     } else if (reason === DisconnectReason.loggedOut) {
       if (shouldLogError('loggedOut')) {
-        global.conn.logger.error(`[ ⚠️ ] Conexion cerrada, por favor elimina la carpeta ${global.authFile} y escanea nuevamente.`);
+        global.conn.logger.error(`[ ⚠️ ] Conexión cerrada desde WhatsApp (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`);
       }
       markTerminalSession('sesión cerrada desde el teléfono (loggedOut)');
     } else if (reason === DisconnectReason.restartRequired) {
       if (shouldLogError('restartRequired')) {
-        global.conn.logger.info(`[ ⚠️ ] Reinicio necesario, reconectando...`);
+        global.conn.logger.info(`[ ⚠️ ] Reinicio necesario (${detail}), reconectando...`);
       }
       scheduleSocketReconnect('restartRequired');
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogError('timedOut')) {
-        global.conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado, reconectando...`);
+        global.conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado (${detail}), reconectando...`);
       }
       scheduleSocketReconnect('timedOut');
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogError(unknownError)) {
-        global.conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida. ${reason || ''}: ${connection || ''}`);
+        global.conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida (${reason || 'none'}: ${detail})`);
       }
       // Motivo que no conocemos: se consulta la misma tabla que usan los
       // anteriores, porque WhatsApp inventa códigos nuevos de vez en cuando y
       // un código de sesión revocada no debe entrar en bucle.
       if (classifyDisconnect(reason, DisconnectReason) === STOP) {
-        markTerminalSession(`motivo ${reason ?? 'desconocido'}`);
+        markTerminalSession(`motivo ${reason ?? 'desconocido'} (${detail})`);
       } else {
         scheduleSocketReconnect(`unknown_${reason || 'none'}`);
       }
@@ -554,6 +714,7 @@ function markTerminalSession(hint) {
     // vuelve a caer, entrará aquí otra vez: es un latido de 5 minutos, no un bucle.
     if (shutdownStarted || stopped === 'open') return;
     terminalSession = false;
+    consecutiveBadSessions = 0;
     console.log(chalk.gray('[ ℹ️ ] Se reintenta una vez tras el estado terminal de la sesión.'));
     scheduleSocketReconnect('terminal-retry');
   }, RECONNECT_POLICY.terminalRetryMs);
@@ -626,21 +787,44 @@ function scheduleSocketReconnect(reason) {
   }, delay);
 }
 
-
 let isInit = true;
-const handlerPath = join(__dirname, 'handler.js');
-/** mtime de handler.js en el último import real (ver global.reloadHandler). */
-let handlerLoadedAt = statSync(handlerPath).mtimeMs;
-let handler = await import('./handler.js');
+
+/** Enlaza todos los eventos del socket de forma síncrona (sin ningún `await` intermedio). */
+function attachSocketHandlers(activeConn) {
+  if (!isInit) {
+    activeConn.ev.off('messages.upsert', activeConn.handler);
+    activeConn.ev.off('group-participants.update', activeConn.participantsUpdate);
+    activeConn.ev.off('groups.update', activeConn.groupsUpdate);
+    activeConn.ev.off('message.delete', activeConn.onDelete);
+    activeConn.ev.off('connection.update', activeConn.connectionUpdate);
+    activeConn.ev.off('creds.update', activeConn.credsUpdate);
+  }
+
+  activeConn.handler = handler.handler.bind(activeConn);
+  activeConn.participantsUpdate = handler.participantsUpdate.bind(activeConn);
+  activeConn.groupsUpdate = handler.groupsUpdate.bind(activeConn);
+  activeConn.onDelete = handler.deleteUpdate.bind(activeConn);
+  activeConn.connectionUpdate = connectionUpdate.bind(activeConn);
+  activeConn.credsUpdate = saveCreds.bind(activeConn);
+
+  activeConn.ev.on('messages.upsert', activeConn.handler);
+  activeConn.ev.on('group-participants.update', activeConn.participantsUpdate);
+  activeConn.ev.on('groups.update', activeConn.groupsUpdate);
+  activeConn.ev.on('message.delete', activeConn.onDelete);
+  activeConn.ev.on('connection.update', activeConn.connectionUpdate);
+  activeConn.ev.on('creds.update', activeConn.credsUpdate);
+
+  isInit = false;
+}
 
 async function refreshAuthState() {
-  const freshAuth = await useMultiFileAuthState(global.authFilePath)
-  state = freshAuth.state
-  saveCreds = freshAuth.saveCreds
+  const freshAuth = await loadAuthState(global.authFilePath);
+  state = freshAuth.state;
+  saveCreds = freshAuth.saveCreds;
   connectionOptions.auth = {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }).child({ level: 'fatal' })),
-  }
+  };
 }
 
 global.reloadHandler = async function (restatConn) {
@@ -665,118 +849,85 @@ global.reloadHandler = async function (restatConn) {
     socketReloadInProgress = true;
     const oldConn = global.conn;
     try {
-      // El patrón de Yuki es cerrar completamente la instancia anterior.
-      // No reutilizamos su EventEmitter ni sus listeners, porque Baileys puede
-      // emitir eventos tardíos del WebSocket que ya murió.
+      // Cerrar por completo la instancia anterior (`end()` limpia keepAlive,
+      // signalRepository y el buffer de eventos) antes de abrir una nueva.
       oldConn?.ev?.removeAllListeners?.();
+      await Promise.race([
+        Promise.resolve().then(() => oldConn?.end?.(new Error('socket-replaced'))),
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ]).catch(() => {});
       try { oldConn?.ws?.close?.(); } catch {}
-      try { oldConn?.end?.(new Error('socket-replaced')); } catch {}
 
       stopped = 'connecting';
-      // Recargar la sesión en cada intento, como AlyaBot, para no reutilizar
-      // creds/keys obsoletos después de un cierre prolongado.
+      // Recargar y reparar la sesión antes de crear el nuevo socket para no
+      // reutilizar creds/keys obsoletos ni archivos JSON truncados.
       await refreshAuthState();
       global.conn = makeWASocket(connectionOptions);
       store?.bind(global.conn);
       isInit = true;
-    }
-    finally {
+    } finally {
       socketReloadInProgress = false;
     }
   }
 
-  const activeConn = global.conn;
-  if (!isInit) {
-    activeConn.ev.off('messages.upsert', activeConn.handler);
-    activeConn.ev.off('group-participants.update', activeConn.participantsUpdate);
-    activeConn.ev.off('groups.update', activeConn.groupsUpdate);
-    activeConn.ev.off('message.delete', activeConn.onDelete);
-    activeConn.ev.off('connection.update', activeConn.connectionUpdate);
-    activeConn.ev.off('creds.update', activeConn.credsUpdate);
-  }
-
-  activeConn.handler = handler.handler.bind(activeConn);
-
-  activeConn.participantsUpdate = handler.participantsUpdate.bind(activeConn);
-  activeConn.groupsUpdate = handler.groupsUpdate.bind(activeConn);
-  activeConn.onDelete = handler.deleteUpdate.bind(activeConn);
-  activeConn.connectionUpdate = connectionUpdate.bind(activeConn);
-  activeConn.credsUpdate = saveCreds.bind(activeConn);
-
-  activeConn.ev.on('messages.upsert', activeConn.handler);
-  activeConn.ev.on('group-participants.update', activeConn.participantsUpdate);
-  activeConn.ev.on('groups.update', activeConn.groupsUpdate);
-  activeConn.ev.on('message.delete', activeConn.onDelete);
-  activeConn.ev.on('connection.update', activeConn.connectionUpdate);
-  activeConn.ev.on('creds.update', activeConn.credsUpdate);
-
-  isInit = false;
+  attachSocketHandlers(global.conn);
   return true;
 };
 
-// Los plugins viven directamente en ./plugins; no existe una subcarpeta index.
-const pluginFolder = join(__dirname, './plugins');
-const pluginFilter = (filename) => typeof filename === 'string' && /\.js$/.test(filename);
-global.plugins = {};
+// ── Arranque del socket (plugins, DB y handler ya están listos) ──────────────
+global.conn = makeWASocket(connectionOptions);
+store?.bind(global.conn);
+// Enlace síncrono inmediato: ni un solo `creds.update` ni `connection: 'open'`
+// inicial puede perderse antes de registrar los listeners.
+attachSocketHandlers(global.conn);
 
-async function filesInit() {
-  for (const filename of readdirSync(pluginFolder).filter(pluginFilter)) {
-    try {
-      const file = global.__filename(join(pluginFolder, filename));
-      const module = await import(file);
-      global.plugins[filename] = module.default || module;
-    } catch (e) {
-      global.conn.logger.error(e);
-      global.notifyOwnerError?.(`No se pudo importar el plugin ${filename}:`, e);
-      delete global.plugins[filename];
-    }
-  }
+// El primer handshake también va vigilado: con credenciales válidas pero una
+// red que no termina de conectar, no llegaba ni un `close` y había que
+// reiniciar a mano. Con sesión sin registrar no se arma, que ahí lo que falta
+// es un QR, no un reintento.
+if (state.creds?.registered) armConnectWatchdog('arranque');
+
+if (methodCode && !state.creds.registered) {
+  withPairingGuard(global.conn, {
+    maxPerHour: 3,
+    globalMaxPerHour: 6,
+    minIntervalMs: 60_000,
+    logger: baileysLogger(),
+  });
 }
-await filesInit();
 
-global.reload = async (_ev, filename) => {
-  if (!pluginFilter(filename)) return;
-  const dir = global.__filename(join(pluginFolder, filename), true);
-  if (filename in global.plugins) {
-    if (existsSync(dir)) global.conn.logger.info(` updated plugin - '${filename}'`);
-    else {
-      global.conn.logger.warn(`deleted plugin - '${filename}'`);
-      return delete global.plugins[filename];
+// Solicitar el código después de crear el socket. Hacerlo desde
+// connection.update puede repetir la solicitud durante el handshake y provocar
+// que WhatsApp reemplace la conexión anterior. Se limita el número de intentos
+// para no martillear el endpoint de pairing cuando WhatsApp devuelve un código
+// inválido (rate limit).
+const MAX_PAIRING_ATTEMPTS = 3;
+const PAIRING_RETRY_DELAY_MS = 5_000;
+
+function requestPairingCodeOnce() {
+  if (pairingCodeDone || pairingAttemptCount >= MAX_PAIRING_ATTEMPTS) return;
+  pairingAttemptCount += 1;
+  void (async () => {
+    try {
+      if (state.creds.registered || !global.conn?.requestPairingCode) return;
+      const raw = await global.conn.requestPairingCode(pairingPhoneNumber);
+      const codigo = String(raw || '').replace(/[^A-Za-z0-9]/g, '');
+      if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
+      pairingCodeDone = true;
+      console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
+      console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
+    } catch (err) {
+      console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/${MAX_PAIRING_ATTEMPTS}): ${err.message}`));
+      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS) {
+        pairingRequestTimer = setTimeout(requestPairingCodeOnce, PAIRING_RETRY_DELAY_MS);
+      }
     }
-  } else global.conn.logger.info(`new plugin - '${filename}'`);
-  // La validación previa con `syntax-error` se retiró a propósito: usa acorn
-  // con ecmaVersion 2020 y marcaba como error sintaxis que Node ya ejecuta
-  // sin problema (`||=`, `&&=`, `??=`, separadores numéricos `1_000`). Con un
-  // falso positivo el plugin ni siquiera se importaba, así que un `||=`
-  // dejaba `speedtest.js` fuera y rompía también a quien lo importara.
-  // Node es el único juez válido: si el import falla, `import()` ya devuelve
-  // el SyntaxError con línea y columna exactas.
-  try {
-    const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-    global.plugins[filename] = module.default || module;
-  } catch (e) {
-    const esSintaxis = e instanceof SyntaxError;
-    global.conn.logger.error(`${esSintaxis ? 'syntax error while loading' : 'error require plugin'} '${filename}'\n${format(e)}`);
-    global.notifyOwnerError?.(`${esSintaxis ? 'Error de sintaxis en el plugin' : 'No se pudo recargar el plugin'} ${filename}:`, e);
-  } finally {
-    global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)));
-  }
-};
-Object.freeze(global.reload);
+  })();
+}
 
-// Un guardado de editor suele disparar varios eventos fs.watch seguidos en
-// pocos milisegundos; el debounce evita importar dos veces el mismo plugin.
-const pluginReloadTimers = new Map();
-const pluginWatcher = watch(pluginFolder, (ev, filename) => {
-  if (!pluginFilter(filename)) return;
-  clearTimeout(pluginReloadTimers.get(filename));
-  pluginReloadTimers.set(filename, setTimeout(() => {
-    pluginReloadTimers.delete(filename);
-    void global.reload(ev, filename);
-  }, 150));
-});
-
-await global.reloadHandler();
+if (pairingPhoneNumber && !state.creds.registered) {
+  pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
+}
 
 const tmpTimer = setInterval(() => {
   if (stopped === 'close' || !global.conn?.user) return;
@@ -819,12 +970,21 @@ async function gracefulShutdown(signal) {
     pairingRequestTimer = null;
   }
   try {
+    await saveCreds?.();
+  } catch (error) {
+    console.error('[ SHUTDOWN ] No se pudieron guardar las credenciales:', error);
+  }
+  try {
     await global.db?.write?.();
   } catch (error) {
     console.error('[ SHUTDOWN ] No se pudo guardar la base local:', error);
   }
   try {
     global.conn?.ev?.removeAllListeners?.();
+    await Promise.race([
+      Promise.resolve().then(() => global.conn?.end?.(new Error('shutdown'))),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]).catch(() => {});
     global.conn?.ws?.close?.();
   } catch (error) {
     console.error('[ SHUTDOWN ] No se pudo cerrar el socket:', error);

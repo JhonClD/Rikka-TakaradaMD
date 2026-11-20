@@ -61,15 +61,36 @@ test('el retardo nunca baja del intervalo base ni se descontrola', () => {
   assert.ok(Number.isFinite(nextReconnectDelay(-4, {}, () => 0.5)))
 })
 
-test('los motivos de sesión no admiten reintento', () => {
-  // Cada uno de estos exige acción humana; reintentar solo gasta el rate limit
-  // de emparejamiento y puede dejar dos sesiones peleadas por el mismo número.
-  // 500 = badSession y 515 = restartRequired en este fork (ver DISCONNECT_CODES).
-  for (const reason of [401, 500, 440, 411, 405]) {
+test('los motivos de sesión terminales no admiten reintento', () => {
+  // Cada uno de estos exige acción humana inmediata; reintentar solo gasta el
+  // rate limit de emparejamiento o pelea con otra sesión activa (405/440).
+  for (const reason of [401, 440, 411, 405]) {
     assert.equal(classifyDisconnect(reason), STOP, `${reason} debería ser terminal`)
   }
   assert.equal(classifyDisconnect('connectionReplaced'), STOP)
   assert.equal(classifyDisconnect('loggedOut'), STOP)
+})
+
+test('badSession (500) tolera reintentos acotados antes de pasar a STOP', () => {
+  // En this-xys/bails, 500 es también el código comodín de stream:error sin
+  // código o fallos temporales de WebSocket: no debe pausar 5 min al primer hipo,
+  // pero sí detenerse tras agotarse maxBadSessionRetries intentos consecutivos.
+  for (let attempt = 0; attempt < DEFAULT_POLICY.maxBadSessionRetries; attempt += 1) {
+    assert.equal(
+      classifyDisconnect(500, DISCONNECT_CODES, { badSessionAttempts: attempt }),
+      RECONNECT,
+      `intento ${attempt} de 500 debería reintentarse`,
+    )
+  }
+  assert.equal(
+    classifyDisconnect(500, DISCONNECT_CODES, { badSessionAttempts: DEFAULT_POLICY.maxBadSessionRetries }),
+    STOP,
+    'tras agotar los reintentos consecutivos, 500 debe pasar a STOP',
+  )
+  assert.equal(
+    classifyDisconnect('badSession', DISCONNECT_CODES, { badSessionAttempts: DEFAULT_POLICY.maxBadSessionRetries }),
+    STOP,
+  )
 })
 
 test('los cortes de red sí se reintentan, y lo desconocido también', () => {
@@ -107,20 +128,27 @@ test('los códigos se contrastan con los de baileys', {
   skip: REAL_DISCONNECT ? false : 'no se pudo importar baileys en este entorno',
 }, () => {
   const DisconnectReason = REAL_DISCONNECT
-  // Si el fork cambia un número, la tabla local se queda obsoleta en silencio
-  // y un badSession dejaría de ser terminal. Esto lo pilla.
-  const TERMINALES = new Set(['loggedOut', 'badSession', 'connectionReplaced', 'multideviceMismatch'])
+  // Si el fork cambia un número, la tabla local se queda obsoleta en silencio.
+  const TERMINALES_INMEDIATOS = new Set(['loggedOut', 'connectionReplaced', 'multideviceMismatch'])
   for (const [name, code] of Object.entries({
     loggedOut: 401, connectionClosed: 428, connectionLost: 408, connectionReplaced: 440,
     badSession: 500, restartRequired: 515, multideviceMismatch: 411,
   })) {
     assert.equal(DisconnectReason[name], code, `el fork cambió DisconnectReason.${name}: ${DisconnectReason[name]} !== ${code}`)
     assert.equal(DISCONNECT_CODES[name], code, 'la tabla local se quedó atrás respecto al enum real')
-    assert.equal(classifyDisconnect(DisconnectReason[name], DisconnectReason),
-      TERMINALES.has(name) ? STOP : RECONNECT, `${name} mal clasificado`)
+    assert.equal(
+      classifyDisconnect(DisconnectReason[name], DisconnectReason),
+      TERMINALES_INMEDIATOS.has(name) ? STOP : RECONNECT,
+      `${name} mal clasificado en el primer intento`,
+    )
   }
+  assert.equal(
+    classifyDisconnect(DisconnectReason.badSession, DisconnectReason, { badSessionAttempts: DEFAULT_POLICY.maxBadSessionRetries }),
+    STOP,
+    'badSession tras agotar reintentos debe ser terminal',
+  )
   // Sin pasar el enum, la tabla local tiene que dar el mismo veredicto.
-  for (const name of TERMINALES) {
+  for (const name of TERMINALES_INMEDIATOS) {
     assert.equal(classifyDisconnect(DISCONNECT_CODES[name]), STOP, `${name} sin enum debería ser terminal`)
   }
 })
@@ -139,6 +167,7 @@ test('los umbrales tienen sentido entre sí', () => {
   assert.ok(DEFAULT_POLICY.connectTimeoutMs > DEFAULT_POLICY.baseMs,
     'el vigilante no puede expirar antes del primer reintento')
   assert.ok(DEFAULT_POLICY.jitterRatio > 0 && DEFAULT_POLICY.jitterRatio < 1)
+  assert.ok(DEFAULT_POLICY.maxBadSessionRetries >= 2 && DEFAULT_POLICY.maxBadSessionRetries <= 5)
 })
 
 // ── El cableado en main.js ────────────────────────────────────────────────
@@ -164,6 +193,17 @@ test('el handshake lleva vigilante y el estado terminal no es un callejón', () 
   assert.match(mainSrc, /RECONNECT_POLICY\.connectTimeoutMs/)
   assert.match(mainSrc, /RECONNECT_POLICY\.terminalRetryMs/)
   assert.match(mainSrc, /classifyDisconnect\(reason, DisconnectReason\)/)
+  assert.match(mainSrc, /classifyDisconnect\(reason, DisconnectReason, \{ badSessionAttempts: consecutiveBadSessions \}\)/)
+})
+
+test('plugins y listeners se preparan para no perder creds.update ni open inicial', () => {
+  // Si makeWASocket corre antes de await filesInit(), el socket abre y emite
+  // creds.update / connection:'open' mientras nadie escucha todavía.
+  const filesInitPos = mainSrc.indexOf('await filesInit();')
+  const bootSocketPos = mainSrc.lastIndexOf('global.conn = makeWASocket(connectionOptions);')
+  const attachPos = mainSrc.indexOf('attachSocketHandlers(global.conn);', bootSocketPos)
+  assert.ok(filesInitPos > 0 && bootSocketPos > filesInitPos, 'filesInit() debe terminar antes de abrir el socket')
+  assert.ok(attachPos > bootSocketPos && attachPos - bootSocketPos < 250, 'attachSocketHandlers debe ejecutarse justo tras makeWASocket sin await intermedio')
 })
 
 test('el apagado cancela lo programado', () => {

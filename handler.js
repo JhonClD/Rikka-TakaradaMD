@@ -185,18 +185,37 @@ function isForeignClientMessage(id) {
     || value.startsWith('FizzxyTheGreat-');
 }
 
+/** Extrae el timestamp en ms tolerando tanto números como objetos protobuf Long. */
+function parseMessageTimestampMs(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw * 1000 : 0;
+  if (raw && typeof raw === 'object') {
+    const value = typeof raw.toNumber === 'function' ? raw.toNumber() : Number(raw.low ?? 0);
+    return Number.isFinite(value) ? value * 1000 : 0;
+  }
+  const value = Number(raw || 0);
+  return Number.isFinite(value) ? value * 1000 : 0;
+}
+
 export async function handler(chatUpdate) {
   if (!chatUpdate?.messages?.length) return;
 
   const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
   chatUpdate.messages = chatUpdate.messages.filter(msg => {
-    const msgTs = (msg.messageTimestamp || 0) * 1000;
-    return msgTs >= connectionTime - 60000;
+    const msgTs = parseMessageTimestampMs(msg?.messageTimestamp);
+    return msgTs === 0 || msgTs >= connectionTime - 60000;
   });
   if (!chatUpdate.messages.length) return;
 
   this.pushMessage(chatUpdate.messages).catch(console.error);
-  let m = chatUpdate.messages[chatUpdate.messages.length - 1];
+  if (global.db.data == null) await global.loadDatabase();
+
+  for (const rawMsg of chatUpdate.messages) {
+    await handleMessage.call(this, rawMsg, chatUpdate);
+  }
+}
+
+async function handleMessage(rawMsg, chatUpdate) {
+  let m = rawMsg;
   if (!m) return;
 
   if (!isValidMessage(m)) return;
@@ -205,8 +224,6 @@ export async function handler(chatUpdate) {
     ? (this?.user?.jid || '')
     : (m.key?.participantAlt || m.key?.participantPN || m.key?.participant || m.key?.remoteJidAlt || m.key?.remoteJidPN || m.key?.remoteJid || '');
   if (isDuplicate(m.key?.id, rawSender, msgText, recentMessages, DUPLICATE_TIMEOUT, MAX_CACHE_SIZE)) return;
-
-  if (global.db.data == null) await global.loadDatabase();
 
   try {
     m = smsg(this, m) || m;
