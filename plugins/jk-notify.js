@@ -1,6 +1,8 @@
 // plugins/jk-notify.js — Notificador automático unificado de nuevos episodios (JKAnime)
 // Incluye extractores JKAnime (sin evaluar JS remoto), cliente HTTP sobre wreq-js
-// con huella Chrome real, descargas paralelas/HLS y suite de tests embebida
+// con huella Chrome real, respaldo anti-Cloudflare con APIs de scraping
+// (scrape.do, ScraperAPI, WebScrapingAPI, OpenGraph.io), descargas paralelas/HLS
+// y suite de tests embebida
 // (ejecutable con `node --test plugins/jk-notify.js`).
 
 import * as cheerio from 'cheerio'
@@ -38,6 +40,9 @@ const ACCEPT_LANG = 'es-419,es;q=0.9,en;q=0.8'
 //   JK_PROXY_URL=http://user:pass@host:8888 (o socks5://host:1080)
 //   JK_FLARESOLVERR_URL / FLARESOLVERR_URL=http://host:8191
 //   JK_COOKIE=cf_clearance=...  (acompañada de JK_UA del mismo navegador e IP)
+// APIs de scraping (respaldo automático cuando JKAnime bloquea la petición directa):
+//   SCRAPEDO_TOKEN, SCRAPERAPI_KEY, WEBSCRAPINGAPI_KEY, OPENGRAPH_APP_ID
+//   (JK_SCRAPER_APIS=0 las desactiva)
 const JK_PROXY_URL = String(process.env.JK_PROXY_URL || '').trim()
 const JK_TIMEZONE = String(process.env.JK_TIMEZONE || process.env.DBS_TIMEZONE || 'America/Lima').trim()
 
@@ -491,6 +496,256 @@ async function solveWithFlareSolverr(targetUrl) {
   return flareSolvePromise
 }
 
+// ─── APIs de scraping (respaldo anti-Cloudflare) ──────────────────────────────
+// Se usan SOLO cuando JKAnime bloquea la petición directa (HTTP 403/desafío) y
+// FlareSolverr no está configurado o falla. Orden: scrape.do → ScraperAPI →
+// WebScrapingAPI → OpenGraph.io (scrape). Cada proveedor prueba primero el modo
+// normal y escala a premium/residencial solo si Cloudflare sigue bloqueando.
+// Las claves se pueden sobrescribir con variables de entorno; JK_SCRAPER_APIS=0
+// desactiva todo este respaldo.
+
+const SCRAPER_TIMEOUT_MS = 70_000
+const SCRAPER_QUOTA_COOLDOWN_MS = 30 * 60 * 1000
+const SCRAPER_SOFT_COOLDOWN_MS = 5 * 60 * 1000
+const SCRAPER_RATE_COOLDOWN_MS = 60 * 1000
+const SCRAPER_CACHE_TTL_MS = 60_000
+const SCRAPER_CACHE_MAX = 40
+
+const envKey = (name, fallback = '') => String(process.env[name] || fallback).trim()
+
+const scraperRuntime = {
+  enabled: !IS_TEST_RUN && process.env.JK_SCRAPER_APIS !== '0',
+  lastGood: '',
+  cache: new Map(),
+  providers: [
+    {
+      id: 'scrapedo',
+      label: 'scrape.do',
+      base: 'https://api.scrape.do/',
+      key: envKey('SCRAPEDO_TOKEN', 'db51bcb2edaf40ed9457e4f121357d66c253eb7d830'),
+      levels: 2, // 0 = normal, 1 = super (proxies residenciales/móviles)
+      forwardHeaders: true,
+      params: (key, url, level, forward) => ({
+        token: key,
+        url,
+        ...(level >= 1 ? { super: 'true' } : {}),
+        ...(forward ? { customHeaders: 'true' } : {}),
+      }),
+    },
+    {
+      id: 'scraperapi',
+      label: 'ScraperAPI',
+      base: 'https://api.scraperapi.com/',
+      key: envKey('SCRAPERAPI_KEY', '0431581063dc7e5b59fd1cb11e3b637e'),
+      levels: 2, // 1 = premium
+      forwardHeaders: true,
+      params: (key, url, level, forward) => ({
+        api_key: key,
+        url,
+        ...(level >= 1 ? { premium: 'true' } : {}),
+        ...(forward ? { keep_headers: 'true' } : {}),
+      }),
+    },
+    {
+      id: 'webscrapingapi',
+      label: 'WebScrapingAPI',
+      base: 'https://api.webscrapingapi.com/v2',
+      key: envKey('WEBSCRAPINGAPI_KEY', '47c60c5d4e836d631151ac9b3287a0f4'),
+      levels: 2, // 1 = render JS + proxy residencial
+      forwardHeaders: true,
+      params: (key, url, level, forward) => ({
+        api_key: key,
+        url,
+        render_js: level >= 1 ? '1' : '0',
+        proxy_type: level >= 1 ? 'residential' : 'datacenter',
+        ...(forward ? { keep_headers: '1' } : {}),
+      }),
+    },
+    {
+      id: 'opengraph',
+      label: 'OpenGraph.io',
+      base: 'https://opengraph.io/api/1.1/',
+      key: envKey('OPENGRAPH_APP_ID', '8621cc8f-b6d6-4493-b8e5-baea0f11efb1'),
+      levels: 2, // 1 = full_render (Chrome real)
+      forwardHeaders: false,
+      buildUrl: (provider, url, level) => `${provider.base}scrape/${encodeURIComponent(url)}?${new URLSearchParams({
+        app_id: provider.key,
+        use_proxy: 'true',
+        cache_ok: 'false',
+        ...(level >= 1 ? { full_render: 'true' } : {}),
+      })}`,
+      extract: (text) => {
+        try {
+          const json = JSON.parse(text)
+          const html = json?.html ?? json?.content ?? json?.data
+          return typeof html === 'string' ? html : ''
+        } catch (_) {
+          return text
+        }
+      },
+    },
+  ],
+}
+
+function redactScraperKeys(text) {
+  let out = String(text ?? '')
+  for (const provider of scraperRuntime.providers) {
+    if (provider.key) out = out.split(provider.key).join('***')
+  }
+  return out
+}
+
+function scraperApisAvailable() {
+  if (!scraperRuntime.enabled) return false
+  const now = Date.now()
+  return scraperRuntime.providers.some(p => p.key && (p.cooldownUntil || 0) <= now)
+}
+
+function activeScraperLabels() {
+  return scraperRuntime.enabled ? scraperRuntime.providers.filter(p => p.key).map(p => p.label) : []
+}
+
+// Una página real de Cloudflare "Just a moment": no confundir con el script
+// pasivo /cdn-cgi/challenge-platform que Cloudflare inyecta en páginas normales.
+function looksLikeCfChallengePage(body) {
+  const snippet = String(body || '').slice(0, 8192)
+  return /<title>\s*(?:Just a moment|Un momento|Attention Required)/i.test(snippet)
+    || /_cf_chl_opt|cf-browser-verification/i.test(snippet)
+}
+
+function parseJsonLoose(value) {
+  if (typeof value !== 'string') return value
+  try { return JSON.parse(value) } catch (_) {}
+  try {
+    const pre = cheerio.load(value)('pre').first().text()
+    if (pre) return JSON.parse(pre)
+  } catch (_) {}
+  return value
+}
+
+async function callScraperProvider(provider, targetUrl, level, { headers = {}, signal } = {}) {
+  const forward = Boolean(provider.forwardHeaders && Object.keys(headers).length)
+  const endpoint = provider.buildUrl
+    ? provider.buildUrl(provider, targetUrl, level)
+    : `${provider.base}?${new URLSearchParams(provider.params(provider.key, targetUrl, level, forward))}`
+
+  let res
+  try {
+    res = await rawFetch(endpoint, {
+      headers: forward ? headers : {},
+      timeout: SCRAPER_TIMEOUT_MS,
+      signal,
+      disableDefaultHeaders: true,
+      bypassProxy: true,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw err
+    throw new Error(redactScraperKeys(err?.message || 'error de red'))
+  }
+
+  const text = await res.text().catch(() => '')
+  if (!res.ok) {
+    const failure = new Error(`HTTP ${res.status}`)
+    if (isCloudflareChallenge(res.status, res.headers, text)) {
+      failure.message = `HTTP ${res.status} (Cloudflare)`
+      failure.blocked = true
+    } else if (res.status === 401 || res.status === 402) {
+      failure.cooldownMs = SCRAPER_QUOTA_COOLDOWN_MS // clave inválida o créditos agotados
+    } else if (res.status === 403) {
+      failure.cooldownMs = SCRAPER_SOFT_COOLDOWN_MS
+    } else if (res.status === 429) {
+      failure.cooldownMs = SCRAPER_RATE_COOLDOWN_MS
+    }
+    throw failure
+  }
+
+  const body = provider.extract ? provider.extract(text) : text
+  if (!String(body).trim()) throw new Error('respuesta vacía')
+  if (looksLikeCfChallengePage(body)) {
+    const blocked = new Error('desafío Cloudflare en la respuesta')
+    blocked.blocked = true
+    throw blocked
+  }
+  return body
+}
+
+async function fetchViaScraperApis(targetUrl, { headers = {}, isAjax = false, signal } = {}) {
+  if (!scraperRuntime.enabled) throw new Error('APIs de scraping desactivadas')
+
+  const cached = scraperRuntime.cache.get(targetUrl)
+  if (cached && Date.now() - cached.at < SCRAPER_CACHE_TTL_MS) return { ...cached.result }
+
+  const forwardable = {}
+  if (isAjax) {
+    for (const name of ['x-requested-with', 'accept', 'referer']) {
+      if (headers[name]) forwardable[name] = headers[name]
+    }
+  }
+
+  const now = Date.now()
+  const pool = scraperRuntime.providers.filter(p => p.key && (p.cooldownUntil || 0) <= now)
+  const lastIdx = pool.findIndex(p => p.id === scraperRuntime.lastGood)
+  if (lastIdx > 0) pool.unshift(...pool.splice(lastIdx, 1)) // primero el que funcionó la última vez
+
+  const errors = []
+  for (const provider of pool) {
+    for (let level = provider.level || 0; level < provider.levels; level += 1) {
+      try {
+        const body = await callScraperProvider(provider, targetUrl, level, { headers: forwardable, signal })
+        provider.level = level
+        scraperRuntime.lastGood = provider.id
+        const result = { data: body, status: 200, headers: {}, url: targetUrl }
+        while (scraperRuntime.cache.size >= SCRAPER_CACHE_MAX) {
+          scraperRuntime.cache.delete(scraperRuntime.cache.keys().next().value)
+        }
+        scraperRuntime.cache.set(targetUrl, { at: Date.now(), result })
+        console.log(`[jk-notify] 🛡️ Cloudflare esquivado vía ${provider.label}${level ? ' (premium)' : ''}`)
+        return { ...result }
+      } catch (err) {
+        if (signal?.aborted) throw createAbortError()
+        errors.push(`${provider.label}${level ? ' premium' : ''}: ${redactScraperKeys(err.message)}`)
+        if (err.cooldownMs) provider.cooldownUntil = Date.now() + err.cooldownMs
+        if (!err.blocked) break // fallo que no es bloqueo → siguiente proveedor
+        // bloqueado por Cloudflare → escala al modo premium del mismo proveedor
+      }
+    }
+  }
+  throw new Error(errors.join(' | ') || 'sin proveedores disponibles')
+}
+
+// Portada de respaldo: og:image de la página del episodio vía OpenGraph.io
+async function getOpenGraphImage(pageUrl) {
+  const provider = scraperRuntime.providers.find(p => p.id === 'opengraph')
+  if (!scraperRuntime.enabled || !provider?.key || (provider.cooldownUntil || 0) > Date.now()) return null
+  const key = `og:${pageUrl}`
+  const cached = getCachedCover(key)
+  if (cached !== undefined) return cached
+
+  try {
+    const endpoint = `${provider.base}site/${encodeURIComponent(pageUrl)}?${new URLSearchParams({
+      app_id: provider.key,
+      use_proxy: 'true',
+    })}`
+    const res = await rawFetch(endpoint, {
+      headers: { accept: 'application/json' },
+      timeout: 30_000,
+      disableDefaultHeaders: true,
+      bypassProxy: true,
+    })
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 402) provider.cooldownUntil = Date.now() + SCRAPER_QUOTA_COOLDOWN_MS
+      throw new Error(`HTTP ${res.status}`)
+    }
+    const json = await res.json()
+    const raw = json?.hybridGraph?.image || json?.openGraph?.image
+    const image = safeHttpUrl(typeof raw === 'string' ? raw : raw?.url, pageUrl)
+    setCachedCover(key, image || null)
+    return image || null
+  } catch (err) {
+    throw new Error(redactScraperKeys(err?.message || 'error de red'))
+  }
+}
+
 function normalizeHeaders(extra = {}, { forJk = false } = {}) {
   const out = {}
   if (forJk && jkRuntime.ua) out['user-agent'] = jkRuntime.ua
@@ -520,6 +775,8 @@ async function httpRequest(url, options = {}) {
   const isAjax = forJk && /\/ajax\//i.test(new URL(url).pathname)
   const totalAttempts = Math.max(1, retries + 1)
   let flareTried = false
+  let scraperTried = false
+  let scraperError = null
   let lastError = null
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
@@ -563,11 +820,29 @@ async function httpRequest(url, options = {}) {
 
       if (blocked && jkRuntime.flareUrl && !flareTried && responseType !== 'buffer') {
         flareTried = true
-        const solved = await solveWithFlareSolverr(url)
-        if (isAjax || responseType === 'json') {
-          try { solved.data = JSON.parse(solved.data) } catch (_) {}
+        try {
+          const solved = await solveWithFlareSolverr(url)
+          if (isAjax || responseType === 'json') {
+            try { solved.data = JSON.parse(solved.data) } catch (_) {}
+          }
+          return solved
+        } catch (flareErr) {
+          if (signal?.aborted) throw createAbortError()
+          console.warn(`[jk-notify] FlareSolverr falló: ${flareErr.message}`)
         }
-        return solved
+      }
+
+      if (blocked && method === 'GET' && !scraperTried && responseType !== 'buffer' && scraperApisAvailable()) {
+        scraperTried = true
+        try {
+          const viaApi = await fetchViaScraperApis(url, { headers: normalizeHeaders(headers), isAjax, signal })
+          if (isAjax || responseType === 'json') viaApi.data = parseJsonLoose(viaApi.data)
+          return viaApi
+        } catch (apiErr) {
+          if (signal?.aborted) throw createAbortError()
+          scraperError = apiErr
+          console.warn(`[jk-notify] APIs de scraping fallaron: ${apiErr.message}`)
+        }
       }
 
       const err = new Error(`HTTP ${res.status}`)
@@ -584,10 +859,15 @@ async function httpRequest(url, options = {}) {
   }
 
   if (forJk) {
-    const needsSolver = !jkRuntime.flareUrl && (lastError?.isCloudflare || lastError?.status === 403)
-    const detail = needsSolver
-      ? 'JKAnime devolvió HTTP 403 (desafío Cloudflare). Configura JK_FLARESOLVERR_URL (o FLARESOLVERR_URL), JK_PROXY_URL residencial, o aporta JK_COOKIE y JK_UA vigentes del mismo navegador/IP.'
-      : `No se pudo acceder a JKAnime: ${lastError?.message || 'error desconocido'}`
+    const cfBlocked = Boolean(lastError?.isCloudflare || lastError?.status === 403)
+    let detail
+    if (cfBlocked && scraperError) {
+      detail = `JKAnime devolvió HTTP 403 (desafío Cloudflare) y las APIs de scraping fallaron (${String(scraperError.message).slice(0, 240)}).`
+    } else if (cfBlocked && !jkRuntime.flareUrl) {
+      detail = 'JKAnime devolvió HTTP 403 (desafío Cloudflare). Configura JK_FLARESOLVERR_URL (o FLARESOLVERR_URL), una API de scraping (SCRAPEDO_TOKEN, SCRAPERAPI_KEY, WEBSCRAPINGAPI_KEY), JK_PROXY_URL residencial, o aporta JK_COOKIE y JK_UA vigentes del mismo navegador/IP.'
+    } else {
+      detail = `No se pudo acceder a JKAnime: ${lastError?.message || 'error desconocido'}`
+    }
     const failed = new Error(detail)
     failed.code = 'JKANIME_FETCH_FAILED'
     if (lastError?.status) failed.status = lastError.status
@@ -1635,19 +1915,28 @@ async function enviarEpisodio(chatId, ep, conn) {
     if (!srvs.length) throw new Error('No se encontraron servidores de video')
 
     let coverBuffer = null
+    const downloadCover = async (coverUrl) => {
+      const imgRes = await httpRequest(coverUrl, {
+        responseType: 'buffer',
+        headers: isJKAnimeUrl(coverUrl) ? { referer: `${JKANIME_URL}/` } : {},
+        timeout: 10_000,
+        retries: 1,
+      })
+      return (Buffer.isBuffer(imgRes.data) && imgRes.data.length > 512) ? imgRes.data : null
+    }
     try {
       const coverUrl = await getAniListCover(titulo, slug, epNum) || imgUrl
-      if (coverUrl) {
-        const imgRes = await httpRequest(coverUrl, {
-          responseType: 'buffer',
-          headers: isJKAnimeUrl(coverUrl) ? { referer: `${JKANIME_URL}/` } : {},
-          timeout: 10_000,
-          retries: 1,
-        })
-        if (Buffer.isBuffer(imgRes.data) && imgRes.data.length > 512) coverBuffer = imgRes.data
-      }
+      if (coverUrl) coverBuffer = await downloadCover(coverUrl)
     } catch (err) {
       console.warn(`[jk-notify] No se pudo obtener la portada de ${titulo}: ${err.message}`)
+    }
+    if (!coverBuffer) {
+      try {
+        const ogUrl = await getOpenGraphImage(epUrl)
+        if (ogUrl) coverBuffer = await downloadCover(ogUrl)
+      } catch (err) {
+        console.warn(`[jk-notify] Portada OpenGraph.io falló para ${titulo}: ${err.message}`)
+      }
     }
 
     const ahora = formatClock()
@@ -1901,6 +2190,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       JK_PROXY_URL ? 'proxy' : null,
       jkRuntime.flareUrl ? 'FlareSolverr' : null,
       jkRuntime.cookie ? 'cookie' : null,
+      scraperApisAvailable() ? `scraping: ${activeScraperLabels().join(' → ')}` : null,
     ].filter(Boolean).join(', ')
     const job = global.jkCurrentJob
     const lines = [
@@ -2276,6 +2566,100 @@ if (IS_TEST_RUN) {
       assert.equal(fs.existsSync(badPath), false)
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+  test('APIs de scraping: rotan, escalan a premium, enfrían cuota agotada y no filtran claves', async () => {
+    const hits = []
+    const server = http.createServer((req, res) => {
+      const u = new URL(req.url, 'http://127.0.0.1')
+      hits.push(`${u.pathname}${u.searchParams.has('premium') ? '?premium' : ''}`)
+      if (u.pathname.startsWith('/sd/')) {
+        res.writeHead(401)
+        res.end('invalid token')
+        return
+      }
+      if (u.pathname.startsWith('/sa/')) {
+        if (!u.searchParams.has('premium')) {
+          res.writeHead(403, { 'Content-Type': 'text/html', 'cf-mitigated': 'challenge' })
+          res.end('<html><title>Just a moment...</title></html>')
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        res.end(`<html>desbloqueado por scraperapi: ${u.searchParams.get('url')}</html>`)
+        return
+      }
+      if (u.pathname.startsWith('/bad/')) {
+        res.writeHead(500)
+        res.end('boom')
+        return
+      }
+      if (u.pathname.startsWith('/cf-')) {
+        res.writeHead(403, { 'Content-Type': 'text/html', 'cf-mitigated': 'challenge' })
+        res.end('<html><title>Just a moment...</title></html>')
+        return
+      }
+      res.writeHead(404)
+      res.end('not found')
+    })
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${server.address().port}`
+    const byId = Object.fromEntries(scraperRuntime.providers.map(p => [p.id, p]))
+    const saved = scraperRuntime.providers.map(p => ({ p, base: p.base, key: p.key, level: p.level, cooldownUntil: p.cooldownUntil }))
+    const prevEnabled = scraperRuntime.enabled
+    const prevFlare = jkRuntime.flareUrl
+    const apiHits = () => hits.filter(h => !h.startsWith('/cf-'))
+
+    try {
+      scraperRuntime.enabled = true
+      scraperRuntime.cache.clear()
+      scraperRuntime.lastGood = ''
+      jkRuntime.flareUrl = ''
+      for (const p of scraperRuntime.providers) { p.key = ''; p.level = 0; p.cooldownUntil = 0 }
+      byId.scrapedo.key = 'test-key-sd'
+      byId.scrapedo.base = `${base}/sd/`
+      byId.scraperapi.key = 'test-key-sa'
+      byId.scraperapi.base = `${base}/sa/`
+
+      // 1) scrape.do responde 401 (cuota) → ScraperAPI normal bloqueado → ScraperAPI premium OK
+      const r1 = await httpRequest(`${base}/cf-one`, { forceJk: true, retries: 0 })
+      assert.equal(r1.status, 200)
+      assert.match(r1.data, /desbloqueado por scraperapi/)
+      assert.deepEqual(apiHits(), ['/sd/', '/sa/', '/sa/?premium'])
+      assert.ok(byId.scrapedo.cooldownUntil > Date.now())
+
+      // 2) scrape.do sigue en enfriamiento y ScraperAPI arranca directo en premium
+      hits.length = 0
+      const r2 = await httpRequest(`${base}/cf-two`, { forceJk: true, retries: 0 })
+      assert.match(r2.data, /desbloqueado por scraperapi/)
+      assert.deepEqual(apiHits(), ['/sa/?premium'])
+
+      // 3) caché de 60 s: la misma URL no vuelve a gastar créditos
+      hits.length = 0
+      await httpRequest(`${base}/cf-two`, { forceJk: true, retries: 0 })
+      assert.deepEqual(apiHits(), [])
+
+      // 4) todo falla → error JKANIME_FETCH_FAILED sin exponer claves
+      byId.scraperapi.base = `${base}/bad/`
+      await assert.rejects(
+        () => httpRequest(`${base}/cf-three`, { forceJk: true, retries: 0 }),
+        (err) => err.code === 'JKANIME_FETCH_FAILED'
+          && /APIs de scraping/.test(err.message)
+          && !/test-key/.test(err.message),
+      )
+      assert.equal(redactScraperKeys('https://x/?api_key=test-key-sa'), 'https://x/?api_key=***')
+    } finally {
+      for (const s of saved) {
+        s.p.base = s.base
+        s.p.key = s.key
+        s.p.level = s.level
+        s.p.cooldownUntil = s.cooldownUntil
+      }
+      scraperRuntime.enabled = prevEnabled
+      scraperRuntime.cache.clear()
+      scraperRuntime.lastGood = ''
+      jkRuntime.flareUrl = prevFlare
       await new Promise(resolve => server.close(resolve))
     }
   })
