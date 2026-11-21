@@ -18,12 +18,12 @@ import { resolveJkAnimeEpisodeInput } from './lib/jkanime-episode-servers.js'
 
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 20_000
-const SEGMENT_TIMEOUT_MS = 25_000
+const SEGMENT_TIMEOUT_MS = 180_000
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.STREAMWISH_TIMEOUT_MS) || 45 * 60_000)
 const IDLE_TIMEOUT_MS = 90_000
 const MIN_VALID_BYTES = 128 * 1024
 const MAX_VIDEO_BYTES = 2 * 1024 ** 3
-const HLS_CONCURRENCY = 6
+const HLS_CONCURRENCY = 4
 
 const STREAMWISH_HOST_RE = /(?:^|\.)(?:(?:stream|str|sfast|a|d|m|flas|obey|cdn|embed|player|hls)wish\.|wishfast\.|wishembed\.|hgcloud\.|hglink\.|streamhg[a-z0-9]*\.|vibuxer\.|hanerix\.|audinifer\.|niramirus\.|cybervynx\.|davioad\.|haxloppd\.|dumbalag\.|cavanhabg\.|tryzendm\.|gradehgplus\.|rulesrule\.|ups2up\.|ghbrisk\.|kravaxxa\.|mycloudz\.|vidcloud\.top$|cdnplaypro\.|iplayerhls\.|streamgg\.|kswplayer\.|swhoi\.|multimovies\.|uqloads\.|neko-stream\.|swdyu\.)/i
 
@@ -443,46 +443,87 @@ async function remuxTsToMp4(tsPath, destPath, signal) {
   throw lastErr || new Error('ffmpeg no pudo remuxear el video.')
 }
 
-async function fetchSegmentBuffer(session, segUrl, referer, signal) {
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(createAbortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function readStreamBuffer(res, watchdog) {
+  const chunks = []
+  for await (const c of toNodeReadable(res)) {
+    const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
+    chunks.push(b)
+    watchdog?.ping()
+  }
+  return Buffer.concat(chunks)
+}
+
+async function fetchSegmentBuffer(session, segUrl, referer, signal, watchdog) {
   const attempts = [
-    { headers: { accept: '*/*', ...(referer ? { referer } : {}) }, preferNative: true },
-    { headers: { accept: '*/*' }, preferNative: true },
-    { headers: { accept: '*/*', ...(referer ? { referer } : {}) }, preferNative: false },
+    { headers: { accept: '*/*', ...(referer ? { referer } : {}) }, useWreq: false },
+    { headers: { accept: '*/*' }, useWreq: false },
+    { headers: { accept: '*/*', ...(referer ? { referer } : {}) }, useWreq: false },
+    { headers: { accept: '*/*', ...(referer ? { referer } : {}) }, useWreq: true },
   ]
   let lastErr = null
   for (let i = 0; i < attempts.length; i += 1) {
+    if (signal?.aborted) throw createAbortError()
+    const { headers, useWreq } = attempts[i]
     try {
-      const res = await clientFetch(session, segUrl, { ...attempts[i], timeout: SEGMENT_TIMEOUT_MS, signal })
+      const res = useWreq && session
+        ? await session.fetch(segUrl, { headers, timeout: SEGMENT_TIMEOUT_MS, redirect: 'follow', signal: combineSignal(signal, SEGMENT_TIMEOUT_MS) })
+        : await globalThis.fetch(segUrl, {
+          headers: { 'user-agent': activeUa, ...headers },
+          redirect: 'follow',
+          signal: combineSignal(signal, SEGMENT_TIMEOUT_MS),
+        })
       if (!res.ok) { await cancelBody(res); lastErr = new Error(`Segmento HTTP ${res.status}`); continue }
-      const buf = Buffer.from(await res.arrayBuffer())
+      const buf = await readStreamBuffer(res, watchdog)
       if (buf.length > 0) return buf
       lastErr = new Error('Segmento vacío')
     } catch (err) {
       if (signal?.aborted) throw createAbortError()
       lastErr = err
     }
+    if (i + 1 < attempts.length) await sleep(600 * (i + 1), signal)
   }
   throw lastErr || new Error('No se pudo descargar un segmento HLS.')
 }
 
-async function downloadHlsNative(session, m3u8Url, destPath, referer, signal) {
+async function resolveHlsVariant(session, m3u8Url, referer, signal) {
   const origin = referer ? referer.replace(/\/$/, '') : ''
   const reqHeaders = { accept: '*/*', ...(referer ? { referer, origin } : {}) }
   const masterRes = await clientFetch(session, m3u8Url, { headers: reqHeaders, timeout: PAGE_TIMEOUT_MS, signal, preferNative: true })
   if (!masterRes.ok) { await cancelBody(masterRes); throw new Error(`M3U8 devolvió HTTP ${masterRes.status}`) }
   let playlistUrl = masterRes.url || m3u8Url
   let playlistText = await masterRes.text()
+  let variantUrl = playlistUrl
 
   if (/#EXT-X-STREAM-INF:/i.test(playlistText)) {
     const bestUrl = selectBestHlsVariant(playlistText, playlistUrl)
-    if (!bestUrl) throw new Error('Playlist maestro requiere demuxer externo.')
+    if (!bestUrl) return { playlistUrl, playlistText, variantUrl, segments: null }
+    variantUrl = bestUrl
     const varRes = await clientFetch(session, bestUrl, { headers: reqHeaders, timeout: PAGE_TIMEOUT_MS, signal, preferNative: true })
     if (!varRes.ok) { await cancelBody(varRes); throw new Error(`Variante HLS devolvió HTTP ${varRes.status}`) }
     playlistUrl = varRes.url || bestUrl
     playlistText = await varRes.text()
   }
 
-  const segments = parseMediaPlaylist(playlistText, playlistUrl)
+  return { playlistUrl, playlistText, variantUrl, segments: parseMediaPlaylist(playlistText, playlistUrl) }
+}
+
+async function downloadHlsNative(session, resolved, destPath, referer, signal, onProgress) {
+  const { segments } = resolved
   if (!segments) throw new Error('Formato HLS no apto para descarga nativa.')
 
   const keyCache = new Map()
@@ -496,16 +537,18 @@ async function downloadHlsNative(session, m3u8Url, destPath, referer, signal) {
     await fsp.rm(tsPath, { force: true }).catch(() => {})
     const fh = await fsp.open(tsPath, 'w')
     let totalBytes = 0
+    let done = 0
+    let lastReport = 0
     try {
       for (let i = 0; i < segments.length; i += HLS_CONCURRENCY) {
         if (ctrl.signal.aborted) throw createAbortError()
         const batch = segments.slice(i, i + HLS_CONCURRENCY)
         const buffers = await Promise.all(batch.map(async (seg) => {
-          let raw = await fetchSegmentBuffer(session, seg.url, referer, ctrl.signal)
+          let raw = await fetchSegmentBuffer(session, seg.url, referer, ctrl.signal, watchdog)
           if (seg.key?.method === 'AES-128') {
             let keyBuf = keyCache.get(seg.key.keyUrl)
             if (!keyBuf) {
-              keyBuf = await fetchSegmentBuffer(session, seg.key.keyUrl, referer, ctrl.signal)
+              keyBuf = await fetchSegmentBuffer(session, seg.key.keyUrl, referer, ctrl.signal, watchdog)
               keyCache.set(seg.key.keyUrl, keyBuf)
             }
             const iv = Buffer.alloc(16)
@@ -517,13 +560,18 @@ async function downloadHlsNative(session, m3u8Url, destPath, referer, signal) {
             const decipher = createDecipheriv('aes-128-cbc', keyBuf, iv)
             raw = Buffer.concat([decipher.update(raw), decipher.final()])
           }
-          watchdog.ping()
           return stripDisguisedTsPrefix(raw)
         }))
         for (const chunk of buffers) {
           totalBytes += chunk.length
+          done += 1
           if (totalBytes > MAX_VIDEO_BYTES) throw new Error('El video supera el límite de 2 GB.')
           await fh.write(chunk)
+        }
+        const now = Date.now()
+        if (onProgress && (now - lastReport >= 12_000 || done === segments.length)) {
+          lastReport = now
+          onProgress({ done, total: segments.length, bytes: totalBytes })
         }
       }
     } finally {
@@ -537,10 +585,13 @@ async function downloadHlsNative(session, m3u8Url, destPath, referer, signal) {
   }
 }
 
-async function downloadHlsStream(session, m3u8Url, destPath, referer, signal) {
+async function downloadHlsStream(session, m3u8Url, destPath, referer, signal, onProgress) {
   let nativeErr = null
+  let targetUrl = m3u8Url
   try {
-    return await downloadHlsNative(session, m3u8Url, destPath, referer, signal)
+    const resolved = await resolveHlsVariant(session, m3u8Url, referer, signal)
+    if (resolved.variantUrl) targetUrl = resolved.variantUrl
+    return await downloadHlsNative(session, resolved, destPath, referer, signal, onProgress)
   } catch (err) {
     if (signal?.aborted) throw createAbortError()
     nativeErr = err
@@ -549,13 +600,13 @@ async function downloadHlsStream(session, m3u8Url, destPath, referer, signal) {
   const dir = path.dirname(destPath)
   const tmpBase = path.join(dir, `streamwish_${Date.now()}`)
   const ytArgs = [
-    '--no-check-certificate', '--no-warnings', '--concurrent-fragments', '8',
+    '--no-check-certificate', '--no-warnings', '--concurrent-fragments', '4',
     '-f', 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best',
     '--merge-output-format', 'mp4',
     '--add-header', `User-Agent: ${activeUa}`,
     '--add-header', `Referer: ${referer}`,
     '-o', `${tmpBase}.%(ext)s`,
-    m3u8Url,
+    targetUrl,
   ]
   try {
     await spawnProcess('yt-dlp', ytArgs, DOWNLOAD_TIMEOUT_MS, signal, 'yt-dlp')
@@ -571,11 +622,20 @@ async function downloadHlsStream(session, m3u8Url, destPath, referer, signal) {
     try {
       await fsp.rm(partPath, { force: true }).catch(() => {})
       await spawnProcess(resolveFfmpegBin(), [
-        '-hide_banner', '-loglevel', 'error', '-y',
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
         '-allowed_extensions', 'ALL',
         '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
-        '-headers', `User-Agent: ${activeUa}\r\nReferer: ${referer}\r\n`,
-        '-i', m3u8Url,
+        '-user_agent', activeUa,
+        '-headers', `Referer: ${referer}\r\n`,
+        '-rw_timeout', '60000000',
+        '-http_persistent', '0',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_at_eof', '1',
+        '-reconnect_on_network_error', '1',
+        '-reconnect_on_http_error', '403,408,429,500,502,503,504',
+        '-reconnect_delay_max', '5',
+        '-i', targetUrl,
         '-c', 'copy',
         '-bsf:a', 'aac_adtstoasc',
         '-movflags', '+faststart',
@@ -591,7 +651,7 @@ async function downloadHlsStream(session, m3u8Url, destPath, referer, signal) {
   }
 }
 
-export async function downloadStreamWishFile(inputUrl, outputPath, { signal } = {}) {
+export async function downloadStreamWishFile(inputUrl, outputPath, { signal, onProgress } = {}) {
   const parsed = parseStreamWishUrl(inputUrl)
   const wreq = await getWreq()
   const session = wreq
@@ -636,7 +696,7 @@ export async function downloadStreamWishFile(inputUrl, outputPath, { signal } = 
     await fsp.rm(outputPath, { force: true }).catch(() => {})
     const stat = media.type === 'mp4'
       ? await downloadDirectMp4(session, media.url, outputPath, media.referer, signal)
-      : await downloadHlsStream(session, media.url, outputPath, media.referer, signal)
+      : await downloadHlsStream(session, media.url, outputPath, media.referer, signal, onProgress)
     return { filePath: outputPath, fileSize: stat.size, extension: '.mp4', mimetype: 'video/mp4' }
   } finally {
     await session?.close?.().catch(() => {})
@@ -678,7 +738,12 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     const sent = await conn.sendMessage(m.chat, { text: `🔎 Resolviendo *StreamWish* · ID ${parsed.id}…` }, { quoted: m })
     statusKey = sent?.key || null
     await update('⬇️ Descargando video desde *StreamWish*…')
-    const { fileSize } = await downloadStreamWishFile(parsed.url, outputPath, { signal: controller.signal })
+    const { fileSize } = await downloadStreamWishFile(parsed.url, outputPath, {
+      signal: controller.signal,
+      onProgress: ({ done, total, bytes }) => {
+        void update(`⬇️ Descargando *StreamWish*… ${done}/${total} segs (${formatBytes(bytes)})`)
+      },
+    })
     let jpegThumbnail
     try { jpegThumbnail = await jpegThumbnailLibrary.createJpegThumbnail(outputPath) } catch (_) {}
     const fileName = `StreamWish-${safeName(parsed.id)}.mp4`

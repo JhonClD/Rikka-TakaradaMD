@@ -277,7 +277,12 @@ async function resilientFetch(session, url, {
       errors.push(`${name}: ${shortNetErr(err)}`)
     }
   }
-  throw new Error(`Mixdrop CDN falló (${errors.join(' | ')})`)
+  const summary = errors.join(' | ')
+  const blocked = /ECONNRESET|ECONNREFUSED|unexpected EOF/i.test(summary) && allowHttpFallback
+  const prefix = blocked
+    ? 'La CDN de MixDrop (mxcontent.net) rechazó todas las conexiones TCP/TLS desde la IP de este servidor'
+    : 'Mixdrop CDN falló'
+  throw new Error(`${prefix} (${summary})`)
 }
 
 function toNodeReadable(res) {
