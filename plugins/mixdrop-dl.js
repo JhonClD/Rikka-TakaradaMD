@@ -195,49 +195,89 @@ function nodeHttpRequest(url, { method = 'GET', headers = {}, timeout = PAGE_TIM
   })
 }
 
-async function resilientFetch(session, url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal, preferNative = false } = {}) {
+function shortNetErr(err) {
+  const code = err?.cause?.code || err?.code || ''
+  const msg = String(err?.cause?.message || err?.message || err || 'error')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120)
+  return code && !msg.includes(code) ? `${code}: ${msg}` : msg
+}
+
+async function resilientFetch(session, url, {
+  method = 'GET',
+  headers = {},
+  timeout = PAGE_TIMEOUT_MS,
+  signal,
+  preferNative = true,
+  allowHttpFallback = false,
+  preferredTransport = null,
+  onTransport = null,
+} = {}) {
   const reqHeaders = {}
   for (const [k, v] of Object.entries(headers)) {
     if (v !== undefined && v !== null && v !== '') reqHeaders[k.toLowerCase()] = String(v)
   }
 
   const nativeHeaders = { 'user-agent': activeUa, accept: '*/*', ...reqHeaders }
-  const nativeCall = () => globalThis.fetch(url, {
-    method,
-    headers: nativeHeaders,
-    redirect: 'follow',
-    signal: combineSignal(signal, timeout),
-  })
-  const tls12Call = () => nodeHttpRequest(url, { method, headers: nativeHeaders, timeout, signal, maxVersion: 'TLSv1.2' })
-  const wreqCall = () => session.fetch(url, {
-    method,
-    headers: reqHeaders,
-    timeout,
-    redirect: 'follow',
-    signal: combineSignal(signal, timeout),
-  })
+  const transports = [
+    {
+      name: 'https-fetch',
+      run: () => globalThis.fetch(url, {
+        method,
+        headers: nativeHeaders,
+        redirect: 'follow',
+        signal: combineSignal(signal, timeout),
+      }),
+    },
+    {
+      name: 'https-tls12',
+      run: () => nodeHttpRequest(url, { method, headers: nativeHeaders, timeout, signal, maxVersion: 'TLSv1.2' }),
+    },
+  ]
+  if (allowHttpFallback && /^https:\/\//i.test(url)) {
+    const httpUrl = url.replace(/^https:/i, 'http:')
+    transports.push({
+      name: 'http-direct',
+      run: () => nodeHttpRequest(httpUrl, { method, headers: nativeHeaders, timeout, signal }),
+    })
+  }
+  if (session) {
+    const wreqEntry = {
+      name: 'wreq',
+      run: () => session.fetch(url, {
+        method,
+        headers: reqHeaders,
+        timeout,
+        redirect: 'follow',
+        signal: combineSignal(signal, timeout),
+      }),
+    }
+    if (preferNative) transports.push(wreqEntry)
+    else transports.unshift(wreqEntry)
+  }
+  if (preferredTransport) {
+    const idx = transports.findIndex(t => t.name === preferredTransport)
+    if (idx > 0) transports.unshift(...transports.splice(idx, 1))
+  }
 
-  const order = preferNative
-    ? [nativeCall, tls12Call, ...(session ? [wreqCall] : [])]
-    : [...(session ? [wreqCall] : []), nativeCall, tls12Call]
-
-  let lastErr = null
-  for (let i = 0; i < order.length; i += 1) {
+  const errors = []
+  for (let i = 0; i < transports.length; i += 1) {
+    const { name, run } = transports[i]
     try {
-      const res = await order[i]()
-      // Si el transporte nativo recibió 403/5xx pero queda otro transporte disponible, probar el siguiente.
-      if ((res.status === 403 || res.status >= 500) && i + 1 < order.length) {
+      const res = await run()
+      if ((res.status === 403 || res.status >= 500) && i + 1 < transports.length) {
         await cancelBody(res)
-        lastErr = new Error(`HTTP ${res.status}`)
+        errors.push(`${name}: HTTP ${res.status}`)
         continue
       }
+      onTransport?.(name)
       return res
     } catch (err) {
       if (signal?.aborted) throw createAbortError()
-      lastErr = err
+      errors.push(`${name}: ${shortNetErr(err)}`)
     }
   }
-  throw lastErr || new Error('Error de red al conectar con Mixdrop.')
+  throw new Error(`Mixdrop CDN falló (${errors.join(' | ')})`)
 }
 
 function toNodeReadable(res) {
@@ -345,7 +385,7 @@ function sleep(ms, signal) {
   })
 }
 
-async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, signal) {
+async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, signal, preferredTransport) {
   let pos = start
   let lastErr = null
   for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt += 1) {
@@ -356,6 +396,8 @@ async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, wa
         timeout: DOWNLOAD_TIMEOUT_MS,
         signal,
         preferNative: true,
+        allowHttpFallback: true,
+        preferredTransport,
       })
       if (r.status !== 206) { await cancelBody(r); throw new Error(`HTTP ${r.status}`) }
       for await (const c of toNodeReadable(r)) {
@@ -375,9 +417,10 @@ async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, wa
   throw lastErr || new Error('Falló la descarga de un bloque en Mixdrop.')
 }
 
-async function downloadSequentialResumable(session, mediaUrl, partPath, headers, expectedSize, watchdog, signal) {
+async function downloadSequentialResumable(session, mediaUrl, partPath, headers, expectedSize, watchdog, signal, preferredTransport) {
   let downloaded = 0
   let lastErr = null
+  let activeTransport = preferredTransport
   for (let attempt = 1; attempt <= MAX_SEQ_RETRIES; attempt += 1) {
     if (signal?.aborted) throw createAbortError()
     try {
@@ -387,6 +430,9 @@ async function downloadSequentialResumable(session, mediaUrl, partPath, headers,
         timeout: DOWNLOAD_TIMEOUT_MS,
         signal,
         preferNative: true,
+        allowHttpFallback: true,
+        preferredTransport: activeTransport,
+        onTransport: (t) => { activeTransport = t },
       })
       if (downloaded > 0 && res.status === 416) {
         await cancelBody(res)
@@ -446,8 +492,17 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
   const headers = { accept: '*/*', ...(referer ? { referer } : {}) }
   let sizeBytes = 0
   let supportsRanges = false
+  let workingTransport = null
   try {
-    const head = await resilientFetch(session, mediaUrl, { method: 'HEAD', headers, timeout: 15_000, signal, preferNative: true })
+    const head = await resilientFetch(session, mediaUrl, {
+      method: 'HEAD',
+      headers,
+      timeout: 15_000,
+      signal,
+      preferNative: true,
+      allowHttpFallback: true,
+      onTransport: (t) => { workingTransport = t },
+    })
     await cancelBody(head)
     if (head.ok) {
       const ct = String(head.headers?.get?.('content-type') || '').toLowerCase()
@@ -481,7 +536,7 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
         const fh = await fsp.open(partPath, 'w')
         try {
           await Promise.all(ranges.map(({ start, end }) =>
-            downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, ctrl.signal)))
+            downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, ctrl.signal, workingTransport)))
         } finally {
           await fh.close()
         }
@@ -493,7 +548,7 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
     }
 
     if (!parallelOk) {
-      await downloadSequentialResumable(session, mediaUrl, partPath, headers, sizeBytes, watchdog, ctrl.signal)
+      await downloadSequentialResumable(session, mediaUrl, partPath, headers, sizeBytes, watchdog, ctrl.signal, workingTransport)
     }
 
     const stat = await validateVideo(partPath)
@@ -527,6 +582,7 @@ export async function downloadMixdropFile(inputUrl, outputPath, { signal } = {})
         const res = await resilientFetch(session, candidate, {
           headers: { accept: 'text/html,application/xhtml+xml,*/*;q=0.8', referer: `${new URL(candidate).origin}/` },
           signal,
+          preferNative: true,
         })
         if (!res.ok) { await cancelBody(res); lastErr = new Error(`Mixdrop devolvió HTTP ${res.status}.`); continue }
         const html = await res.text()
