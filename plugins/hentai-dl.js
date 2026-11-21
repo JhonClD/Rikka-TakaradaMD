@@ -1,4 +1,4 @@
-import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from 'baileys'
+import { getDevice } from 'baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
 import fs from 'node:fs'
@@ -1087,6 +1087,7 @@ async function sendInteractiveList(conn, chat, m, status, {
   rows,
   coverUrl = null,
   coverShown = false,
+  quickReplies = false,
 }) {
   pruneExpiredSessions()
   const sessionKey = `${chat}|${m.sender}`
@@ -1107,51 +1108,43 @@ async function sendInteractiveList(conn, chat, m, status, {
 
   if (isMobile) {
     try {
-      let header = { title, hasMediaAttachment: false }
+      let imgBuf = null
       if (coverUrl) {
-        try {
-          const imgBuf = await fetchBuffer(coverUrl)
-          const media = await prepareWAMessageMedia({ image: imgBuf }, { upload: conn.waUploadToServer })
-          header = { title, hasMediaAttachment: true, imageMessage: media.imageMessage }
-        } catch { }
+        try { imgBuf = await fetchBuffer(coverUrl) } catch { }
       }
 
-      const interactiveMessage = {
-        body: { text: description },
-        footer: { text: global.wm || 'HentaiLA' },
-        header,
-        nativeFlowMessage: {
-          buttons: [{
-            name: 'single_select',
-            buttonParamsJson: JSON.stringify({
-              title: button,
-              sections: [{
-                title: section,
-                highlight_label: '',
-                rows: rows.map((r) => ({
-                  header: r.title,
-                  title: r.subtitle || r.title,
-                  description: r.description || '',
-                  id: r.rowId,
-                })),
-              }],
-            }),
-          }],
-          messageParamsJson: '',
-        },
-      }
+      const nativeFlow = quickReplies && rows.length <= 3
+        ? rows.map((r) => ({
+            text: `▶️ ${r.title}`,
+            id: r.rowId,
+            icon: 'default',
+          }))
+        : [{
+            text: button,
+            icon: 'default',
+            sections: [{
+              title: section,
+              rows: rows.map((r) => ({
+                header: r.title,
+                title: r.subtitle || r.title,
+                description: r.description || '',
+                id: r.rowId,
+              })),
+            }],
+          }]
 
-      const msg = generateWAMessageFromContent(
-        chat,
-        { viewOnceMessage: { message: { interactiveMessage } } },
-        { userJid: conn.user.jid, quoted: m },
-      )
-      await conn.relayMessage(chat, msg.message, { messageId: msg.key.id })
+      const footer = global.botName || global.wm || 'HentaiLA'
+      const bodyText = description || title
+      const payload = imgBuf
+        ? { image: imgBuf, title, caption: bodyText, footer, nativeFlow }
+        : { text: `*${title}*\n\n${bodyText}`, footer, nativeFlow }
+
+      const sent = await conn.sendMessage(chat, payload, { quoted: m })
       await status.remove()
-      session.msgId = msg.key?.id || null
-      return msg
+      session.msgId = sent?.key?.id || null
+      return sent
     } catch (err) {
-      console.error('[HDL] Error en lista interactiva:', err.message)
+      console.error('[HDL] Error en botones NativeFlow:', err.message)
     }
   }
 
@@ -1415,6 +1408,7 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
         rows,
         coverUrl: info.cover,
         coverShown: true,
+        quickReplies: true,
       })
       return
     }
@@ -1428,6 +1422,19 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
     console.error('[HDL]', err.message)
     await status.update(`❌ *Error:* ${err.message}`, { forceSend: true })
   }
+}
+
+function extractInteractiveId(message) {
+  const nf = message?.interactiveResponseMessage?.nativeFlowResponseMessage
+  if (nf?.paramsJson) {
+    try { return JSON.parse(nf.paramsJson)?.id ?? null } catch { return null }
+  }
+  return (
+    message?.buttonsResponseMessage?.selectedButtonId ||
+    message?.templateButtonReplyMessage?.selectedId ||
+    message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    null
+  )
 }
 
 async function dispatchSelection(conn, m, rowId, { existingKey = null, skipCover = false } = {}) {
@@ -1446,13 +1453,9 @@ handler.before = async function (m, { conn }) {
   const sessionKey = `${m.chat}|${m.sender}`
   const session = sessions.get(sessionKey)
 
-  const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
-  if (nativeFlow) {
-    let selectedId = null
-    try {
-      selectedId = JSON.parse(nativeFlow.paramsJson || '{}')?.id || null
-    } catch { }
-    if (!selectedId || !COMMAND_PREFIX_RE.test(selectedId)) return false
+  const selectedId = extractInteractiveId(m.message)
+  if (selectedId) {
+    if (!COMMAND_PREFIX_RE.test(selectedId)) return false
     if (!session || session.owner !== m.sender) return true
     if (!session.rows.some((r) => r.rowId === selectedId)) return false
 
@@ -1465,16 +1468,6 @@ handler.before = async function (m, { conn }) {
   }
 
   if (!session || session.owner !== m.sender) return false
-
-  const listRowId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId
-  if (listRowId && session.rows.some((r) => r.rowId === listRowId)) {
-    sessions.delete(sessionKey)
-    await dispatchSelection(conn, m, listRowId, {
-      existingKey: session.statusKey,
-      skipCover: Boolean(session.coverShown),
-    })
-    return true
-  }
 
   const rawText = String(m.text || '').trim()
   if (!/^\d+$/.test(rawText)) return false
