@@ -1209,10 +1209,9 @@ async function sendInteractiveList(conn, chat, m, status, {
 }) {
   pruneExpiredSessions()
   const ownerIds = await collectUserIdentities(m, conn, chat, participants)
-  for (const [oldId, existing] of sessions) {
-    if (existing.chat === chat && hasIdentityOverlap(existing.ownerIds, ownerIds)) {
-      markSessionExpired(oldId)
-    }
+  if (sessions.size >= 200) {
+    const oldestId = sessions.keys().next().value
+    if (oldestId) markSessionExpired(oldestId)
   }
 
   const sessionId = randomBytes(6).toString('hex')
@@ -1628,10 +1627,9 @@ handler.before = async function (m, { conn, participants = [] }) {
     const chosen = session.rows[token.index]
     if (!chosen) return true
 
-    sessions.delete(session.id)
     await dispatchSelection(conn, m, chosen.rowId, {
       participants,
-      existingKey: session.statusKey,
+      existingKey: null,
       skipCover: Boolean(session.coverShown),
     })
     return true
@@ -1684,10 +1682,13 @@ handler.before = async function (m, { conn, participants = [] }) {
   }
 
   const chosen = session.rows[index]
-  sessions.delete(session.id)
+  const isEpisodeChoice = /\s+\d+\s*$/.test(chosen.rowId)
+  const reuseKey = !isEpisodeChoice ? session.statusKey : null
+  if (reuseKey) sessions.delete(session.id)
+
   await dispatchSelection(conn, m, chosen.rowId, {
     participants,
-    existingKey: session.statusKey,
+    existingKey: reuseKey,
     skipCover: Boolean(session.coverShown),
   })
   return true
