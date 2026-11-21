@@ -1,6 +1,7 @@
 import { getDevice } from 'baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -8,6 +9,7 @@ import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { downloadKey, hasDownload, startDownload } from '../src/funcion/download-registry.js'
+import { cleanJid, getLidForJidAsync, resolveAnyJid, resolveJidToPhone } from '../src/funcion/lid-resolver.js'
 
 const BASE = 'https://hentaila.com'
 const SERVICE = 'hentaila'
@@ -28,7 +30,8 @@ const STATUS_EDIT_INTERVAL_MS = 2500
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000
 const CACHE_MAX_ENTRIES = 150
-const SESSION_TTL_MS = 5 * 60 * 1000
+const SESSION_TTL_MS = 3 * 60 * 1000
+const EXPIRED_MEMORY_MS = 30 * 60 * 1000
 
 const MIN_VALID_BYTES = 16 * 1024
 const MAX_FILE_BYTES = 2 * 1024 ** 3
@@ -37,7 +40,7 @@ const PARALLEL_THREADS = 8
 const MIN_PARALLEL_BYTES = 5 * 1024 * 1024
 
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504])
-const COMMAND_PREFIX_RE = /^[^\s]?(?:hdl|hentaidl|hlatest|hentailatest)\b/i
+const BUTTON_TOKEN_PREFIX = 'hdl_btn:'
 
 let wreqSessionPromise = null
 let wreqUnavailable = false
@@ -46,6 +49,7 @@ let impitUnavailable = false
 
 const htmlCache = new Map()
 const sessions = new Map()
+const expiredSessions = new Map()
 
 let lastPacedRequestAt = 0
 let pacingChain = Promise.resolve()
@@ -1072,11 +1076,124 @@ function createStatusController(conn, m, initialKey = null) {
   }
 }
 
+async function collectUserIdentities(m, conn, chat, participants = []) {
+  const ids = new Set()
+  const rawList = [
+    m?.sender,
+    m?.key?.participant,
+    m?.key?.participantAlt,
+    m?.participant,
+  ]
+  if (m?.fromMe) {
+    rawList.push(conn?.user?.jid, conn?.user?.id, conn?.user?.lid)
+  } else if (chat && !chat.endsWith('@g.us')) {
+    rawList.push(chat)
+  }
+
+  const addJid = (value) => {
+    const cleaned = cleanJid(value)
+    if (!cleaned || typeof cleaned !== 'string') return
+    ids.add(cleaned)
+    const userPart = cleaned.split('@')[0]
+    if (cleaned.endsWith('@s.whatsapp.net') || cleaned.endsWith('@c.us')) {
+      const digits = userPart.replace(/\D/g, '')
+      if (digits) {
+        ids.add(`${digits}@s.whatsapp.net`)
+        ids.add(`pn:${digits}`)
+      }
+    } else if (cleaned.endsWith('@lid') && userPart) {
+      ids.add(`lid:${userPart}`)
+    }
+    const phone = resolveJidToPhone(cleaned, conn)
+    if (phone) {
+      ids.add(`${phone}@s.whatsapp.net`)
+      ids.add(`pn:${phone}`)
+    }
+  }
+
+  for (const raw of rawList) addJid(raw)
+
+  if (Array.isArray(participants) && participants.length && ids.size) {
+    const bareUsers = new Set([...ids].map((v) => v.split('@')[0].replace(/^(?:pn|lid):/, '')))
+    for (const p of participants) {
+      const candidates = [
+        p?.id,
+        p?.jid,
+        p?.lid,
+        p?.phoneNumber ? (String(p.phoneNumber).includes('@') ? p.phoneNumber : `${p.phoneNumber}@s.whatsapp.net`) : null,
+      ].map(cleanJid).filter(Boolean)
+
+      const matches = candidates.some((c) => ids.has(c) || bareUsers.has(c.split('@')[0]))
+      if (matches) {
+        for (const c of candidates) addJid(c)
+      }
+    }
+  }
+
+  const snapshot = [...ids].filter((v) => v.includes('@'))
+  for (const jid of snapshot) {
+    try {
+      const resolved = await resolveAnyJid(jid, conn, chat)
+      if (resolved) addJid(resolved)
+      if (resolved?.endsWith('@s.whatsapp.net')) {
+        const lid = await getLidForJidAsync(resolved, conn)
+        if (lid) addJid(lid)
+      }
+    } catch { }
+  }
+
+  return ids
+}
+
+function hasIdentityOverlap(ownerIds, actorIds) {
+  if (!ownerIds?.size || !actorIds?.size) return false
+  for (const id of actorIds) {
+    if (ownerIds.has(id)) return true
+  }
+  return false
+}
+
+function actorWarningKey(actorIds, m) {
+  for (const id of actorIds) {
+    if (id.startsWith('pn:')) return id
+  }
+  for (const id of actorIds) {
+    if (id.startsWith('lid:')) return id
+  }
+  return cleanJid(m?.sender) || 'unknown'
+}
+
+function markSessionExpired(sessionId, now = Date.now()) {
+  sessions.delete(sessionId)
+  if (!expiredSessions.has(sessionId)) {
+    expiredSessions.set(sessionId, { expiry: now + EXPIRED_MEMORY_MS, warned: new Set() })
+  }
+}
+
 function pruneExpiredSessions() {
   const now = Date.now()
-  for (const [key, session] of sessions) {
-    if (session.expiry <= now) sessions.delete(key)
+  for (const [id, session] of sessions) {
+    if (session.expiry <= now) markSessionExpired(id, now)
   }
+  for (const [id, info] of expiredSessions) {
+    if (info.expiry <= now) expiredSessions.delete(id)
+  }
+}
+
+function makeButtonToken(sessionId, index) {
+  return `${BUTTON_TOKEN_PREFIX}${sessionId}:${index}`
+}
+
+function parseButtonToken(raw) {
+  const value = String(raw || '').trim()
+  if (!value.startsWith(BUTTON_TOKEN_PREFIX)) return null
+  const body = value.slice(BUTTON_TOKEN_PREFIX.length)
+  const sep = body.lastIndexOf(':')
+  if (sep <= 0) return null
+  const sessionId = body.slice(0, sep)
+  const index = Number(body.slice(sep + 1))
+  if (!sessionId || !Number.isInteger(index) || index < 0) return null
+  return { sessionId, index }
 }
 
 async function sendInteractiveList(conn, chat, m, status, {
@@ -1088,19 +1205,29 @@ async function sendInteractiveList(conn, chat, m, status, {
   coverUrl = null,
   coverShown = false,
   quickReplies = false,
+  participants = [],
 }) {
   pruneExpiredSessions()
-  const sessionKey = `${chat}|${m.sender}`
+  const ownerIds = await collectUserIdentities(m, conn, chat, participants)
+  for (const [oldId, existing] of sessions) {
+    if (existing.chat === chat && hasIdentityOverlap(existing.ownerIds, ownerIds)) {
+      markSessionExpired(oldId)
+    }
+  }
+
+  const sessionId = randomBytes(6).toString('hex')
   const session = {
-    owner: m.sender,
+    id: sessionId,
     chat,
+    ownerIds,
     rows,
     msgId: null,
     statusKey: null,
     coverShown,
     expiry: Date.now() + SESSION_TTL_MS,
+    warned: new Set(),
   }
-  sessions.set(sessionKey, session)
+  sessions.set(sessionId, session)
 
   let device = 'android'
   try { device = getDevice(m?.key?.id) } catch { }
@@ -1114,9 +1241,9 @@ async function sendInteractiveList(conn, chat, m, status, {
       }
 
       const nativeFlow = quickReplies && rows.length <= 3
-        ? rows.map((r) => ({
+        ? rows.map((r, index) => ({
             text: `▶️ ${r.title}`,
-            id: r.rowId,
+            id: makeButtonToken(sessionId, index),
             icon: 'default',
           }))
         : [{
@@ -1124,16 +1251,16 @@ async function sendInteractiveList(conn, chat, m, status, {
             icon: 'default',
             sections: [{
               title: section,
-              rows: rows.map((r) => ({
+              rows: rows.map((r, index) => ({
                 header: r.title,
                 title: r.subtitle || r.title,
                 description: r.description || '',
-                id: r.rowId,
+                id: makeButtonToken(sessionId, index),
               })),
             }],
           }]
 
-      const footer = global.botName || global.wm || 'HentaiLA'
+      const footer = `${global.botName || global.wm || 'HentaiLA'} · Expira en 3 min`
       const bodyText = description || title
       const payload = imgBuf
         ? { image: imgBuf, title, caption: bodyText, footer, nativeFlow }
@@ -1154,7 +1281,7 @@ async function sendInteractiveList(conn, chat, m, status, {
     if (r.description) txt += ` _(${r.description})_`
     txt += '\n'
   })
-  txt += '\n_Responde con el número para elegir._'
+  txt += '\n_Responde con el número para elegir (expira en 3 min)._'
   await status.update(txt, { forceSend: true })
   session.statusKey = status.getKey()
   session.msgId = session.statusKey?.id || null
@@ -1312,7 +1439,7 @@ async function runEpisodeFlow(m, conn, info, episode, status, { skipCover = fals
   }
 }
 
-const handler = async (m, { conn, text, usedPrefix, command, existingKey = null, skipCover = false }) => {
+const handler = async (m, { conn, text, usedPrefix, command, participants = [], existingKey = null, skipCover = false }) => {
   const isLatest = /hlatest|hentailatest/i.test(command)
 
   if (!text && !isLatest) {
@@ -1346,6 +1473,7 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
         button: '📋 Ver lanzamientos',
         section: 'Recién subidos',
         rows,
+        participants,
       })
       return
     }
@@ -1384,6 +1512,7 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
           button: '📋 Ver opciones',
           section: 'Títulos disponibles',
           rows,
+          participants,
         })
         return
       }
@@ -1409,6 +1538,7 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
         coverUrl: info.cover,
         coverShown: true,
         quickReplies: true,
+        participants,
       })
       return
     }
@@ -1424,55 +1554,124 @@ const handler = async (m, { conn, text, usedPrefix, command, existingKey = null,
   }
 }
 
-function extractInteractiveId(message) {
+function extractInteractiveId(message, fallbackText = '') {
   const nf = message?.interactiveResponseMessage?.nativeFlowResponseMessage
   if (nf?.paramsJson) {
     try { return JSON.parse(nf.paramsJson)?.id ?? null } catch { return null }
   }
-  return (
+  const direct = (
     message?.buttonsResponseMessage?.selectedButtonId ||
     message?.templateButtonReplyMessage?.selectedId ||
     message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
     null
   )
+  if (direct) return direct
+  const raw = String(fallbackText || '').trim()
+  return raw.startsWith(BUTTON_TOKEN_PREFIX) ? raw : null
 }
 
-async function dispatchSelection(conn, m, rowId, { existingKey = null, skipCover = false } = {}) {
+async function warnOnce(warnedSet, actorKey, conn, m, text) {
+  if (warnedSet.has(actorKey)) return
+  warnedSet.add(actorKey)
+  try {
+    await conn.sendMessage(m.chat, { text }, { quoted: m })
+  } catch { }
+}
+
+async function dispatchSelection(conn, m, rowId, { participants = [], existingKey = null, skipCover = false } = {}) {
   const usedPrefix = rowId[0]
   const [command, ...argParts] = rowId.slice(1).trim().split(/\s+/)
   const text = argParts.join(' ')
   try {
-    await handler.call(conn, m, { conn, text, usedPrefix, command, existingKey, skipCover })
+    await handler.call(conn, m, { conn, text, usedPrefix, command, participants, existingKey, skipCover })
   } catch (err) {
     console.error('[HDL before] Error ejecutando selección:', err.message)
   }
 }
 
-handler.before = async function (m, { conn }) {
+handler.before = async function (m, { conn, participants = [] }) {
   pruneExpiredSessions()
-  const sessionKey = `${m.chat}|${m.sender}`
-  const session = sessions.get(sessionKey)
 
-  const selectedId = extractInteractiveId(m.message)
-  if (selectedId) {
-    if (!COMMAND_PREFIX_RE.test(selectedId)) return false
-    if (!session || session.owner !== m.sender) return true
-    if (!session.rows.some((r) => r.rowId === selectedId)) return false
+  const selectedId = extractInteractiveId(m.message, m.text)
+  const token = parseButtonToken(selectedId)
+  if (token) {
+    const actorIds = await collectUserIdentities(m, conn, m.chat, participants)
+    const actorKey = actorWarningKey(actorIds, m)
+    const session = sessions.get(token.sessionId)
 
-    sessions.delete(sessionKey)
-    await dispatchSelection(conn, m, selectedId, {
+    if (!session || session.expiry <= Date.now()) {
+      markSessionExpired(token.sessionId)
+      const expired = expiredSessions.get(token.sessionId)
+      await warnOnce(
+        expired.warned,
+        actorKey,
+        conn,
+        m,
+        '⏱️ Estos botones expiraron (duran 3 minutos). Vuelve a ejecutar el comando.',
+      )
+      return true
+    }
+
+    if (session.chat !== m.chat) return true
+
+    if (!hasIdentityOverlap(session.ownerIds, actorIds)) {
+      await warnOnce(
+        session.warned,
+        actorKey,
+        conn,
+        m,
+        '🔒 Solo quien ejecutó el comando puede usar este botón.',
+      )
+      return true
+    }
+
+    const chosen = session.rows[token.index]
+    if (!chosen) return true
+
+    sessions.delete(session.id)
+    await dispatchSelection(conn, m, chosen.rowId, {
+      participants,
       existingKey: session.statusKey,
       skipCover: Boolean(session.coverShown),
     })
     return true
   }
 
-  if (!session || session.owner !== m.sender) return false
+  if (!sessions.size) return false
 
   const rawText = String(m.text || '').trim()
   if (!/^\d+$/.test(rawText)) return false
 
+  const chatSessions = [...sessions.values()].filter((s) => s.chat === m.chat && s.expiry > Date.now())
+  if (!chatSessions.length) return false
+
+  const actorIds = await collectUserIdentities(m, conn, m.chat, participants)
+  const actorKey = actorWarningKey(actorIds, m)
   const quotedId = m.quoted?.key?.id || m.quoted?.id || null
+
+  let session = null
+  if (quotedId) {
+    const quotedSession = chatSessions.find((s) => s.msgId && s.msgId === quotedId)
+    if (quotedSession) {
+      if (!hasIdentityOverlap(quotedSession.ownerIds, actorIds)) {
+        await warnOnce(
+          quotedSession.warned,
+          actorKey,
+          conn,
+          m,
+          '🔒 Solo quien ejecutó el comando puede usar esta lista.',
+        )
+        return true
+      }
+      session = quotedSession
+    }
+  }
+
+  if (!session) {
+    const owned = chatSessions.filter((s) => hasIdentityOverlap(s.ownerIds, actorIds))
+    session = owned.at(-1) || null
+  }
+  if (!session) return false
   if (quotedId && session.msgId && quotedId !== session.msgId) return false
 
   const index = Number(rawText) - 1
@@ -1485,8 +1684,9 @@ handler.before = async function (m, { conn }) {
   }
 
   const chosen = session.rows[index]
-  sessions.delete(sessionKey)
+  sessions.delete(session.id)
   await dispatchSelection(conn, m, chosen.rowId, {
+    participants,
     existingKey: session.statusKey,
     skipCover: Boolean(session.coverShown),
   })
