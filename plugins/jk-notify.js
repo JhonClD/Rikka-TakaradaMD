@@ -17,6 +17,8 @@ import { File as MegaFile } from 'megajs'
 import ffmpegStatic from 'ffmpeg-static'
 import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js'
 import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
+import { downloadMp4UploadFile } from './mp4upload-dl.js'
+import { downloadVoeWithMirrorFailover, isKnownVoeMirrorUrl, parseVoeUrl } from './voe-dl.js'
 
 // ─── Constantes y configuración ───────────────────────────────────────────────
 
@@ -70,11 +72,11 @@ const TRANSIENT_SEND_ERROR_RE = /connection closed|stream errored|timed out|econ
 const BLOCKED_HOSTS_RE = /(?:^|\.)(?:hqq\.tv|netu\.tv|netu\.ac|waaw\.to|biribup\.com)$/i
 
 const SERVER_PRIORITY = [
-  'mega',
   'mediafire',
   'mp4upload',
-  'jkplayer',
   'voe',
+  'mega',
+  'jkplayer',
   'filemoon',
   'streamwish',
   'vidhide',
@@ -1117,7 +1119,7 @@ export function detectarServNombre(url, hint = '') {
   if (/mediafire/.test(u)) return 'mediafire'
   if (/mp4upload/.test(u)) return 'mp4upload'
   if (/jkanime\.net\/jkplayer\/|\bjkplayer\b|\bdesu\b|\bnozu\b|\bdesuka\b/.test(u)) return 'jkplayer'
-  if (/voe\d*\.sx|\bvoe\b|susanexpectcare|kathyinformationwhether|stevenfamilyedge|walterprettytheir|markstyleall|lukecomparetwo|jilliandescribecompany/.test(u)) return 'voe'
+  if (/voe\d*\.sx|\bvoe\b/.test(u) || isKnownVoeMirrorUrl(url)) return 'voe'
   if (/filemoon|moonplayer/.test(u)) return 'filemoon'
   if (/streamwish|wishembed|hgcloud|awish|dwish|mwish|sfastwish/.test(u)) return 'streamwish'
   if (/vidhide|filelions|dhtpre|peytonepre/.test(u)) return 'vidhide'
@@ -1215,7 +1217,7 @@ async function scrapeServidoresJK(epUrl) {
     const resolved = safeHttpUrl(href, epUrl)
     if (!resolved) return
     const host = new URL(resolved).hostname.toLowerCase()
-    if (/(?:^|\.)(?:mega\.(?:nz|co\.nz)|mediafire\.com|mp4upload\.com)$/i.test(host)) {
+    if (/(?:^|\.)(?:mega\.(?:nz|co\.nz)|mediafire\.com|mp4upload\.com)$/i.test(host) || isKnownVoeMirrorUrl(resolved)) {
       addServer(resolved, $(el).text(), 'download')
     }
   })
@@ -1541,6 +1543,27 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
   })
 }
 
+async function descargarMp4Upload(mp4Url, outputDir, fileName) {
+  const destPath = path.join(outputDir, fileName)
+  await fsp.rm(destPath, { force: true }).catch(() => {})
+  await downloadMp4UploadFile(mp4Url, destPath)
+  await validateVideoFile(destPath)
+  return destPath
+}
+
+async function descargarVoe(voeUrl, outputDir, fileName) {
+  const normalized = String(voeUrl || '').trim().replace(/^http:\/\//i, 'https://')
+  const voe = parseVoeUrl(normalized)
+  const { outputPath: downloadedPath } = await downloadVoeWithMirrorFailover(voe, outputDir)
+  const destPath = path.join(outputDir, fileName)
+  if (downloadedPath !== destPath) {
+    await fsp.rm(destPath, { force: true }).catch(() => {})
+    await fsp.rename(downloadedPath, destPath)
+  }
+  await validateVideoFile(destPath)
+  return destPath
+}
+
 async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
   const u = embedUrl.toLowerCase()
 
@@ -1562,66 +1585,6 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
             return { url: candidate, type: 'hls', referer: embedUrl }
           }
         } catch (_) {}
-      }
-    } catch (_) {}
-    return null
-  }
-
-  if (u.includes('mp4upload')) {
-    const idMatch = embedUrl.match(/mp4upload\.com\/(?:embed-)?([A-Za-z0-9_-]+)/i)
-    const pages = idMatch
-      ? [`https://www.mp4upload.com/embed-${idMatch[1]}.html`, `https://www.mp4upload.com/${idMatch[1]}`]
-      : [embedUrl]
-    for (const pageUrl of pages) {
-      try {
-        const { data } = await httpRequest(pageUrl, {
-          headers: { referer: 'https://www.mp4upload.com/' },
-          timeout: HTTP_TIMEOUT_MS,
-        })
-        const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
-        const code = (packed ? jsUnpack(packed[0]) : null) || data
-        const direct =
-          code.match(/player\.src\(\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i)?.[1] ||
-          code.match(/https?:\/\/(?:www\d{1,2}|s\d+)\.mp4upload\.com(?::\d+)?\/d\/[a-z0-9]{20,80}\/[^"'\s<>]+/i)?.[0] ||
-          extraerUrlVideo(code)
-        if (direct) {
-          return {
-            url: direct,
-            type: /\.m3u8(?:[?#]|$)/i.test(direct) ? 'hls' : 'mp4',
-            referer: pageUrl,
-          }
-        }
-      } catch (_) {}
-    }
-    return null
-  }
-
-  if (/voe\d*\.sx|susanexpectcare|kathyinformationwhether|stevenfamilyedge|walterprettytheir|markstyleall|lukecomparetwo|jilliandescribecompany/.test(u)) {
-    try {
-      let currentUrl = embedUrl
-      for (let hop = 0; hop < 4; hop += 1) {
-        const { data, url: finalUrl } = await httpRequest(currentUrl, {
-          headers: { referer: currentUrl },
-          timeout: HTTP_TIMEOUT_MS,
-        })
-        const effectiveUrl = finalUrl || currentUrl
-        const mMp4 = data.match(/["']mp4["']\s*:\s*["'](https?:\/\/[^"']+)["']/i)?.[1]
-        if (mMp4) return { url: mMp4.replace(/\\\//g, '/'), type: 'mp4', referer: effectiveUrl }
-        const mHls = data.match(/["']hls["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i)?.[1]
-          || data.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i)?.[1]
-        if (mHls) return { url: mHls.replace(/\\\//g, '/'), type: 'hls', referer: effectiveUrl }
-        const mAtob = data.match(/["']hls["']\s*:\s*atob\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)/i)?.[1]
-        if (mAtob) {
-          const decoded = decodeBase64(mAtob)
-          if (decoded && /^https?:\/\//i.test(decoded)) {
-            return { url: decoded, type: 'hls', referer: effectiveUrl }
-          }
-        }
-        const jsRedirect = data.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i)?.[1]
-          || data.match(/location\.replace\(\s*["']([^"']+)["']\s*\)/i)?.[1]
-        const nextUrl = safeHttpUrl(jsRedirect, effectiveUrl)
-        if (!nextUrl || nextUrl === effectiveUrl) break
-        currentUrl = nextUrl
       }
     } catch (_) {}
     return null
@@ -1949,8 +1912,10 @@ async function enviarEpisodio(chatId, ep, conn) {
     const errores = []
     for (const srv of ordenarServidores(srvs).slice(0, 6)) {
       try {
-        if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
-        else if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
+        if (srv.nombre === 'mediafire') videoPath = await descargarMediaFire(srv.url, tmpDir, fileName)
+        else if (srv.nombre === 'mp4upload') videoPath = await descargarMp4Upload(srv.url, tmpDir, fileName)
+        else if (srv.nombre === 'voe') videoPath = await descargarVoe(srv.url, tmpDir, fileName)
+        else if (srv.nombre === 'mega') videoPath = await descargarMega(srv.url, tmpDir, fileName)
         else videoPath = await descargarEmbed(srv.url, tmpDir, fileName, epUrl)
         break
       } catch (err) {
@@ -2453,10 +2418,12 @@ if (IS_TEST_RUN) {
     const ordered = ordenarServidores([
       { nombre: 'streamwish', url: 'https://streamwish.to/e/1', kind: 'stream' },
       { nombre: 'jkplayer', url: 'https://jkanime.net/jkplayer/um?e=1', kind: 'player' },
-      { nombre: 'mediafire', url: 'https://www.mediafire.com/file/1', kind: 'download' },
       { nombre: 'mega', url: 'https://mega.nz/file/1#key', kind: 'download' },
+      { nombre: 'voe', url: 'https://voe.sx/e/1', kind: 'stream' },
+      { nombre: 'mp4upload', url: 'https://www.mp4upload.com/embed-1.html', kind: 'stream' },
+      { nombre: 'mediafire', url: 'https://www.mediafire.com/file/1', kind: 'download' },
     ])
-    assert.deepEqual(ordered.map(s => s.nombre), ['mega', 'mediafire', 'jkplayer', 'streamwish'])
+    assert.deepEqual(ordered.map(s => s.nombre), ['mediafire', 'mp4upload', 'voe', 'mega', 'jkplayer', 'streamwish'])
     assert.equal(
       buildFileName('Episodio 4 - Frieren 2nd Season Sub Español', 4),
       '04 T2 Frieren Sub Español (720p) [[JK]].mp4',
