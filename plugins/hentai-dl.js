@@ -1239,31 +1239,27 @@ async function sendInteractiveList(conn, chat, m, status, {
         try { imgBuf = await fetchBuffer(coverUrl) } catch { }
       }
 
-      const nativeFlow = quickReplies && rows.length <= 3
-        ? rows.map((r, index) => ({
-            text: `▶️ ${r.title}`,
-            id: makeButtonToken(sessionId, index),
-            icon: 'default',
-          }))
-        : [{
-            text: button,
-            icon: 'default',
-            sections: [{
-              title: section,
-              rows: rows.map((r, index) => ({
-                header: r.title,
-                title: r.subtitle || r.title,
-                description: r.description || '',
-                id: makeButtonToken(sessionId, index),
-              })),
-            }],
-          }]
+      const formatLabel = (r) => {
+        const base = r.description ? `${r.title} · ${r.description}` : r.title
+        return base.length > 58 ? `${base.slice(0, 55)}...` : base
+      }
+
+      const inlineQuick = quickReplies && rows.length <= 3
+      const nativeFlow = rows.map((r, index) => ({
+        text: inlineQuick ? `▶️ ${r.title}` : formatLabel(r),
+        id: makeButtonToken(sessionId, index),
+        icon: 'default',
+      }))
+
+      const sheetOptions = !inlineQuick && rows.length > 1
+        ? { optionText: button, optionTitle: section }
+        : {}
 
       const footer = `${global.botName || global.wm || 'HentaiLA'} · Expira en 3 min`
       const bodyText = description || title
       const payload = imgBuf
-        ? { image: imgBuf, title, caption: bodyText, footer, nativeFlow }
-        : { text: `*${title}*\n\n${bodyText}`, footer, nativeFlow }
+        ? { image: imgBuf, title, caption: bodyText, footer, ...sheetOptions, nativeFlow }
+        : { text: `*${title}*\n\n${bodyText}`, footer, ...sheetOptions, nativeFlow }
 
       const sent = await conn.sendMessage(chat, payload, { quoted: m })
       await status.remove()
