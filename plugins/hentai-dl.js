@@ -154,7 +154,7 @@ async function getImpitClient() {
   return impitClientPromise
 }
 
-export function toNodeReadable(body) {
+function toNodeReadable(body) {
   if (!body) throw new Error('Respuesta HTTP sin cuerpo')
   if (body instanceof Readable || typeof body.pipe === 'function') return body
   if (typeof body.getReader === 'function') {
@@ -248,7 +248,7 @@ async function httpFetch(url, options = {}) {
   }
 }
 
-export function isCloudflareBlocked(html) {
+function isCloudflareBlocked(html) {
   if (!html || html.length < 200) return true
   return (
     html.includes('cf-browser-verification') ||
@@ -278,10 +278,6 @@ function cacheSet(url, html) {
     if (oldestKey !== undefined) htmlCache.delete(oldestKey)
   }
   htmlCache.set(url, { html, ts: Date.now() })
-}
-
-export function clearHtmlCache() {
-  htmlCache.clear()
 }
 
 export async function fetchText(url, options = {}) {
@@ -343,7 +339,7 @@ async function fetchBuffer(url, signal) {
   return Buffer.from(await res.arrayBuffer())
 }
 
-export function parseHentaiInput(rawText) {
+function parseHentaiInput(rawText) {
   const trimmed = String(rawText || '').trim()
   const urlMatch = trimmed.match(/https?:\/\/(?:www\.)?hentaila\.com\/media\/([^/?#\s]+)(?:\/(\d+))?/i)
   if (urlMatch) {
@@ -367,7 +363,7 @@ export function parseHentaiInput(rawText) {
   return { slug: null, episode, query: cleanQuery }
 }
 
-export function buildSlugVariations(query) {
+function buildSlugVariations(query) {
   const base = String(query || '').toLowerCase().trim()
   const variations = new Set()
   const toSlug = (str) => str.replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '')
@@ -386,7 +382,7 @@ export function buildSlugVariations(query) {
   return [...variations].filter((v) => v.length > 1)
 }
 
-export function parseSeriesInfo(html, slug) {
+function parseSeriesInfo(html, slug) {
   const $ = cheerio.load(html)
 
   const h1 = $('h1').first().text().replace(/\s+/g, ' ').trim()
@@ -419,7 +415,7 @@ export function parseSeriesInfo(html, slug) {
   return { slug, title, cover, desc, episodes, generos: [...genreSet] }
 }
 
-export function parseSearchResults(html) {
+function parseSearchResults(html) {
   const $ = cheerio.load(html)
   const results = []
   const seen = new Set()
@@ -454,7 +450,7 @@ export function parseSearchResults(html) {
   return results
 }
 
-export function parseLatestReleases(html, limit = 10) {
+function parseLatestReleases(html, limit = 10) {
   const $ = cheerio.load(html)
   const results = []
   const seen = new Set()
@@ -490,7 +486,7 @@ export function parseLatestReleases(html, limit = 10) {
   return results.slice(0, limit)
 }
 
-export function normalizeMegaUrl(url) {
+function normalizeMegaUrl(url) {
   const raw = String(url || '').trim()
   const m = raw.match(/mega\.nz\/(?:embed|file)\/[#!]*([A-Za-z0-9_-]{6,})[!#]([A-Za-z0-9_-]{20,})/i)
   if (m) return `https://mega.nz/file/${m[1]}#${m[2]}`
@@ -504,7 +500,7 @@ function normalizeMp4UploadUrl(url) {
   return raw
 }
 
-export function parseEpisodeLinks(html) {
+function parseEpisodeLinks(html) {
   const decoded = String(html || '')
     .replace(/\\u002F/gi, '/')
     .replace(/\\u0026/gi, '&')
@@ -534,7 +530,7 @@ export function parseEpisodeLinks(html) {
   return { mega, mediafire, fireload, fichier, mp4upload, yourupload, otros }
 }
 
-export function extractMediafireDirect(html, sourceUrl = '') {
+function extractMediafireDirect(html, sourceUrl = '') {
   const $ = cheerio.load(html)
   const direct =
     $('#downloadButton').attr('href') ||
@@ -548,7 +544,7 @@ export function extractMediafireDirect(html, sourceUrl = '') {
   return { direct, name: name.replace(/\s+/g, ' ').trim() }
 }
 
-export function extractFireloadDirect(html) {
+function extractFireloadDirect(html) {
   let direct = null
   let waitSeconds = 0
   const flMatch = html.match(/window\.Fl\s*=\s*(\{[\s\S]*?\})/i)
@@ -570,7 +566,7 @@ export function extractFireloadDirect(html) {
   return { direct, name: titleName || 'video.mp4', waitSeconds }
 }
 
-export function extractMp4UploadDirect(html) {
+function extractMp4UploadDirect(html) {
   const source = String(html || '')
     .replace(/\\u0026/gi, '&')
     .replace(/\\\//g, '/')
@@ -604,7 +600,7 @@ export function extractMp4UploadDirect(html) {
   return { direct: null, name: 'video.mp4' }
 }
 
-export function extractYourUploadDirect(html) {
+function extractYourUploadDirect(html) {
   const source = String(html || '')
     .replace(/\\u0026/gi, '&')
     .replace(/\\\//g, '/')
