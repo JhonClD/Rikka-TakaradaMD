@@ -1,4 +1,10 @@
-import { getDevice } from 'baileys'
+import {
+  CarouselCardType,
+  generateWAMessageFromContent,
+  getBizBinaryNode,
+  getDevice,
+  prepareWAMessageMedia,
+} from 'baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
 import { randomBytes } from 'node:crypto'
@@ -1235,11 +1241,16 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
   try { device = getDevice(m?.key?.id) } catch { }
   const isMobile = device !== 'desktop' && device !== 'web'
 
-  if (isMobile) {
+  if (isMobile && typeof conn.waUploadToServer === 'function' && typeof conn.relayMessage === 'function') {
     try {
       const items = latest.slice(0, 10)
-      const fetched = await Promise.allSettled(
-        items.map((item) => (item.thumb ? fetchBuffer(item.thumb) : Promise.reject(new Error('sin thumb')))),
+      const uploaded = await Promise.allSettled(
+        items.map(async (item) => {
+          if (!item.thumb) throw new Error('sin thumb')
+          const buf = await fetchBuffer(item.thumb)
+          if (!buf?.length) throw new Error('imagen vacía')
+          return prepareWAMessageMedia({ image: buf }, { upload: conn.waUploadToServer })
+        }),
       )
 
       pruneExpiredSessions()
@@ -1254,21 +1265,40 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
       const cards = []
 
       items.forEach((item, i) => {
-        if (fetched[i].status !== 'fulfilled' || !fetched[i].value?.length) return
+        if (uploaded[i].status !== 'fulfilled' || !uploaded[i].value?.imageMessage) return
         const dlIdx = rows.push({ rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`, title: item.title }) - 1
         const epsIdx = rows.push({ rowId: `${usedPrefix}hdl ${item.slug}`, title: item.title }) - 1
         cards.push({
-          image: fetched[i].value,
-          caption: `🎬 *${item.title}*\n📺 Episodio ${item.episode}`,
-          footer: `HentaiLA · Ep. ${item.episode}`,
-          nativeFlow: [
-            { text: `⬇️ Descargar Ep. ${item.episode}`, id: makeButtonToken(sessionId, dlIdx), icon: 'default' },
-            { text: '📺 Ver episodios', id: makeButtonToken(sessionId, epsIdx), icon: 'default' },
-          ],
+          header: {
+            title: '',
+            subtitle: '',
+            hasMediaAttachment: true,
+            imageMessage: uploaded[i].value.imageMessage,
+          },
+          body: { text: `🎬 *${item.title}*\n📺 Episodio ${item.episode}` },
+          footer: { text: `HentaiLA · Ep. ${item.episode}` },
+          nativeFlowMessage: {
+            buttons: [
+              {
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({
+                  display_text: `⬇️ Descargar Ep. ${item.episode}`,
+                  id: makeButtonToken(sessionId, dlIdx),
+                }),
+              },
+              {
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({
+                  display_text: '📺 Ver episodios',
+                  id: makeButtonToken(sessionId, epsIdx),
+                }),
+              },
+            ],
+          },
         })
       })
 
-      if (cards.length > 0) {
+      if (cards.length >= 2) {
         const session = {
           id: sessionId,
           chat,
@@ -1282,17 +1312,45 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
         sessions.set(sessionId, session)
 
         const footer = `${global.botName || global.wm || 'HentaiLA'} · Expira en 3 min`
-        const sent = await conn.sendMessage(
+        const userJid = conn.authState?.creds?.me?.id || conn.user?.jid || conn.user?.id
+        const userJidLid = conn.authState?.creds?.me?.lid || conn.user?.lid
+        const hasQuoted = Boolean(m?.key && m?.message && Object.keys(m.message).length > 0)
+
+        const fullMsg = generateWAMessageFromContent(
           chat,
           {
-            text: '🔞 *Últimos lanzamientos en HentaiLA*\n_Desliza las tarjetas para elegir:_',
-            footer,
-            cards,
+            messageContextInfo: { messageSecret: randomBytes(32) },
+            interactiveMessage: {
+              header: { hasMediaAttachment: false },
+              body: { text: '🔞 *Últimos lanzamientos en HentaiLA*\n_Desliza las tarjetas para elegir:_' },
+              footer: { text: footer },
+              carouselMessage: {
+                cards,
+                messageVersion: 1,
+                carouselCardType: CarouselCardType.HSCROLL_CARDS,
+              },
+            },
           },
-          { quoted: m },
+          {
+            userJid,
+            userJidLid,
+            ...(hasQuoted ? { quoted: m } : {}),
+          },
         )
-        session.msgId = sent?.key?.id || null
-        return sent
+
+        const bizNode = getBizBinaryNode(fullMsg.message)
+        try {
+          await conn.relayMessage(chat, fullMsg.message, {
+            messageId: fullMsg.key.id,
+            additionalNodes: [bizNode],
+          })
+        } catch (relayErr) {
+          sessions.delete(sessionId)
+          throw relayErr
+        }
+
+        session.msgId = fullMsg?.key?.id || null
+        return fullMsg
       }
     } catch (err) {
       console.error('[HDL] Error en carrusel /hlatest:', err.message)
