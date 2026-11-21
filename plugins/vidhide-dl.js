@@ -1,10 +1,12 @@
 // plugins/vidhide-dl.js — Descargador independiente para VidHide / FileLions / EarnVids
-// Desempaqueta scripts base-62 (sin eval), extrae links.hls* / sources y remuxea a MP4.
+// Soporta callistanise (/file/, /v/), morencius, peytonepre, smoothpre y failover de mirrors.
+// Desempaqueta scripts base-62 (sin eval), selecciona mejor calidad HLS y remuxea a MP4.
 
+import * as cheerio from 'cheerio'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createDecipheriv, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -16,17 +18,35 @@ import { resolveJkAnimeEpisodeInput } from './lib/jkanime-episode-servers.js'
 
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 20_000
+const SEGMENT_TIMEOUT_MS = 25_000
 const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.VIDHIDE_TIMEOUT_MS) || 45 * 60_000)
 const IDLE_TIMEOUT_MS = 90_000
 const MIN_VALID_BYTES = 128 * 1024
 const MAX_VIDEO_BYTES = 2 * 1024 ** 3
-const FFMPEG_BIN = ffmpegStatic || process.env.FFMPEG_PATH || 'ffmpeg'
+const HLS_CONCURRENCY = 6
 
-const VIDHIDE_HOST_RE = /(?:^|\.)(?:vidhide[a-z0-9]*\.|filelions\.|dhtpre\.|peytonepre\.|movearnpre\.|niikaplayerr\.|dinisglows\.|ryderjet\.|smoothpre\.|earnvids\.|callistanise\.|mivalyo\.|bingezove\.)/i
+const VIDHIDE_HOST_RE = /(?:^|\.)(?:vidhide[a-z0-9]*\.|filelions\.|dhtpre\.|peytonepre\.|movearnpre\.|niikaplayerr\.|dinisglows\.|ryderjet\.|smoothpre\.|earnvids[a-z0-9]*\.|callistanise\.|morencius\.|seraphinapl\.|mivalyo\.|bingezove\.|premilkyway\.|dintezuvio\.|minochinos\.|taylorplayer\.|guccihide\.|ahvsh\.|streamhide\.)/i
+
+const ACTIVE_MIRRORS = ['callistanise.com', 'morencius.com', 'peytonepre.com', 'smoothpre.com']
 
 let wreqPromise = null
 let wreqUnavailable = false
 let activeUa = FALLBACK_UA
+
+function resolveFfmpegBin() {
+  const candidates = [
+    process.env.FFMPEG_PATH,
+    '/usr/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    ffmpegStatic,
+  ].filter(Boolean)
+  for (const bin of candidates) {
+    try {
+      if (fs.existsSync(bin)) return bin
+    } catch (_) {}
+  }
+  return 'ffmpeg'
+}
 
 function createAbortError(message = 'Descarga cancelada.') {
   const err = new Error(message)
@@ -116,18 +136,37 @@ async function getWreq() {
   return wreqPromise
 }
 
-async function clientFetch(session, url, { headers = {}, timeout = PAGE_TIMEOUT_MS, signal } = {}) {
+async function clientFetch(session, url, { headers = {}, timeout = PAGE_TIMEOUT_MS, signal, preferNative = false } = {}) {
   const reqHeaders = {}
   for (const [k, v] of Object.entries(headers)) {
     if (v !== undefined && v !== null && v !== '') reqHeaders[k.toLowerCase()] = String(v)
   }
-  const combined = combineSignal(signal, timeout)
-  if (session) return session.fetch(url, { headers: reqHeaders, timeout, redirect: 'follow', signal: combined })
-  return globalThis.fetch(url, {
+  const nativeCall = () => globalThis.fetch(url, {
     headers: { 'user-agent': activeUa, accept: 'text/html,application/xhtml+xml,*/*;q=0.8', ...reqHeaders },
     redirect: 'follow',
-    signal: combined,
+    signal: combineSignal(signal, timeout),
   })
+  const wreqCall = () => session.fetch(url, {
+    headers: reqHeaders,
+    timeout,
+    redirect: 'follow',
+    signal: combineSignal(signal, timeout),
+  })
+
+  if (!session || preferNative) {
+    try {
+      return await nativeCall()
+    } catch (err) {
+      if (signal?.aborted || !session) throw err
+      return wreqCall()
+    }
+  }
+  try {
+    return await wreqCall()
+  } catch (err) {
+    if (signal?.aborted) throw err
+    return nativeCall()
+  }
 }
 
 function toNodeReadable(res) {
@@ -155,14 +194,18 @@ export function parseVidHideUrl(value) {
     throw new Error('El enlace no es una URL válida de VidHide.')
   }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !VIDHIDE_HOST_RE.test(url.hostname)) {
-    throw new Error('Solo acepto enlaces de VidHide / FileLions o sus mirrors conocidos.')
+    throw new Error('Solo acepto enlaces de VidHide / FileLions o sus mirrors conocidos (ej. callistanise.com, morencius.com, peytonepre.com).')
   }
-  const m = url.pathname.match(/^\/(?:(?:e|v|d|f|embed|download)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
+  const m = url.pathname.match(/^\/(?:(?:e|v|d|f|w|file|embed|download)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
   if (!m) throw new Error('No pude reconocer el identificador del video en VidHide.')
   const id = m[1]
   const embedUrl = `${url.origin}/v/${id}`
-  const altEmbed = `${url.origin}/e/${id}`
-  return { id, url: url.href, candidates: [...new Set([url.href, embedUrl, altEmbed])] }
+  const altEmbed = `${url.origin}/embed/${id}`
+  const mirrorUrls = ACTIVE_MIRRORS
+    .filter(host => host !== url.hostname.toLowerCase())
+    .map(host => `https://${host}/v/${id}`)
+  const candidates = [...new Set([embedUrl, url.href, altEmbed, ...mirrorUrls])]
+  return { id, url: url.href, candidates }
 }
 
 export function extractVidHideMedia(html, pageUrl) {
@@ -209,6 +252,75 @@ export function extractVidHideMedia(html, pageUrl) {
   return null
 }
 
+function stripDisguisedTsPrefix(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 188) return buf
+  if (buf[0] === 0x47 && (buf.length < 376 || buf[188] === 0x47)) return buf
+
+  const pngEnd = buf.indexOf(Buffer.from([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]))
+  if (pngEnd !== -1 && pngEnd + 8 < buf.length && buf[pngEnd + 8] === 0x47) {
+    return buf.subarray(pngEnd + 8)
+  }
+
+  const limit = Math.min(buf.length - 564, 65_536)
+  for (let i = 1; i <= limit; i += 1) {
+    if (buf[i] === 0x47 && buf[i + 188] === 0x47 && buf[i + 376] === 0x47 && (i + 564 >= buf.length || buf[i + 564] === 0x47)) {
+      return buf.subarray(i)
+    }
+  }
+  return buf
+}
+
+function selectBestHlsVariant(masterText, masterUrl) {
+  const lines = String(masterText || '').split(/\r?\n/).map(l => l.trim())
+  if (/^#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=/im.test(masterText)) return null
+  const variants = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue
+    const bw = Number(lines[i].match(/BANDWIDTH=(\d+)/i)?.[1] || 0)
+    const resH = Number(lines[i].match(/RESOLUTION=\d+x(\d+)/i)?.[1] || 0)
+    let j = i + 1
+    while (j < lines.length && (!lines[j] || lines[j].startsWith('#'))) j += 1
+    if (j < lines.length) {
+      const url = safeHttpUrl(lines[j], masterUrl)
+      if (url) variants.push({ url, bw, resH })
+    }
+  }
+  if (!variants.length) return null
+  variants.sort((a, b) => (b.bw - a.bw) || (b.resH - a.resH))
+  return variants[0].url
+}
+
+function parseMediaPlaylist(text, playlistUrl) {
+  const lines = String(text || '').split(/\r?\n/).map(l => l.trim())
+  if (lines.some(l => l.startsWith('#EXT-X-MAP:') || l.startsWith('#EXT-X-BYTERANGE:'))) return null
+  let mediaSequence = 0
+  let keyInfo = null
+  const segments = []
+  for (const line of lines) {
+    if (!line) continue
+    if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+      mediaSequence = Number(line.split(':')[1]) || 0
+    } else if (line.startsWith('#EXT-X-KEY:')) {
+      const method = line.match(/METHOD=([^,\s]+)/i)?.[1]?.toUpperCase() || 'NONE'
+      if (method === 'NONE') {
+        keyInfo = null
+      } else if (method === 'AES-128') {
+        const uri = line.match(/URI="([^"]+)"/i)?.[1]
+        const ivHex = line.match(/IV=0x([0-9a-f]+)/i)?.[1] || null
+        const keyUrl = safeHttpUrl(uri, playlistUrl)
+        if (!keyUrl) return null
+        keyInfo = { method, keyUrl, ivHex }
+      } else {
+        return null
+      }
+    } else if (!line.startsWith('#')) {
+      const segUrl = safeHttpUrl(line, playlistUrl)
+      if (segUrl) segments.push({ url: segUrl, key: keyInfo ? { ...keyInfo } : null, seq: mediaSequence + segments.length })
+    }
+  }
+  return segments.length ? segments : null
+}
+
 async function validateVideo(filePath) {
   const stat = await fsp.stat(filePath)
   if (stat.size < MIN_VALID_BYTES) throw new Error(`Archivo incompleto (${formatBytes(stat.size)}).`)
@@ -251,6 +363,7 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
       headers: { accept: '*/*', ...(referer ? { referer } : {}) },
       timeout: DOWNLOAD_TIMEOUT_MS,
       signal: ctrl.signal,
+      preferNative: true,
     })
     if (!res.ok) { await cancelBody(res); throw new Error(`HTTP ${res.status}`) }
     let bytes = 0
@@ -298,7 +411,134 @@ function spawnProcess(bin, args, timeoutMs, signal, label) {
   })
 }
 
-async function downloadHlsStream(m3u8Url, destPath, referer, signal) {
+async function remuxTsToMp4(tsPath, destPath, signal) {
+  const ffmpegBin = resolveFfmpegBin()
+  const partPath = `${destPath}.part.mp4`
+  const variants = [
+    ['-hide_banner', '-loglevel', 'error', '-y', '-i', tsPath, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart', partPath],
+    ['-hide_banner', '-loglevel', 'error', '-y', '-i', tsPath, '-c', 'copy', '-movflags', '+faststart', partPath],
+  ]
+  let lastErr = null
+  for (const args of variants) {
+    try {
+      await fsp.rm(partPath, { force: true }).catch(() => {})
+      await spawnProcess(ffmpegBin, args, DOWNLOAD_TIMEOUT_MS, signal, 'ffmpeg')
+      const stat = await validateVideo(partPath)
+      await fsp.rename(partPath, destPath)
+      return stat
+    } catch (err) {
+      await fsp.rm(partPath, { force: true }).catch(() => {})
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+  }
+  throw lastErr || new Error('ffmpeg no pudo remuxear el video.')
+}
+
+async function fetchSegmentBuffer(session, segUrl, referer, signal) {
+  const origin = referer ? referer.replace(/\/$/, '') : ''
+  const attempts = [
+    { headers: { accept: '*/*', ...(referer ? { referer, origin } : {}) }, preferNative: true },
+    { headers: { accept: '*/*' }, preferNative: true },
+    { headers: { accept: '*/*', ...(referer ? { referer, origin } : {}) }, preferNative: false },
+  ]
+  let lastErr = null
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      const res = await clientFetch(session, segUrl, { ...attempts[i], timeout: SEGMENT_TIMEOUT_MS, signal })
+      if (!res.ok) { await cancelBody(res); lastErr = new Error(`Segmento HTTP ${res.status}`); continue }
+      const buf = Buffer.from(await res.arrayBuffer())
+      if (buf.length > 0) return buf
+      lastErr = new Error('Segmento vacío')
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+  }
+  throw lastErr || new Error('No se pudo descargar un segmento HLS.')
+}
+
+async function downloadHlsNative(session, m3u8Url, destPath, referer, signal) {
+  const origin = referer ? referer.replace(/\/$/, '') : ''
+  const reqHeaders = { accept: '*/*', ...(referer ? { referer, origin } : {}) }
+  const masterRes = await clientFetch(session, m3u8Url, { headers: reqHeaders, timeout: PAGE_TIMEOUT_MS, signal, preferNative: true })
+  if (!masterRes.ok) { await cancelBody(masterRes); throw new Error(`M3U8 devolvió HTTP ${masterRes.status}`) }
+  let playlistUrl = masterRes.url || m3u8Url
+  let playlistText = await masterRes.text()
+
+  if (/#EXT-X-STREAM-INF:/i.test(playlistText)) {
+    const bestUrl = selectBestHlsVariant(playlistText, playlistUrl)
+    if (!bestUrl) throw new Error('Playlist maestro requiere demuxer externo.')
+    const varRes = await clientFetch(session, bestUrl, { headers: reqHeaders, timeout: PAGE_TIMEOUT_MS, signal, preferNative: true })
+    if (!varRes.ok) { await cancelBody(varRes); throw new Error(`Variante HLS devolvió HTTP ${varRes.status}`) }
+    playlistUrl = varRes.url || bestUrl
+    playlistText = await varRes.text()
+  }
+
+  const segments = parseMediaPlaylist(playlistText, playlistUrl)
+  if (!segments) throw new Error('Formato HLS no apto para descarga nativa.')
+
+  const keyCache = new Map()
+  const tsPath = `${destPath}.stream.ts`
+  const ctrl = new AbortController()
+  const onAbort = () => ctrl.abort(createAbortError())
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const watchdog = createIdleWatchdog(() => ctrl.abort(new Error('Descarga HLS sin datos durante 90s.')))
+
+  try {
+    await fsp.rm(tsPath, { force: true }).catch(() => {})
+    const fh = await fsp.open(tsPath, 'w')
+    let totalBytes = 0
+    try {
+      for (let i = 0; i < segments.length; i += HLS_CONCURRENCY) {
+        if (ctrl.signal.aborted) throw createAbortError()
+        const batch = segments.slice(i, i + HLS_CONCURRENCY)
+        const buffers = await Promise.all(batch.map(async (seg) => {
+          let raw = await fetchSegmentBuffer(session, seg.url, referer, ctrl.signal)
+          if (seg.key?.method === 'AES-128') {
+            let keyBuf = keyCache.get(seg.key.keyUrl)
+            if (!keyBuf) {
+              keyBuf = await fetchSegmentBuffer(session, seg.key.keyUrl, referer, ctrl.signal)
+              keyCache.set(seg.key.keyUrl, keyBuf)
+            }
+            const iv = Buffer.alloc(16)
+            if (seg.key.ivHex) {
+              Buffer.from(seg.key.ivHex.padStart(32, '0').slice(-32), 'hex').copy(iv)
+            } else {
+              iv.writeBigUInt64BE(BigInt(seg.seq), 8)
+            }
+            const decipher = createDecipheriv('aes-128-cbc', keyBuf, iv)
+            raw = Buffer.concat([decipher.update(raw), decipher.final()])
+          }
+          watchdog.ping()
+          return stripDisguisedTsPrefix(raw)
+        }))
+        for (const chunk of buffers) {
+          totalBytes += chunk.length
+          if (totalBytes > MAX_VIDEO_BYTES) throw new Error('El video supera el límite de 2 GB.')
+          await fh.write(chunk)
+        }
+      }
+    } finally {
+      await fh.close()
+    }
+    return await remuxTsToMp4(tsPath, destPath, signal)
+  } finally {
+    watchdog.stop()
+    signal?.removeEventListener('abort', onAbort)
+    await fsp.rm(tsPath, { force: true }).catch(() => {})
+  }
+}
+
+async function downloadHlsStream(session, m3u8Url, destPath, referer, signal) {
+  let nativeErr = null
+  try {
+    return await downloadHlsNative(session, m3u8Url, destPath, referer, signal)
+  } catch (err) {
+    if (signal?.aborted) throw createAbortError()
+    nativeErr = err
+  }
+
   const dir = path.dirname(destPath)
   const tmpBase = path.join(dir, `vidhide_${Date.now()}`)
   const ytArgs = [
@@ -323,8 +563,10 @@ async function downloadHlsStream(m3u8Url, destPath, referer, signal) {
     const partPath = `${destPath}.part.mp4`
     try {
       await fsp.rm(partPath, { force: true }).catch(() => {})
-      await spawnProcess(FFMPEG_BIN, [
+      await spawnProcess(resolveFfmpegBin(), [
         '-hide_banner', '-loglevel', 'error', '-y',
+        '-allowed_extensions', 'ALL',
+        '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
         '-headers', `User-Agent: ${activeUa}\r\nReferer: ${referer}\r\n`,
         '-i', m3u8Url,
         '-c', 'copy',
@@ -337,7 +579,7 @@ async function downloadHlsStream(m3u8Url, destPath, referer, signal) {
       return stat
     } catch (ffErr) {
       await fsp.rm(partPath, { force: true }).catch(() => {})
-      throw new Error(`HLS falló (yt-dlp: ${ytErr.message} | ffmpeg: ${ffErr.message})`)
+      throw new Error(`HLS falló (nativo: ${nativeErr?.message || 'n/a'} | yt-dlp: ${ytErr.message} | ffmpeg: ${ffErr.message})`)
     }
   }
 }
@@ -358,15 +600,24 @@ export async function downloadVidHideFile(inputUrl, outputPath, { signal } = {})
     let lastErr = null
     for (const candidate of parsed.candidates) {
       try {
-        const res = await clientFetch(session, candidate, {
-          headers: { referer: `${new URL(candidate).origin}/` },
-          signal,
-        })
-        if (!res.ok) { await cancelBody(res); lastErr = new Error(`VidHide devolvió HTTP ${res.status}.`); continue }
-        const html = await res.text()
-        media = extractVidHideMedia(html, res.url || candidate)
+        let currentUrl = candidate
+        let referer = `${new URL(candidate).origin}/`
+        for (let hop = 0; hop < 3; hop += 1) {
+          const res = await clientFetch(session, currentUrl, { headers: { referer }, signal })
+          if (!res.ok) { await cancelBody(res); lastErr = new Error(`VidHide devolvió HTTP ${res.status}.`); break }
+          const finalUrl = res.url || currentUrl
+          const html = await res.text()
+          media = extractVidHideMedia(html, finalUrl)
+          if (media) break
+          const $ = cheerio.load(html)
+          const iframeSrc = $('iframe[src]').first().attr('src')
+          const nextUrl = safeHttpUrl(iframeSrc, finalUrl)
+          if (!nextUrl || nextUrl === finalUrl) break
+          referer = finalUrl
+          currentUrl = nextUrl
+        }
         if (media) break
-        lastErr = new Error('VidHide no expuso una fuente m3u8/mp4 reconocible.')
+        lastErr = lastErr || new Error('VidHide no expuso una fuente m3u8/mp4 reconocible.')
       } catch (err) {
         if (signal?.aborted) throw createAbortError()
         lastErr = err
@@ -378,7 +629,7 @@ export async function downloadVidHideFile(inputUrl, outputPath, { signal } = {})
     await fsp.rm(outputPath, { force: true }).catch(() => {})
     const stat = media.type === 'mp4'
       ? await downloadDirectMp4(session, media.url, outputPath, media.referer, signal)
-      : await downloadHlsStream(media.url, outputPath, media.referer, signal)
+      : await downloadHlsStream(session, media.url, outputPath, media.referer, signal)
     return { filePath: outputPath, fileSize: stat.size, extension: '.mp4', mimetype: 'video/mp4' }
   } finally {
     await session?.close?.().catch(() => {})
@@ -394,7 +645,7 @@ function getInput(m, text, args) {
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const input = getInput(m, text, args)
   if (!input) {
-    return m.reply(`Envía o responde a un enlace de VidHide / FileLions.\nEjemplo: *${usedPrefix || '.'}${command || 'vidhide'} https://vidhidepro.com/v/ID*`)
+    return m.reply(`Envía o responde a un enlace de VidHide / FileLions.\nEjemplo: *${usedPrefix || '.'}${command || 'vidhide'} https://callistanise.com/file/ID*`)
   }
   let resolvedInput = input
   try { resolvedInput = await resolveJkAnimeEpisodeInput(input, 'vidhide') }

@@ -1120,13 +1120,13 @@ export function detectarServNombre(url, hint = '') {
   if (/mp4upload/.test(u)) return 'mp4upload'
   if (/jkanime\.net\/jkplayer\/|\bjkplayer\b|\bdesu\b|\bnozu\b|\bdesuka\b/.test(u)) return 'jkplayer'
   if (/voe\d*\.sx|\bvoe\b/.test(u) || isKnownVoeMirrorUrl(url)) return 'voe'
-  if (/filemoon|moonplayer/.test(u)) return 'filemoon'
-  if (/streamwish|wishembed|hgcloud|awish|dwish|mwish|sfastwish/.test(u)) return 'streamwish'
-  if (/vidhide|filelions|dhtpre|peytonepre/.test(u)) return 'vidhide'
+  if (/filemoon|moonplayer|byse[a-z0-9]*\./.test(u)) return 'filemoon'
+  if (/streamwish|wishembed|hgcloud|hglink|streamhg|vibuxer|hanerix|audinifer|niramirus|awish|dwish|mwish|sfastwish/.test(u)) return 'streamwish'
+  if (/vidhide|filelions|dhtpre|peytonepre|callistanise|morencius|smoothpre/.test(u)) return 'vidhide'
   if (/streamtape|strtape/.test(u)) return 'streamtape'
   if (/dood|ds2play|d000d|d0000d|do0od/.test(u)) return 'doodstream'
   if (/ok\.ru|\bokru\b/.test(u)) return 'okru'
-  if (/mixdrop|mdy48tn97/.test(u)) return 'mixdrop'
+  if (/mixdrop|mxdrop|mdy48tn97/.test(u)) return 'mixdrop'
   return 'embed'
 }
 

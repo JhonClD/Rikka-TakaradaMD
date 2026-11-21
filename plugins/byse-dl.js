@@ -42,6 +42,7 @@ import { Transform } from 'node:stream'
 import { isIP } from 'node:net'
 import axios from 'axios'
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
+import { resolveJkAnimeEpisodeInput } from './lib/jkanime-episode-servers.js'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 const CABECERAS_BASE = {
@@ -1264,9 +1265,16 @@ const handler = async (m, { conn, text, args, usedPrefix, command, prefix }) => 
     )
   }
 
+  let entradaResuelta = entrada
+  try {
+    entradaResuelta = await resolveJkAnimeEpisodeInput(entrada, 'byse')
+  } catch (error) {
+    return m.reply(`❌ ${error?.message || error}`)
+  }
+
   let info
   try {
-    info = parseByseUrl(entrada)
+    info = parseByseUrl(entradaResuelta)
   } catch (error) {
     return m.reply(`❌ ${error?.message || error}`)
   }

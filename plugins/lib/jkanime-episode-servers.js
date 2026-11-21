@@ -101,7 +101,8 @@ function matchesProvider(entry, provider) {
   if (key === 'desu') return false
   if (key === 'jkplayer') return false
   const aliases = {
-    filemoon: ['filemoon'], streamwish: ['streamwish'], vidhide: ['vidhide'],
+    byse: ['byse', 'filemoon'], filemoon: ['filemoon', 'byse'],
+    streamwish: ['streamwish'], vidhide: ['vidhide'],
     streamtape: ['streamtape'], doodstream: ['doodstream', 'dood'], mixdrop: ['mixdrop'],
   }[key] || [key]
   return aliases.some(alias => name.includes(alias.replace(/[^a-z0-9]/g, '')))

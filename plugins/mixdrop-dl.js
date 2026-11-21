@@ -1,8 +1,11 @@
 // plugins/mixdrop-dl.js — Descargador independiente para Mixdrop y mirrors
-// Desempaqueta MDCore.wurl en base-62 (sin eval) y descarga MP4 en paralelo.
+// Desempaqueta MDCore.wurl en base-62 (sin eval) y descarga MP4 con transporte resiliente
+// (fetch nativo + fallback node:https IPv4/TLS1.2 + wreq-js) y reanudación Range.
 
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Readable, Transform } from 'node:stream'
@@ -18,10 +21,13 @@ const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.MIXDROP_TIMEOUT_
 const IDLE_TIMEOUT_MS = 90_000
 const MIN_VALID_BYTES = 128 * 1024
 const MAX_VIDEO_BYTES = 2 * 1024 ** 3
-const PARALLEL_THREADS = 8
+const PARALLEL_THREADS = 4
 const MIN_PARALLEL_BYTES = 5 * 1024 * 1024
+const MAX_CHUNK_RETRIES = 3
+const MAX_SEQ_RETRIES = 5
 
-const MIXDROP_HOST_RE = /(?:^|\.)(?:mixdrop[a-z0-9]*\.|mxdrop\.|mdbekjwqa\.|mdy48tn97\.|mdfx9dc8n\.|mdzsmutpcvykb\.)/i
+const MIXDROP_HOST_RE = /(?:^|\.)(?:mixdrop[a-z0-9]*\.|mxdrop\.|mixdrp\.|mixdroop\.|mdbekjwqa\.|mdy48tn97\.|mdfx9dc8n\.|mdzsmutpcvykb\.|md3b0j6hj\.)/i
+const ACTIVE_MIRRORS = ['mixdrop.ag', 'mxdrop.to', 'mixdrop.ps', 'mixdrop.my']
 
 let wreqPromise = null
 let wreqUnavailable = false
@@ -116,19 +122,122 @@ async function getWreq() {
   return wreqPromise
 }
 
-async function clientFetch(session, url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal } = {}) {
+// Transporte directo sobre node:https (IPv4 + TLS 1.2) como respaldo cuando wreq-js
+// (BoringSSL) o TLS 1.3 ML-KEM reciben "client error (Connect): unexpected EOF" en mxcontent.net.
+function nodeHttpRequest(url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal, maxRedirects = 5, maxVersion = 'TLSv1.2' } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    let parsed
+    try { parsed = new URL(url) } catch (err) { return reject(err) }
+    const isHttps = parsed.protocol === 'https:'
+    const mod = isHttps ? https : http
+    const opts = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: `${parsed.pathname}${parsed.search}`,
+      method,
+      family: 4,
+      headers: { 'user-agent': activeUa, accept: '*/*', ...headers },
+      ...(isHttps ? { maxVersion } : {}),
+    }
+    const req = mod.request(opts, (res) => {
+      const status = res.statusCode || 0
+      const loc = res.headers.location
+      if (status >= 300 && status < 400 && loc && maxRedirects > 0) {
+        res.resume()
+        cleanup()
+        const nextUrl = safeHttpUrl(loc, url)
+        if (!nextUrl) return reject(new Error(`Redirección inválida (${status})`))
+        nodeHttpRequest(nextUrl, { method, headers, timeout, signal, maxRedirects: maxRedirects - 1, maxVersion })
+          .then(resolve, reject)
+        return
+      }
+      clearTimeout(timer)
+      res.once('close', cleanup)
+      res.once('end', cleanup)
+      const hdrs = new Headers()
+      for (const [k, v] of Object.entries(res.headers)) {
+        if (Array.isArray(v)) hdrs.set(k, v.join(', '))
+        else if (v !== undefined) hdrs.set(k, String(v))
+      }
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        url,
+        headers: hdrs,
+        body: res,
+        async text() {
+          const chunks = []
+          for await (const c of res) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
+          return Buffer.concat(chunks).toString('utf8')
+        },
+      })
+    })
+    const onAbort = () => {
+      req.destroy(createAbortError())
+      reject(createAbortError())
+    }
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`Timeout HTTP (${timeout}ms)`))
+      reject(new Error(`Timeout HTTP (${timeout}ms)`))
+    }, timeout)
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    req.on('error', (err) => {
+      cleanup()
+      reject(err)
+    })
+    req.end()
+  })
+}
+
+async function resilientFetch(session, url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal, preferNative = false } = {}) {
   const reqHeaders = {}
   for (const [k, v] of Object.entries(headers)) {
     if (v !== undefined && v !== null && v !== '') reqHeaders[k.toLowerCase()] = String(v)
   }
-  const combined = combineSignal(signal, timeout)
-  if (session) return session.fetch(url, { method, headers: reqHeaders, timeout, redirect: 'follow', signal: combined })
-  return globalThis.fetch(url, {
+
+  const nativeHeaders = { 'user-agent': activeUa, accept: '*/*', ...reqHeaders }
+  const nativeCall = () => globalThis.fetch(url, {
     method,
-    headers: { 'user-agent': activeUa, accept: 'text/html,application/xhtml+xml,*/*;q=0.8', ...reqHeaders },
+    headers: nativeHeaders,
     redirect: 'follow',
-    signal: combined,
+    signal: combineSignal(signal, timeout),
   })
+  const tls12Call = () => nodeHttpRequest(url, { method, headers: nativeHeaders, timeout, signal, maxVersion: 'TLSv1.2' })
+  const wreqCall = () => session.fetch(url, {
+    method,
+    headers: reqHeaders,
+    timeout,
+    redirect: 'follow',
+    signal: combineSignal(signal, timeout),
+  })
+
+  const order = preferNative
+    ? [nativeCall, tls12Call, ...(session ? [wreqCall] : [])]
+    : [...(session ? [wreqCall] : []), nativeCall, tls12Call]
+
+  let lastErr = null
+  for (let i = 0; i < order.length; i += 1) {
+    try {
+      const res = await order[i]()
+      // Si el transporte nativo recibió 403/5xx pero queda otro transporte disponible, probar el siguiente.
+      if ((res.status === 403 || res.status >= 500) && i + 1 < order.length) {
+        await cancelBody(res)
+        lastErr = new Error(`HTTP ${res.status}`)
+        continue
+      }
+      return res
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+  }
+  throw lastErr || new Error('Error de red al conectar con Mixdrop.')
 }
 
 function toNodeReadable(res) {
@@ -159,11 +268,14 @@ export function parseMixdropUrl(value) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !MIXDROP_HOST_RE.test(url.hostname)) {
     throw new Error('Solo acepto enlaces de Mixdrop o sus mirrors conocidos.')
   }
-  const m = url.pathname.match(/^\/(?:(?:e|f|d)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
+  const m = url.pathname.match(/^\/(?:(?:e|f|d|file|embed)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
   if (!m) throw new Error('No pude reconocer el identificador del video en Mixdrop.')
   const id = m[1]
   const embedUrl = `${url.origin}/e/${id}`
-  return { id, url: embedUrl, candidates: [...new Set([embedUrl, url.href])] }
+  const mirrorUrls = ACTIVE_MIRRORS
+    .filter(host => host !== url.hostname.toLowerCase())
+    .map(host => `https://${host}/e/${id}`)
+  return { id, url: embedUrl, candidates: [...new Set([embedUrl, url.href, ...mirrorUrls])] }
 }
 
 export function extractMixdropMedia(html, pageUrl = 'https://mixdrop.co/') {
@@ -218,13 +330,124 @@ function createIdleWatchdog(onIdle) {
   return { ping() { last = Date.now() }, stop() { clearInterval(timer) } }
 }
 
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(createAbortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, signal) {
+  let pos = start
+  let lastErr = null
+  for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt += 1) {
+    if (signal?.aborted) throw createAbortError()
+    try {
+      const r = await resilientFetch(session, mediaUrl, {
+        headers: { ...headers, range: `bytes=${pos}-${end}` },
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        signal,
+        preferNative: true,
+      })
+      if (r.status !== 206) { await cancelBody(r); throw new Error(`HTTP ${r.status}`) }
+      for await (const c of toNodeReadable(r)) {
+        const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
+        await fh.write(b, 0, b.length, pos)
+        pos += b.length
+        watchdog.ping()
+      }
+      if (pos > end) return
+      lastErr = new Error(`Bloque incompleto (${pos - start}/${end - start + 1})`)
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+    if (attempt < MAX_CHUNK_RETRIES) await sleep(600 * attempt, signal)
+  }
+  throw lastErr || new Error('Falló la descarga de un bloque en Mixdrop.')
+}
+
+async function downloadSequentialResumable(session, mediaUrl, partPath, headers, expectedSize, watchdog, signal) {
+  let downloaded = 0
+  let lastErr = null
+  for (let attempt = 1; attempt <= MAX_SEQ_RETRIES; attempt += 1) {
+    if (signal?.aborted) throw createAbortError()
+    try {
+      const reqHeaders = downloaded > 0 ? { ...headers, range: `bytes=${downloaded}-` } : headers
+      const res = await resilientFetch(session, mediaUrl, {
+        headers: reqHeaders,
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        signal,
+        preferNative: true,
+      })
+      if (downloaded > 0 && res.status === 416) {
+        await cancelBody(res)
+        if (expectedSize && downloaded >= expectedSize) return
+        downloaded = 0
+        await fsp.rm(partPath, { force: true }).catch(() => {})
+        lastErr = new Error('HTTP 416')
+        continue
+      }
+      if (downloaded > 0 && res.status === 200) {
+        // El servidor ignoró Range: reiniciar desde 0.
+        downloaded = 0
+        await fsp.rm(partPath, { force: true }).catch(() => {})
+      } else if (!res.ok && res.status !== 206) {
+        await cancelBody(res)
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const ct = String(res.headers?.get?.('content-type') || '').toLowerCase()
+      if (/text\/html|application\/json/i.test(ct)) {
+        await cancelBody(res)
+        throw new Error(`Mixdrop devolvió ${ct} en lugar de video.`)
+      }
+      if (!expectedSize) {
+        const cl = Number(res.headers?.get?.('content-length') || 0) || 0
+        if (cl > 0) expectedSize = downloaded + cl
+      }
+      const guard = new Transform({
+        transform(c, _e, cb) {
+          downloaded += c.length
+          watchdog.ping()
+          if (downloaded > MAX_VIDEO_BYTES) cb(new Error('El video supera el límite de 2 GB.'))
+          else cb(null, c)
+        },
+      })
+      const ws = fs.createWriteStream(partPath, { flags: downloaded > 0 ? 'a' : 'w' })
+      await pipeline(toNodeReadable(res), guard, ws)
+      if (!expectedSize || downloaded >= expectedSize) return
+      lastErr = new Error(`Descarga interrumpida (${formatBytes(downloaded)}/${formatBytes(expectedSize)})`)
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      if (/en lugar de video|supera el límite/i.test(err.message)) throw err
+      lastErr = err
+      try {
+        const st = await fsp.stat(partPath)
+        downloaded = st.size
+      } catch (_) {
+        downloaded = 0
+      }
+    }
+    if (attempt < MAX_SEQ_RETRIES) await sleep(800 * attempt, signal)
+  }
+  throw lastErr || new Error('No se pudo descargar el MP4 desde Mixdrop.')
+}
+
 async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
   const partPath = `${destPath}.part`
   const headers = { accept: '*/*', ...(referer ? { referer } : {}) }
   let sizeBytes = 0
   let supportsRanges = false
   try {
-    const head = await clientFetch(session, mediaUrl, { method: 'HEAD', headers, timeout: 12_000, signal })
+    const head = await resilientFetch(session, mediaUrl, { method: 'HEAD', headers, timeout: 15_000, signal, preferNative: true })
     await cancelBody(head)
     if (head.ok) {
       const ct = String(head.headers?.get?.('content-type') || '').toLowerCase()
@@ -257,22 +480,8 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
         }
         const fh = await fsp.open(partPath, 'w')
         try {
-          await Promise.all(ranges.map(async ({ start, end }) => {
-            const r = await clientFetch(session, mediaUrl, {
-              headers: { ...headers, range: `bytes=${start}-${end}` },
-              timeout: DOWNLOAD_TIMEOUT_MS,
-              signal: ctrl.signal,
-            })
-            if (r.status !== 206) { await cancelBody(r); throw new Error(`HTTP ${r.status}`) }
-            let pos = start
-            for await (const c of toNodeReadable(r)) {
-              const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
-              await fh.write(b, 0, b.length, pos)
-              pos += b.length
-              watchdog.ping()
-            }
-            if (pos - start !== end - start + 1) throw new Error('Bloque incompleto')
-          }))
+          await Promise.all(ranges.map(({ start, end }) =>
+            downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, ctrl.signal)))
         } finally {
           await fh.close()
         }
@@ -284,18 +493,7 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
     }
 
     if (!parallelOk) {
-      const res = await clientFetch(session, mediaUrl, { headers, timeout: DOWNLOAD_TIMEOUT_MS, signal: ctrl.signal })
-      if (!res.ok) { await cancelBody(res); throw new Error(`HTTP ${res.status}`) }
-      let bytes = 0
-      const guard = new Transform({
-        transform(c, _e, cb) {
-          bytes += c.length
-          watchdog.ping()
-          if (bytes > MAX_VIDEO_BYTES) cb(new Error('El video supera el límite de 2 GB.'))
-          else cb(null, c)
-        },
-      })
-      await pipeline(toNodeReadable(res), guard, fs.createWriteStream(partPath))
+      await downloadSequentialResumable(session, mediaUrl, partPath, headers, sizeBytes, watchdog, ctrl.signal)
     }
 
     const stat = await validateVideo(partPath)
@@ -326,8 +524,8 @@ export async function downloadMixdropFile(inputUrl, outputPath, { signal } = {})
     let lastErr = null
     for (const candidate of parsed.candidates) {
       try {
-        const res = await clientFetch(session, candidate, {
-          headers: { referer: `${new URL(candidate).origin}/` },
+        const res = await resilientFetch(session, candidate, {
+          headers: { accept: 'text/html,application/xhtml+xml,*/*;q=0.8', referer: `${new URL(candidate).origin}/` },
           signal,
         })
         if (!res.ok) { await cancelBody(res); lastErr = new Error(`Mixdrop devolvió HTTP ${res.status}.`); continue }

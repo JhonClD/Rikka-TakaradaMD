@@ -4,7 +4,9 @@ import {
   parseJkAnimeEpisodeUrl,
   resolveJkAnimeEpisodeInput,
 } from '../plugins/lib/jkanime-episode-servers.js'
-import { parseFilemoonUrl } from '../plugins/filemoon-dl.js'
+import { parseByseUrl } from '../plugins/byse-dl.js'
+import { parseStreamWishUrl } from '../plugins/streamwish-dl.js'
+import { parseVidHideUrl } from '../plugins/vidhide-dl.js'
 
 const episode = 'https://jkanime.net/kyoufu-collector/7/'
 const b64 = value => Buffer.from(value).toString('base64')
@@ -12,8 +14,8 @@ const html = `
 <script>
 var servers = [
   {"server":"Filemoon","remote":"${b64('https://bysekoze.com/e/ldrk67q0kwiw')}","slug":"ldrk67q0kwiw"},
-  {"server":"Streamwish","remote":"${b64('https://streamwish.to/e/sw-id')}","slug":"sw-id"},
-  {"server":"Vidhide","remote":"${b64('https://vidhidepro.com/v/vh-id')}","slug":"vh-id"},
+  {"server":"Streamwish","remote":"${b64('https://vibuxer.com/f/87wzxbc2xijd')}","slug":"87wzxbc2xijd"},
+  {"server":"Vidhide","remote":"${b64('https://callistanise.com/file/4t8obkq2pwnr')}","slug":"4t8obkq2pwnr"},
   {"server":"StreamTape","remote":"${b64('https://streamtape.com/e/st-id')}","slug":"st-id"},
   {"server":"DoodStream","remote":"${b64('https://dood.wf/e/ds-id')}","slug":"ds-id"},
   {"server":"Mixdrop","remote":"${b64('https://mixdrop.ag/e/md-id')}","slug":"md-id"}
@@ -38,9 +40,9 @@ test('solo acepta URLs de episodio JKAnime con ruta numérica', () => {
 
 test('resuelve los seis servidores externos por etiqueta, no por posición', async () => {
   const expected = {
-    filemoon: 'https://bysekoze.com/e/ldrk67q0kwiw',
-    streamwish: 'https://streamwish.to/e/sw-id',
-    vidhide: 'https://vidhidepro.com/v/vh-id',
+    byse: 'https://bysekoze.com/e/ldrk67q0kwiw',
+    streamwish: 'https://vibuxer.com/f/87wzxbc2xijd',
+    vidhide: 'https://callistanise.com/file/4t8obkq2pwnr',
     streamtape: 'https://streamtape.com/e/st-id',
     doodstream: 'https://dood.wf/e/ds-id',
     mixdrop: 'https://mixdrop.ag/e/md-id',
@@ -48,7 +50,9 @@ test('resuelve los seis servidores externos por etiqueta, no por posición', asy
   for (const [provider, url] of Object.entries(expected)) {
     assert.equal(await resolveJkAnimeEpisodeInput(episode, provider, { fetchPage: mockFetch() }), url)
   }
-  assert.equal(parseFilemoonUrl(expected.filemoon).id, 'ldrk67q0kwiw')
+  assert.equal(parseByseUrl(expected.byse).code, 'ldrk67q0kwiw')
+  assert.equal(parseStreamWishUrl(expected.streamwish).id, '87wzxbc2xijd')
+  assert.equal(parseVidHideUrl(expected.vidhide).id, '4t8obkq2pwnr')
 })
 
 test('resuelve los reproductores Magi, Desu y JKPlayer por tipo de ruta', async () => {
@@ -60,15 +64,15 @@ test('resuelve los reproductores Magi, Desu y JKPlayer por tipo de ruta', async 
 test('no ejecuta JavaScript y rechaza matriz malformada o proveedor ausente', async () => {
   let executed = false
   const invalid = `<script>globalThis.__ran = true; var servers = getServers();</script>`
-  await assert.rejects(resolveJkAnimeEpisodeInput(episode, 'filemoon', { fetchPage: mockFetch(invalid) }), /no publica un servidor filemoon válido/)
+  await assert.rejects(resolveJkAnimeEpisodeInput(episode, 'byse', { fetchPage: mockFetch(invalid) }), /no publica un servidor byse válido/)
   assert.equal(executed, false)
-  await assert.rejects(resolveJkAnimeEpisodeInput(episode, 'filemoon', { fetchPage: mockFetch(html, 'https://elsewhere.example/redirect') }), /dominio inesperado/)
+  await assert.rejects(resolveJkAnimeEpisodeInput(episode, 'byse', { fetchPage: mockFetch(html, 'https://elsewhere.example/redirect') }), /dominio inesperado/)
 })
 
 test('las URLs directas pasan sin hacer una petición', async () => {
   let requests = 0
-  const direct = 'https://filemoon.sx/e/abc123'
-  const output = await resolveJkAnimeEpisodeInput(direct, 'filemoon', { fetchPage: async () => { requests += 1 } })
+  const direct = 'https://bysekoze.com/e/abc123'
+  const output = await resolveJkAnimeEpisodeInput(direct, 'byse', { fetchPage: async () => { requests += 1 } })
   assert.equal(output, direct)
   assert.equal(requests, 0)
 })
