@@ -219,7 +219,7 @@ export function parseByseUrl(valor) {
 
   const partes = url.pathname.split('/').filter(Boolean)
   let code = null
-  if (partes.length >= 2 && /^(?:e|d|v|download|video|file|embed)$/i.test(partes[0])) code = partes[1]
+  if (partes.length >= 2 && /^(?:e|d|v|f|download|video|file|embed)$/i.test(partes[0])) code = partes[1]
   else if (partes.length >= 1) code = partes[partes.length - 1]
   code = String(code || '').replace(/\.html?$/i, '')
 

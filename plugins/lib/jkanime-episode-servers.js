@@ -1,4 +1,5 @@
 const JKANIME_HOST_RE = /^(?:[a-z0-9-]+\.)*jkanime\.net$/i
+const JKPLAYERS_HOST_RE = /^(?:[a-z0-9-]+\.)*jkplayers\.com$/i
 const MAX_PAGE_CHARS = 5 * 1024 * 1024
 const PAGE_TIMEOUT_MS = 20_000
 
@@ -119,7 +120,29 @@ function selectPlayerUrl(html, baseUrl, provider) {
   return pattern ? urls.find(raw => pattern.test(new URL(raw).pathname)) || null : null
 }
 
+export function parseJkPlayersRedirectUrl(value) {
+  let url
+  try { url = new URL(String(value || '').trim()) } catch (_) { return null }
+  if (!['http:', 'https:'].includes(url.protocol) || !JKPLAYERS_HOST_RE.test(url.hostname) || url.username || url.password) return null
+  if (!/^\/d\/[a-z0-9_-]{4,64}\/?$/i.test(url.pathname)) return null
+  return url.href
+}
+
 export async function resolveJkAnimeEpisodeInput(value, provider, { fetchPage = globalThis.fetch, signal } = {}) {
+  const redirectUrl = parseJkPlayersRedirectUrl(value)
+  if (redirectUrl) {
+    if (typeof fetchPage !== 'function') throw new Error('No hay un método disponible para resolver el enlace de descarga.')
+    const response = await fetchPage(redirectUrl, {
+      headers: { accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
+      redirect: 'manual',
+      signal: signal || AbortSignal.timeout(PAGE_TIMEOUT_MS),
+    })
+    const location = response?.headers?.get?.('location')
+    try { await response?.body?.cancel?.() } catch (_) {}
+    const resolved = location && safeHttpUrl(location, redirectUrl)
+    if (!resolved) throw new Error(`No pude resolver la redirección de descarga (${response?.status || 'sin Location'}).`)
+    return resolved
+  }
   const episodeUrl = parseJkAnimeEpisodeUrl(value)
   if (!episodeUrl) return value
   if (typeof fetchPage !== 'function') throw new Error('No hay un método disponible para consultar JKAnime.')

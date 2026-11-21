@@ -1,8 +1,10 @@
-// plugins/doodstream-dl.js — Descargador independiente para DoodStream y mirrors
-// Resuelve /pass_md5/ + token + expiry con Referer exacto y descarga MP4 en paralelo.
+// plugins/doodstream-dl.js — Descargador independiente para DoodStream / PlayMogo y mirrors
+// Resuelve /pass_md5/ + token + expiry con failover de mirrors y descarga MP4 resiliente.
 
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Readable, Transform } from 'node:stream'
@@ -18,11 +20,14 @@ const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.DOODSTREAM_TIMEO
 const IDLE_TIMEOUT_MS = 90_000
 const MIN_VALID_BYTES = 128 * 1024
 const MAX_VIDEO_BYTES = 2 * 1024 ** 3
-const PARALLEL_THREADS = 8
+const PARALLEL_THREADS = 4
 const MIN_PARALLEL_BYTES = 5 * 1024 * 1024
+const MAX_CHUNK_RETRIES = 3
+const MAX_SEQ_RETRIES = 5
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 
-const DOOD_HOST_RE = /(?:^|\.)(?:dood(?:stream)?\.|ds2play\.|ds2video\.|dsvplay\.|d000d\.|d0000d\.|do0od\.|dooood\.|doostream\.|d-s\.io|myvidplay\.|vide0\.net|vidply\.)/i
+const DOOD_HOST_RE = /(?:^|\.)(?:dood(?:stream)?\.|ds2play\.|ds2video\.|dsvplay\.|d000d\.|d0000d\.|do0od\.|dooood\.|doostream\.|d-s\.io|myvidplay\.|vide0\.net|vidply\.|playmogo\.|doply\.|do7go\.)/i
+const ACTIVE_MIRRORS = ['myvidplay.com', 'playmogo.com', 'd000d.com', 'ds2play.com']
 
 let wreqPromise = null
 let wreqUnavailable = false
@@ -58,6 +63,19 @@ function safeName(value, fallback = 'doodstream-video') {
     .slice(0, 100) || fallback
 }
 
+function safeHttpUrl(value, baseUrl) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return null
+  try {
+    const url = new URL(trimmed, baseUrl)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null
+    return url.href
+  } catch (_) {
+    return null
+  }
+}
+
 async function getWreq() {
   if (wreqUnavailable) return null
   if (!wreqPromise) {
@@ -78,19 +96,118 @@ async function getWreq() {
   return wreqPromise
 }
 
-async function clientFetch(session, url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal } = {}) {
+function nodeHttpRequest(url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal, maxRedirects = 5, maxVersion = 'TLSv1.2' } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    let parsed
+    try { parsed = new URL(url) } catch (err) { return reject(err) }
+    const isHttps = parsed.protocol === 'https:'
+    const mod = isHttps ? https : http
+    const opts = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: `${parsed.pathname}${parsed.search}`,
+      method,
+      family: 4,
+      headers: { 'user-agent': activeUa, accept: '*/*', ...headers },
+      ...(isHttps ? { maxVersion } : {}),
+    }
+    const req = mod.request(opts, (res) => {
+      const status = res.statusCode || 0
+      const loc = res.headers.location
+      if (status >= 300 && status < 400 && loc && maxRedirects > 0) {
+        res.resume()
+        cleanup()
+        const nextUrl = safeHttpUrl(loc, url)
+        if (!nextUrl) return reject(new Error(`Redirección inválida (${status})`))
+        nodeHttpRequest(nextUrl, { method, headers, timeout, signal, maxRedirects: maxRedirects - 1, maxVersion })
+          .then(resolve, reject)
+        return
+      }
+      clearTimeout(timer)
+      res.once('close', cleanup)
+      res.once('end', cleanup)
+      const hdrs = new Headers()
+      for (const [k, v] of Object.entries(res.headers)) {
+        if (Array.isArray(v)) hdrs.set(k, v.join(', '))
+        else if (v !== undefined) hdrs.set(k, String(v))
+      }
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        url,
+        headers: hdrs,
+        body: res,
+        async text() {
+          const chunks = []
+          for await (const c of res) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
+          return Buffer.concat(chunks).toString('utf8')
+        },
+      })
+    })
+    const onAbort = () => {
+      req.destroy(createAbortError())
+      reject(createAbortError())
+    }
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`Timeout HTTP (${timeout}ms)`))
+      reject(new Error(`Timeout HTTP (${timeout}ms)`))
+    }, timeout)
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    req.on('error', (err) => {
+      cleanup()
+      reject(err)
+    })
+    req.end()
+  })
+}
+
+async function resilientFetch(session, url, { method = 'GET', headers = {}, timeout = PAGE_TIMEOUT_MS, signal, preferNative = false } = {}) {
   const reqHeaders = {}
   for (const [k, v] of Object.entries(headers)) {
     if (v !== undefined && v !== null && v !== '') reqHeaders[k.toLowerCase()] = String(v)
   }
-  const combined = combineSignal(signal, timeout)
-  if (session) return session.fetch(url, { method, headers: reqHeaders, timeout, redirect: 'follow', signal: combined })
-  return globalThis.fetch(url, {
+  const nativeHeaders = { 'user-agent': activeUa, accept: '*/*', ...reqHeaders }
+  const nativeCall = () => globalThis.fetch(url, {
     method,
-    headers: { 'user-agent': activeUa, accept: 'text/html,application/xhtml+xml,*/*;q=0.8', ...reqHeaders },
+    headers: nativeHeaders,
     redirect: 'follow',
-    signal: combined,
+    signal: combineSignal(signal, timeout),
   })
+  const tls12Call = () => nodeHttpRequest(url, { method, headers: nativeHeaders, timeout, signal, maxVersion: 'TLSv1.2' })
+  const wreqCall = () => session.fetch(url, {
+    method,
+    headers: reqHeaders,
+    timeout,
+    redirect: 'follow',
+    signal: combineSignal(signal, timeout),
+  })
+
+  const order = preferNative
+    ? [nativeCall, tls12Call, ...(session ? [wreqCall] : [])]
+    : [...(session ? [wreqCall] : []), nativeCall, tls12Call]
+
+  let lastErr = null
+  for (let i = 0; i < order.length; i += 1) {
+    try {
+      const res = await order[i]()
+      if ((res.status === 403 || res.status >= 500) && i + 1 < order.length) {
+        await cancelBody(res)
+        lastErr = new Error(`HTTP ${res.status}`)
+        continue
+      }
+      return res
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+  }
+  throw lastErr || new Error('Error de red al conectar con DoodStream.')
 }
 
 function toNodeReadable(res) {
@@ -118,13 +235,16 @@ export function parseDoodStreamUrl(value) {
     throw new Error('El enlace no es una URL válida de DoodStream.')
   }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !DOOD_HOST_RE.test(url.hostname)) {
-    throw new Error('Solo acepto enlaces de DoodStream o sus mirrors conocidos.')
+    throw new Error('Solo acepto enlaces de DoodStream / PlayMogo o sus mirrors conocidos.')
   }
-  const m = url.pathname.match(/^\/(?:(?:e|d|watch)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
+  const m = url.pathname.match(/^\/(?:(?:e|d|f|file|embed|watch)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
   if (!m) throw new Error('No pude reconocer el identificador del video en DoodStream.')
   const id = m[1]
   const embedUrl = `${url.origin}/e/${id}`
-  return { id, url: embedUrl }
+  const mirrorUrls = ACTIVE_MIRRORS
+    .filter(host => host !== url.hostname.toLowerCase())
+    .map(host => `https://${host}/e/${id}`)
+  return { id, url: embedUrl, candidates: [...new Set([embedUrl, ...mirrorUrls])] }
 }
 
 export function extractDoodPassPath(html) {
@@ -133,6 +253,12 @@ export function extractDoodPassPath(html) {
   const passPath = m[0]
   const token = passPath.split('/').filter(Boolean).at(-1) || ''
   return token ? { passPath, token } : null
+}
+
+function isCaptchaGate(html, res) {
+  const cf = String(res?.headers?.get?.('cf-mitigated') || '').toLowerCase()
+  if (cf.includes('challenge')) return true
+  return /challenges\.cloudflare\.com|op=validate&gc_response=|loadCaptcha\s*\(|cf-turnstile/i.test(String(html || ''))
 }
 
 function randomSuffix(length = 10) {
@@ -173,13 +299,123 @@ function createIdleWatchdog(onIdle) {
   return { ping() { last = Date.now() }, stop() { clearInterval(timer) } }
 }
 
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(createAbortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, signal) {
+  let pos = start
+  let lastErr = null
+  for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt += 1) {
+    if (signal?.aborted) throw createAbortError()
+    try {
+      const r = await resilientFetch(session, mediaUrl, {
+        headers: { ...headers, range: `bytes=${pos}-${end}` },
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        signal,
+        preferNative: true,
+      })
+      if (r.status !== 206) { await cancelBody(r); throw new Error(`HTTP ${r.status}`) }
+      for await (const c of toNodeReadable(r)) {
+        const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
+        await fh.write(b, 0, b.length, pos)
+        pos += b.length
+        watchdog.ping()
+      }
+      if (pos > end) return
+      lastErr = new Error(`Bloque incompleto (${pos - start}/${end - start + 1})`)
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastErr = err
+    }
+    if (attempt < MAX_CHUNK_RETRIES) await sleep(600 * attempt, signal)
+  }
+  throw lastErr || new Error('Falló la descarga de un bloque en DoodStream.')
+}
+
+async function downloadSequentialResumable(session, mediaUrl, partPath, headers, expectedSize, watchdog, signal) {
+  let downloaded = 0
+  let lastErr = null
+  for (let attempt = 1; attempt <= MAX_SEQ_RETRIES; attempt += 1) {
+    if (signal?.aborted) throw createAbortError()
+    try {
+      const reqHeaders = downloaded > 0 ? { ...headers, range: `bytes=${downloaded}-` } : headers
+      const res = await resilientFetch(session, mediaUrl, {
+        headers: reqHeaders,
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        signal,
+        preferNative: true,
+      })
+      if (downloaded > 0 && res.status === 416) {
+        await cancelBody(res)
+        if (expectedSize && downloaded >= expectedSize) return
+        downloaded = 0
+        await fsp.rm(partPath, { force: true }).catch(() => {})
+        lastErr = new Error('HTTP 416')
+        continue
+      }
+      if (downloaded > 0 && res.status === 200) {
+        downloaded = 0
+        await fsp.rm(partPath, { force: true }).catch(() => {})
+      } else if (!res.ok && res.status !== 206) {
+        await cancelBody(res)
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const ct = String(res.headers?.get?.('content-type') || '').toLowerCase()
+      if (/text\/html|application\/json/i.test(ct)) {
+        await cancelBody(res)
+        throw new Error(`DoodStream devolvió ${ct} en lugar de video.`)
+      }
+      if (!expectedSize) {
+        const cl = Number(res.headers?.get?.('content-length') || 0) || 0
+        if (cl > 0) expectedSize = downloaded + cl
+      }
+      const guard = new Transform({
+        transform(c, _e, cb) {
+          downloaded += c.length
+          watchdog.ping()
+          if (downloaded > MAX_VIDEO_BYTES) cb(new Error('El video supera el límite de 2 GB.'))
+          else cb(null, c)
+        },
+      })
+      const ws = fs.createWriteStream(partPath, { flags: downloaded > 0 ? 'a' : 'w' })
+      await pipeline(toNodeReadable(res), guard, ws)
+      if (!expectedSize || downloaded >= expectedSize) return
+      lastErr = new Error(`Descarga interrumpida (${formatBytes(downloaded)}/${formatBytes(expectedSize)})`)
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      if (/en lugar de video|supera el límite/i.test(err.message)) throw err
+      lastErr = err
+      try {
+        const st = await fsp.stat(partPath)
+        downloaded = st.size
+      } catch (_) {
+        downloaded = 0
+      }
+    }
+    if (attempt < MAX_SEQ_RETRIES) await sleep(800 * attempt, signal)
+  }
+  throw lastErr || new Error('No se pudo descargar el MP4 desde DoodStream.')
+}
+
 async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
   const partPath = `${destPath}.part`
   const headers = { accept: '*/*', ...(referer ? { referer } : {}) }
   let sizeBytes = 0
   let supportsRanges = false
   try {
-    const head = await clientFetch(session, mediaUrl, { method: 'HEAD', headers, timeout: 12_000, signal })
+    const head = await resilientFetch(session, mediaUrl, { method: 'HEAD', headers, timeout: 15_000, signal, preferNative: true })
     await cancelBody(head)
     if (head.ok) {
       const ct = String(head.headers?.get?.('content-type') || '').toLowerCase()
@@ -212,22 +448,8 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
         }
         const fh = await fsp.open(partPath, 'w')
         try {
-          await Promise.all(ranges.map(async ({ start, end }) => {
-            const r = await clientFetch(session, mediaUrl, {
-              headers: { ...headers, range: `bytes=${start}-${end}` },
-              timeout: DOWNLOAD_TIMEOUT_MS,
-              signal: ctrl.signal,
-            })
-            if (r.status !== 206) { await cancelBody(r); throw new Error(`HTTP ${r.status}`) }
-            let pos = start
-            for await (const c of toNodeReadable(r)) {
-              const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
-              await fh.write(b, 0, b.length, pos)
-              pos += b.length
-              watchdog.ping()
-            }
-            if (pos - start !== end - start + 1) throw new Error('Bloque incompleto')
-          }))
+          await Promise.all(ranges.map(({ start, end }) =>
+            downloadRangeChunk(session, mediaUrl, fh, start, end, headers, watchdog, ctrl.signal)))
         } finally {
           await fh.close()
         }
@@ -239,18 +461,7 @@ async function downloadDirectMp4(session, mediaUrl, destPath, referer, signal) {
     }
 
     if (!parallelOk) {
-      const res = await clientFetch(session, mediaUrl, { headers, timeout: DOWNLOAD_TIMEOUT_MS, signal: ctrl.signal })
-      if (!res.ok) { await cancelBody(res); throw new Error(`HTTP ${res.status}`) }
-      let bytes = 0
-      const guard = new Transform({
-        transform(c, _e, cb) {
-          bytes += c.length
-          watchdog.ping()
-          if (bytes > MAX_VIDEO_BYTES) cb(new Error('El video supera el límite de 2 GB.'))
-          else cb(null, c)
-        },
-      })
-      await pipeline(toNodeReadable(res), guard, fs.createWriteStream(partPath))
+      await downloadSequentialResumable(session, mediaUrl, partPath, headers, sizeBytes, watchdog, ctrl.signal)
     }
 
     const stat = await validateVideo(partPath)
@@ -277,18 +488,38 @@ export async function downloadDoodStreamFile(inputUrl, outputPath, { signal } = 
     })
     : null
   try {
-    const res1 = await clientFetch(session, parsed.url, {
-      headers: { referer: `${new URL(parsed.url).origin}/` },
-      signal,
-    })
-    if (!res1.ok) { await cancelBody(res1); throw new Error(`DoodStream devolvió HTTP ${res1.status}.`) }
-    const finalPageUrl = res1.url || parsed.url
-    const origin = new URL(finalPageUrl).origin
-    const html = await res1.text()
-    const pass = extractDoodPassPath(html)
-    if (!pass) throw new Error('DoodStream no expuso la ruta /pass_md5/ (video eliminado o bloqueado).')
+    let pass = null
+    let finalPageUrl = parsed.url
+    let origin = new URL(parsed.url).origin
+    let lastErr = null
+    for (const candidate of parsed.candidates) {
+      try {
+        const res1 = await resilientFetch(session, candidate, {
+          headers: { accept: 'text/html,application/xhtml+xml,*/*;q=0.8', referer: `${new URL(candidate).origin}/` },
+          signal,
+        })
+        const html = await res1.text()
+        if (isCaptchaGate(html, res1)) {
+          lastErr = new Error(`DoodStream (${new URL(res1.url || candidate).hostname}) solicitó verificación CAPTCHA (Turnstile) desde esta IP y no se puede descargar automáticamente.`)
+          break
+        }
+        if (!res1.ok) {
+          lastErr = new Error(`DoodStream devolvió HTTP ${res1.status}.`)
+          continue
+        }
+        finalPageUrl = res1.url || candidate
+        origin = new URL(finalPageUrl).origin
+        pass = extractDoodPassPath(html)
+        if (pass) break
+        lastErr = new Error('DoodStream no expuso la ruta /pass_md5/ (video eliminado o bloqueado).')
+      } catch (err) {
+        if (signal?.aborted) throw createAbortError()
+        lastErr = err
+      }
+    }
+    if (!pass) throw lastErr || new Error('DoodStream no expuso la ruta /pass_md5/ (video eliminado o bloqueado).')
 
-    const res2 = await clientFetch(session, `${origin}${pass.passPath}`, {
+    const res2 = await resilientFetch(session, `${origin}${pass.passPath}`, {
       headers: { referer: finalPageUrl, 'x-requested-with': 'XMLHttpRequest' },
       signal,
     })
@@ -317,7 +548,7 @@ function getInput(m, text, args) {
 const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   const input = getInput(m, text, args)
   if (!input) {
-    return m.reply(`Envía o responde a un enlace de DoodStream.\nEjemplo: *${usedPrefix || '.'}${command || 'doodstream'} https://dood.wf/e/ID*`)
+    return m.reply(`Envía o responde a un enlace de DoodStream / PlayMogo.\nEjemplo: *${usedPrefix || '.'}${command || 'doodstream'} https://dsvplay.com/e/ID*`)
   }
   let resolvedInput = input
   try { resolvedInput = await resolveJkAnimeEpisodeInput(input, 'doodstream') }
