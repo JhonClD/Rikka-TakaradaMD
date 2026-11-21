@@ -355,7 +355,7 @@ function parseHentaiInput(rawText) {
 
   let query = trimmed
   let episode = null
-  const epMatch = query.match(/(?:\s+(?:ep(?:isodio)?|cap(?:[ií]tulo)?|#)\s*|\s+)(\d+)\s*$/i)
+  const epMatch = query.match(/(?:\s+(?:(?:ep(?:isodio)?|cap(?:[ií]tulo)?)\.?|#)\s*|\s+)(\d+)\s*$/i)
   if (epMatch) {
     const candidateQuery = query.slice(0, epMatch.index).trim()
     if (candidateQuery) {
@@ -1392,7 +1392,6 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
     if (signal?.aborted) throw createAbortError()
     await status.update(`📤 *${info.title}* — Ep. ${episode}\n_Enviando a WhatsApp..._`)
 
-    const stats = await fsp.stat(tempPath)
     const epNum = String(episode).padStart(2, '0')
     const finalName = `${epNum} ${sanitizeFilename(info.title, info.slug)}.mp4`
 
@@ -1400,7 +1399,6 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
       document: { url: tempPath },
       fileName: finalName,
       mimetype: 'video/mp4',
-      caption: `🔞 *${info.title}* — Ep. ${episode} · ${formatBytes(stats.size)}`,
     }, { quoted: m })
 
     await status.update(`✅ *Enviado* · ${info.title} — Ep. ${episode}`)
