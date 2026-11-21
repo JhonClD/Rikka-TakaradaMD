@@ -1063,8 +1063,9 @@ export function parseLatestEpisodesHtml(html, baseUrl = JKANIME_URL) {
   const addEpisode = ($card, aTag) => {
     const href = aTag.attr('href') || ''
     if (!href) return
-    const tiempo = $card.find('.badge-secondary, .badge').first().text().trim()
-    if (!isRecentBadge(tiempo)) return
+    const esReciente = $card.find('.badge-secondary, .badge').toArray()
+      .some(badge => isRecentBadge($(badge).text()))
+    if (!esReciente) return
     const episodio = parseJkAnimeEpisodeUrl(href, baseUrl)
     if (!episodio) return
     const { slug, epNum, epUrl } = episodio
@@ -2415,6 +2416,30 @@ if (IS_TEST_RUN) {
     assert.deepEqual(episodes.map(e => e.id), ['jk-dandadan-5', 'jk-frieren-2'])
     assert.equal(episodes[0].imgUrl, 'https://jkanime.net/img/dandadan.jpg')
     assert.equal(episodes[1].imgUrl, 'https://cdn.jkanime.net/f.jpg')
+  })
+
+  test('detecta el feed actual cuando la insignia del episodio aparece antes de la fecha', () => {
+    const html = `
+      <div id="animes">
+        <div class="mb-4 d-flex align-items-stretch dir1">
+          <div class="card"><a href="https://jkanime.net/ranma-2024-3rd-season/8/">
+            <div class="d-thumb">
+              <img class="card-img-top" src="/episode.jpg" alt="Ranma ½ (2024) 3rd Season - 8">
+              <div class="badges badges-top">
+                <span class="badge badge-primary">Ep 8</span>
+                <span class="badge ml-2 badge-secondary"><i class="ti-clock"></i> Hoy</span>
+              </div>
+            </div>
+            <div class="card-body"><h5 class="strlimit card-title">Ranma ½ (2024) 3rd Season</h5></div>
+          </a></div>
+        </div>
+      </div>
+    `
+    const episodes = parseLatestEpisodesHtml(html)
+    assert.equal(episodes.length, 1)
+    assert.equal(episodes[0].id, 'jk-ranma-2024-3rd-season-8')
+    assert.equal(episodes[0].titulo, 'Ranma ½ (2024) 3rd Season')
+    assert.equal(episodes[0].epNum, 8)
   })
 
   test('extrae enlaces directos de MediaFire (normal y data-scrambled-url Base64)', () => {
