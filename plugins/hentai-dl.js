@@ -1427,17 +1427,57 @@ function actorWarningKey(actorIds, m) {
   return cleanJid(m?.sender) || 'unknown'
 }
 
-function markSessionExpired(sessionId, now = Date.now()) {
-  sessions.delete(sessionId)
+function clearSessionTimer(session) {
+  if (session?.timer) {
+    clearTimeout(session.timer)
+    session.timer = null
+  }
+}
+
+async function deleteSessionMessage(session) {
+  const key = session?.msgKey
+  if (!key) return
+  session.msgKey = null
+  const clients = [session.conn, global.conn].filter(
+    (c, i, arr) => typeof c?.sendMessage === 'function' && arr.indexOf(c) === i,
+  )
+  for (const client of clients) {
+    try {
+      await client.sendMessage(session.chat, { delete: key })
+      return
+    } catch { }
+  }
+}
+
+function markSessionExpired(sessionId, now = Date.now(), { deleteMessage = false } = {}) {
+  const session = sessions.get(sessionId)
+  if (session) {
+    clearSessionTimer(session)
+    sessions.delete(sessionId)
+    if (deleteMessage) {
+      deleteSessionMessage(session).catch(() => {})
+    }
+  }
   if (!expiredSessions.has(sessionId)) {
     expiredSessions.set(sessionId, { expiry: now + EXPIRED_MEMORY_MS, warned: new Set() })
   }
 }
 
+function scheduleSessionExpiry(session) {
+  clearSessionTimer(session)
+  session.expiry = Date.now() + SESSION_TTL_MS
+  const timer = setTimeout(() => {
+    if (sessions.get(session.id) !== session) return
+    markSessionExpired(session.id, Date.now(), { deleteMessage: true })
+  }, SESSION_TTL_MS)
+  timer.unref?.()
+  session.timer = timer
+}
+
 function pruneExpiredSessions() {
   const now = Date.now()
   for (const [id, session] of sessions) {
-    if (session.expiry <= now) markSessionExpired(id, now)
+    if (session.expiry <= now) markSessionExpired(id, now, { deleteMessage: true })
   }
   for (const [id, info] of expiredSessions) {
     if (info.expiry <= now) expiredSessions.delete(id)
@@ -1475,17 +1515,20 @@ async function sendInteractiveList(conn, chat, m, {
   const ownerIds = await collectUserIdentities(m, conn, chat, participants)
   if (sessions.size >= 200) {
     const oldestId = sessions.keys().next().value
-    if (oldestId) markSessionExpired(oldestId)
+    if (oldestId) markSessionExpired(oldestId, Date.now(), { deleteMessage: true })
   }
 
   const sessionId = randomBytes(6).toString('hex')
   const session = {
     id: sessionId,
     chat,
+    conn,
     ownerIds,
     rows,
     msgId: null,
+    msgKey: null,
     listKey: null,
+    timer: null,
     expiry: Date.now() + SESSION_TTL_MS,
     warned: new Set(),
   }
@@ -1525,7 +1568,9 @@ async function sendInteractiveList(conn, chat, m, {
         : { text: `*${title}*\n\n${bodyText}`, footer, ...sheetOptions, nativeFlow }
 
       const sent = await conn.sendMessage(chat, payload, { quoted: m })
+      session.msgKey = sent?.key || null
       session.msgId = sent?.key?.id || null
+      scheduleSessionExpiry(session)
       return sent
     } catch (err) {
       console.error('[HDL] Error en botones NativeFlow:', err.message)
@@ -1552,7 +1597,9 @@ async function sendInteractiveList(conn, chat, m, {
     listKey = sent?.key || null
   }
   session.listKey = listKey
+  session.msgKey = listKey
   session.msgId = listKey?.id || null
+  scheduleSessionExpiry(session)
   return listKey
 }
 
@@ -1577,7 +1624,7 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
       const ownerIds = await collectUserIdentities(m, conn, chat, participants)
       if (sessions.size >= 200) {
         const oldestId = sessions.keys().next().value
-        if (oldestId) markSessionExpired(oldestId)
+        if (oldestId) markSessionExpired(oldestId, Date.now(), { deleteMessage: true })
       }
 
       const sessionId = randomBytes(6).toString('hex')
@@ -1622,10 +1669,13 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
         const session = {
           id: sessionId,
           chat,
+          conn,
           ownerIds,
           rows,
           msgId: null,
+          msgKey: null,
           listKey: null,
+          timer: null,
           expiry: Date.now() + SESSION_TTL_MS,
           warned: new Set(),
         }
@@ -1665,11 +1715,14 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
             additionalNodes: [bizNode],
           })
         } catch (relayErr) {
+          clearSessionTimer(session)
           sessions.delete(sessionId)
           throw relayErr
         }
 
+        session.msgKey = fullMsg?.key || null
         session.msgId = fullMsg?.key?.id || null
+        scheduleSessionExpiry(session)
         return fullMsg
       }
     } catch (err) {
@@ -2018,7 +2071,7 @@ handler.before = async function (m, { conn, participants = [] }) {
     const session = sessions.get(token.sessionId)
 
     if (!session || session.expiry <= Date.now()) {
-      markSessionExpired(token.sessionId)
+      markSessionExpired(token.sessionId, Date.now(), { deleteMessage: true })
       const expired = expiredSessions.get(token.sessionId)
       await warnOnce(
         expired.warned,
@@ -2102,7 +2155,11 @@ handler.before = async function (m, { conn, participants = [] }) {
   const chosen = session.rows[index]
   const isEpisodeChoice = /\s+\d+\s*$/.test(chosen.rowId)
   const reuseKey = !isEpisodeChoice ? session.listKey : null
-  if (reuseKey) sessions.delete(session.id)
+  if (reuseKey) {
+    clearSessionTimer(session)
+    session.msgKey = null
+    sessions.delete(session.id)
+  }
 
   await dispatchSelection(conn, m, chosen.rowId, {
     participants,
