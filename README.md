@@ -183,7 +183,7 @@ Las pruebas y comprobaciones se ejecutan manualmente con los comandos anteriores
 
 | Archivo | Qué protege |
 |---|---|
-| `tests/jkanime-extractors.test.js` | extracción de enlaces JKAnime, sin ejecutar el JS remoto |
+| `plugins/jk-notify.js` | extracción de enlaces JKAnime (sin evaluar JS remoto), parser de portada, MediaFire y cliente HTTP `wreq-js` (tests embebidos con `npm run test:one`) |
 | `tests/download-registry.test.js` | cancelación única de descargas (`download-registry.js`) |
 | `tests/message-validation.test.js` | filtrado de mensajes, dedupe, texto de mensajes interactivos |
 | `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, ningún alias lo comparten dos plugins, y los archivos se llaman en kebab-case |
