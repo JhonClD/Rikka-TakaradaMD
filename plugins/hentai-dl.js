@@ -6,7 +6,9 @@ import {
   prepareWAMessageMedia,
 } from 'baileys'
 import * as cheerio from 'cheerio'
+import ffmpegStatic from 'ffmpeg-static'
 import { File as MegaFile } from 'megajs'
+import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -16,6 +18,7 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { downloadKey, hasDownload, startDownload } from '../src/funcion/download-registry.js'
 import { cleanJid, getLidForJidAsync, resolveAnyJid, resolveJidToPhone } from '../src/funcion/lid-resolver.js'
+import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 
 const BASE = 'https://hentaila.com'
 const SERVICE = 'hentaila'
@@ -24,6 +27,14 @@ const WREQ_BROWSER = 'chrome_142'
 const IMPIT_BROWSER = 'chrome142'
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
 const BASE_HEADERS = { 'Accept-Language': 'es-419,es;q=0.9,en-US;q=0.8,en;q=0.7' }
+const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
+const VOE_MIRRORS = [
+  'susanexpectcare.com',
+  'kathyinformationwhether.com',
+  'walterprettytheir.com',
+  'stevenfamilyedge.com',
+  'voe.sx',
+]
 
 const PROXY_URL = String(process.env.HDL_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim()
 const ONEFICHIER_API_KEY = String(process.env.ONEFICHIER_API_KEY || '').trim()
@@ -113,6 +124,12 @@ function sanitizeFilename(name, fallback = 'video.mp4') {
     .trim()
     .slice(0, 140)
   return cleaned || fallback
+}
+
+function buildDocumentFilename(title, slug, episode) {
+  const epNum = String(episode).padStart(2, '0')
+  const safeTitle = sanitizeFilename(title, slug)
+  return `${epNum} ${safeTitle} Sub Español (1080p) [[𝗖𝗜𝗗]].mp4`
 }
 
 function waitRequestSlot(signal) {
@@ -516,6 +533,13 @@ function normalizeMp4UploadUrl(url) {
   return raw
 }
 
+function normalizeVoeUrl(url) {
+  const raw = String(url || '').trim()
+  const m = raw.match(/https?:\/\/[^/\s"'<\\]+\/(?:(?:e|v|d)\/)?([a-z0-9_-]{6,64})(?:[/?#]|$)/i)
+  if (m) return `https://voe.sx/e/${m[1]}`
+  return raw
+}
+
 function parseEpisodeLinks(html) {
   const decoded = String(html || '')
     .replace(/\\u002F/gi, '/')
@@ -532,18 +556,22 @@ function parseEpisodeLinks(html) {
     return [...out]
   }
 
+  const voeHosts = VOE_MIRRORS.map((h) => h.replace(/\./g, '\\.')).join('|')
+  const voeRe = new RegExp(`https?:\\/\\/[^\\s"'<\\\\]*(?:${voeHosts})\\/(?:(?:e|v|d)\\/)?[a-z0-9_-]{6,64}[^\\s"'<\\\\]*`, 'gi')
+
   const mega = matchAllUnique(/https?:\/\/[^\s"'<\\]*mega\.nz\/(?:file|embed)\/[^\s"'<\\]*/gi, normalizeMegaUrl)
   const mediafire = matchAllUnique(/https?:\/\/[^\s"'<\\]*mediafire\.com\/file[^\s"'<\\]*/gi)
   const fireload = matchAllUnique(/https?:\/\/[^\s"'<\\]*fireload\.com\/[a-z0-9]{8,}[^\s"'<\\]*/gi)
   const fichier = matchAllUnique(/https?:\/\/[^\s"'<\\]*1fichier\.com\/\?[^\s"'<\\]*/gi)
   const mp4upload = matchAllUnique(/https?:\/\/[^\s"'<\\]*mp4upload\.com\/(?:embed-)?[a-z0-9_-]{4,80}(?:\.html)?/gi, normalizeMp4UploadUrl)
   const yourupload = matchAllUnique(/https?:\/\/[^\s"'<\\]*yourupload\.com\/(?:embed|watch)\/[^\s"'<\\]*/gi)
+  const voe = matchAllUnique(voeRe, normalizeVoeUrl)
 
-  const known = new Set([...mega, ...mediafire, ...fireload, ...fichier, ...mp4upload, ...yourupload])
+  const known = new Set([...mega, ...mediafire, ...fireload, ...fichier, ...mp4upload, ...yourupload, ...voe])
   const otros = matchAllUnique(/https?:\/\/[^\s"'<\\]{10,}/gi)
     .filter((u) => !u.includes(BASE) && !known.has(u) && /\.(mp4|mkv|avi|ts|m4v)(\?|$)/i.test(u))
 
-  return { mega, mediafire, fireload, fichier, mp4upload, yourupload, otros }
+  return { mega, mediafire, fireload, fichier, mp4upload, yourupload, voe, otros }
 }
 
 function extractMediafireDirect(html, sourceUrl = '') {
@@ -704,6 +732,227 @@ async function resolveYourUpload(url, signal) {
   const direct = extractYourUploadDirect(html)
   if (!direct) throw new Error('No se encontró enlace MP4 en YourUpload')
   return { direct, name: 'video.mp4', referer: pageUrl }
+}
+
+function deobfuscateVoePayload(rawStr) {
+  try {
+    let s = String(rawStr || '').replace(/[a-zA-Z]/g, (c) => {
+      const base = c <= 'Z' ? 65 : 97
+      return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base)
+    })
+    for (const junk of ['@$', '^^', '~@', '%?', '*~', '!!', '#&']) {
+      s = s.split(junk).join('')
+    }
+    s = s.replace(/_/g, '')
+    const step2 = Buffer.from(s, 'base64').toString('utf8')
+    let step3 = ''
+    for (let i = 0; i < step2.length; i++) {
+      step3 += String.fromCharCode(step2.charCodeAt(i) - 3)
+    }
+    const reversed = step3.split('').reverse().join('')
+    return JSON.parse(Buffer.from(reversed, 'base64').toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+function decodeVoeUrl(value) {
+  const cleaned = String(value || '')
+    .replace(/\\\//g, '/')
+    .replace(/\\u0026/gi, '&')
+    .replace(/&amp;/g, '&')
+    .trim()
+  if (!/^https?:\/\//i.test(cleaned) && /^[A-Za-z0-9+/=]{16,}$/.test(cleaned)) {
+    try {
+      const decoded = Buffer.from(cleaned, 'base64').toString('utf8').trim()
+      if (/^https?:\/\//i.test(decoded)) return decoded
+    } catch { }
+  }
+  return cleaned
+}
+
+function isSafeHttpsUrl(value, baseUrl) {
+  try {
+    const u = new URL(value, baseUrl)
+    if (u.protocol !== 'https:' || u.username || u.password || u.port) return null
+    return u
+  } catch {
+    return null
+  }
+}
+
+function extractVoeMedia(html, baseUrl) {
+  let directMp4 = null
+  let hlsUrl = null
+  const isFake = (u) => /bigbuckbunny|test[-_]?video|sample[-_]?video|placeholder/i.test(u)
+
+  const consider = (raw) => {
+    const decoded = decodeVoeUrl(raw)
+    if (!decoded || isFake(decoded)) return
+    const safe = isSafeHttpsUrl(decoded, baseUrl)
+    if (!safe) return
+    const href = safe.toString()
+    if (!directMp4 && /\.mp4(?:[?#]|$)/i.test(safe.pathname)) {
+      directMp4 = href
+    } else if (!hlsUrl && (/\.m3u8(?:[?#]|$)/i.test(safe.pathname) || /\/hls(?:[/?#]|$)/i.test(safe.pathname))) {
+      hlsUrl = href
+    }
+  }
+
+  const jsonScriptRe = /<script[^>]+type=["']application\/json["'][^>]*>\s*\[\s*["']([^"']+)["']\s*\]\s*<\/script>/gi
+  for (const m of html.matchAll(jsonScriptRe)) {
+    const obj = deobfuscateVoePayload(m[1])
+    if (!obj) continue
+    if (Array.isArray(obj.direct_access_url)) consider(obj.direct_access_url[0])
+    else if (obj.direct_access_url) consider(obj.direct_access_url)
+    if (obj.source) consider(obj.source)
+    if (obj.hls) consider(obj.hls)
+    if (obj.file) consider(obj.file)
+    if (Array.isArray(obj.sources)) {
+      for (const item of obj.sources) {
+        if (item) consider(item.hls || item.file || item.src)
+      }
+    }
+  }
+
+  if (!directMp4 && !hlsUrl) {
+    for (const m of html.matchAll(/["'](?:direct_access_url|hls|source|file)["']\s*:\s*["']([^"']+)["']/gi)) {
+      consider(m[1])
+    }
+    for (const m of html.matchAll(/atob\(\s*["']([A-Za-z0-9+/=]{20,})["']\s*\)/gi)) {
+      consider(m[1])
+    }
+    for (const m of html.matchAll(/https?:\\?\/\\?\/[^\s"'<>]+?\.(?:mp4|m3u8)(?:\?[^\s"'<>]*)?/gi)) {
+      consider(m[0])
+    }
+  }
+
+  return { directMp4, hlsUrl }
+}
+
+function extractVoeJsRedirect(html, currentUrl) {
+  const patterns = [
+    /window\.location\.href\s*=\s*["']([^"']+)["']/i,
+    /window\.location\s*=\s*["']([^"']+)["']/i,
+    /location\.replace\(\s*["']([^"']+)["']\s*\)/i,
+    /<meta[^>]+http-equiv=["']refresh["'][^>]+url=([^"'\s>]+)/i,
+  ]
+  for (const re of patterns) {
+    const match = html.match(re)
+    if (match?.[1]) {
+      const safe = isSafeHttpsUrl(decodeVoeUrl(match[1]), currentUrl)
+      if (safe) return safe.toString()
+    }
+  }
+  return null
+}
+
+async function resolveVoe(url, signal) {
+  const parsed = new URL(url)
+  const idMatch = parsed.pathname.match(/^\/(?:(?:e|v|d)\/)?([a-z0-9_-]{6,64})(?:\/|$)/i)
+  if (!idMatch) throw new Error('ID de VOE no reconocido')
+  const id = idMatch[1]
+  const originalHost = parsed.hostname.toLowerCase().replace(/^www\./, '')
+  const mirrors = [...new Set([
+    ...VOE_MIRRORS,
+    ...(originalHost ? [originalHost] : []),
+  ])]
+
+  const triedHosts = new Set()
+  let lastError = null
+
+  for (const mirror of mirrors) {
+    if (signal?.aborted) throw createAbortError()
+    if (triedHosts.has(mirror)) continue
+    triedHosts.add(mirror)
+
+    let currentUrl = `https://${mirror}/e/${id}`
+    const visited = new Set([currentUrl])
+    let cookieHeader = ''
+    let cookieHost = mirror
+
+    try {
+      for (let hop = 0; hop < 8; hop++) {
+        if (signal?.aborted) throw createAbortError()
+        const currentHost = new URL(currentUrl).hostname
+        const headers = {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Referer: hop === 0 ? `${BASE}/` : `https://${mirror}/`,
+          ...(cookieHeader && cookieHost === currentHost ? { Cookie: cookieHeader } : {}),
+        }
+
+        const res = await httpFetch(currentUrl, {
+          headers,
+          redirect: 'manual',
+          timeout: PAGE_TIMEOUT_MS,
+          signal,
+        })
+
+        if (cookieHost !== currentHost) {
+          cookieHeader = ''
+          cookieHost = currentHost
+        }
+        const setCookie = res.headers?.get?.('set-cookie')
+        if (setCookie) {
+          const pair = setCookie.split(';')[0].trim()
+          if (pair) cookieHeader = cookieHeader ? `${cookieHeader}; ${pair}` : pair
+        }
+
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers?.get?.('location')
+          await cancelBodyQuietly(res)
+          if (!location) throw new Error(`VOE HTTP ${res.status} sin Location`)
+          const next = isSafeHttpsUrl(location, currentUrl)
+          if (!next) throw new Error('Redirección VOE no segura')
+          const nextUrl = next.toString()
+          if (visited.has(nextUrl)) throw new Error('Bucle de redirección VOE')
+          if (next.hostname !== currentHost) {
+            cookieHeader = ''
+            cookieHost = next.hostname
+          }
+          visited.add(nextUrl)
+          currentUrl = nextUrl
+          continue
+        }
+
+        if (!res.ok) {
+          await cancelBodyQuietly(res)
+          throw new Error(`VOE HTTP ${res.status} (${currentHost})`)
+        }
+
+        const html = await res.text()
+        const { directMp4, hlsUrl } = extractVoeMedia(html, currentUrl)
+        if (directMp4 || hlsUrl) {
+          return {
+            direct: directMp4,
+            hls: hlsUrl,
+            referer: currentUrl,
+            cookie: cookieHeader,
+          }
+        }
+
+        const jsNext = extractVoeJsRedirect(html, currentUrl)
+        if (jsNext && !visited.has(jsNext)) {
+          const nextHost = new URL(jsNext).hostname
+          if (nextHost !== currentHost) {
+            cookieHeader = ''
+            cookieHost = nextHost
+          }
+          visited.add(jsNext)
+          currentUrl = jsNext
+          continue
+        }
+
+        throw new Error(`VOE sin stream en ${currentHost}`)
+      }
+      throw new Error('Demasiadas redirecciones en VOE')
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastError = err
+    }
+  }
+
+  throw lastError || new Error('No se pudo extraer video de VOE')
 }
 
 async function resolve1Fichier(url, signal) {
@@ -881,10 +1130,11 @@ async function downloadParallelRanges(directUrl, tempPath, totalBytes, headers, 
   }
 }
 
-async function downloadDirect(directUrl, tempPath, { label, referer, signal, onStart } = {}) {
+async function downloadDirect(directUrl, tempPath, { label, referer, cookie, signal, onStart } = {}) {
   const headers = {
     Accept: '*/*',
     ...(referer ? { Referer: referer } : {}),
+    ...(cookie ? { Cookie: cookie } : {}),
   }
 
   let sizeBytes = 0
@@ -970,6 +1220,76 @@ async function downloadDirect(directUrl, tempPath, { label, referer, signal, onS
     watchdog.stop()
     attemptSignal.removeEventListener('abort', onParentAbort)
   }
+}
+
+async function downloadHls(hlsUrl, tempPath, { referer, cookie, signal, onStart } = {}) {
+  if (signal?.aborted) throw createAbortError()
+  await onStart?.()
+
+  const headerLines = [
+    referer ? `Referer: ${referer}` : '',
+    cookie ? `Cookie: ${cookie}` : '',
+  ].filter(Boolean).join('\r\n')
+
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    '-protocol_whitelist', 'https,http,tcp,tls,crypto,data',
+    '-user_agent', FALLBACK_UA,
+    ...(headerLines ? ['-headers', `${headerLines}\r\n`] : []),
+    '-rw_timeout', '20000000',
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_at_eof', '1',
+    '-reconnect_on_network_error', '1',
+    '-reconnect_on_http_error', '403,408,429,500,502,503,504',
+    '-reconnect_delay_max', '5',
+    '-i', hlsUrl,
+    '-map', '0:v:0', '-map', '0:a:0?',
+    '-c', 'copy',
+    '-bsf:a', 'aac_adtstoasc',
+    '-movflags', '+faststart',
+    '-f', 'mp4',
+    tempPath,
+  ]
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    let settled = false
+    let timedOut = false
+
+    const finish = (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (err) reject(err)
+      else resolve()
+    }
+
+    const onAbort = () => {
+      child.kill('SIGKILL')
+      finish(createAbortError())
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, DOWNLOAD_TIMEOUT_MS)
+    timer.unref?.()
+
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-4096)
+    })
+    child.once('error', (err) => finish(err))
+    child.once('close', (code) => {
+      if (timedOut) return finish(new Error('FFmpeg HLS superó el tiempo límite'))
+      if (code === 0) return finish(null)
+      finish(new Error(`FFmpeg HLS falló (código ${code})${stderr ? `: ${stderr.trim().slice(-240)}` : ''}`))
+    })
+  })
 }
 
 async function downloadMega(url, tempPath, { signal, onStart } = {}) {
@@ -1376,12 +1696,13 @@ async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participant
 function buildServerQueue(links) {
   return [
     ...links.mediafire.map((url) => ({ tipo: 'mediafire', label: 'MediaFire', url })),
-    ...links.fireload.map((url) => ({ tipo: 'fireload', label: 'FireLoad', url })),
-    ...links.mp4upload.map((url) => ({ tipo: 'mp4upload', label: 'MP4Upload', url })),
     ...links.yourupload.map((url) => ({ tipo: 'yourupload', label: 'YourUpload', url })),
+    ...links.mp4upload.map((url) => ({ tipo: 'mp4upload', label: 'MP4Upload', url })),
+    ...links.voe.map((url) => ({ tipo: 'voe', label: 'VOE', url })),
+    ...links.mega.map((url) => ({ tipo: 'mega', label: 'MEGA', url })),
+    ...links.fireload.map((url) => ({ tipo: 'fireload', label: 'FireLoad', url })),
     ...(ONEFICHIER_API_KEY ? links.fichier.map((url) => ({ tipo: '1fichier', label: '1Fichier', url })) : []),
     ...links.otros.map((url) => ({ tipo: 'directo', label: 'Directo', url })),
-    ...links.mega.map((url) => ({ tipo: 'mega', label: 'MEGA', url })),
   ]
 }
 
@@ -1424,6 +1745,35 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal) 
         await downloadMega(srv.url, tempPath, { signal, onStart })
       } else if (srv.tipo === 'directo') {
         await downloadDirect(srv.url, tempPath, { label: srv.label, signal, onStart })
+      } else if (srv.tipo === 'voe') {
+        const resolved = await resolveVoe(srv.url, signal)
+        let downloaded = false
+        if (resolved.direct) {
+          try {
+            await downloadDirect(resolved.direct, tempPath, {
+              label: srv.label,
+              referer: resolved.referer,
+              cookie: resolved.cookie,
+              signal,
+              onStart,
+            })
+            downloaded = true
+          } catch (directErr) {
+            await fsp.rm(tempPath, { force: true }).catch(() => {})
+            if (signal?.aborted) throw createAbortError()
+            if (!resolved.hls) throw directErr
+            console.warn(`[HDL][VOE] MP4 directo falló (${directErr.message}), probando HLS...`)
+          }
+        }
+        if (!downloaded) {
+          if (!resolved.hls) throw new Error('VOE sin stream descargable')
+          await downloadHls(resolved.hls, tempPath, {
+            referer: resolved.referer,
+            cookie: resolved.cookie,
+            signal,
+            onStart,
+          })
+        }
       } else {
         const resolver = {
           mediafire: resolveMediafire,
@@ -1464,13 +1814,22 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal) 
     if (signal?.aborted) throw createAbortError()
     await react('📤')
 
-    const epNum = String(episode).padStart(2, '0')
-    const finalName = `${epNum} ${sanitizeFilename(info.title, info.slug)}.mp4`
+    const finalName = buildDocumentFilename(info.title, info.slug, episode)
+    let jpegThumbnail = null
+    try {
+      jpegThumbnail = await jpegThumbnailLibrary.createJpegThumbnail(tempPath)
+    } catch { }
+    if (!jpegThumbnail && info.cover) {
+      try {
+        jpegThumbnail = await fetchBuffer(info.cover, signal)
+      } catch { }
+    }
 
     await conn.sendMessage(m.chat, {
       document: { url: tempPath },
       fileName: finalName,
       mimetype: 'video/mp4',
+      ...(jpegThumbnail ? { jpegThumbnail } : {}),
     }, { quoted: m })
 
     await react('✅')
