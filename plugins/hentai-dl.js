@@ -26,7 +26,6 @@ const PAGE_TIMEOUT_MS = 20_000
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000
 const IDLE_TIMEOUT_MS = 60_000
 const REQUEST_PACING_MS = 350
-const STATUS_EDIT_INTERVAL_MS = 2500
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000
 const CACHE_MAX_ENTRIES = 150
@@ -791,30 +790,10 @@ function createIdleWatchdog(onIdle) {
   }
 }
 
-function buildProgressBar(pct, width = 14) {
-  const clamped = Math.max(0, Math.min(100, pct))
-  const filled = Math.round((width * clamped) / 100)
-  return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
-}
-
-function formatDownloadProgress(title, episode, serverLabel, downloaded, totalBytes, speed) {
-  const header = `📥 *${title}* — Ep. ${episode} _(${serverLabel})_`
-  if (totalBytes > 0) {
-    const pct = Math.min(100, (downloaded / totalBytes) * 100)
-    return (
-      `${header}\n` +
-      `\`[${buildProgressBar(pct)}] ${pct.toFixed(1)}%\`\n` +
-      `📦 ${formatBytes(downloaded)} / ${formatBytes(totalBytes)} · ⚡ ${formatBytes(speed)}/s`
-    )
-  }
-  return `${header}\n📦 ${formatBytes(downloaded)} · ⚡ ${formatBytes(speed)}/s`
-}
-
-function createProgressLogger(label, initialTotal, onStatusProgress) {
+function createProgressLogger(label, initialTotal) {
   let totalBytes = Number(initialTotal) || 0
   let downloaded = 0
   let lastTtyRender = 0
-  let lastStatusRender = Date.now()
   const startedAt = Date.now()
 
   return {
@@ -824,23 +803,17 @@ function createProgressLogger(label, initialTotal, onStatusProgress) {
     add(bytes) {
       downloaded += bytes
       const now = Date.now()
-      const elapsed = Math.max((now - startedAt) / 1000, 0.001)
-      const speed = downloaded / elapsed
 
       if (process.stdout.isTTY && now - lastTtyRender >= 1000) {
         lastTtyRender = now
+        const elapsed = Math.max((now - startedAt) / 1000, 0.001)
+        const speed = downloaded / elapsed
         const pct = totalBytes > 0 ? `${Math.min(100, (downloaded / totalBytes) * 100).toFixed(1)}%` : '--%'
         process.stdout.write(`\r[${label}] ${pct} (${formatBytes(downloaded)}) | ${formatBytes(speed)}/s   `)
-      }
-
-      if (onStatusProgress && now - lastStatusRender >= STATUS_EDIT_INTERVAL_MS) {
-        lastStatusRender = now
-        onStatusProgress(downloaded, totalBytes, speed)
       }
     },
     reset() {
       downloaded = 0
-      lastStatusRender = Date.now()
     },
     finish(extra = '') {
       if (process.stdout.isTTY) process.stdout.write('\n')
@@ -902,7 +875,7 @@ async function downloadParallelRanges(directUrl, tempPath, totalBytes, headers, 
   }
 }
 
-async function downloadDirect(directUrl, tempPath, status, { title, episode, label, referer, signal } = {}) {
+async function downloadDirect(directUrl, tempPath, { label, referer, signal, onStart } = {}) {
   const headers = {
     Accept: '*/*',
     ...(referer ? { Referer: referer } : {}),
@@ -932,8 +905,7 @@ async function downloadDirect(directUrl, tempPath, status, { title, episode, lab
     throw new Error(`El archivo (${formatBytes(sizeBytes)}) supera el límite de 2 GB`)
   }
 
-  const sizeInfo = sizeBytes > 0 ? ` · ${formatBytes(sizeBytes)}` : ''
-  await status.update(`📥 *${title}* — Ep. ${episode} _(${label}${sizeInfo})_\n⏬ _Descargando..._`)
+  await onStart?.()
 
   const attemptController = new AbortController()
   const attemptSignal = combineSignal(signal, DOWNLOAD_TIMEOUT_MS)
@@ -941,9 +913,7 @@ async function downloadDirect(directUrl, tempPath, status, { title, episode, lab
   attemptSignal.addEventListener('abort', onParentAbort, { once: true })
 
   const watchdog = createIdleWatchdog(() => attemptController.abort(new Error(`${label} sin datos por ${IDLE_TIMEOUT_MS / 1000}s`)))
-  const progress = createProgressLogger(label, sizeBytes, (done, total, speed) => {
-    status.update(formatDownloadProgress(title, episode, label, done, total, speed))
-  })
+  const progress = createProgressLogger(label, sizeBytes)
 
   try {
     if (supportsRanges && sizeBytes >= MIN_PARALLEL_BYTES) {
@@ -996,7 +966,7 @@ async function downloadDirect(directUrl, tempPath, status, { title, episode, lab
   }
 }
 
-async function downloadMega(url, tempPath, status, { title, episode, signal } = {}) {
+async function downloadMega(url, tempPath, { signal, onStart } = {}) {
   const file = MegaFile.fromURL(normalizeMegaUrl(url))
   await file.loadAttributes()
   if (signal?.aborted) throw createAbortError()
@@ -1006,13 +976,10 @@ async function downloadMega(url, tempPath, status, { title, episode, signal } = 
     throw new Error(`El archivo en MEGA (${formatBytes(sizeBytes)}) supera el límite de 2 GB`)
   }
 
-  const sizeInfo = sizeBytes > 0 ? ` · ${formatBytes(sizeBytes)}` : ''
-  await status.update(`📥 *${title}* — Ep. ${episode} _(MEGA${sizeInfo})_\n⏬ _Descargando..._`)
+  await onStart?.()
 
   const fileStream = file.download({ maxConnections: MEGA_MAX_CONNECTIONS })
-  const progress = createProgressLogger('MEGA', sizeBytes, (done, total, speed) => {
-    status.update(formatDownloadProgress(title, episode, 'MEGA', done, total, speed))
-  })
+  const progress = createProgressLogger('MEGA', sizeBytes)
   const watchdog = createIdleWatchdog(() => fileStream.destroy(new Error('MEGA sin respuesta')))
   const onAbort = () => fileStream.destroy(createAbortError())
   signal?.addEventListener('abort', onAbort, { once: true })
@@ -1034,51 +1001,16 @@ async function downloadMega(url, tempPath, status, { title, episode, signal } = 
   }
 }
 
-function createStatusController(conn, m, initialKey = null) {
-  let key = initialKey
-  let lastText = ''
-  let chain = Promise.resolve()
-
-  const enqueue = (fn) => {
-    const task = chain.then(fn, fn)
-    chain = task.catch(() => {})
-    return task
-  }
-
-  return {
-    getKey() {
-      return key
-    },
-    update(txt, { forceSend = false } = {}) {
-      return enqueue(async () => {
-        if (!txt || txt === lastText) return
-        if (key) {
-          try {
-            await conn.sendMessage(m.chat, { text: txt, edit: key })
-            lastText = txt
-            return
-          } catch {
-            if (!forceSend) return
-          }
-        }
-        try {
-          const sent = await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
-          if (sent?.key) key = sent.key
-          lastText = txt
-        } catch { }
-      })
-    },
-    remove() {
-      return enqueue(async () => {
-        if (!key) return
-        const target = key
-        key = null
-        lastText = ''
-        try {
-          await conn.sendMessage(m.chat, { delete: target })
-        } catch { }
-      })
-    },
+function createReactionController(conn, m) {
+  let lastEmoji = null
+  return async function react(emoji) {
+    if (!conn?.sendMessage || !m?.key) return
+    const next = String(emoji || '')
+    if (next === lastEmoji) return
+    lastEmoji = next
+    try {
+      await conn.sendMessage(m.chat, { react: { text: next, key: m.key } })
+    } catch { }
   }
 }
 
@@ -1202,16 +1134,16 @@ function parseButtonToken(raw) {
   return { sessionId, index }
 }
 
-async function sendInteractiveList(conn, chat, m, status, {
+async function sendInteractiveList(conn, chat, m, {
   title,
   description,
   button,
   section,
   rows,
   coverUrl = null,
-  coverShown = false,
   quickReplies = false,
   participants = [],
+  existingKey = null,
 }) {
   pruneExpiredSessions()
   const ownerIds = await collectUserIdentities(m, conn, chat, participants)
@@ -1227,8 +1159,7 @@ async function sendInteractiveList(conn, chat, m, status, {
     ownerIds,
     rows,
     msgId: null,
-    statusKey: null,
-    coverShown,
+    listKey: null,
     expiry: Date.now() + SESSION_TTL_MS,
     warned: new Set(),
   }
@@ -1268,7 +1199,6 @@ async function sendInteractiveList(conn, chat, m, status, {
         : { text: `*${title}*\n\n${bodyText}`, footer, ...sheetOptions, nativeFlow }
 
       const sent = await conn.sendMessage(chat, payload, { quoted: m })
-      await status.remove()
       session.msgId = sent?.key?.id || null
       return sent
     } catch (err) {
@@ -1283,13 +1213,24 @@ async function sendInteractiveList(conn, chat, m, status, {
     txt += '\n'
   })
   txt += '\n_Responde con el número para elegir (expira en 3 min)._'
-  await status.update(txt, { forceSend: true })
-  session.statusKey = status.getKey()
-  session.msgId = session.statusKey?.id || null
-  return session.statusKey
+
+  let listKey = null
+  if (existingKey) {
+    try {
+      await conn.sendMessage(chat, { text: txt, edit: existingKey })
+      listKey = existingKey
+    } catch { }
+  }
+  if (!listKey) {
+    const sent = await conn.sendMessage(chat, { text: txt }, { quoted: m })
+    listKey = sent?.key || null
+  }
+  session.listKey = listKey
+  session.msgId = listKey?.id || null
+  return listKey
 }
 
-async function sendLatestCarousel(conn, chat, m, status, latest, usedPrefix, participants = []) {
+async function sendLatestCarousel(conn, chat, m, latest, usedPrefix, participants = [], existingKey = null) {
   let device = 'android'
   try { device = getDevice(m?.key?.id) } catch { }
   const isMobile = device !== 'desktop' && device !== 'web'
@@ -1334,8 +1275,7 @@ async function sendLatestCarousel(conn, chat, m, status, latest, usedPrefix, par
           ownerIds,
           rows,
           msgId: null,
-          statusKey: null,
-          coverShown: false,
+          listKey: null,
           expiry: Date.now() + SESSION_TTL_MS,
           warned: new Set(),
         }
@@ -1351,7 +1291,6 @@ async function sendLatestCarousel(conn, chat, m, status, latest, usedPrefix, par
           },
           { quoted: m },
         )
-        await status.remove()
         session.msgId = sent?.key?.id || null
         return sent
       }
@@ -1365,37 +1304,15 @@ async function sendLatestCarousel(conn, chat, m, status, latest, usedPrefix, par
     title: item.title,
     description: `Ep. ${item.episode}`,
   }))
-  return sendInteractiveList(conn, chat, m, status, {
+  return sendInteractiveList(conn, chat, m, {
     title: '🔞 Últimos lanzamientos en HentaiLA',
     description: 'Elige un título para descargar:',
     button: '📋 Ver lanzamientos',
     section: 'Recién subidos',
     rows: fallbackRows,
     participants,
+    existingKey,
   })
-}
-
-async function sendCover(m, conn, info, signal) {
-  const { title, cover, desc, episodes, generos } = info
-  const totalEps = episodes.length
-  const lastEp = episodes[totalEps - 1] || '?'
-  const rango = totalEps === 1 ? 'Ep. 1' : `Eps 1–${lastEp}`
-  const tags = generos.length > 0 ? generos.slice(0, 5).join(' · ') : 'N/A'
-
-  const caption =
-    `🔞 *${title}*\n` +
-    `📖 ${desc}\n\n` +
-    `🎬 *Episodios:* ${totalEps > 0 ? `${totalEps} (${rango})` : '?'} · 🏷️ ${tags}`
-
-  if (cover) {
-    try {
-      const imgBuf = await fetchBuffer(cover, signal)
-      await conn.sendMessage(m.chat, { image: imgBuf, caption, mimetype: 'image/jpeg' }, { quoted: m })
-      return true
-    } catch { }
-  }
-  await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
-  return true
 }
 
 function buildServerQueue(links) {
@@ -1410,14 +1327,19 @@ function buildServerQueue(links) {
   ]
 }
 
-async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal) {
+async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal) {
+  const replyError = async (text) => {
+    await react('❌')
+    await conn.sendMessage(m.chat, { text }, { quoted: m })
+  }
+
   let html
   try {
     html = await fetchText(mediaUrl, { signal })
   } catch (err) {
     if (err?.status === 404) {
       const avail = info.episodes.length ? ` (disponibles: 1–${info.episodes.at(-1)})` : ''
-      return status.update(`❌ El episodio *${episode}* de *${info.title}* no existe${avail}.`, { forceSend: true })
+      return replyError(`❌ El episodio *${episode}* de *${info.title}* no existe${avail}.`)
     }
     throw err
   }
@@ -1425,7 +1347,7 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
   const links = parseEpisodeLinks(html)
   const servers = buildServerQueue(links)
   if (!servers.length) {
-    return status.update(`❌ No se encontraron servidores de descarga.\n🔗 ${mediaUrl}`, { forceSend: true })
+    return replyError(`❌ No se encontraron servidores de descarga.\n🔗 ${mediaUrl}`)
   }
 
   let tempPath = null
@@ -1437,12 +1359,13 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
     tempPath = path.join(os.tmpdir(), `hdl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`)
 
     try {
-      await status.update(`🔄 *${info.title}* — Ep. ${episode}\n_Probando ${srv.label}..._`)
+      await react('⏳')
+      const onStart = () => react('📥')
 
       if (srv.tipo === 'mega') {
-        await downloadMega(srv.url, tempPath, status, { title: info.title, episode, signal })
+        await downloadMega(srv.url, tempPath, { signal, onStart })
       } else if (srv.tipo === 'directo') {
-        await downloadDirect(srv.url, tempPath, status, { title: info.title, episode, label: srv.label, signal })
+        await downloadDirect(srv.url, tempPath, { label: srv.label, signal, onStart })
       } else {
         const resolver = {
           mediafire: resolveMediafire,
@@ -1452,12 +1375,11 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
           '1fichier': resolve1Fichier,
         }[srv.tipo]
         const resolved = await resolver(srv.url, signal)
-        await downloadDirect(resolved.direct, tempPath, status, {
-          title: info.title,
-          episode,
+        await downloadDirect(resolved.direct, tempPath, {
           label: srv.label,
           referer: resolved.referer,
           signal,
+          onStart,
         })
       }
 
@@ -1477,12 +1399,12 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
   }
 
   if (!success || !tempPath) {
-    return status.update(`❌ Todos los servidores fallaron para el ep. ${episode} de *${info.title}*.\n🔗 ${mediaUrl}`, { forceSend: true })
+    return replyError(`❌ Todos los servidores fallaron para el ep. ${episode} de *${info.title}*.\n🔗 ${mediaUrl}`)
   }
 
   try {
     if (signal?.aborted) throw createAbortError()
-    await status.update(`📤 *${info.title}* — Ep. ${episode}\n_Enviando a WhatsApp..._`)
+    await react('📤')
 
     const epNum = String(episode).padStart(2, '0')
     const finalName = `${epNum} ${sanitizeFilename(info.title, info.slug)}.mp4`
@@ -1493,16 +1415,21 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, status, signal)
       mimetype: 'video/mp4',
     }, { quoted: m })
 
-    await status.update(`✅ *Enviado* · ${info.title} — Ep. ${episode}`)
+    await react('✅')
   } finally {
     await fsp.rm(tempPath, { force: true }).catch(() => {})
   }
 }
 
-async function runEpisodeFlow(m, conn, info, episode, status, { skipCover = false } = {}) {
+async function runEpisodeFlow(m, conn, info, episode, react) {
   const userKey = downloadKey(m)
   if (hasDownload(userKey, SERVICE)) {
-    return status.update('⚠️ Ya tienes una descarga de HentaiLA en curso. Usa *.cancelar* para detenerla.', { forceSend: true })
+    await react('⚠️')
+    return conn.sendMessage(
+      m.chat,
+      { text: '⚠️ Ya tienes una descarga de HentaiLA en curso. Usa *.cancelar* para detenerla.' },
+      { quoted: m },
+    )
   }
 
   const controller = new AbortController()
@@ -1511,20 +1438,14 @@ async function runEpisodeFlow(m, conn, info, episode, status, { skipCover = fals
   })
 
   try {
-    if (!skipCover) {
-      await status.remove()
-      await sendCover(m, conn, info, controller.signal)
-    }
-    await status.update(`⏳ *${info.title}* — Ep. ${episode}\n_Preparando descarga... (usa .cancelar para detener)_`)
-
     const epUrl = `${BASE}/media/${info.slug}/${episode}`
-    await downloadAndSend(m, conn, epUrl, info, episode, status, controller.signal)
+    await downloadAndSend(m, conn, epUrl, info, episode, react, controller.signal)
   } finally {
     release()
   }
 }
 
-const handler = async (m, { conn, text, usedPrefix, command, participants = [], existingKey = null, skipCover = false }) => {
+const handler = async (m, { conn, text, usedPrefix, command, participants = [], existingKey = null }) => {
   const isLatest = /hlatest|hentailatest/i.test(command)
 
   if (!text && !isLatest) {
@@ -1537,16 +1458,22 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
     )
   }
 
-  const status = createStatusController(conn, m, existingKey)
-  await status.update('🔍 _Buscando en HentaiLA..._', { forceSend: true })
+  const react = createReactionController(conn, m)
+  const replyError = async (msg) => {
+    await react('❌')
+    await conn.sendMessage(m.chat, { text: msg }, { quoted: m })
+  }
+
+  await react('⏳')
 
   try {
     if (isLatest) {
       const latest = await fetchLatestReleases()
       if (!latest.length) {
-        return status.update('❌ No se pudieron obtener los últimos lanzamientos.', { forceSend: true })
+        return replyError('❌ No se pudieron obtener los últimos lanzamientos.')
       }
-      await sendLatestCarousel(conn, m.chat, m, status, latest, usedPrefix, participants)
+      await sendLatestCarousel(conn, m.chat, m, latest, usedPrefix, participants, existingKey)
+      await react('✅')
       return
     }
 
@@ -1555,37 +1482,37 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
 
     if (slug) {
       info = await fetchSeriesBySlug(slug)
-      if (!info) return status.update(`❌ No se encontró la serie *${slug}* en HentaiLA.`, { forceSend: true })
+      if (!info) return replyError(`❌ No se encontró la serie *${slug}* en HentaiLA.`)
     } else {
-      await status.update(`🔎 _Buscando "${query}"..._`)
       const { exact, results } = await searchHentaiLA(query)
 
       if (exact) {
         info = exact
       } else if (!results.length) {
-        return status.update(
+        return replyError(
           `❌ No se encontraron resultados para *"${query}"*.\n\n` +
           `💡 Prueba con el título en inglés o romaji.\n` +
           `Ej: \`${usedPrefix}hdl overflow 1\``,
-          { forceSend: true },
         )
       } else if (results.length === 1) {
         info = await fetchSeriesBySlug(results[0].slug)
-        if (!info) return status.update(`❌ No se pudo cargar la info de *${results[0].title}*.`, { forceSend: true })
+        if (!info) return replyError(`❌ No se pudo cargar la info de *${results[0].title}*.`)
       } else {
         const top = results.slice(0, 10)
         const rows = top.map((r) => ({
           rowId: episode ? `${usedPrefix}hdl ${r.slug} ${episode}` : `${usedPrefix}hdl ${r.slug}`,
           title: r.title,
         }))
-        await sendInteractiveList(conn, m.chat, m, status, {
+        await sendInteractiveList(conn, m.chat, m, {
           title: `🔞 Resultados para: "${query}"`,
           description: `Se encontraron ${top.length} títulos. Elige uno:`,
           button: '📋 Ver opciones',
           section: 'Títulos disponibles',
           rows,
           participants,
+          existingKey,
         })
+        await react('✅')
         return
       }
     }
@@ -1601,28 +1528,30 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
         : '?'
       const genresSummary = info.generos.length > 0 ? info.generos.slice(0, 4).join(' · ') : 'N/A'
 
-      await sendInteractiveList(conn, m.chat, m, status, {
+      await sendInteractiveList(conn, m.chat, m, {
         title: `🎬 ${info.title}`,
         description: `${info.desc}\n\n🎬 *Eps:* ${epsSummary} · 🏷️ ${genresSummary}`,
         button: '📺 Elegir episodio',
         section: 'Episodios disponibles',
         rows,
         coverUrl: info.cover,
-        coverShown: true,
         quickReplies: true,
         participants,
+        existingKey,
       })
+      await react('✅')
       return
     }
 
-    await runEpisodeFlow(m, conn, info, episode, status, { skipCover })
+    await runEpisodeFlow(m, conn, info, episode, react)
   } catch (err) {
     if (isAbortError(err)) {
-      await status.update('⏹️ *Descarga cancelada.*', { forceSend: true })
+      await react('⏹️')
+      await conn.sendMessage(m.chat, { text: '⏹️ *Descarga cancelada.*' }, { quoted: m })
       return
     }
     console.error('[HDL]', err.message)
-    await status.update(`❌ *Error:* ${err.message}`, { forceSend: true })
+    await replyError(`❌ *Error:* ${err.message}`)
   }
 }
 
@@ -1650,12 +1579,12 @@ async function warnOnce(warnedSet, actorKey, conn, m, text) {
   } catch { }
 }
 
-async function dispatchSelection(conn, m, rowId, { participants = [], existingKey = null, skipCover = false } = {}) {
+async function dispatchSelection(conn, m, rowId, { participants = [], existingKey = null } = {}) {
   const usedPrefix = rowId[0]
   const [command, ...argParts] = rowId.slice(1).trim().split(/\s+/)
   const text = argParts.join(' ')
   try {
-    await handler.call(conn, m, { conn, text, usedPrefix, command, participants, existingKey, skipCover })
+    await handler.call(conn, m, { conn, text, usedPrefix, command, participants, existingKey })
   } catch (err) {
     console.error('[HDL before] Error ejecutando selección:', err.message)
   }
@@ -1703,7 +1632,6 @@ handler.before = async function (m, { conn, participants = [] }) {
     await dispatchSelection(conn, m, chosen.rowId, {
       participants,
       existingKey: null,
-      skipCover: Boolean(session.coverShown),
     })
     return true
   }
@@ -1756,13 +1684,12 @@ handler.before = async function (m, { conn, participants = [] }) {
 
   const chosen = session.rows[index]
   const isEpisodeChoice = /\s+\d+\s*$/.test(chosen.rowId)
-  const reuseKey = !isEpisodeChoice ? session.statusKey : null
+  const reuseKey = !isEpisodeChoice ? session.listKey : null
   if (reuseKey) sessions.delete(session.id)
 
   await dispatchSelection(conn, m, chosen.rowId, {
     participants,
     existingKey: reuseKey,
-    skipCover: Boolean(session.coverShown),
   })
   return true
 }
