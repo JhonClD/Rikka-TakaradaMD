@@ -1,1319 +1,1430 @@
-// ╔══════════════════════════════════════════════════════════════╗
-// ║             HENTAI-DL.js — HentaiLA Downloader              ║
-// ║  Comandos:                                                   ║
-// ║   .hdl <nombre> <episodio>  → busca, portada y descarga     ║
-// ║   .hdl overflow 1           → ejemplo                       ║
-// ║   .hlatest                  → últimos lanzamientos          ║
-// ╚══════════════════════════════════════════════════════════════╝
-
-import nodeFetch from 'node-fetch'
 import { prepareWAMessageMedia, generateWAMessageFromContent, getDevice } from 'baileys'
 import * as cheerio from 'cheerio'
 import { File as MegaFile } from 'megajs'
-import { pipeline } from 'stream/promises'
-import fs from 'fs'
-import path from 'path'
-import { tmpdir } from 'os'
-import https from 'https'
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { downloadKey, hasDownload, startDownload } from '../src/funcion/download-registry.js'
 
-// ─── Configuración ─────────────────────────────────────────────────────────
 const BASE = 'https://hentaila.com'
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-const httpsAgent = new https.Agent({ keepAlive: true, maxFreeSockets: 10 })
+const SERVICE = 'hentaila'
 
-// [MEJORA VELOCIDAD] Conexiones paralelas para acelerar descargas
-const HDL_MEGA_MAX_CONNECTIONS = 10  // default de megajs es 4
-const HDL_HILOS_PARALELOS      = 8   // hilos para descarga por rangos HTTP
-const HDL_MIN_SIZE_PARALELO    = 5 * 1024 * 1024 // no vale la pena paralelizar archivos < 5MB
+const WREQ_BROWSER = 'chrome_142'
+const IMPIT_BROWSER = 'chrome142'
+const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+const BASE_HEADERS = { 'Accept-Language': 'es-419,es;q=0.9,en-US;q=0.8,en;q=0.7' }
 
-// ╔═══════════════════════════════════════════════════════════════════╗
-// ║  CONFIGURACIÓN DE TOKENS — TODOS GRATUITOS                        ║
-// ║                                                                   ║
-// ║  Crea cuenta gratis en cada uno y pega el token:                 ║
-// ║  1. https://scrape.do          → general     → SCRAPE_DO_TOKEN    ║
-// ║     https://scrape.do          → JKAnime     → SCRAPE_DO_JK_TOKEN ║
-// ║  2. https://scraperapi.com      → 1,000/mes  → SCRAPERAPI_KEY     ║
-// ║  3. https://webscraping.ai      → clave opcional → WEBSCRAPING_AI_KEY ║
-// ║  4. https://webscrapingapi.com  → 5,000/mes  → WEBSCRAPINGAPI_KEY ║
-// ║  5. https://www.scrapingdog.com → 1,000/mes  → SCRAPINGDOG_KEY    ║
-// ║  6. https://www.scrapingbee.com → 1,000/mes  → SCRAPINGBEE_KEY    ║
-// ║                                                                   ║
-// ║  Con estos + caché de 6h: ~300+ descargas/día gratis              ║
-// ║  Tokens que no ponés quedan como ''  — el bot los salta          ║
-// ╚═══════════════════════════════════════════════════════════════════╝
+const PROXY_URL = String(process.env.HDL_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim()
+const ONEFICHIER_API_KEY = String(process.env.ONEFICHIER_API_KEY || '').trim()
 
-const SCRAPE_DO_TOKEN    = '6868b58ba96148b4b282f0075795119e67a595611e7'  // scrape.do → 1,000/mes
-const SCRAPE_DO_JK_TOKEN = 'db51bcb2edaf40ed9457e4f121357d66c253eb7d830'
-const SCRAPERAPI_KEY     = '56971a05b709caed0f17204ccc1f4532'             // scraperapi.com → 1,000/mes
-const WEBSCRAPING_AI_KEY = '6a9771e5-2a40-4571-9a0f-5d3730388c36'
-const WEBSCRAPINGAPI_KEY = ''  // webscrapingapi.com → 5,000/mes
-const SCRAPINGDOG_KEY    = ''  // scrapingdog.com → 1,000/mes
-const SCRAPINGBEE_KEY    = ''  // scrapingbee.com → 1,000/mes
-const CF_WORKER_URL      = 'https://purple-cloud-3351.luisluissandovaltarazona.workers.dev'
+const PAGE_TIMEOUT_MS = 20_000
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000
+const IDLE_TIMEOUT_MS = 60_000
+const REQUEST_PACING_MS = 350
 
-global.activeDownloads = global.activeDownloads || new Map()
-global.hentaiSelection = global.hentaiSelection || {}
-global.hdlSessions = global.hdlSessions || {}
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const CACHE_MAX_ENTRIES = 150
+const SESSION_TTL_MS = 5 * 60 * 1000
 
-// ─── fetch wrapper robusto ─────────────────────────────────────────────────
-async function fetchGet(url, opts = {}) {
-    const timeoutMs = opts.timeout || 25000
-    delete opts.timeout
-    return nodeFetch(url, {
-        ...opts,
-        agent: opts.agent !== null ? (opts.agent || httpsAgent) : undefined,
-        signal: AbortSignal.timeout(timeoutMs),
+const MIN_VALID_BYTES = 16 * 1024
+const MAX_FILE_BYTES = 2 * 1024 ** 3
+const MEGA_MAX_CONNECTIONS = 10
+const PARALLEL_THREADS = 8
+const MIN_PARALLEL_BYTES = 5 * 1024 * 1024
+
+const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504])
+const COMMAND_PREFIX_RE = /^[^\s]?(?:hdl|hentaidl|hlatest|hentailatest)\b/i
+
+let wreqSessionPromise = null
+let wreqUnavailable = false
+let impitClientPromise = null
+let impitUnavailable = false
+
+const htmlCache = new Map()
+const sessions = new Map()
+
+let lastPacedRequestAt = 0
+let pacingChain = Promise.resolve()
+
+function sleep(ms, signal) {
+  if (ms <= 0) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort() {
+      clearTimeout(timer)
+      reject(createAbortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function createAbortError(message = 'Operación cancelada') {
+  const err = new Error(message)
+  err.name = 'AbortError'
+  err.code = 'ABORT_ERR'
+  return err
+}
+
+function isAbortError(err) {
+  return (
+    err?.name === 'AbortError' ||
+    err?.name === 'CanceledError' ||
+    err?.code === 'ABORT_ERR' ||
+    err?.code === 'ERR_CANCELED'
+  )
+}
+
+function combineSignal(signal, timeoutMs) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  if (!signal) return timeoutSignal
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, timeoutSignal])
+  return signal
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(2)} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${n} B`
+}
+
+function sanitizeFilename(name, fallback = 'video.mp4') {
+  const cleaned = String(name || '')
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140)
+  return cleaned || fallback
+}
+
+function waitRequestSlot(signal) {
+  const slot = pacingChain.then(async () => {
+    const wait = Math.max(0, lastPacedRequestAt + REQUEST_PACING_MS - Date.now())
+    if (wait > 0) await sleep(wait, signal)
+    lastPacedRequestAt = Date.now()
+  })
+  pacingChain = slot.catch(() => {})
+  return slot
+}
+
+async function getWreqSession() {
+  if (wreqUnavailable) return null
+  if (!wreqSessionPromise) {
+    wreqSessionPromise = import('wreq-js')
+      .then((mod) => mod.createSession({
+        browser: WREQ_BROWSER,
+        os: 'windows',
+        timeout: PAGE_TIMEOUT_MS,
+        ...(PROXY_URL ? { proxy: PROXY_URL } : {}),
+      }))
+      .catch((err) => {
+        wreqUnavailable = true
+        wreqSessionPromise = null
+        console.warn(`[HDL] wreq-js no disponible: ${err.message}`)
+        return null
+      })
+  }
+  return wreqSessionPromise
+}
+
+async function getImpitClient() {
+  if (impitUnavailable) return null
+  if (!impitClientPromise) {
+    impitClientPromise = import('impit')
+      .then(({ Impit }) => new Impit({
+        browser: IMPIT_BROWSER,
+        timeout: PAGE_TIMEOUT_MS,
+        ...(PROXY_URL ? { proxyUrl: PROXY_URL } : {}),
+      }))
+      .catch((err) => {
+        impitUnavailable = true
+        impitClientPromise = null
+        console.warn(`[HDL] impit no disponible: ${err.message}`)
+        return null
+      })
+  }
+  return impitClientPromise
+}
+
+export function toNodeReadable(body) {
+  if (!body) throw new Error('Respuesta HTTP sin cuerpo')
+  if (body instanceof Readable || typeof body.pipe === 'function') return body
+  if (typeof body.getReader === 'function') {
+    try {
+      return Readable.fromWeb(body)
+    } catch {
+      if (typeof body[Symbol.asyncIterator] === 'function') return Readable.from(body)
+      throw new Error('Cuerpo HTTP Web ReadableStream incompatible')
+    }
+  }
+  if (typeof body[Symbol.asyncIterator] === 'function') return Readable.from(body)
+  throw new Error('Cuerpo HTTP incompatible')
+}
+
+async function cancelBodyQuietly(res) {
+  try {
+    if (typeof res?.body?.cancel === 'function') await res.body.cancel()
+    else if (typeof res?.body?.destroy === 'function') res.body.destroy()
+  } catch { }
+}
+
+async function httpFetch(url, options = {}) {
+  const {
+    method = 'GET',
+    headers = {},
+    body,
+    timeout = PAGE_TIMEOUT_MS,
+    signal,
+    redirect = 'follow',
+  } = options
+
+  const reqHeaders = { ...BASE_HEADERS, ...headers }
+  let fallbackResponse = null
+  let lastError = null
+
+  const wreqSession = await getWreqSession()
+  if (wreqSession) {
+    try {
+      const res = await wreqSession.fetch(url, {
+        method,
+        headers: reqHeaders,
+        body,
+        timeout,
+        redirect,
+        signal: combineSignal(signal, timeout),
+      })
+      if (res.status !== 403 && res.status !== 503) return res
+      fallbackResponse = res
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastError = err
+    }
+  }
+
+  const impit = await getImpitClient()
+  if (impit) {
+    try {
+      const res = await impit.fetch(url, {
+        method,
+        headers: reqHeaders,
+        body,
+        timeout,
+        redirect,
+        signal: combineSignal(signal, timeout),
+      })
+      if (res.ok || !fallbackResponse) {
+        if (fallbackResponse) await cancelBodyQuietly(fallbackResponse)
+        return res
+      }
+      await cancelBodyQuietly(res)
+      return fallbackResponse
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastError = err
+    }
+  }
+
+  if (fallbackResponse) return fallbackResponse
+
+  try {
+    return await globalThis.fetch(url, {
+      method,
+      headers: { 'User-Agent': FALLBACK_UA, ...reqHeaders },
+      body,
+      redirect,
+      signal: combineSignal(signal, timeout),
     })
+  } catch (err) {
+    if (signal?.aborted) throw createAbortError()
+    throw lastError || err
+  }
 }
 
-// ─── Cabeceras estándar para bypass básico de Cloudflare ──────────────────
-const CF_HEADERS = {
-    'User-Agent': UA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'es-419,es;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Cache-Control': 'max-age=0',
+export function isCloudflareBlocked(html) {
+  if (!html || html.length < 200) return true
+  return (
+    html.includes('cf-browser-verification') ||
+    html.includes('Just a moment') ||
+    html.includes('challenge-platform') ||
+    html.includes('Enable JavaScript and cookies') ||
+    /<title>\s*Attention Required/i.test(html)
+  )
 }
-
-// ─── Cola de peticiones (máx 1 a la vez, delay entre c/u) ─────────────────
-const REQUEST_DELAY = 2000
-let _lastRequestTime = 0
-let _queueRunning = false
-const _requestQueue = []
-
-function queuedFetch(fn) {
-    return new Promise((resolve, reject) => {
-        _requestQueue.push({ fn, resolve, reject })
-        if (!_queueRunning) _processQueue()
-    })
-}
-
-async function _processQueue() {
-    if (_requestQueue.length === 0) { _queueRunning = false; return }
-    _queueRunning = true
-    const { fn, resolve, reject } = _requestQueue.shift()
-    const now = Date.now()
-    const wait = Math.max(0, _lastRequestTime + REQUEST_DELAY - now)
-    if (wait > 0) await new Promise(r => setTimeout(r, wait))
-    _lastRequestTime = Date.now()
-    try { resolve(await fn()) } catch (e) { reject(e) }
-    _processQueue()
-}
-
-// ─── Helper: verificar si respuesta es HTML válido ─────────────────────────
-function esCFBloqueado(html) {
-    if (!html || html.length < 200) return true
-    if (html.includes('cf-browser-verification') ||
-        html.includes('Just a moment') ||
-        html.includes('challenge-platform') ||
-        html.includes('Enable JavaScript and cookies') ||
-        html.includes('cf_clearance')) return true
-    return false
-}
-
-function esJKAnimeUrl(url) {
-    return /(^|\.)jkanime\.net\//i.test(String(url || ''))
-}
-
-function headersProveedor(url) {
-    return esJKAnimeUrl(url)
-        ? { Referer: 'https://jkanime.net/', 'Accept-Language': 'es-419,es;q=0.9,en;q=0.8' }
-        : {}
-}
-
-// ─── CACHÉ inteligente de páginas (6 horas) ────────────────────────────────
-// Si el mismo anime/episodio se pide varias veces, NO consume tokens adicionales
-const _htmlCache = new Map()
-const CACHE_TTL  = 6 * 60 * 60 * 1000   // 6 horas
-const CACHE_MAX  = 150                    // máximo de entradas en memoria
 
 function cacheGet(url) {
-    const entry = _htmlCache.get(url)
-    if (!entry) return null
-    if (Date.now() - entry.t > CACHE_TTL) { _htmlCache.delete(url); return null }
-    return entry.html
+  const entry = htmlCache.get(url)
+  if (!entry) return null
+  if (Date.now() - entry.ts > CACHE_TTL_MS) {
+    htmlCache.delete(url)
+    return null
+  }
+  htmlCache.delete(url)
+  htmlCache.set(url, entry)
+  return entry.html
 }
+
 function cacheSet(url, html) {
-    if (_htmlCache.size >= CACHE_MAX) {
-        // Eliminar la entrada más antigua
-        const oldest = [..._htmlCache.entries()].sort((a, b) => a[1].t - b[1].t)[0]
-        _htmlCache.delete(oldest[0])
-    }
-    _htmlCache.set(url, { html, t: Date.now() })
+  if (htmlCache.has(url)) htmlCache.delete(url)
+  else if (htmlCache.size >= CACHE_MAX_ENTRIES) {
+    const oldestKey = htmlCache.keys().next().value
+    if (oldestKey !== undefined) htmlCache.delete(oldestKey)
+  }
+  htmlCache.set(url, { html, ts: Date.now() })
 }
 
-// ─── Capa 1a: scrape.do ──────────────────────────────────────────────────
-async function fetchViaScrapeDo(url, options = {}) {
-    const token = options.token || SCRAPE_DO_TOKEN
-    if (!token) throw new Error('sin token')
-    const params = new URLSearchParams({
-        token,
-        url,
-        render: String(Boolean(options.render)),
-        timeout: String(options.render ? 55000 : 30000),
-        retryTimeout: '15000',
-        waitUntil: options.render ? 'networkidle2' : 'domcontentloaded',
-        customWait: options.render ? '2500' : '0',
-        super: String(Boolean(options.superProxy)),
-        blockResources: options.render ? 'false' : 'true',
-    })
-    const apiUrl = `https://api.scrape.do/?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: options.render ? 65000 : 35000, agent: null })
-    if (res.status === 401) throw new Error('Token inválido')
-    if (res.status === 429) throw new Error('Límite mensual alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
+export function clearHtmlCache() {
+  htmlCache.clear()
 }
 
-// ─── Capa 1b: WebScraping.AI (opcional) ─────────────────────────────────
-async function fetchViaWebScrapingAI(url) {
-    if (!WEBSCRAPING_AI_KEY) throw new Error('sin token')
-    const params = new URLSearchParams({
-        api_key: WEBSCRAPING_AI_KEY,
-        url,
-        js_rendering: 'true',
-        timeout: '30000',
-    })
-    const apiUrl = `https://api.webscraping.ai/html?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: 45000, agent: null, headers: headersProveedor(url) })
-    if (res.status === 401 || res.status === 403) throw new Error('Token WebScraping.AI inválido')
-    if (res.status === 429) throw new Error('Límite de WebScraping.AI alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 1c: ScraperAPI ─────────────────────────────────────────────────
-async function fetchViaScraperAPI(url) {
-    if (!SCRAPERAPI_KEY) throw new Error('sin token')
-    const render = esJKAnimeUrl(url)
-    const params = new URLSearchParams({
-        api_key: SCRAPERAPI_KEY,
-        url,
-        render: String(render),
-        premium: String(render),
-        country_code: 'us',
-        session_number: String(Math.floor(Date.now() / 1000) % 100000),
-    })
-    const apiUrl = `https://api.scraperapi.com/?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
-    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
-    if (res.status === 429) throw new Error('Límite mensual alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 1c: WebScrapingAPI (5,000/mes gratis) ───────────────────────
-async function fetchViaWebScrapingAPI(url) {
-    if (!WEBSCRAPINGAPI_KEY) throw new Error('sin token')
-    const render = esJKAnimeUrl(url)
-    const params = new URLSearchParams({
-        api_key: WEBSCRAPINGAPI_KEY,
-        url,
-        render_js: String(render ? 1 : 0),
-        timeout: render ? '45000' : '25000',
-        country: 'us',
-    })
-    const apiUrl = `https://api.webscrapingapi.com/v2?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
-    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
-    if (res.status === 429) throw new Error('Límite mensual alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 1d: Scrapingdog (1,000/mes gratis) ─────────────────────────
-async function fetchViaScrapingdog(url) {
-    if (!SCRAPINGDOG_KEY) throw new Error('sin token')
-    const render = esJKAnimeUrl(url)
-    const params = new URLSearchParams({
-        api_key: SCRAPINGDOG_KEY,
-        url,
-        dynamic: String(render),
-        premium: String(render),
-        country: 'us',
-    })
-    const apiUrl = `https://api.scrapingdog.com/scrape?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
-    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
-    if (res.status === 429) throw new Error('Límite mensual alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 1e: ScrapingBee (1,000/mes gratis) ─────────────────────────
-async function fetchViaScrapingBee(url) {
-    if (!SCRAPINGBEE_KEY) throw new Error('sin token')
-    const render = esJKAnimeUrl(url)
-    const params = new URLSearchParams({
-        api_key: SCRAPINGBEE_KEY,
-        url,
-        render_js: String(render),
-        wait: render ? '2500' : '0',
-        premium_proxy: String(render),
-        country_code: 'us',
-        block_ads: 'true',
-    })
-    const apiUrl = `https://app.scrapingbee.com/api/v1/?${params.toString()}`
-    const res = await fetchGet(apiUrl, { timeout: render ? 60000 : 35000, agent: null, headers: headersProveedor(url) })
-    if (res.status === 401 || res.status === 403) throw new Error('Token inválido')
-    if (res.status === 429) throw new Error('Límite mensual alcanzado')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 2: Via Cloudflare Worker ──────────────────────────────────────
-async function fetchViaWorker(url) {
-    if (!CF_WORKER_URL) throw new Error('sin URL')
-    const params = new URLSearchParams({ url, cache: 'bypass' })
-    const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?${params.toString()}`
-    const res = await fetchGet(proxyUrl, {
-        timeout: esJKAnimeUrl(url) ? 45000 : 30000,
-        agent: null,
-        headers: headersProveedor(url),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.text()
-}
-
-// ─── Capa 3: Fetch directo ────────────────────────────────────────────────
-async function fetchDirecto(url) {
-    let ultimoError
-    for (let intento = 0; intento < 2; intento++) {
-        try {
-            const res = await fetchGet(url, {
-                headers: { ...CF_HEADERS, ...headersProveedor(url), 'Cache-Control': 'no-cache' },
-                timeout: 25000,
-                compress: true,
-                redirect: 'follow',
-            })
-            if (res.ok) return res.text()
-            if (![408, 425, 429, 500, 502, 503, 504].includes(res.status)) throw new Error(`HTTP ${res.status}`)
-            ultimoError = new Error(`HTTP ${res.status}`)
-        } catch (error) {
-            ultimoError = error
-        }
-        if (intento === 0) await new Promise(resolve => setTimeout(resolve, 800))
-    }
-    throw ultimoError || new Error('Fetch directo falló')
-}
-
-// ─── Capa 4: Proxies públicos rotativos ──────────────────────────────────
-const PUBLIC_CORS_PROXIES = [
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url) => `https://r.jina.ai/http://${url.replace(/^https?:\/\//i, '')}`,
-]
-let _proxyIndex = 0
-
-async function fetchViaProxy(url) {
-    for (let i = 0; i < PUBLIC_CORS_PROXIES.length; i++) {
-        const proxyFn = PUBLIC_CORS_PROXIES[_proxyIndex % PUBLIC_CORS_PROXIES.length]
-        _proxyIndex++
-        try {
-            const res = await fetchGet(proxyFn(url), {
-                timeout: 25000,
-                agent: null,
-                headers: { ...CF_HEADERS, ...headersProveedor(url) },
-            })
-            if (!res.ok) continue
-            const text = await res.text()
-            if (!esCFBloqueado(text)) return text
-        } catch (_) { continue }
-    }
-    throw new Error('Todos los proxies fallaron')
-}
-
-// ─── fetchText: CACHÉ + 7 capas de fallback ────────────────────────────
-// Cache → scrape.do → ScraperAPI → WebScrapingAPI → Scrapingdog → ScrapingBee → CF Worker → Directo → Proxies
-export async function fetchText(url) {
-    // 1. Ver cache
+export async function fetchText(url, options = {}) {
+  const { cache = true, headers = {}, timeout = PAGE_TIMEOUT_MS, signal } = options
+  if (cache) {
     const cached = cacheGet(url)
-    if (cached) {
-        console.log(`[HDL] ✅ Caché hit: ${url.replace(BASE, '')}`)
-        return cached
-    }
+    if (cached) return cached
+  }
 
-    return queuedFetch(async () => {
-        // Capa 1a: scrape.do; JKAnime necesita navegador, espera y proxy avanzado.
-        if (SCRAPE_DO_TOKEN) {
-            try {
-                const esJKAnime = esJKAnimeUrl(url)
-                const html = await fetchViaScrapeDo(url, {
-                    render: esJKAnime,
-                    superProxy: esJKAnime,
-                    token: esJKAnime ? (SCRAPE_DO_JK_TOKEN || SCRAPE_DO_TOKEN) : SCRAPE_DO_TOKEN,
-                })
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ scrape.do${esJKAnime ? ' render' : ''} OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] scrape.do falló: ${e.message}`)
-            }
-        }
+  const isHentaiLa = url.startsWith(BASE)
+  let lastError = null
 
-        // Capa 1b: WebScraping.AI con Chrome/proxy, si se configuró su clave.
-        if (WEBSCRAPING_AI_KEY) {
-            try {
-                const html = await fetchViaWebScrapingAI(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ WebScraping.AI OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] WebScraping.AI falló: ${e.message}`)
-            }
-        }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (isHentaiLa) await waitRequestSlot(signal)
+    try {
+      const res = await httpFetch(url, { headers, timeout, signal })
+      const html = await res.text()
 
-        // Capa 1c: ScraperAPI
-        if (SCRAPERAPI_KEY) {
-            try {
-                const html = await fetchViaScraperAPI(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ ScraperAPI OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] ScraperAPI falló: ${e.message}`)
-            }
-        }
-
-        // Capa 1d: WebScrapingAPI
-        if (WEBSCRAPINGAPI_KEY) {
-            try {
-                const html = await fetchViaWebScrapingAPI(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ WebScrapingAPI OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] WebScrapingAPI falló: ${e.message}`)
-            }
-        }
-
-        // Capa 1e: Scrapingdog
-        if (SCRAPINGDOG_KEY) {
-            try {
-                const html = await fetchViaScrapingdog(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ Scrapingdog OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] Scrapingdog falló: ${e.message}`)
-            }
-        }
-
-        // Capa 1f: ScrapingBee
-        if (SCRAPINGBEE_KEY) {
-            try {
-                const html = await fetchViaScrapingBee(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ ScrapingBee OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] ScrapingBee falló: ${e.message}`)
-            }
-        }
-
-        // Capa 2: CF Worker
-        if (CF_WORKER_URL) {
-            try {
-                const html = await fetchViaWorker(url)
-                if (!esCFBloqueado(html)) {
-                    console.log(`[HDL] ✅ CF Worker OK: ${url.replace(BASE, '')}`)
-                    cacheSet(url, html)
-                    return html
-                }
-            } catch (e) {
-                console.warn(`[HDL] CF Worker falló: ${e.message}`)
-            }
-        }
-
-        // Capa 3: Directo
-        try {
-            const html = await fetchDirecto(url)
-            if (!esCFBloqueado(html)) {
-                console.log(`[HDL] ✅ Directo OK: ${url.replace(BASE, '')}`)
-                cacheSet(url, html)
-                return html
-            }
-        } catch (e) {
-            console.warn(`[HDL] Directo falló: ${e.message}`)
-        }
-
-        // Capa 4: Proxies públicos
-        console.log(`[HDL] Intentando proxies públicos...`)
-        const html = await fetchViaProxy(url)
-        console.log(`[HDL] ✅ Proxy público OK: ${url.replace(BASE, '')}`)
-        cacheSet(url, html)
+      if (res.status === 404) {
+        const err = new Error('HTTP 404')
+        err.status = 404
+        throw err
+      }
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`)
+        err.status = res.status
+        if (!RETRYABLE_STATUSES.has(res.status)) throw err
+        lastError = err
+      } else if (isCloudflareBlocked(html)) {
+        const err = new Error('Bloqueado por desafío anti-bot (Cloudflare)')
+        err.status = 403
+        lastError = err
+      } else {
+        if (cache) cacheSet(url, html)
         return html
-    })
-}
-
-// ─── fetchBuffer: para imágenes (portadas) ────────────────────────────────
-async function fetchBuffer(url) {
-    return queuedFetch(async () => {
-        // Para imágenes de CDN (no son hentaila.com directamente) funciona sin proxy
-        try {
-            const res = await fetchGet(url, {
-                headers: { 'User-Agent': UA, 'Referer': BASE + '/' },
-                timeout: 20000,
-            })
-            if (res.ok) {
-                if (typeof res.buffer === 'function') return res.buffer()
-                return Buffer.from(await res.arrayBuffer())
-            }
-        } catch (_) { }
-
-        // Fallback: via proxy
-        if (CF_WORKER_URL) {
-            try {
-                const proxyUrl = `${CF_WORKER_URL.replace(/\/$/, '')}/?url=${encodeURIComponent(url)}`
-                const res = await fetchGet(proxyUrl, { timeout: 20000, agent: null })
-                if (res.ok) {
-                    if (typeof res.buffer === 'function') return res.buffer()
-                    return Buffer.from(await res.arrayBuffer())
-                }
-            } catch (_) { }
-        }
-        throw new Error(`No se pudo obtener imagen: ${url}`)
-    })
-}
-
-// ─── Helper: enviar lista interactiva de WhatsApp ─────────────────────────
-async function enviarListaWA(conn, chat, m, titulo, descripcion, boton, seccion, filas, coverUrl = null) {
-    const sessionKey = `${chat}|${m.sender}`
-    global.hdlSessions[sessionKey] = {
-        owner: m.sender,
-        chat,
-        expiry: Date.now() + 5 * 60 * 1000,
-    }
-    const now = Date.now()
-    for (const k of Object.keys(global.hdlSessions)) {
-        if (global.hdlSessions[k].expiry < now) delete global.hdlSessions[k]
-    }
-
-    let device
-    try { device = getDevice(m.key.id) } catch (_) { device = 'android' }
-    const isMobile = device !== 'desktop' && device !== 'web'
-
-    if (isMobile) {
-        try {
-            let header
-            if (coverUrl) {
-                try {
-                    const messa = await prepareWAMessageMedia(
-                        { image: { url: coverUrl } },
-                        { upload: conn.waUploadToServer }
-                    )
-                    header = {
-                        title: titulo,
-                        hasMediaAttachment: true,
-                        imageMessage: messa.imageMessage,
-                    }
-                } catch (_) {
-                    header = { title: titulo, hasMediaAttachment: false }
-                }
-            } else {
-                header = { title: titulo, hasMediaAttachment: false }
-            }
-
-            const interactiveMessage = {
-                body: { text: descripcion },
-                footer: { text: global.wm || 'HentaiLA Bot' },
-                header,
-                nativeFlowMessage: {
-                    buttons: [{
-                        name: 'single_select',
-                        buttonParamsJson: JSON.stringify({
-                            title: boton,
-                            sections: [{
-                                title: seccion,
-                                highlight_label: '',
-                                rows: filas.map(r => ({
-                                    header: r.title,
-                                    title: r.subtitle || r.title,
-                                    description: r.description || '',
-                                    id: r.rowId,
-                                })),
-                            }],
-                        }),
-                    }],
-                    messageParamsJson: '',
-                },
-            }
-
-            const msg = generateWAMessageFromContent(
-                chat,
-                { viewOnceMessage: { message: { interactiveMessage } } },
-                { userJid: conn.user.jid, quoted: m }
-            )
-            await conn.relayMessage(chat, msg.message, { messageId: msg.key.id })
-            return msg
-        } catch (err) {
-            console.error('[interactiveMessage] Error:', err.message)
-        }
-    }
-
-    // Fallback: texto plano
-    let txt = `✨ *${titulo}*\n_${descripcion}_\n\n`
-    filas.forEach((r, i) => {
-        txt += `*${i + 1}.* ${r.title}`
-        if (r.description) txt += ` _(${r.description})_`
-        txt += `\n`
-    })
-    txt += `\n_Responde con el número o el comando._`
-    return conn.sendMessage(chat, { text: txt }, { quoted: m })
-}
-
-// ─── Info de la serie: portada, descripción, episodios ────────────────────
-async function obtenerInfoSerie(slug) {
-    const html = await fetchText(`${BASE}/media/${slug}`)
-
-    const imgMatch = html.match(/property="og:image"\s+content="([^"]+)"/) ||
-        html.match(/content="([^"]+)"\s+property="og:image"/)
-    const cover = imgMatch?.[1] || null
-
-    const descMatch = html.match(/property="og:description"\s+content="([^"]+)"/) ||
-        html.match(/name="description"\s+content="([^"]+)"/)
-    const desc = descMatch?.[1]?.trim() || 'Sin descripción.'
-
-    const titleMatch = html.match(/<title>([^<]+)<\/title>/)
-    const title = titleMatch?.[1]?.replace(/\s*[-–|].*$/, '').trim() || slug.replace(/-/g, ' ')
-
-    const epSet = new Set()
-    const epRe = new RegExp(`/media/${slug}/(\\d+)`, 'g')
-    let mMatch
-    while ((mMatch = epRe.exec(html)) !== null) epSet.add(Number(mMatch[1]))
-    const episodes = [...epSet].sort((a, b) => a - b)
-
-    const $ = cheerio.load(html)
-    const generos = []
-    $('a[href*="?genre="]').each((_, el) => generos.push($(el).text().trim()))
-
-    return { slug, title, cover, desc, episodes, generos }
-}
-
-// ─── Generar variaciones de slug ──────────────────────────────────────────
-function generarSlugVariaciones(query) {
-    const base = query.toLowerCase().trim()
-    const variaciones = new Set()
-
-    const full = base.replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
-    variaciones.add(full)
-
-    const sinStop = base.split(' ').filter(w => w.length > 2 && !['the', 'and', 'for', 'with', 'una', 'los', 'las', 'del'].includes(w))
-    variaciones.add(sinStop.join('-').replace(/[^a-z0-9-]/g, ''))
-
-    variaciones.add(base.split(' ').slice(0, 3).join('-').replace(/[^a-z0-9-]/g, ''))
-    variaciones.add(base.split(' ').slice(0, 2).join('-').replace(/[^a-z0-9-]/g, ''))
-    variaciones.add(base.split(' ')[0].replace(/[^a-z0-9-]/g, ''))
-
-    const sinParticulas = base.replace(/\b(wa|no|ga|wo|ni|ha|de|mo|ka)\b/g, '').replace(/\s+/g, ' ').trim()
-    variaciones.add(sinParticulas.replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, ''))
-
-    return [...variaciones].filter(v => v && v.length > 1)
-}
-
-// ─── Búsqueda por fetch (usa fetchText con todas las capas) ───────────────
-async function buscarPorFetch(query) {
-    try {
-        // Usar fetchText para que pase por scrape.do / CF Worker / proxies
-        const html = await fetchText(`${BASE}/busqueda?q=${encodeURIComponent(query)}`)
-        const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
-
-        const results = []
-        const re = /"slug":"([^"]+)"(?:[^}]{0,300}?"title":"([^"]+)")?/g
-        let m
-        while ((m = re.exec(decoded)) !== null) {
-            const slug = m[1], title = m[2] || m[1].replace(/-/g, ' ')
-            if (slug && !results.find(r => r.slug === slug) && !slug.includes('/'))
-                results.push({ slug, title })
-        }
-        const re2 = /href="\/media\/([^/"]+)(?:\/\d+)?"/g
-        while ((m = re2.exec(decoded)) !== null) {
-            const slug = m[1]
-            if (slug && !results.find(r => r.slug === slug))
-                results.push({ slug, title: slug.replace(/-/g, ' ') })
-        }
-        return results
-    } catch (_) {
-        return []
-    }
-}
-
-// ─── Búsqueda principal ────────────────────────────────────────────────────
-async function buscarHentaiLA(query) {
-    // 1. Probar slugs generados directamente
-    const variaciones = generarSlugVariaciones(query)
-    for (const slug of variaciones) {
-        try {
-            const _html = await fetchText(`${BASE}/media/${slug}`)
-            if (_html && _html.length > 500 && !_html.includes('404')) {
-                console.log(`[SLUG] ✅ Encontrado directo: ${slug}`)
-                return [{ slug, title: slug.replace(/-/g, ' ') }]
-            }
-        } catch (_) { continue }
-    }
-
-    // 2. Fetch por búsqueda
-    const fetchResults = await buscarPorFetch(query)
-    if (fetchResults.length > 0) {
-        console.log(`[FETCH] ✅ ${fetchResults.length} resultados`)
-        return fetchResults
-    }
-
-    return []
-}
-
-// ─── Últimos lanzamientos ─────────────────────────────────────────────────
-async function obtenerUltimos() {
-    const html = await fetchText(`${BASE}/`)
-    const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
-    const results = []
-    const re = /"slug":"([^"]+)"[^}]{0,200}?"episode":(\d+)(?:[^}]{0,200}?"title":"([^"]+)")?/g
-    let m
-    while ((m = re.exec(decoded)) !== null) {
-        const slug = m[1], episode = m[2], title = m[3] || m[1].replace(/-/g, ' ')
-        if (!results.find(r => r.slug === slug))
-            results.push({ slug, title, episode })
-    }
-    if (results.length === 0) {
-        const re2 = /href="\/media\/([^/]+)\/(\d+)"/g
-        while ((m = re2.exec(html)) !== null) {
-            const slug = m[1], episode = m[2]
-            if (!results.find(r => r.slug === slug))
-                results.push({ slug, title: slug.replace(/-/g, ' '), episode })
-        }
-    }
-    return results.slice(0, 10)
-}
-
-// ─── Links de descarga en página /media/slug/ep ──────────────────────────
-async function obtenerLinksDescarga(mediaUrl) {
-    const html = await fetchText(mediaUrl)
-    const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
-
-    const mega = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*mega\.nz\/file\/[^\s"'<\\]*/g) || [])]
-    const mediafire = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*mediafire\.com\/file[^\s"'<\\]*/g) || [])]
-    const fireload = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*fireload\.com\/[^\s"'<\\]*/g) || [])]
-    const fichier = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*1fichier\.com\/\?[^\s"'<\\]*/g) || [])]
-    const mp4upload = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*mp4upload\.com\/[^\s"'<\\]*/g) || [])]
-    const yourupload = [...new Set(decoded.match(/https?:\/\/[^\s"'<\\]*yourupload\.com\/[^\s"'<\\]*/g) || [])]
-    const otros = [...new Set(
-        (decoded.match(/https?:\/\/[^\s"'<\\]{10,}/g) || [])
-            .filter(u =>
-                !u.includes(BASE) &&
-                !mega.includes(u) && !mediafire.includes(u) && !fireload.includes(u) &&
-                !fichier.includes(u) && !mp4upload.includes(u) && !yourupload.includes(u) &&
-                /\.(mp4|mkv|avi|ts|m4v)(\?|$)/i.test(u)
-            )
-    )]
-
-    return { mega, mediafire, fireload, fichier, mp4upload, yourupload, otros }
-}
-
-// ─── Resolvers ────────────────────────────────────────────────────────────
-async function resolverMediafire(url) {
-    const res = await fetchGet(url, { headers: { 'User-Agent': UA }, timeout: 15000 })
-    const html = await res.text()
-    const $ = cheerio.load(html)
-    const direct =
-        $('#downloadButton').attr('href') ||
-        html.match(/href="(https:\/\/download\d+\.mediafire\.com[^"]+)"/)?.[1]
-    const name =
-        $('.promoDownloadName').first().attr('title') ||
-        $('.filename').first().text().trim() ||
-        url.split('/').pop().split('?')[0] || 'video.mp4'
-    return { direct, name: name.trim() }
-}
-
-async function resolverFireload(url) {
-    const res = await fetchGet(url, { headers: { 'User-Agent': UA }, timeout: 15000 })
-    const html = await res.text()
-    const direct =
-        html.match(/href="(https?:\/\/[^"]*fireload\.com\/d\/[^"]+)"/)?.[1] ||
-        html.match(/file:\s*"([^"]+)"/)?.[1] ||
-        html.match(/source\s+src="([^"]+)"/)?.[1]
-    const name = html.match(/<title>([^<]+)<\/title>/)?.[1]?.trim() || 'video.mp4'
-    return { direct: direct || null, name }
-}
-
-async function resolver1fichier(url) {
-    const res = await fetchGet('https://api.1fichier.com/v1/download/get_token.cgi', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
-        body: JSON.stringify({ url }),
-        timeout: 15000,
-    })
-    const json = await res.json().catch(() => null)
-    return { direct: json?.download_url || null, name: json?.filename || 'video.mp4' }
-}
-
-async function resolverMp4upload(url) {
-    const res = await fetchGet(url, { headers: { 'User-Agent': UA }, timeout: 15000 })
-    const html = await res.text()
-    const direct =
-        html.match(/file:\s*"([^"]+\.mp4[^"]*)"/)?.[1] ||
-        html.match(/src:\s*"([^"]+\.mp4[^"]*)"/)?.[1] ||
-        html.match(/source\s+src="([^"]+)"/)?.[1]
-    const name = html.match(/<title>([^<]+)<\/title>/)?.[1]?.trim() || 'video.mp4'
-    return { direct: direct || null, name }
-}
-
-// ─── Descarga genérica por URL directa ───────────────────────────────────
-async function descargarDirecto(directUrl, fileName, tempPath, updateStatus, label) {
-    const headRes = await fetchGet(directUrl, { method: 'HEAD', headers: { 'User-Agent': UA }, timeout: 10000 })
-    const sizeBytes = parseInt(headRes.headers.get('content-length') || '0')
-    const sizeH = sizeBytes ? (sizeBytes / 1048576).toFixed(2) + ' MB' : '?'
-    const soportaRangos = /bytes/i.test(headRes.headers.get('accept-ranges') || '')
-
-    await updateStatus(`📥 *${label}:* ${fileName}\n⚖️ *Peso:* ${sizeH}\n⏬ _Descargando..._`)
-
-    let dld = 0
-    const tStart = Date.now()
-    let lastLog = 0
-    const reportar = bytes => {
-        dld += bytes
-        const now = Date.now()
-        if (now - lastLog > 1000) {
-            lastLog = now
-            const secs  = (now - tStart) / 1000 || 0.001
-            const speed = dld / secs
-            const pct   = sizeBytes > 0 ? (dld / sizeBytes) * 100 : 0
-            process.stdout.write(`\r[${label}] ${pct.toFixed(1)}% (${(dld / 1048576).toFixed(1)} MB) | ${(speed / 1048576).toFixed(2)} MB/s   `)
-        }
-    }
-
-    // ── Descarga paralela por rangos (si el servidor lo soporta) ─────────────
-    if (soportaRangos && sizeBytes >= HDL_MIN_SIZE_PARALELO) {
-        const hilos     = HDL_HILOS_PARALELOS
-        const chunkSize = Math.ceil(sizeBytes / hilos)
-        const partes    = []
-        for (let i = 0; i < hilos; i++) {
-            const start = i * chunkSize
-            const end   = Math.min(start + chunkSize - 1, sizeBytes - 1)
-            if (start > end) break
-            partes.push({ start, end, path: `${tempPath}.part${i}` })
-        }
-
-        try {
-            await Promise.all(partes.map(async p => {
-                const res = await fetchGet(directUrl, {
-                    headers: { 'User-Agent': UA, Range: `bytes=${p.start}-${p.end}` },
-                    timeout: 180000,
-                })
-                if (!res.ok && res.status !== 206) throw new Error(`HTTP ${res.status}`)
-                res.body.on('data', chunk => reportar(chunk.length))
-                await pipeline(res.body, fs.createWriteStream(p.path))
-            }))
-
-            // Unir las partes en orden
-            const out = fs.createWriteStream(tempPath)
-            for (const p of partes) {
-                await new Promise((resolve, reject) => {
-                    const rs = fs.createReadStream(p.path)
-                    rs.pipe(out, { end: false })
-                    rs.on('end', resolve)
-                    rs.on('error', reject)
-                })
-            }
-            await new Promise(resolve => out.end(resolve))
-            for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) { } }
-
-            console.log(`\n[${label}] ✅ Completo (${partes.length} hilos paralelos)`)
-            return sizeH
-        } catch (err) {
-            for (const p of partes) { try { fs.unlinkSync(p.path) } catch (_) { } }
-            console.log(`\n[${label}] ⚠️ Descarga paralela falló (${err.message}), reintentando en modo simple...`)
-            dld = 0 // reiniciar contador para el fallback
-            // sigue abajo al modo de un solo stream
-        }
-    }
-
-    // ── Descarga simple (fallback o cuando no hay soporte de rangos) ─────────
-    const response = await fetchGet(directUrl, { headers: { 'User-Agent': UA }, timeout: 180000 })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    response.body.on('data', chunk => reportar(chunk.length))
-    await pipeline(response.body, fs.createWriteStream(tempPath))
-    console.log(`\n[${label}] ✅ Completo`)
-    return sizeH
-}
-
-// ─── Enviar portada con info ───────────────────────────────────────────────
-async function enviarPortada(m, conn, info, episodio = null, extra = '') {
-    const { title, cover, desc, episodes, generos } = info
-    const totalEps = episodes.length
-    const lastEp = episodes[totalEps - 1] || '?'
-    const rango = totalEps === 1 ? 'Episodio 1' : `Episodios 1 – ${lastEp}`
-    const tags = generos.length > 0 ? generos.slice(0, 6).join(' • ') : 'N/A'
-
-    const caption =
-        `🔞 *${title}*\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `📖 ${desc}\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🎬 *Episodios:* ${totalEps > 0 ? `${totalEps} (${rango})` : '?'}\n` +
-        `🏷️ *Géneros:* ${tags}\n` +
-        (extra ? `━━━━━━━━━━━━━━━━━━━━\n${extra}` : '')
-
-    if (cover) {
-        try {
-            const imgBuf = await fetchBuffer(cover)
-            await conn.sendMessage(m.chat, { image: imgBuf, caption, mimetype: 'image/jpeg' }, { quoted: m })
-            return
-        } catch (_) { }
-    }
-    await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
-}
-
-// ─── FIX 4: Descarga + envío del archivo ──────────────────────────────────
-// Bug original: "document: { url: tempPath }" — tempPath es una ruta local,
-// NO una URL HTTP. Baileys no puede leer un archivo desde path://.
-// Fix: leer el archivo como Buffer y pasarlo directamente.
-async function descargarYEnviar(m, conn, mediaUrl, title, episodio, updateStatus) {
-    const links = await obtenerLinksDescarga(mediaUrl)
-
-    const totalLinks =
-        links.mega.length + links.mediafire.length + links.fireload.length +
-        links.fichier.length + links.mp4upload.length + links.yourupload.length + links.otros.length
-
-    if (totalLinks === 0) {
-        return updateStatus(`❌ No se encontraron links de descarga.\n🔗 ${mediaUrl}`)
-    }
-
-    const servidores = [
-        ...links.mediafire.map(u => ({ tipo: 'mediafire', url: u })),
-        ...links.fireload.map(u => ({ tipo: 'fireload', url: u })),
-        ...links.fichier.map(u => ({ tipo: '1fichier', url: u })),
-        ...links.mp4upload.map(u => ({ tipo: 'mp4upload', url: u })),
-        ...links.yourupload.map(u => ({ tipo: 'yourupload', url: u })),
-        ...links.otros.map(u => ({ tipo: 'directo', url: u })),
-        ...links.mega.map(u => ({ tipo: 'mega', url: u })),
-    ]
-
-    let tempPath = null
-    let fileName = `${title} - Ep ${episodio}.mp4`
-    let sizeH = '?'
-    let exitoso = false
-
-    for (const srv of servidores) {
-        tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-        try {
-            await updateStatus(`🔄 *Intentando con ${srv.tipo.toUpperCase()}...*\n⏳ Ep. ${episodio} de *${title}*`)
-
-            if (srv.tipo === 'mega') {
-                const file = MegaFile.fromURL(srv.url)
-                await file.loadAttributes()
-                fileName = file.name || fileName
-                const sizeBytes = file.size
-                sizeH = (sizeBytes / 1048576).toFixed(2) + ' MB'
-                tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-                await updateStatus(`📥 *MEGA:* ${fileName}\n⚖️ *Peso:* ${sizeH}\n⏬ _Descargando..._`)
-                // [MEJORA VELOCIDAD] megajs usa 4 conexiones por defecto; subimos a HDL_MEGA_MAX_CONNECTIONS
-                const fileStream = file.download({ maxConnections: HDL_MEGA_MAX_CONNECTIONS })
-                let dld = 0
-                fileStream.on('data', chunk => {
-                    dld += chunk.length
-                    process.stdout.write(`\r[MEGA] ${((dld / sizeBytes) * 100).toFixed(1)}% (${(dld / 1048576).toFixed(1)} MB)`)
-                })
-                await pipeline(fileStream, fs.createWriteStream(tempPath))
-                console.log('\n[MEGA] ✅ Completo')
-
-            } else if (srv.tipo === 'mediafire') {
-                const { direct, name } = await resolverMediafire(srv.url)
-                if (!direct) throw new Error('No se pudo resolver MediaFire')
-                fileName = name || fileName
-                tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-                sizeH = await descargarDirecto(direct, fileName, tempPath, updateStatus, 'MediaFire')
-
-            } else if (srv.tipo === 'fireload') {
-                const { direct, name } = await resolverFireload(srv.url)
-                if (!direct) throw new Error('No se pudo resolver FireLoad')
-                fileName = name || fileName
-                tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-                sizeH = await descargarDirecto(direct, fileName, tempPath, updateStatus, 'FireLoad')
-
-            } else if (srv.tipo === '1fichier') {
-                const { direct, name } = await resolver1fichier(srv.url)
-                if (!direct) throw new Error('No se pudo resolver 1Fichier')
-                fileName = name || fileName
-                tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-                sizeH = await descargarDirecto(direct, fileName, tempPath, updateStatus, '1Fichier')
-
-            } else if (srv.tipo === 'mp4upload') {
-                const { direct, name } = await resolverMp4upload(srv.url)
-                if (!direct) throw new Error('No se pudo resolver MP4Upload')
-                fileName = name || fileName
-                tempPath = path.join(tmpdir(), `hent_${Date.now()}_${fileName.replace(/[/\\:*?"<>|]/g, '_')}`)
-                sizeH = await descargarDirecto(direct, fileName, tempPath, updateStatus, 'MP4Upload')
-
-            } else if (srv.tipo === 'yourupload') {
-                const res = await fetchGet(srv.url, { headers: { 'User-Agent': UA }, timeout: 15000 })
-                const html = await res.text()
-                const direct = html.match(/file:\s*"([^"]+)"/)?.[1] || html.match(/src="([^"]+\.mp4[^"]*)"/)?.[1]
-                if (!direct) throw new Error('No se pudo resolver YourUpload')
-                sizeH = await descargarDirecto(direct, fileName, tempPath, updateStatus, 'YourUpload')
-
-            } else {
-                sizeH = await descargarDirecto(srv.url, fileName, tempPath, updateStatus, 'Directo')
-            }
-
-            exitoso = true
-            break
-
-        } catch (err) {
-            console.error(`[${srv.tipo.toUpperCase()}] ❌ Falló: ${err.message}`)
-            await updateStatus(`⚠️ *${srv.tipo.toUpperCase()} falló*, probando siguiente servidor...`)
-            if (tempPath && fs.existsSync(tempPath)) {
-                try { fs.unlinkSync(tempPath) } catch (_) { }
-            }
-            tempPath = null
-            continue
-        }
-    }
-
-    if (!exitoso || !tempPath) {
-        return updateStatus(`❌ Todos los servidores fallaron para el ep. ${episodio} de *${title}*.\n🔗 ${mediaUrl}`)
-    }
-
-    try {
-        await updateStatus(`✅ *Descarga completa!*\n📤 _Enviando a WhatsApp..._`)
-
-        // Baileys admite rutas locales y las transmite desde disco como stream.
-        const stats = fs.statSync(tempPath)
-        const epNum = String(episodio).padStart(2, '0')
-        const cleanTitle = title.replace(/[/\\:*?"<>|]/g, '').trim()
-        const finalName = `${epNum} ${cleanTitle}.mp4`
-        const fileSizeH = (stats.size / 1048576).toFixed(2) + ' MB'
-
-        await conn.sendMessage(m.chat, {
-            document: { url: tempPath },
-            fileName: finalName,
-            mimetype: 'video/mp4',
-            caption:
-                `🔞 *${title}* — Ep. ${episodio}\n` +
-                `📁 ${finalName}\n` +
-                `⚖️ ${fileSizeH}\n` +
-                `🌐 HentaiLA`,
-        }, { quoted: m })
-
-        console.log(`\n[BOT] ✨ Enviado: ${finalName}`)
-        await updateStatus(`✅ *¡Enviado!* 🔞 ${title} — Ep. ${episodio}`)
-
-    } finally {
-        if (tempPath && fs.existsSync(tempPath)) {
-            try { fs.unlinkSync(tempPath) } catch (_) { }
-        }
-    }
-}
-
-// ─── Flujo completo ────────────────────────────────────────────────────────
-async function flujoCompleto(m, conn, info, episodio, statusKey) {
-    const updateStatus = async txt => {
-        try {
-            if (statusKey) await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
-            else await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
-        } catch (_) { await conn.sendMessage(m.chat, { text: txt }, { quoted: m }) }
-    }
-
-    await updateStatus(`🖼️ _Cargando portada de *${info.title}*..._`)
-    await enviarPortada(m, conn, info, episodio,
-        `📥 Preparando descarga del episodio *${episodio}*...`
-    )
-    await updateStatus(
-        `⬇️ *Descargando:* ${info.title} — Ep. ${episodio}\n` +
-        `_Espera, esto puede tardar..._`
-    )
-
-    const epUrl = `${BASE}/media/${info.slug}/${episodio}`
-    await descargarYEnviar(m, conn, epUrl, info.title, episodio, updateStatus)
-}
-
-// ─── Handler principal ────────────────────────────────────────────────────
-const handler = async (m, { conn, text, usedPrefix, command }) => {
-    const isLatest = /hlatest|hentailatest/i.test(command)
-
-    if (!text && !isLatest) {
-        return m.reply(
-            `🔞 *Uso:* ${usedPrefix}${command} <nombre> <episodio>\n\n` +
-            `*Ejemplo:* ${usedPrefix}${command} overflow 1\n\n` +
-            `💡 Usa \`${usedPrefix}hlatest\` para ver lo más nuevo.`
-        )
-    }
-
-    let statusKey
-    try {
-        const sent = await conn.sendMessage(m.chat, { text: `🔍 _Buscando en HentaiLA..._` }, { quoted: m })
-        statusKey = sent.key
-    } catch (_) {
-        const sent = await m.reply(`🔍 _Buscando en HentaiLA..._`)
-        statusKey = sent?.key || sent
-    }
-
-    const updateStatus = async txt => {
-        try {
-            await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
-        } catch (_) {
-            await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
-        }
-    }
-
-    try {
-        // ── .hlatest ──────────────────────────────────────────────────────
-        if (isLatest) {
-            const ultimos = await obtenerUltimos()
-            if (ultimos.length === 0)
-                return updateStatus(`❌ No se pudieron obtener los últimos lanzamientos.`)
-
-            const filas = ultimos.map((item) => ({
-                rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`,
-                title: item.title || item.slug.replace(/-/g, ' '),
-                description: `Ep. ${item.episode}`,
-            }))
-            await enviarListaWA(
-                conn, m.chat, m,
-                '🔞 Últimos lanzamientos en HentaiLA',
-                'Elige un título para ver portada y descargar:',
-                '📋 Ver lanzamientos',
-                'Recién subidos',
-                filas
-            )
-            await updateStatus(`✅ _${ultimos.length} lanzamientos disponibles. Elige uno._`)
-            return
-        }
-
-        // ── Parsear nombre y episodio ──────────────────────────────────────
-        let query = text.trim()
-        let episodio = null
-        const words = query.split(' ')
-        if (words.length > 1 && !isNaN(words[words.length - 1])) {
-            episodio = words.pop()
-            query = words.join(' ')
-        }
-        const cleanQuery = query.replace(/[?!¡¿]/g, '').trim()
-        const slugIntent = cleanQuery.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
-
-        // ── Intento directo por slug ───────────────────────────────────────
-        let directOk = false
-        try {
-            const _html = await fetchText(`${BASE}/media/${slugIntent}`)
-            directOk = _html && _html.length > 500 && !_html.includes('404')
-        } catch (_) { }
-
-        let info = null
-
-        if (directOk) {
-            await updateStatus(`✅ _Encontrado! Cargando info..._`)
-            info = await obtenerInfoSerie(slugIntent)
-        } else {
-            await updateStatus(`🔎 _Buscando "${cleanQuery}"..._`)
-            const results = await buscarHentaiLA(cleanQuery)
-
-            if (results.length === 0)
-                return updateStatus(
-                    `❌ No se encontraron resultados para *"${cleanQuery}"*.\n\n` +
-                    `💡 Intenta con el nombre en inglés o en romaji.\n` +
-                    `Ej: \`.hdl overflow 1\` o \`.hdl seihou shouka\``
-                )
-
-            if (results.length === 1) {
-                await updateStatus(`✅ _Encontrado! Cargando info..._`)
-                info = await obtenerInfoSerie(results[0].slug)
-            } else {
-                const top = results.slice(0, 8)
-                const filas = top.map((r) => ({
-                    rowId: episodio ? `${usedPrefix}hdl ${r.slug} ${episodio}` : `${usedPrefix}hdl ${r.slug}`,
-                    title: r.title || r.slug.replace(/-/g, ' '),
-                }))
-                await enviarListaWA(
-                    conn, m.chat, m,
-                    `🔞 Resultados para: "${cleanQuery}"`,
-                    `Se encontraron ${top.length} títulos. Elige uno:`,
-                    '📋 Ver opciones',
-                    'Títulos disponibles',
-                    filas
-                )
-                await updateStatus(`🔎 _${top.length} resultados. Elige un título._`)
-                return
-            }
-        }
-
-        // ── Sin episodio: mostrar portada + lista ──────────────────────────
-        if (!episodio) {
-            const epList = info.episodes.length > 0 ? info.episodes.slice(0, 20) : [1, 2, 3]
-            const filasEp = epList.map(ep => ({
-                rowId: `${usedPrefix}hdl ${info.slug} ${ep}`,
-                title: `Episodio ${ep}`,
-            }))
-            await enviarListaWA(
-                conn, m.chat, m,
-                `🎬 ${info.title}`,
-                `${info.desc}\n\n🎬 *Eps:* ${info.episodes.length > 0 ? info.episodes.length + ' (' + (info.episodes.length === 1 ? 'Episodio 1' : 'Eps 1-' + info.episodes[info.episodes.length - 1]) + ')' : '?'}\n🏷️ *Géneros:* ${info.generos.length > 0 ? info.generos.slice(0, 4).join(' · ') : 'N/A'}`,
-                '📺 Elegir episodio',
-                'Episodios disponibles',
-                filasEp,
-                info.cover || null
-            )
-            await updateStatus(`💬 Elige un episodio de *${info.title}*`)
-            return
-        }
-
-        // ── Con episodio: flujo completo ────────────────────────────────────
-        await flujoCompleto(m, conn, info, episodio, statusKey)
-
+      }
     } catch (err) {
-        console.error('[HentaiDL]', err.message)
-        await updateStatus(`❌ *Error:* ${err.message}`)
+      if (signal?.aborted) throw createAbortError()
+      if (err?.status === 404) throw err
+      lastError = err
     }
+
+    if (attempt === 0) await sleep(700, signal)
+  }
+
+  throw lastError || new Error(`No se pudo obtener ${url}`)
+}
+
+async function fetchBuffer(url, signal) {
+  const res = await httpFetch(url, {
+    headers: { Referer: `${BASE}/`, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' },
+    timeout: 15_000,
+    signal,
+  })
+  if (!res.ok) {
+    await cancelBodyQuietly(res)
+    throw new Error(`No se pudo obtener imagen (HTTP ${res.status})`)
+  }
+  return Buffer.from(await res.arrayBuffer())
+}
+
+export function parseHentaiInput(rawText) {
+  const trimmed = String(rawText || '').trim()
+  const urlMatch = trimmed.match(/https?:\/\/(?:www\.)?hentaila\.com\/media\/([^/?#\s]+)(?:\/(\d+))?/i)
+  if (urlMatch) {
+    const slug = decodeURIComponent(urlMatch[1]).toLowerCase()
+    const ep = urlMatch[2] || null
+    return { slug, episode: ep, query: slug.replace(/-/g, ' ') }
+  }
+
+  let query = trimmed
+  let episode = null
+  const epMatch = query.match(/(?:\s+(?:ep(?:isodio)?|cap(?:[ií]tulo)?|#)\s*|\s+)(\d+)\s*$/i)
+  if (epMatch) {
+    const candidateQuery = query.slice(0, epMatch.index).trim()
+    if (candidateQuery) {
+      episode = epMatch[1]
+      query = candidateQuery
+    }
+  }
+
+  const cleanQuery = query.replace(/[?!¡¿]/g, '').replace(/\s+/g, ' ').trim()
+  return { slug: null, episode, query: cleanQuery }
+}
+
+export function buildSlugVariations(query) {
+  const base = String(query || '').toLowerCase().trim()
+  const variations = new Set()
+  const toSlug = (str) => str.replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '')
+
+  variations.add(toSlug(base))
+
+  const words = base.split(/\s+/).filter(Boolean)
+  const stopWords = new Set(['the', 'and', 'for', 'with', 'una', 'los', 'las', 'del'])
+  variations.add(toSlug(words.filter((w) => w.length > 2 && !stopWords.has(w)).join(' ')))
+  if (words.length > 3) variations.add(toSlug(words.slice(0, 3).join(' ')))
+  if (words.length > 2) variations.add(toSlug(words.slice(0, 2).join(' ')))
+
+  const sinParticulas = base.replace(/\b(wa|no|ga|wo|ni|ha|de|mo|ka)\b/g, ' ').replace(/\s+/g, ' ').trim()
+  variations.add(toSlug(sinParticulas))
+
+  return [...variations].filter((v) => v.length > 1)
+}
+
+export function parseSeriesInfo(html, slug) {
+  const $ = cheerio.load(html)
+
+  const h1 = $('h1').first().text().replace(/\s+/g, ' ').trim()
+  const rawTitle = $('title').first().text().trim()
+  const cleanedTitle = rawTitle
+    .replace(/\s*(?:online\s+gratis.*|[-–|].*)$/i, '')
+    .trim()
+  const title = h1 || cleanedTitle || slug.replace(/-/g, ' ')
+
+  const cover = $('meta[property="og:image"]').attr('content')?.trim() || null
+  const desc = (
+    $('meta[property="og:description"]').attr('content') ||
+    $('meta[name="description"]').attr('content') ||
+    ''
+  ).replace(/\s+/g, ' ').trim() || 'Sin descripción.'
+
+  const epSet = new Set()
+  const escapedSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const epRe = new RegExp(`/media/${escapedSlug}/(\\d+)`, 'g')
+  let match
+  while ((match = epRe.exec(html)) !== null) epSet.add(Number(match[1]))
+  const episodes = [...epSet].filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b)
+
+  const genreSet = new Set()
+  $('a[href*="genre="]').each((_, el) => {
+    const g = $(el).text().replace(/\s+/g, ' ').trim()
+    if (g) genreSet.add(g)
+  })
+
+  return { slug, title, cover, desc, episodes, generos: [...genreSet] }
+}
+
+export function parseSearchResults(html) {
+  const $ = cheerio.load(html)
+  const results = []
+  const seen = new Set()
+
+  const add = (slug, title) => {
+    const cleanSlug = String(slug || '').trim().replace(/^\/+|\/+$/g, '')
+    if (!cleanSlug || cleanSlug.includes('/') || seen.has(cleanSlug)) return
+    seen.add(cleanSlug)
+    const cleanTitle = String(title || '').replace(/\s+/g, ' ').trim() || cleanSlug.replace(/-/g, ' ')
+    results.push({ slug: cleanSlug, title: cleanTitle })
+  }
+
+  $('article').each((_, el) => {
+    const $el = $(el)
+    const href = $el.find('a[href^="/media/"]').first().attr('href') || ''
+    const m = href.match(/^\/media\/([^/?#]+)$/)
+    if (!m) return
+    const title = $el.find('h2, h3, h4, header').first().text() || $el.find('img').first().attr('alt')?.replace(/^Portada de\s+/i, '')
+    add(m[1], title)
+  })
+
+  if (results.length > 0) return results
+
+  const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
+  for (const m of decoded.matchAll(/"slug"\s*:\s*"([^"]+)"(?:[^}]{0,300}?"title"\s*:\s*"([^"]+)")?/g)) {
+    add(m[1], m[2])
+  }
+  for (const m of decoded.matchAll(/href="\/media\/([^/"]+)(?:\/\d+)?"/g)) {
+    add(m[1], null)
+  }
+
+  return results
+}
+
+export function parseLatestReleases(html, limit = 10) {
+  const $ = cheerio.load(html)
+  const results = []
+  const seen = new Set()
+
+  const add = (slug, episode, title) => {
+    const cleanSlug = String(slug || '').trim()
+    const epNum = Number(episode)
+    if (!cleanSlug || !Number.isFinite(epNum) || epNum <= 0 || seen.has(cleanSlug)) return
+    seen.add(cleanSlug)
+    const cleanTitle = String(title || '').replace(/\s+/g, ' ').trim() || cleanSlug.replace(/-/g, ' ')
+    results.push({ slug: cleanSlug, title: cleanTitle, episode: epNum })
+  }
+
+  $('article').each((_, el) => {
+    const $el = $(el)
+    const href = $el.find('a[href^="/media/"]').first().attr('href') || ''
+    const m = href.match(/^\/media\/([^/?#]+)\/(\d+)$/)
+    if (!m) return
+    const title = $el.find('h2, h3, h4, header').first().text()
+    add(m[1], m[2], title)
+  })
+
+  if (results.length === 0) {
+    const decoded = html.replace(/\\u002F/g, '/').replace(/\\"/g, '"')
+    for (const m of decoded.matchAll(/"slug"\s*:\s*"([^"]+)"[^}]{0,200}?"episode"\s*:\s*(\d+)(?:[^}]{0,200}?"title"\s*:\s*"([^"]+)")?/g)) {
+      add(m[1], m[2], m[3])
+    }
+    for (const m of html.matchAll(/href="\/media\/([^/"]+)\/(\d+)"/g)) {
+      add(m[1], m[2], null)
+    }
+  }
+
+  return results.slice(0, limit)
+}
+
+export function normalizeMegaUrl(url) {
+  const raw = String(url || '').trim()
+  const m = raw.match(/mega\.nz\/(?:embed|file)\/[#!]*([A-Za-z0-9_-]{6,})[!#]([A-Za-z0-9_-]{20,})/i)
+  if (m) return `https://mega.nz/file/${m[1]}#${m[2]}`
+  return raw
+}
+
+function normalizeMp4UploadUrl(url) {
+  const raw = String(url || '').trim()
+  const m = raw.match(/mp4upload\.com\/(?:embed-)?([a-z0-9_-]{4,80})(?:\.html)?/i)
+  if (m) return `https://www.mp4upload.com/embed-${m[1]}.html`
+  return raw
+}
+
+export function parseEpisodeLinks(html) {
+  const decoded = String(html || '')
+    .replace(/\\u002F/gi, '/')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\"/g, '"')
+    .replace(/&amp;/g, '&')
+
+  const matchAllUnique = (regex, transform = (u) => u) => {
+    const out = new Set()
+    for (const m of decoded.matchAll(regex)) {
+      const cleaned = m[0].replace(/[),.;'"]+$/, '')
+      out.add(transform(cleaned))
+    }
+    return [...out]
+  }
+
+  const mega = matchAllUnique(/https?:\/\/[^\s"'<\\]*mega\.nz\/(?:file|embed)\/[^\s"'<\\]*/gi, normalizeMegaUrl)
+  const mediafire = matchAllUnique(/https?:\/\/[^\s"'<\\]*mediafire\.com\/file[^\s"'<\\]*/gi)
+  const fireload = matchAllUnique(/https?:\/\/[^\s"'<\\]*fireload\.com\/[a-z0-9]{8,}[^\s"'<\\]*/gi)
+  const fichier = matchAllUnique(/https?:\/\/[^\s"'<\\]*1fichier\.com\/\?[^\s"'<\\]*/gi)
+  const mp4upload = matchAllUnique(/https?:\/\/[^\s"'<\\]*mp4upload\.com\/(?:embed-)?[a-z0-9_-]{4,80}(?:\.html)?/gi, normalizeMp4UploadUrl)
+  const yourupload = matchAllUnique(/https?:\/\/[^\s"'<\\]*yourupload\.com\/(?:embed|watch)\/[^\s"'<\\]*/gi)
+
+  const known = new Set([...mega, ...mediafire, ...fireload, ...fichier, ...mp4upload, ...yourupload])
+  const otros = matchAllUnique(/https?:\/\/[^\s"'<\\]{10,}/gi)
+    .filter((u) => !u.includes(BASE) && !known.has(u) && /\.(mp4|mkv|avi|ts|m4v)(\?|$)/i.test(u))
+
+  return { mega, mediafire, fireload, fichier, mp4upload, yourupload, otros }
+}
+
+export function extractMediafireDirect(html, sourceUrl = '') {
+  const $ = cheerio.load(html)
+  const direct =
+    $('#downloadButton').attr('href') ||
+    html.match(/href=["'](https?:\/\/download\d+\.mediafire\.com[^"']+)["']/i)?.[1] ||
+    null
+  const name =
+    $('.promoDownloadName').first().attr('title') ||
+    $('.filename').first().text().trim() ||
+    sourceUrl.split('/').pop()?.split('?')[0] ||
+    'video.mp4'
+  return { direct, name: name.replace(/\s+/g, ' ').trim() }
+}
+
+export function extractFireloadDirect(html) {
+  let direct = null
+  let waitSeconds = 0
+  const flMatch = html.match(/window\.Fl\s*=\s*(\{[\s\S]*?\})/i)
+  if (flMatch) {
+    try {
+      const parsed = JSON.parse(flMatch[1])
+      direct = parsed.dlink || null
+      waitSeconds = Math.min(30, Math.max(0, Number(parsed.dwait) || 0))
+    } catch { }
+  }
+  if (!direct) {
+    direct =
+      html.match(/"dlink"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1]?.replace(/\\\//g, '/') ||
+      html.match(/href=["'](https?:\/\/[^"']*fireload\.com\/d\/[^"']+)["']/i)?.[1] ||
+      html.match(/file\s*:\s*["'](https?:\/\/[^"']+)["']/i)?.[1] ||
+      null
+  }
+  const titleName = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.replace(/\s*\|\s*Fireload.*$/i, '').trim()
+  return { direct, name: titleName || 'video.mp4', waitSeconds }
+}
+
+export function extractMp4UploadDirect(html) {
+  const source = String(html || '')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&')
+
+  const patterns = [
+    /https?:\/\/(?:[a-z]\d+|www\d{1,2})\.mp4upload\.com(?::\d+)?\/d\/[a-z0-9]{20,100}\/[^"'\s<>]+/i,
+    /(?:file|src|source|video_url)\s*[:=]\s*["'](https?:\/\/[^"']+\.mp4(?:\?[^"']*)?)["']/i,
+  ]
+  for (const re of patterns) {
+    const m = source.match(re)
+    const candidate = m?.[1] || m?.[0]
+    if (candidate && /\.mp4(?:[?#]|$)/i.test(candidate)) {
+      return { direct: candidate, name: 'video.mp4' }
+    }
+  }
+
+  const packed = source.match(/(?:^|[^a-z0-9])((?:www\d{1,2}|[a-z]\d+))\|[^|]{0,120}\|poster\|[a-z0-9]+\|(?:nivideo|video)\|([a-z0-9]{40,80})\|(\d{1,5})(?:[^0-9]|$)/i)
+  const heading = source.match(/<h2[^>]*>\s*Download\s+File\s+(.+?)\s*<\/h2>/i)
+  if (packed && heading) {
+    const filename = heading[1].replace(/<[^>]*>/g, '').trim()
+    const port = Number(packed[3])
+    if (port > 0 && port <= 65535 && filename && /^[a-z0-9._%+-]+$/i.test(filename)) {
+      return {
+        direct: `https://${packed[1].toLowerCase()}.mp4upload.com:${port}/d/${packed[2].toLowerCase()}/${filename}`,
+        name: filename,
+      }
+    }
+  }
+
+  return { direct: null, name: 'video.mp4' }
+}
+
+export function extractYourUploadDirect(html) {
+  const source = String(html || '')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&')
+
+  const patterns = [
+    /file\s*:\s*['"](https?:\/\/[^'"]+)['"]/i,
+    /sources?\s*:\s*\[\s*\{[^}]*src\s*:\s*['"](https?:\/\/[^'"]+)['"]/i,
+    /(?:src|source)\s*=\s*['"](https?:\/\/[^'"]+\.mp4(?:\?[^'"]*)?)['"]/i,
+  ]
+  for (const re of patterns) {
+    const m = source.match(re)
+    if (m?.[1] && !/novideo\.mp4/i.test(m[1])) return m[1]
+  }
+  return null
+}
+
+async function resolveMediafire(url, signal) {
+  const res = await httpFetch(url, { timeout: PAGE_TIMEOUT_MS, signal })
+  if (!res.ok) throw new Error(`MediaFire HTTP ${res.status}`)
+  const html = await res.text()
+  const { direct, name } = extractMediafireDirect(html, url)
+  if (!direct) throw new Error('No se encontró enlace directo en MediaFire')
+  return { direct, name, referer: 'https://www.mediafire.com/' }
+}
+
+async function resolveFireload(url, signal) {
+  const res = await httpFetch(url, { timeout: PAGE_TIMEOUT_MS, signal })
+  if (!res.ok) throw new Error(`FireLoad HTTP ${res.status}`)
+  const html = await res.text()
+  const { direct, name, waitSeconds } = extractFireloadDirect(html)
+  if (!direct) throw new Error('No se encontró enlace directo en FireLoad')
+  if (waitSeconds > 0) await sleep(waitSeconds * 1000, signal)
+  return { direct, name, referer: 'https://www.fireload.com/' }
+}
+
+async function resolveMp4Upload(url, signal) {
+  const id = url.match(/mp4upload\.com\/(?:embed-)?([a-z0-9_-]{4,80})/i)?.[1]
+  const candidates = id
+    ? [`https://www.mp4upload.com/embed-${id}.html`, `https://www.mp4upload.com/${id}`]
+    : [url]
+
+  let lastError = null
+  for (const candidate of candidates) {
+    try {
+      const res = await httpFetch(candidate, {
+        headers: { Referer: 'https://www.mp4upload.com/' },
+        timeout: PAGE_TIMEOUT_MS,
+        signal,
+      })
+      if (!res.ok) throw new Error(`MP4Upload HTTP ${res.status}`)
+      const html = await res.text()
+      const { direct, name } = extractMp4UploadDirect(html)
+      if (direct) return { direct, name, referer: 'https://www.mp4upload.com/' }
+    } catch (err) {
+      if (signal?.aborted) throw createAbortError()
+      lastError = err
+    }
+  }
+  throw lastError || new Error('No se encontró enlace directo en MP4Upload')
+}
+
+async function resolveYourUpload(url, signal) {
+  let pageUrl = url
+  let res = await httpFetch(pageUrl, {
+    headers: { Referer: 'https://www.yourupload.com/' },
+    timeout: PAGE_TIMEOUT_MS,
+    signal,
+  })
+  if (!res.ok) throw new Error(`YourUpload HTTP ${res.status}`)
+  let html = await res.text()
+
+  const iframeSrc = html.match(/<iframe\b[^>]*\bsrc=["']([^"']*yourupload\.com\/embed\/[^"']+)["']/i)?.[1]
+  if (iframeSrc) {
+    pageUrl = new URL(iframeSrc, pageUrl).href
+    res = await httpFetch(pageUrl, {
+      headers: { Referer: url },
+      timeout: PAGE_TIMEOUT_MS,
+      signal,
+    })
+    if (!res.ok) throw new Error(`YourUpload embed HTTP ${res.status}`)
+    html = await res.text()
+  }
+
+  const direct = extractYourUploadDirect(html)
+  if (!direct) throw new Error('No se encontró enlace MP4 en YourUpload')
+  return { direct, name: 'video.mp4', referer: pageUrl }
+}
+
+async function resolve1Fichier(url, signal) {
+  if (!ONEFICHIER_API_KEY) throw new Error('1Fichier sin ONEFICHIER_API_KEY configurada')
+  const res = await httpFetch('https://api.1fichier.com/v1/download/get_token.cgi', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ONEFICHIER_API_KEY}`,
+    },
+    body: JSON.stringify({ url, no_ssl: 0 }),
+    timeout: PAGE_TIMEOUT_MS,
+    signal,
+  })
+  const json = await res.json().catch(() => null)
+  if (json?.status !== 'OK' || !json?.url) {
+    throw new Error(json?.message || `1Fichier HTTP ${res.status}`)
+  }
+  return { direct: json.url, name: json.filename || 'video.mp4', referer: 'https://1fichier.com/' }
+}
+
+async function fetchSeriesBySlug(slug, signal) {
+  try {
+    const html = await fetchText(`${BASE}/media/${slug}`, { signal })
+    const info = parseSeriesInfo(html, slug)
+    if (!info.episodes.length && !info.cover && !/<h1\b/i.test(html)) return null
+    return info
+  } catch (err) {
+    if (err?.status === 404) return null
+    throw err
+  }
+}
+
+async function searchCatalog(query, signal) {
+  const html = await fetchText(`${BASE}/catalogo?search=${encodeURIComponent(query)}`, { signal })
+  return parseSearchResults(html)
+}
+
+async function searchHentaiLA(query, signal) {
+  const isSingleToken = !/\s/.test(query)
+  const triedSlugs = new Set()
+
+  if (isSingleToken) {
+    const directSlug = query.toLowerCase().replace(/[^a-z0-9-]/g, '')
+    if (directSlug.length > 1) {
+      triedSlugs.add(directSlug)
+      const directInfo = await fetchSeriesBySlug(directSlug, signal)
+      if (directInfo) return { exact: directInfo, results: [{ slug: directInfo.slug, title: directInfo.title }] }
+    }
+  }
+
+  const catalogResults = await searchCatalog(query, signal)
+  if (catalogResults.length > 0) {
+    const normalizedQuery = query.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+    const exactMatch = catalogResults.find((r) => r.slug === normalizedQuery)
+    if (exactMatch) {
+      const exactInfo = await fetchSeriesBySlug(exactMatch.slug, signal)
+      if (exactInfo) return { exact: exactInfo, results: [exactMatch] }
+    }
+    return { exact: null, results: catalogResults }
+  }
+
+  for (const slug of buildSlugVariations(query)) {
+    if (triedSlugs.has(slug)) continue
+    triedSlugs.add(slug)
+    const info = await fetchSeriesBySlug(slug, signal)
+    if (info) return { exact: info, results: [{ slug: info.slug, title: info.title }] }
+  }
+
+  return { exact: null, results: [] }
+}
+
+async function fetchLatestReleases(signal) {
+  const html = await fetchText(`${BASE}/`, { signal })
+  return parseLatestReleases(html, 10)
+}
+
+function createIdleWatchdog(onIdle) {
+  let lastActivity = Date.now()
+  const timer = setInterval(() => {
+    if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+      clearInterval(timer)
+      onIdle()
+    }
+  }, 5000)
+  timer.unref?.()
+  return {
+    ping() { lastActivity = Date.now() },
+    stop() { clearInterval(timer) },
+  }
+}
+
+function createProgressLogger(label, totalBytes) {
+  let downloaded = 0
+  let lastRender = 0
+  const startedAt = Date.now()
+
+  return {
+    add(bytes) {
+      downloaded += bytes
+      const now = Date.now()
+      if (now - lastRender < 1000) return
+      lastRender = now
+      const elapsed = Math.max((now - startedAt) / 1000, 0.001)
+      const speed = downloaded / elapsed
+      const pct = totalBytes > 0 ? `${Math.min(100, (downloaded / totalBytes) * 100).toFixed(1)}%` : '--%'
+      if (process.stdout.isTTY) {
+        process.stdout.write(`\r[${label}] ${pct} (${formatBytes(downloaded)}) | ${formatBytes(speed)}/s   `)
+      }
+    },
+    reset() { downloaded = 0 },
+    finish(extra = '') {
+      if (process.stdout.isTTY) process.stdout.write('\n')
+      console.log(`[HDL][${label}] Completo (${formatBytes(downloaded)})${extra ? ` ${extra}` : ''}`)
+    },
+  }
+}
+
+function validateMediaResponse(res, label) {
+  const ct = String(res.headers?.get?.('content-type') || '').toLowerCase()
+  if (/text\/html|application\/json|javascript/i.test(ct)) {
+    throw new Error(`${label} devolvió ${ct} en lugar de video`)
+  }
+}
+
+async function downloadParallelRanges(directUrl, tempPath, totalBytes, headers, progress, watchdog, signal) {
+  const chunkSize = Math.ceil(totalBytes / PARALLEL_THREADS)
+  const ranges = []
+  for (let i = 0; i < PARALLEL_THREADS; i++) {
+    const start = i * chunkSize
+    const end = Math.min(start + chunkSize - 1, totalBytes - 1)
+    if (start > end) break
+    ranges.push({ start, end })
+  }
+
+  const fh = await fsp.open(tempPath, 'w')
+  try {
+    await Promise.all(ranges.map(async ({ start, end }) => {
+      const res = await httpFetch(directUrl, {
+        headers: { ...headers, Range: `bytes=${start}-${end}` },
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        signal,
+      })
+      if (res.status !== 206) {
+        await cancelBodyQuietly(res)
+        throw new Error(`HTTP ${res.status} (se esperaba 206)`)
+      }
+      validateMediaResponse(res, 'Range')
+      const stream = toNodeReadable(res.body)
+      let pos = start
+      for await (const chunk of stream) {
+        if (signal?.aborted) {
+          stream.destroy()
+          throw createAbortError()
+        }
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        await fh.write(buf, 0, buf.length, pos)
+        pos += buf.length
+        watchdog.ping()
+        progress.add(buf.length)
+      }
+      const expectedLen = end - start + 1
+      if (pos - start !== expectedLen) {
+        throw new Error(`Bloque incompleto (${pos - start}/${expectedLen} bytes)`)
+      }
+    }))
+  } finally {
+    await fh.close()
+  }
+}
+
+async function downloadDirect(directUrl, fileName, tempPath, updateStatus, label, { referer, signal } = {}) {
+  const headers = {
+    Accept: '*/*',
+    ...(referer ? { Referer: referer } : {}),
+  }
+
+  let sizeBytes = 0
+  let supportsRanges = false
+  try {
+    const headRes = await httpFetch(directUrl, {
+      method: 'HEAD',
+      headers,
+      timeout: 12_000,
+      signal,
+    })
+    await cancelBodyQuietly(headRes)
+    if (headRes.ok) {
+      validateMediaResponse(headRes, label)
+      sizeBytes = Number(headRes.headers?.get?.('content-length') || 0) || 0
+      supportsRanges = /bytes/i.test(headRes.headers?.get?.('accept-ranges') || '')
+    }
+  } catch (err) {
+    if (signal?.aborted) throw createAbortError()
+    if (/devolvió .* en lugar de video/i.test(err.message)) throw err
+  }
+
+  if (sizeBytes > MAX_FILE_BYTES) {
+    throw new Error(`El archivo (${formatBytes(sizeBytes)}) supera el límite de 2 GB`)
+  }
+
+  const sizeLabel = sizeBytes > 0 ? formatBytes(sizeBytes) : '?'
+  await updateStatus(`📥 *${label}:* ${fileName}\n⚖️ *Peso:* ${sizeLabel}\n⏬ _Descargando..._`)
+
+  const attemptController = new AbortController()
+  const attemptSignal = combineSignal(signal, DOWNLOAD_TIMEOUT_MS)
+  const onParentAbort = () => attemptController.abort(createAbortError())
+  attemptSignal.addEventListener('abort', onParentAbort, { once: true })
+
+  const watchdog = createIdleWatchdog(() => attemptController.abort(new Error(`${label} sin datos por ${IDLE_TIMEOUT_MS / 1000}s`)))
+  const progress = createProgressLogger(label, sizeBytes)
+
+  try {
+    if (supportsRanges && sizeBytes >= MIN_PARALLEL_BYTES) {
+      try {
+        await downloadParallelRanges(directUrl, tempPath, sizeBytes, headers, progress, watchdog, attemptController.signal)
+        progress.finish(`(${PARALLEL_THREADS} hilos)`)
+        return
+      } catch (err) {
+        if (signal?.aborted) throw createAbortError()
+        await fsp.rm(tempPath, { force: true }).catch(() => {})
+        console.warn(`[HDL][${label}] Descarga paralela falló (${err.message}), probando modo secuencial...`)
+        progress.reset()
+      }
+    }
+
+    const res = await httpFetch(directUrl, {
+      headers,
+      timeout: DOWNLOAD_TIMEOUT_MS,
+      signal: attemptController.signal,
+    })
+    if (!res.ok) {
+      await cancelBodyQuietly(res)
+      throw new Error(`HTTP ${res.status}`)
+    }
+    validateMediaResponse(res, label)
+
+    const contentLength = Number(res.headers?.get?.('content-length') || 0) || 0
+    if (contentLength > MAX_FILE_BYTES) {
+      await cancelBodyQuietly(res)
+      throw new Error(`El archivo (${formatBytes(contentLength)}) supera el límite de 2 GB`)
+    }
+
+    let written = 0
+    const counter = new Transform({
+      transform(chunk, _enc, cb) {
+        written += chunk.length
+        if (written > MAX_FILE_BYTES) return cb(new Error('El archivo superó el límite de 2 GB'))
+        watchdog.ping()
+        progress.add(chunk.length)
+        cb(null, chunk)
+      },
+    })
+
+    await pipeline(toNodeReadable(res.body), counter, fs.createWriteStream(tempPath), { signal: attemptController.signal })
+    progress.finish()
+  } finally {
+    watchdog.stop()
+    attemptSignal.removeEventListener('abort', onParentAbort)
+  }
+}
+
+async function downloadMega(url, tempPath, fallbackName, updateStatus, signal) {
+  const file = MegaFile.fromURL(normalizeMegaUrl(url))
+  await file.loadAttributes()
+  if (signal?.aborted) throw createAbortError()
+
+  const fileName = file.name || fallbackName
+  const sizeBytes = Number(file.size) || 0
+  if (sizeBytes > MAX_FILE_BYTES) {
+    throw new Error(`El archivo en MEGA (${formatBytes(sizeBytes)}) supera el límite de 2 GB`)
+  }
+
+  await updateStatus(`📥 *MEGA:* ${fileName}\n⚖️ *Peso:* ${sizeBytes ? formatBytes(sizeBytes) : '?'}\n⏬ _Descargando..._`)
+
+  const fileStream = file.download({ maxConnections: MEGA_MAX_CONNECTIONS })
+  const progress = createProgressLogger('MEGA', sizeBytes)
+  const watchdog = createIdleWatchdog(() => fileStream.destroy(new Error('MEGA sin respuesta')))
+  const onAbort = () => fileStream.destroy(createAbortError())
+  signal?.addEventListener('abort', onAbort, { once: true })
+
+  const counter = new Transform({
+    transform(chunk, _enc, cb) {
+      watchdog.ping()
+      progress.add(chunk.length)
+      cb(null, chunk)
+    },
+  })
+
+  try {
+    await pipeline(fileStream, counter, fs.createWriteStream(tempPath))
+    progress.finish()
+  } finally {
+    watchdog.stop()
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+function pruneExpiredSessions() {
+  const now = Date.now()
+  for (const [key, session] of sessions) {
+    if (session.expiry <= now) sessions.delete(key)
+  }
+}
+
+async function sendInteractiveList(conn, chat, m, { title, description, button, section, rows, coverUrl = null }) {
+  pruneExpiredSessions()
+  const sessionKey = `${chat}|${m.sender}`
+  const session = {
+    owner: m.sender,
+    chat,
+    rows,
+    msgId: null,
+    expiry: Date.now() + SESSION_TTL_MS,
+  }
+  sessions.set(sessionKey, session)
+
+  let device = 'android'
+  try { device = getDevice(m?.key?.id) } catch { }
+  const isMobile = device !== 'desktop' && device !== 'web'
+
+  if (isMobile) {
+    try {
+      let header = { title, hasMediaAttachment: false }
+      if (coverUrl) {
+        try {
+          const imgBuf = await fetchBuffer(coverUrl)
+          const media = await prepareWAMessageMedia({ image: imgBuf }, { upload: conn.waUploadToServer })
+          header = { title, hasMediaAttachment: true, imageMessage: media.imageMessage }
+        } catch { }
+      }
+
+      const interactiveMessage = {
+        body: { text: description },
+        footer: { text: global.wm || 'HentaiLA' },
+        header,
+        nativeFlowMessage: {
+          buttons: [{
+            name: 'single_select',
+            buttonParamsJson: JSON.stringify({
+              title: button,
+              sections: [{
+                title: section,
+                highlight_label: '',
+                rows: rows.map((r) => ({
+                  header: r.title,
+                  title: r.subtitle || r.title,
+                  description: r.description || '',
+                  id: r.rowId,
+                })),
+              }],
+            }),
+          }],
+          messageParamsJson: '',
+        },
+      }
+
+      const msg = generateWAMessageFromContent(
+        chat,
+        { viewOnceMessage: { message: { interactiveMessage } } },
+        { userJid: conn.user.jid, quoted: m },
+      )
+      await conn.relayMessage(chat, msg.message, { messageId: msg.key.id })
+      session.msgId = msg.key?.id || null
+      return msg
+    } catch (err) {
+      console.error('[HDL] Error en lista interactiva:', err.message)
+    }
+  }
+
+  let txt = `✨ *${title}*\n_${description}_\n\n`
+  rows.forEach((r, i) => {
+    txt += `*${i + 1}.* ${r.title}`
+    if (r.description) txt += ` _(${r.description})_`
+    txt += '\n'
+  })
+  txt += '\n_Responde con el número para elegir._'
+  const sent = await conn.sendMessage(chat, { text: txt }, { quoted: m })
+  session.msgId = sent?.key?.id || null
+  return sent
+}
+
+async function sendCover(m, conn, info, extra = '', signal) {
+  const { title, cover, desc, episodes, generos } = info
+  const totalEps = episodes.length
+  const lastEp = episodes[totalEps - 1] || '?'
+  const rango = totalEps === 1 ? 'Episodio 1' : `Episodios 1–${lastEp}`
+  const tags = generos.length > 0 ? generos.slice(0, 6).join(' • ') : 'N/A'
+
+  const caption =
+    `🔞 *${title}*\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `📖 ${desc}\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🎬 *Episodios:* ${totalEps > 0 ? `${totalEps} (${rango})` : '?'}\n` +
+    `🏷️ *Géneros:* ${tags}\n` +
+    (extra ? `━━━━━━━━━━━━━━━━━━━━\n${extra}` : '')
+
+  if (cover) {
+    try {
+      const imgBuf = await fetchBuffer(cover, signal)
+      await conn.sendMessage(m.chat, { image: imgBuf, caption, mimetype: 'image/jpeg' }, { quoted: m })
+      return
+    } catch { }
+  }
+  await conn.sendMessage(m.chat, { text: caption }, { quoted: m })
+}
+
+function buildServerQueue(links) {
+  return [
+    ...links.mediafire.map((url) => ({ tipo: 'mediafire', label: 'MediaFire', url })),
+    ...links.fireload.map((url) => ({ tipo: 'fireload', label: 'FireLoad', url })),
+    ...links.mp4upload.map((url) => ({ tipo: 'mp4upload', label: 'MP4Upload', url })),
+    ...links.yourupload.map((url) => ({ tipo: 'yourupload', label: 'YourUpload', url })),
+    ...(ONEFICHIER_API_KEY ? links.fichier.map((url) => ({ tipo: '1fichier', label: '1Fichier', url })) : []),
+    ...links.otros.map((url) => ({ tipo: 'directo', label: 'Directo', url })),
+    ...links.mega.map((url) => ({ tipo: 'mega', label: 'MEGA', url })),
+  ]
+}
+
+async function downloadAndSend(m, conn, mediaUrl, info, episode, updateStatus, signal) {
+  let html
+  try {
+    html = await fetchText(mediaUrl, { signal })
+  } catch (err) {
+    if (err?.status === 404) {
+      const avail = info.episodes.length ? ` (disponibles: 1–${info.episodes.at(-1)})` : ''
+      return updateStatus(`❌ El episodio *${episode}* de *${info.title}* no existe${avail}.`)
+    }
+    throw err
+  }
+
+  const links = parseEpisodeLinks(html)
+  const servers = buildServerQueue(links)
+  if (!servers.length) {
+    return updateStatus(`❌ No se encontraron servidores de descarga.\n🔗 ${mediaUrl}`)
+  }
+
+  let tempPath = null
+  let success = false
+
+  for (const srv of servers) {
+    if (signal?.aborted) throw createAbortError()
+    const baseName = sanitizeFilename(`${info.title} - Ep ${episode}.mp4`)
+    tempPath = path.join(os.tmpdir(), `hdl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`)
+
+    try {
+      await updateStatus(`🔄 *Probando ${srv.label}...*\n⏳ Ep. ${episode} de *${info.title}*`)
+
+      if (srv.tipo === 'mega') {
+        await downloadMega(srv.url, tempPath, baseName, updateStatus, signal)
+      } else if (srv.tipo === 'directo') {
+        await downloadDirect(srv.url, baseName, tempPath, updateStatus, srv.label, { signal })
+      } else {
+        const resolver = {
+          mediafire: resolveMediafire,
+          fireload: resolveFireload,
+          mp4upload: resolveMp4Upload,
+          yourupload: resolveYourUpload,
+          '1fichier': resolve1Fichier,
+        }[srv.tipo]
+        const resolved = await resolver(srv.url, signal)
+        await downloadDirect(
+          resolved.direct,
+          sanitizeFilename(resolved.name || baseName),
+          tempPath,
+          updateStatus,
+          srv.label,
+          { referer: resolved.referer, signal },
+        )
+      }
+
+      const stats = await fsp.stat(tempPath)
+      if (stats.size < MIN_VALID_BYTES) {
+        throw new Error(`Archivo incompleto (${formatBytes(stats.size)})`)
+      }
+
+      success = true
+      break
+    } catch (err) {
+      await fsp.rm(tempPath, { force: true }).catch(() => {})
+      tempPath = null
+      if (signal?.aborted) throw createAbortError()
+      console.warn(`[HDL][${srv.label}] Falló: ${err.message}`)
+      await updateStatus(`⚠️ *${srv.label} falló*, probando siguiente servidor...`)
+    }
+  }
+
+  if (!success || !tempPath) {
+    return updateStatus(`❌ Todos los servidores fallaron para el ep. ${episode} de *${info.title}*.\n🔗 ${mediaUrl}`)
+  }
+
+  try {
+    if (signal?.aborted) throw createAbortError()
+    await updateStatus('✅ *Descarga completa!*\n📤 _Enviando a WhatsApp..._')
+
+    const stats = await fsp.stat(tempPath)
+    const epNum = String(episode).padStart(2, '0')
+    const finalName = `${epNum} ${sanitizeFilename(info.title, info.slug)}.mp4`
+
+    await conn.sendMessage(m.chat, {
+      document: { url: tempPath },
+      fileName: finalName,
+      mimetype: 'video/mp4',
+      caption:
+        `🔞 *${info.title}* — Ep. ${episode}\n` +
+        `📁 ${finalName}\n` +
+        `⚖️ ${formatBytes(stats.size)}\n` +
+        '🌐 HentaiLA',
+    }, { quoted: m })
+
+    await updateStatus(`✅ *¡Enviado!* 🔞 ${info.title} — Ep. ${episode}`)
+  } finally {
+    await fsp.rm(tempPath, { force: true }).catch(() => {})
+  }
+}
+
+async function runEpisodeFlow(m, conn, info, episode, updateStatus) {
+  const userKey = downloadKey(m)
+  if (hasDownload(userKey, SERVICE)) {
+    return updateStatus('⚠️ Ya tienes una descarga de HentaiLA en curso. Usa *.cancelar* para detenerla.')
+  }
+
+  const controller = new AbortController()
+  const release = startDownload(userKey, SERVICE, controller, {
+    label: `HentaiLA · ${info.title} Ep. ${episode}`,
+  })
+
+  try {
+    await updateStatus(`🖼️ _Cargando portada de *${info.title}*..._`)
+    await sendCover(m, conn, info, `📥 Preparando episodio *${episode}*...`, controller.signal)
+    await updateStatus(`⬇️ *Descargando:* ${info.title} — Ep. ${episode}\n_Usa .cancelar si deseas detenerla._`)
+
+    const epUrl = `${BASE}/media/${info.slug}/${episode}`
+    await downloadAndSend(m, conn, epUrl, info, episode, updateStatus, controller.signal)
+  } finally {
+    release()
+  }
+}
+
+function createStatusUpdater(conn, m, statusKey) {
+  return async (txt) => {
+    try {
+      if (statusKey) await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
+      else await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
+    } catch {
+      await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
+    }
+  }
+}
+
+const handler = async (m, { conn, text, usedPrefix, command }) => {
+  const isLatest = /hlatest|hentailatest/i.test(command)
+
+  if (!text && !isLatest) {
+    return m.reply(
+      `🔞 *Uso:* ${usedPrefix}${command} <nombre|url> [episodio]\n\n` +
+      `*Ejemplos:*\n` +
+      `• ${usedPrefix}${command} overflow 1\n` +
+      `• ${usedPrefix}${command} ${BASE}/media/overflow/1\n\n` +
+      `💡 Usa \`${usedPrefix}hlatest\` para ver lo más nuevo.`,
+    )
+  }
+
+  let statusKey = null
+  try {
+    const sent = await conn.sendMessage(m.chat, { text: '🔍 _Buscando en HentaiLA..._' }, { quoted: m })
+    statusKey = sent?.key || null
+  } catch {
+    const sent = await m.reply('🔍 _Buscando en HentaiLA..._')
+    statusKey = sent?.key || null
+  }
+  const updateStatus = createStatusUpdater(conn, m, statusKey)
+
+  try {
+    if (isLatest) {
+      const latest = await fetchLatestReleases()
+      if (!latest.length) {
+        return updateStatus('❌ No se pudieron obtener los últimos lanzamientos.')
+      }
+
+      const rows = latest.map((item) => ({
+        rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`,
+        title: item.title,
+        description: `Ep. ${item.episode}`,
+      }))
+      await sendInteractiveList(conn, m.chat, m, {
+        title: '🔞 Últimos lanzamientos en HentaiLA',
+        description: 'Elige un título para ver portada y descargar:',
+        button: '📋 Ver lanzamientos',
+        section: 'Recién subidos',
+        rows,
+      })
+      await updateStatus(`✅ _${latest.length} lanzamientos disponibles. Elige uno._`)
+      return
+    }
+
+    const { slug, episode, query } = parseHentaiInput(text)
+    let info = null
+
+    if (slug) {
+      info = await fetchSeriesBySlug(slug)
+      if (!info) return updateStatus(`❌ No se encontró la serie *${slug}* en HentaiLA.`)
+    } else {
+      await updateStatus(`🔎 _Buscando "${query}"..._`)
+      const { exact, results } = await searchHentaiLA(query)
+
+      if (exact) {
+        info = exact
+      } else if (!results.length) {
+        return updateStatus(
+          `❌ No se encontraron resultados para *"${query}"*.\n\n` +
+          `💡 Prueba con el título en inglés o romaji.\n` +
+          `Ej: \`${usedPrefix}hdl overflow 1\``,
+        )
+      } else if (results.length === 1) {
+        await updateStatus('✅ _Encontrado! Cargando info..._')
+        info = await fetchSeriesBySlug(results[0].slug)
+        if (!info) return updateStatus(`❌ No se pudo cargar la info de *${results[0].title}*.`)
+      } else {
+        const top = results.slice(0, 10)
+        const rows = top.map((r) => ({
+          rowId: episode ? `${usedPrefix}hdl ${r.slug} ${episode}` : `${usedPrefix}hdl ${r.slug}`,
+          title: r.title,
+        }))
+        await sendInteractiveList(conn, m.chat, m, {
+          title: `🔞 Resultados para: "${query}"`,
+          description: `Se encontraron ${top.length} títulos. Elige uno:`,
+          button: '📋 Ver opciones',
+          section: 'Títulos disponibles',
+          rows,
+        })
+        await updateStatus(`🔎 _${top.length} resultados. Elige un título._`)
+        return
+      }
+    }
+
+    if (!episode) {
+      const epList = info.episodes.length > 0 ? info.episodes.slice(0, 25) : [1, 2, 3]
+      const rows = epList.map((ep) => ({
+        rowId: `${usedPrefix}hdl ${info.slug} ${ep}`,
+        title: `Episodio ${ep}`,
+      }))
+      const epsSummary = info.episodes.length > 0
+        ? `${info.episodes.length} (${info.episodes.length === 1 ? 'Ep. 1' : `Eps 1–${info.episodes.at(-1)}`})`
+        : '?'
+      const genresSummary = info.generos.length > 0 ? info.generos.slice(0, 4).join(' · ') : 'N/A'
+
+      await sendInteractiveList(conn, m.chat, m, {
+        title: `🎬 ${info.title}`,
+        description: `${info.desc}\n\n🎬 *Eps:* ${epsSummary}\n🏷️ *Géneros:* ${genresSummary}`,
+        button: '📺 Elegir episodio',
+        section: 'Episodios disponibles',
+        rows,
+        coverUrl: info.cover,
+      })
+      await updateStatus(`💬 Elige un episodio de *${info.title}*`)
+      return
+    }
+
+    await runEpisodeFlow(m, conn, info, episode, updateStatus)
+  } catch (err) {
+    if (isAbortError(err)) {
+      await updateStatus('⏹️ *Descarga cancelada.*')
+      return
+    }
+    console.error('[HDL]', err.message)
+    await updateStatus(`❌ *Error:* ${err.message}`)
+  }
+}
+
+async function dispatchSelection(conn, m, rowId) {
+  const usedPrefix = rowId[0]
+  const [command, ...argParts] = rowId.slice(1).trim().split(/\s+/)
+  const text = argParts.join(' ')
+  try {
+    await handler.call(conn, m, { conn, text, usedPrefix, command })
+  } catch (err) {
+    console.error('[HDL before] Error ejecutando selección:', err.message)
+  }
 }
 
 handler.before = async function (m, { conn }) {
-    // ── Respuesta de interactiveMessage (nativeFlow single_select) ──────────
-    const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
-    if (nativeFlow) {
-        try {
-            const params = JSON.parse(nativeFlow.paramsJson || '{}')
-            const selectedId = params?.id || null
-            if (selectedId) {
-                const sessionKey = `${m.chat}|${m.sender}`
-                const session = global.hdlSessions?.[sessionKey]
+  pruneExpiredSessions()
+  const sessionKey = `${m.chat}|${m.sender}`
+  const session = sessions.get(sessionKey)
 
-                if (!session || session.owner !== m.sender || Date.now() > session.expiry) {
-                    console.log(`[HDL] Botón ignorado: no es el dueño de la sesión`)
-                    return true
-                }
+  const nativeFlow = m.message?.interactiveResponseMessage?.nativeFlowResponseMessage
+  if (nativeFlow) {
+    let selectedId = null
+    try {
+      selectedId = JSON.parse(nativeFlow.paramsJson || '{}')?.id || null
+    } catch { }
+    if (!selectedId || !COMMAND_PREFIX_RE.test(selectedId)) return false
+    if (!session || session.owner !== m.sender) return true
+    if (!session.rows.some((r) => r.rowId === selectedId)) return false
 
-                delete global.hdlSessions[sessionKey]
+    sessions.delete(sessionKey)
+    await dispatchSelection(conn, m, selectedId)
+    return true
+  }
 
-                const usedPrefix = selectedId[0]
-                const [command, ...argParts] = selectedId.slice(1).trim().split(' ')
-                const text = argParts.join(' ')
-                try {
-                    await handler.call(conn, m, { conn, text, usedPrefix, command })
-                } catch (e) {
-                    console.error('[HDL before] Error ejecutando handler:', e.message)
-                }
-                return true
-            }
-        } catch (_) { }
-        return false
+  if (!session || session.owner !== m.sender) return false
+
+  const listRowId = m.message?.listResponseMessage?.singleSelectReply?.selectedRowId
+  if (listRowId && session.rows.some((r) => r.rowId === listRowId)) {
+    sessions.delete(sessionKey)
+    await dispatchSelection(conn, m, listRowId)
+    return true
+  }
+
+  const rawText = String(m.text || '').trim()
+  if (!/^\d+$/.test(rawText)) return false
+
+  const quotedId = m.quoted?.key?.id || m.quoted?.id || null
+  if (quotedId && session.msgId && quotedId !== session.msgId) return false
+
+  const index = Number(rawText) - 1
+  if (index < 0 || index >= session.rows.length) {
+    if (quotedId && quotedId === session.msgId) {
+      await conn.sendMessage(m.chat, { text: `❌ Número inválido. Elige entre 1 y ${session.rows.length}.` }, { quoted: m })
+      return true
     }
-
-    // ── Fallback: listResponseMessage o texto numérico ───────────────────────
-    let rawInput = null
-    const listResp = m.message?.listResponseMessage
-    if (listResp) rawInput = listResp.singleSelectReply?.selectedRowId || null
-    if (!rawInput) {
-        if (!m.text || !/^\d+$/.test(m.text.trim())) return false
-        rawInput = m.text.trim()
-    }
-    if (!/^\d+$/.test(rawInput)) return false
-
-    const sel = global.hentaiSelection?.[m.sender]
-    if (!sel) return false
-
-    const input = parseInt(rawInput)
-    const quotedText = m.quoted
-        ? (m.quoted.text || m.quoted.body || m.quoted.caption || m.quoted.message?.conversation || '')
-        : ''
-
-    const esListaTitulos = /n.mero para ver portada|Últimos lanzamientos|Resultados para|n.mero del t.tulo/i.test(quotedText)
-    const esListaEpisodios = /n.mero de episodio/i.test(quotedText)
-
-    if (m.quoted && !esListaTitulos && !esListaEpisodios) {
-        const quotedId = m.quoted?.key?.id || m.quoted?.id
-        const esMsgGuardado = quotedId && sel.msgId && quotedId === sel.msgId
-        if (!esMsgGuardado) return false
-    }
-
-    if (sel.type === 'selectTitle' || sel.type === 'latest') {
-        const index = input - 1
-        if (index < 0 || index >= sel.results.length) {
-            await conn.sendMessage(m.chat, { text: `❌ Número inválido. Elige entre 1 y ${sel.results.length}.` }, { quoted: m })
-            return true
-        }
-        delete global.hentaiSelection[m.sender]
-
-        const item = sel.results[index]
-        const episodio = item.episode || sel.episodio || null
-
-        let statusKey
-        try {
-            const sent = await conn.sendMessage(m.chat, { text: `✅ _Cargando info de *${item.title || item.slug}*..._` }, { quoted: m })
-            statusKey = sent.key
-        } catch (_) { statusKey = null }
-
-        const updateStatus = async txt => {
-            try {
-                if (statusKey) await conn.sendMessage(m.chat, { text: txt, edit: statusKey })
-                else await conn.sendMessage(m.chat, { text: txt }, { quoted: m })
-            } catch (_) { await conn.sendMessage(m.chat, { text: txt }, { quoted: m }) }
-        }
-
-        const info = await obtenerInfoSerie(item.slug).catch(() => null)
-        if (!info) return updateStatus(`❌ No se pudo cargar la info de *${item.slug}*.`)
-
-        if (!episodio) {
-            const pfx = global.prefix || '.'
-            const epList = info.episodes.length > 0 ? info.episodes.slice(0, 20) : [1, 2, 3]
-            const filasEp = epList.map(ep => ({
-                rowId: `${pfx}hdl ${info.slug} ${ep}`,
-                title: `Episodio ${ep}`,
-            }))
-            await enviarListaWA(
-                conn, m.chat, m,
-                `🎬 ${info.title}`,
-                `${info.desc}\n\n🎬 *Eps:* ${info.episodes.length > 0 ? info.episodes.length + ' (' + (info.episodes.length === 1 ? 'Episodio 1' : 'Eps 1-' + info.episodes[info.episodes.length - 1]) + ')' : '?'}\n🏷️ *Géneros:* ${info.generos.length > 0 ? info.generos.slice(0, 4).join(' · ') : 'N/A'}`,
-                '📺 Elegir episodio',
-                'Episodios disponibles',
-                filasEp,
-                info.cover || null
-            )
-            await updateStatus(`💬 Elige un episodio de *${info.title}*`)
-        } else {
-            await flujoCompleto(m, conn, info, episodio, statusKey)
-        }
-        return true
-    }
-
-    if (sel.type === 'selectEp') {
-        const episodio = rawInput
-        const { slug, title } = sel
-        delete global.hentaiSelection[m.sender]
-
-        let statusKey
-        try {
-            const sent = await conn.sendMessage(m.chat, { text: `⬇️ _Descargando episodio *${episodio}* de *${title}*..._` }, { quoted: m })
-            statusKey = sent.key
-        } catch (_) { statusKey = null }
-
-        const info = await obtenerInfoSerie(slug).catch(() => ({
-            slug, title, cover: null, desc: '', episodes: [], generos: []
-        }))
-        await flujoCompleto(m, conn, info, episodio, statusKey)
-        return true
-    }
-
     return false
+  }
+
+  const chosen = session.rows[index]
+  sessions.delete(sessionKey)
+  await dispatchSelection(conn, m, chosen.rowId)
+  return true
 }
 
-handler.help = ['hdl <nombre> <episodio>']
+handler.help = ['hdl <nombre|url> [episodio]', 'hlatest']
 handler.tags = ['nsfw']
 handler.command = /^(hdl|hentaidl|hlatest|hentailatest)$/i
 
