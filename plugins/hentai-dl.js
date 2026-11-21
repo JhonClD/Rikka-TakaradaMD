@@ -27,7 +27,7 @@ const WREQ_BROWSER = 'chrome_142'
 const IMPIT_BROWSER = 'chrome142'
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
 const BASE_HEADERS = { 'Accept-Language': 'es-419,es;q=0.9,en-US;q=0.8,en;q=0.7' }
-const FFMPEG_BIN = ffmpegStatic || 'ffmpeg'
+const FFMPEG_BIN = (ffmpegStatic && fs.existsSync(ffmpegStatic)) ? ffmpegStatic : (process.env.FFMPEG_PATH || 'ffmpeg')
 const VOE_MIRRORS = [
   'susanexpectcare.com',
   'kathyinformationwhether.com',
@@ -368,26 +368,40 @@ async function fetchBuffer(url, signal) {
 
 function parseHentaiInput(rawText) {
   const trimmed = String(rawText || '').trim()
-  const urlMatch = trimmed.match(/https?:\/\/(?:www\.)?hentaila\.com\/media\/([^/?#\s]+)(?:\/(\d+))?/i)
+  const urlMatch = trimmed.match(/https?:\/\/(?:www\.)?hentaila\.com\/media\/([^/?#\s]+)(?:\/(\d+))?(?:\s+(all))?/i)
   if (urlMatch) {
     const slug = decodeURIComponent(urlMatch[1]).toLowerCase()
     const ep = urlMatch[2] || null
-    return { slug, episode: ep, query: slug.replace(/-/g, ' ') }
+    const all = !ep && Boolean(urlMatch[3])
+    return { slug, episode: ep, all, query: slug.replace(/-/g, ' ') }
   }
 
   let query = trimmed
   let episode = null
-  const epMatch = query.match(/(?:\s+(?:(?:ep(?:isodio)?|cap(?:[ií]tulo)?)\.?|#)\s*|\s+)(\d+)\s*$/i)
-  if (epMatch) {
-    const candidateQuery = query.slice(0, epMatch.index).trim()
+  let all = false
+
+  const allMatch = query.match(/\s+all\s*$/i)
+  if (allMatch) {
+    const candidateQuery = query.slice(0, allMatch.index).trim()
     if (candidateQuery) {
-      episode = epMatch[1]
+      all = true
       query = candidateQuery
     }
   }
 
+  if (!all) {
+    const epMatch = query.match(/(?:\s+(?:(?:ep(?:isodio)?|cap(?:[ií]tulo)?)\.?|#)\s*|\s+)(\d+)\s*$/i)
+    if (epMatch) {
+      const candidateQuery = query.slice(0, epMatch.index).trim()
+      if (candidateQuery) {
+        episode = epMatch[1]
+        query = candidateQuery
+      }
+    }
+  }
+
   const cleanQuery = query.replace(/[?!¡¿]/g, '').replace(/\s+/g, ' ').trim()
-  return { slug: null, episode, query: cleanQuery }
+  return { slug: null, episode, all, query: cleanQuery }
 }
 
 function buildSlugVariations(query) {
@@ -1759,10 +1773,15 @@ function buildServerQueue(links) {
   ]
 }
 
-async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal) {
+async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal, { batchMode = false } = {}) {
   const replyError = async (text) => {
+    if (batchMode) {
+      console.warn(`[HDL] ${text}`)
+      return false
+    }
     await react('❌')
     await conn.sendMessage(m.chat, { text }, { quoted: m })
+    return false
   }
 
   let html
@@ -1885,7 +1904,8 @@ async function downloadAndSend(m, conn, mediaUrl, info, episode, react, signal) 
       ...(jpegThumbnail ? { jpegThumbnail } : {}),
     }, { quoted: m })
 
-    await react('✅')
+    if (!batchMode) await react('✅')
+    return true
   } finally {
     await fsp.rm(tempPath, { force: true }).catch(() => {})
   }
@@ -1915,16 +1935,122 @@ async function runEpisodeFlow(m, conn, info, episode, react) {
   }
 }
 
-const handler = async (m, { conn, text, usedPrefix, command, participants = [], existingKey = null }) => {
+async function runAllEpisodesFlow(m, conn, info, react) {
+  const userKey = downloadKey(m)
+  if (hasDownload(userKey, SERVICE)) {
+    await react('⚠️')
+    return conn.sendMessage(
+      m.chat,
+      { text: '⚠️ Ya tienes una descarga de HentaiLA en curso. Usa *.cancelar* para detenerla.' },
+      { quoted: m },
+    )
+  }
+
+  const episodes = [...info.episodes]
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b)
+
+  if (!episodes.length) {
+    await react('❌')
+    return conn.sendMessage(
+      m.chat,
+      { text: `❌ No se encontraron episodios disponibles para *${info.title}*.` },
+      { quoted: m },
+    )
+  }
+
+  const controller = new AbortController()
+  const release = startDownload(userKey, SERVICE, controller, {
+    label: `HentaiLA · ${info.title} (${episodes.length} eps)`,
+  })
+
+  try {
+    if (info.cover) {
+      try {
+        const coverBuf = await fetchBuffer(info.cover, controller.signal)
+        if (coverBuf?.length) {
+          await conn.sendMessage(
+            m.chat,
+            { image: coverBuf, mimetype: 'image/jpeg' },
+            { quoted: m },
+          )
+          await sleep(800, controller.signal)
+        }
+      } catch (err) {
+        if (controller.signal.aborted) throw createAbortError()
+        console.warn(`[HDL] No se pudo enviar portada de ${info.title}: ${err.message}`)
+      }
+    }
+
+    let sentCount = 0
+    const failed = []
+
+    for (let i = 0; i < episodes.length; i++) {
+      if (controller.signal.aborted) throw createAbortError()
+      const ep = episodes[i]
+      const epUrl = `${BASE}/media/${info.slug}/${ep}`
+      try {
+        const ok = await downloadAndSend(m, conn, epUrl, info, ep, react, controller.signal, { batchMode: true })
+        if (ok) {
+          sentCount++
+          if (i < episodes.length - 1) await sleep(800, controller.signal)
+        } else {
+          failed.push(ep)
+        }
+      } catch (err) {
+        if (controller.signal.aborted || isAbortError(err)) throw createAbortError()
+        console.warn(`[HDL] Ep. ${ep} de ${info.title} falló: ${err.message}`)
+        failed.push(ep)
+      }
+    }
+
+    if (sentCount === 0) {
+      await react('❌')
+      await conn.sendMessage(
+        m.chat,
+        { text: `❌ No se pudo descargar ningún episodio de *${info.title}*.` },
+        { quoted: m },
+      )
+      return
+    }
+
+    if (failed.length > 0) {
+      await react('⚠️')
+      await conn.sendMessage(
+        m.chat,
+        { text: `⚠️ *${info.title}*: enviados ${sentCount}/${episodes.length}. Fallaron los episodios: ${failed.join(', ')}.` },
+        { quoted: m },
+      )
+      return
+    }
+
+    await react('✅')
+  } finally {
+    release()
+  }
+}
+
+const handler = async (m, { conn, text, usedPrefix, command, participants = [], existingKey = null, isOwner = false, isROwner = false }) => {
   const isLatest = /hlatest|hentailatest/i.test(command)
 
   if (!text && !isLatest) {
     return m.reply(
-      `🔞 *Uso:* ${usedPrefix}${command} <nombre|url> [episodio]\n\n` +
+      `🔞 *Uso:* ${usedPrefix}${command} <nombre|url> [episodio|all]\n\n` +
       `*Ejemplos:*\n` +
       `• ${usedPrefix}${command} overflow 1\n` +
+      `• ${usedPrefix}${command} nikuen all _(solo owner)_\n` +
       `• ${usedPrefix}${command} ${BASE}/media/overflow/1\n\n` +
       `💡 Usa \`${usedPrefix}hlatest\` para ver lo más nuevo.`,
+    )
+  }
+
+  const parsed = isLatest ? null : parseHentaiInput(text)
+  const ownerAuthorized = Boolean(isOwner || isROwner || m?.fromMe)
+  if (parsed?.all && !ownerAuthorized) {
+    return conn.sendMessage(
+      m.chat,
+      { text: '🔒 La descarga completa (*all*) es de uso exclusivo del owner.' },
+      { quoted: m },
     )
   }
 
@@ -1947,7 +2073,7 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
       return
     }
 
-    const { slug, episode, query } = parseHentaiInput(text)
+    const { slug, episode, all, query } = parsed
     let info = null
 
     if (slug) {
@@ -1970,7 +2096,11 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
       } else {
         const top = results.slice(0, 10)
         const rows = top.map((r) => ({
-          rowId: episode ? `${usedPrefix}hdl ${r.slug} ${episode}` : `${usedPrefix}hdl ${r.slug}`,
+          rowId: all
+            ? `${usedPrefix}hdl ${r.slug} all`
+            : episode
+              ? `${usedPrefix}hdl ${r.slug} ${episode}`
+              : `${usedPrefix}hdl ${r.slug}`,
           title: r.title,
         }))
         await sendInteractiveList(conn, m.chat, m, {
@@ -1985,6 +2115,11 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
         await react('✅')
         return
       }
+    }
+
+    if (all) {
+      await runAllEpisodesFlow(m, conn, info, react)
+      return
     }
 
     if (!episode) {
@@ -2049,18 +2184,18 @@ async function warnOnce(warnedSet, actorKey, conn, m, text) {
   } catch { }
 }
 
-async function dispatchSelection(conn, m, rowId, { participants = [], existingKey = null } = {}) {
+async function dispatchSelection(conn, m, rowId, { participants = [], existingKey = null, isOwner = false, isROwner = false } = {}) {
   const usedPrefix = rowId[0]
   const [command, ...argParts] = rowId.slice(1).trim().split(/\s+/)
   const text = argParts.join(' ')
   try {
-    await handler.call(conn, m, { conn, text, usedPrefix, command, participants, existingKey })
+    await handler.call(conn, m, { conn, text, usedPrefix, command, participants, existingKey, isOwner, isROwner })
   } catch (err) {
     console.error('[HDL before] Error ejecutando selección:', err.message)
   }
 }
 
-handler.before = async function (m, { conn, participants = [] }) {
+handler.before = async function (m, { conn, participants = [], isOwner = false, isROwner = false }) {
   pruneExpiredSessions()
 
   const selectedId = extractInteractiveId(m.message, m.text)
@@ -2102,6 +2237,8 @@ handler.before = async function (m, { conn, participants = [] }) {
     await dispatchSelection(conn, m, chosen.rowId, {
       participants,
       existingKey: null,
+      isOwner,
+      isROwner,
     })
     return true
   }
@@ -2153,7 +2290,7 @@ handler.before = async function (m, { conn, participants = [] }) {
   }
 
   const chosen = session.rows[index]
-  const isEpisodeChoice = /\s+\d+\s*$/.test(chosen.rowId)
+  const isEpisodeChoice = /\s+(?:\d+|all)\s*$/i.test(chosen.rowId)
   const reuseKey = !isEpisodeChoice ? session.listKey : null
   if (reuseKey) {
     clearSessionTimer(session)
@@ -2164,11 +2301,13 @@ handler.before = async function (m, { conn, participants = [] }) {
   await dispatchSelection(conn, m, chosen.rowId, {
     participants,
     existingKey: reuseKey,
+    isOwner,
+    isROwner,
   })
   return true
 }
 
-handler.help = ['hdl <nombre|url> [episodio]', 'hlatest']
+handler.help = ['hdl <nombre|url> [episodio|all]', 'hlatest']
 handler.tags = ['nsfw']
 handler.command = /^(hdl|hentaidl|hlatest|hentailatest)$/i
 
