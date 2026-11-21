@@ -203,11 +203,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   // ── Modo creación de sticker (.s, .scrop, .scircle, etc.) ───
   const { mode, remaining } = parseModeAndText(cmd, text);
-  const urlMatch = !mime ? remaining.match(URL_REGEX) : null;
-  const mediaUrl = urlMatch ? urlMatch[0].replace(/[),.!?;:'"\]}>]+$/g, '') : null;
-  const metaText = mediaUrl ? remaining.replace(urlMatch[0], '').trim() : remaining;
 
-  if (!mime && !mediaUrl) {
+  if (/^(list|lista|help|ayuda)$/i.test(remaining)) {
     return m.reply(
       `✦ *Stickers* ✦\n\n` +
         `▸ *Normal:* ${usedPrefix}s [pack | autor]\n` +
@@ -217,6 +214,14 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         `▸ *A imagen/video:* ${usedPrefix}toimg / ${usedPrefix}tovid\n\n` +
         `_Adjunta o responde a una imagen, video, GIF, sticker o pega un enlace directo._`,
     );
+  }
+
+  const urlMatch = !mime ? remaining.match(URL_REGEX) : null;
+  const mediaUrl = urlMatch ? urlMatch[0].replace(/[),.!?;:'"\]}>]+$/g, '') : null;
+  const metaText = mediaUrl ? remaining.replace(urlMatch[0], '').trim() : remaining;
+
+  if (!mime && !mediaUrl) {
+    return m.reply('✖ *Error:* Adjunta o cita una imagen/video/GIF.');
   }
 
   let mediaBuffer;
