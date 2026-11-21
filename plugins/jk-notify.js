@@ -2199,6 +2199,24 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply(`🔓 Cola desbloqueada${estaba ? ' (estaba trabada)' : ''}.`)
   }
 
+  if (command === 'jkservers') {
+    const candidate = String(text || '').trim().match(/https?:\/\/[^\s<>"']+/i)?.[0] || String(text || '').trim()
+    const episode = parseJkAnimeEpisodeUrl(candidate, `${JKANIME_URL}/`)
+    if (!episode) {
+      return m.reply(`❌ Envía una URL de episodio de JKAnime.\nEjemplo: *${usedPrefix}jkservers https://jkanime.net/kyoufu-collector/7/*`)
+    }
+    try {
+      const servers = ordenarServidores(await scrapeServidoresJK(episode.epUrl))
+      if (!servers.length) return m.reply('❌ No encontré servidores en ese episodio.')
+      const lines = servers.map((server, index) =>
+        `${index + 1}. *${server.nombre}* · ${server.kind}\n${server.url}`,
+      )
+      return m.reply(`🔗 *Servidores de ${episode.slug} · episodio ${episode.epNum}*\n\n${lines.join('\n\n')}`)
+    } catch (err) {
+      return m.reply(`❌ No pude leer los servidores de JKAnime:\n${String(err?.message || err).slice(0, 500)}`)
+    }
+  }
+
   if (command === 'jkcheck') {
     await m.reply('🔍 Chequeando JKAnime...')
     try {
@@ -2250,7 +2268,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   }
 }
 
-handler.command = /^(jkstart|jkstop|jkstatus|jkcheck|jkqueue|jkflush|jkunblock|jkinterval|jkexample)$/i
+handler.command = /^(jkstart|jkstop|jkstatus|jkcheck|jkqueue|jkflush|jkunblock|jkservers|jkinterval|jkexample)$/i
 handler.tags = ['anime', 'notificaciones']
 handler.help = [
   'jkstart [min]',
@@ -2260,6 +2278,7 @@ handler.help = [
   'jkqueue',
   'jkflush',
   'jkunblock',
+  'jkservers <URL>',
   'jkinterval <min>',
   'jkexample [N]',
 ]
@@ -2282,6 +2301,11 @@ if (IS_TEST_RUN) {
   })
 
   const pageUrl = 'https://jkanime.net/serie/12/'
+
+  test('registra jkservers para consultar enlaces de un episodio', () => {
+    assert.equal(handler.command.test('jkservers'), true)
+    assert.equal(handler.help.includes('jkservers <URL>'), true)
+  })
 
   test('extrae streams codificados, descarga remota e iframe de JKAnime', () => {
     const streamUrl = 'https://streamwish.to/e/episode-token'

@@ -13,6 +13,7 @@ import ffmpegStatic from 'ffmpeg-static'
 import { TEMP_VIDEOS_DIR } from '../src/funcion/paths.js'
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
 import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
+import { resolveJkAnimeEpisodeInput } from './lib/jkanime-episode-servers.js'
 
 const JKANIME_URL = String(process.env.JK_BASE_URL || 'https://jkanime.net').replace(/\/+$/, '')
 const JKANIME_HOST = (() => {
@@ -469,8 +470,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!input) {
     return m.reply(`Envía o responde a un enlace de Desu/Desuka.\nEjemplo: *${usedPrefix || '.'}${command || 'desu'} https://jkanime.net/jkplayer/um?e=...*`)
   }
+  let resolvedInput = input
+  try { resolvedInput = await resolveJkAnimeEpisodeInput(input, 'desu') }
+  catch (err) { return m.reply(`❌ ${err.message}`) }
   let parsed
-  try { parsed = parseDesuUrl(input) } catch (err) { return m.reply(`❌ ${err.message}`) }
+  try { parsed = parseDesuUrl(resolvedInput) } catch (err) { return m.reply(`❌ ${err.message}`) }
 
   const key = downloadKey(m)
   if (hasDownload(key, 'desu')) return m.reply('⏳ Ya tienes una descarga de Desu activa en este chat. Usa *.cancelar* para detenerla.')

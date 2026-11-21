@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises'
 import { TEMP_VIDEOS_DIR } from '../src/funcion/paths.js'
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
 import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
+import { resolveJkAnimeEpisodeInput } from './lib/jkanime-episode-servers.js'
 
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const PAGE_TIMEOUT_MS = 20_000
@@ -336,8 +337,11 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
   if (!input) {
     return m.reply(`Envía o responde a un enlace de StreamTape.\nEjemplo: *${usedPrefix || '.'}${command || 'streamtape'} https://streamtape.com/e/ID*`)
   }
+  let resolvedInput = input
+  try { resolvedInput = await resolveJkAnimeEpisodeInput(input, 'streamtape') }
+  catch (err) { return m.reply(`❌ ${err.message}`) }
   let parsed
-  try { parsed = parseStreamTapeUrl(input) } catch (err) { return m.reply(`❌ ${err.message}`) }
+  try { parsed = parseStreamTapeUrl(resolvedInput) } catch (err) { return m.reply(`❌ ${err.message}`) }
 
   const key = downloadKey(m)
   if (hasDownload(key, 'streamtape')) return m.reply('⏳ Ya tienes una descarga de StreamTape activa en este chat. Usa *.cancelar* para detenerla.')
