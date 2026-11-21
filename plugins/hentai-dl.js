@@ -460,13 +460,17 @@ function parseLatestReleases(html, limit = 10) {
   const results = []
   const seen = new Set()
 
-  const add = (slug, episode, title) => {
+  const add = (slug, episode, title, rawThumb = null) => {
     const cleanSlug = String(slug || '').trim()
     const epNum = Number(episode)
     if (!cleanSlug || !Number.isFinite(epNum) || epNum <= 0 || seen.has(cleanSlug)) return
     seen.add(cleanSlug)
     const cleanTitle = String(title || '').replace(/\s+/g, ' ').trim() || cleanSlug.replace(/-/g, ' ')
-    results.push({ slug: cleanSlug, title: cleanTitle, episode: epNum })
+    let thumb = null
+    if (rawThumb) {
+      try { thumb = new URL(rawThumb, BASE).href } catch { }
+    }
+    results.push({ slug: cleanSlug, title: cleanTitle, episode: epNum, thumb })
   }
 
   $('article').each((_, el) => {
@@ -475,7 +479,9 @@ function parseLatestReleases(html, limit = 10) {
     const m = href.match(/^\/media\/([^/?#]+)\/(\d+)$/)
     if (!m) return
     const title = $el.find('h2, h3, h4, header').first().text()
-    add(m[1], m[2], title)
+    const img = $el.find('img').first()
+    const thumb = img.attr('src') || img.attr('data-src') || null
+    add(m[1], m[2], title, thumb)
   })
 
   if (results.length === 0) {
@@ -1283,6 +1289,92 @@ async function sendInteractiveList(conn, chat, m, status, {
   return session.statusKey
 }
 
+async function sendLatestCarousel(conn, chat, m, status, latest, usedPrefix, participants = []) {
+  let device = 'android'
+  try { device = getDevice(m?.key?.id) } catch { }
+  const isMobile = device !== 'desktop' && device !== 'web'
+
+  if (isMobile) {
+    try {
+      const items = latest.slice(0, 10)
+      const fetched = await Promise.allSettled(
+        items.map((item) => (item.thumb ? fetchBuffer(item.thumb) : Promise.reject(new Error('sin thumb')))),
+      )
+
+      pruneExpiredSessions()
+      const ownerIds = await collectUserIdentities(m, conn, chat, participants)
+      if (sessions.size >= 200) {
+        const oldestId = sessions.keys().next().value
+        if (oldestId) markSessionExpired(oldestId)
+      }
+
+      const sessionId = randomBytes(6).toString('hex')
+      const rows = []
+      const cards = []
+
+      items.forEach((item, i) => {
+        if (fetched[i].status !== 'fulfilled' || !fetched[i].value?.length) return
+        const dlIdx = rows.push({ rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`, title: item.title }) - 1
+        const epsIdx = rows.push({ rowId: `${usedPrefix}hdl ${item.slug}`, title: item.title }) - 1
+        cards.push({
+          image: fetched[i].value,
+          caption: `🎬 *${item.title}*\n📺 Episodio ${item.episode}`,
+          footer: `HentaiLA · Ep. ${item.episode}`,
+          nativeFlow: [
+            { text: `⬇️ Descargar Ep. ${item.episode}`, id: makeButtonToken(sessionId, dlIdx), icon: 'default' },
+            { text: '📺 Ver episodios', id: makeButtonToken(sessionId, epsIdx), icon: 'default' },
+          ],
+        })
+      })
+
+      if (cards.length > 0) {
+        const session = {
+          id: sessionId,
+          chat,
+          ownerIds,
+          rows,
+          msgId: null,
+          statusKey: null,
+          coverShown: false,
+          expiry: Date.now() + SESSION_TTL_MS,
+          warned: new Set(),
+        }
+        sessions.set(sessionId, session)
+
+        const footer = `${global.botName || global.wm || 'HentaiLA'} · Expira en 3 min`
+        const sent = await conn.sendMessage(
+          chat,
+          {
+            text: '🔞 *Últimos lanzamientos en HentaiLA*\n_Desliza las tarjetas para elegir:_',
+            footer,
+            cards,
+          },
+          { quoted: m },
+        )
+        await status.remove()
+        session.msgId = sent?.key?.id || null
+        return sent
+      }
+    } catch (err) {
+      console.error('[HDL] Error en carrusel /hlatest:', err.message)
+    }
+  }
+
+  const fallbackRows = latest.map((item) => ({
+    rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`,
+    title: item.title,
+    description: `Ep. ${item.episode}`,
+  }))
+  return sendInteractiveList(conn, chat, m, status, {
+    title: '🔞 Últimos lanzamientos en HentaiLA',
+    description: 'Elige un título para descargar:',
+    button: '📋 Ver lanzamientos',
+    section: 'Recién subidos',
+    rows: fallbackRows,
+    participants,
+  })
+}
+
 async function sendCover(m, conn, info, signal) {
   const { title, cover, desc, episodes, generos } = info
   const totalEps = episodes.length
@@ -1454,20 +1546,7 @@ const handler = async (m, { conn, text, usedPrefix, command, participants = [], 
       if (!latest.length) {
         return status.update('❌ No se pudieron obtener los últimos lanzamientos.', { forceSend: true })
       }
-
-      const rows = latest.map((item) => ({
-        rowId: `${usedPrefix}hdl ${item.slug} ${item.episode}`,
-        title: item.title,
-        description: `Ep. ${item.episode}`,
-      }))
-      await sendInteractiveList(conn, m.chat, m, status, {
-        title: '🔞 Últimos lanzamientos en HentaiLA',
-        description: 'Elige un título para descargar:',
-        button: '📋 Ver lanzamientos',
-        section: 'Recién subidos',
-        rows,
-        participants,
-      })
+      await sendLatestCarousel(conn, m.chat, m, status, latest, usedPrefix, participants)
       return
     }
 
