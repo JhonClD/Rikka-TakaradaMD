@@ -25,7 +25,10 @@ const IS_TEST_RUN = Boolean(
   path.resolve(process.argv[1]) === MODULE_PATH,
 )
 
-const JKANIME_URL = 'https://jkanime.net'
+const JKANIME_URL = String(process.env.JK_BASE_URL || 'https://jkanime.net').replace(/\/+$/, '')
+const JKANIME_HOST = (() => {
+  try { return new URL(JKANIME_URL).hostname.toLowerCase().replace(/^www\./, '') } catch (_) { return 'jkanime.net' }
+})()
 const ANILIST_URL = 'https://graphql.anilist.co'
 const SOURCE_LABEL = 'JKAnime 🇯🇵'
 
@@ -34,7 +37,8 @@ const WREQ_OS = 'windows'
 const FALLBACK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const ACCEPT_LANG = 'es-419,es;q=0.9,en;q=0.8'
 
-// Anti-Cloudflare (opcionales; si tu IP es de datacenter y Cloudflare pide desafío):
+// Opcionales (en .env):
+//   JK_BASE_URL=https://jkanime.net      dominio base si cambia
 //   JK_PROXY_URL=http://user:pass@host:8888 (o socks5://host:1080)
 //   JK_FLARESOLVERR_URL / FLARESOLVERR_URL=http://host:8191
 //   JK_COOKIE=cf_clearance=...  (acompañada de JK_UA del mismo navegador e IP)
@@ -68,14 +72,18 @@ const SERVER_PRIORITY = [
   'mega',
   'mediafire',
   'mp4upload',
+  'desuka',
+  'desu',
+  'nozomi',
+  'magi',
   'jkplayer',
   'voe',
+  'okru',
   'filemoon',
   'streamwish',
   'vidhide',
   'streamtape',
   'doodstream',
-  'okru',
   'mixdrop',
   'embed',
 ]
@@ -203,9 +211,16 @@ function buildFileName(titulo, epNum, slug = '') {
   return `${zeroPad(epNum)} ${seasonLabel}${safeFile(title)} Sub Español (720p) [[JK]].mp4`
 }
 
+function isJKAnimeHost(hostname) {
+  const host = String(hostname || '').toLowerCase()
+  return host === JKANIME_HOST
+    || host.endsWith(`.${JKANIME_HOST}`)
+    || /(^|\.)jkanime\.net$/i.test(host)
+}
+
 function isJKAnimeUrl(url) {
   try {
-    return /(^|\.)jkanime\.net$/i.test(new URL(url).hostname)
+    return isJKAnimeHost(new URL(url).hostname)
   } catch (_) {
     return false
   }
@@ -463,10 +478,17 @@ async function solveWithFlareSolverr(targetUrl) {
   if (!jkRuntime.flareUrl) throw new Error('FlareSolverr no configurado')
   if (flareSolvePromise) return flareSolvePromise
   flareSolvePromise = (async () => {
-    const res = await rawFetch(`${jkRuntime.flareUrl}/v1`, {
+    const endpoint = /\/v1$/i.test(jkRuntime.flareUrl) ? jkRuntime.flareUrl : `${jkRuntime.flareUrl}/v1`
+    const payloadBody = {
+      cmd: 'request.get',
+      url: targetUrl,
+      maxTimeout: 60_000,
+      ...(JK_PROXY_URL ? { proxy: { url: JK_PROXY_URL } } : {}),
+    }
+    const res = await rawFetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ cmd: 'request.get', url: targetUrl, maxTimeout: 60_000 }),
+      body: JSON.stringify(payloadBody),
       timeout: 75_000,
       disableDefaultHeaders: true,
       bypassProxy: true,
@@ -665,12 +687,35 @@ function decodeRemote(value) {
   return decoded && (/^https?:\/\//i.test(decoded) || decoded.startsWith('/')) ? decoded : null
 }
 
+export function normalizeJkEmbedUrl(url, baseUrl = `${JKANIME_URL}/`) {
+  let u = String(url || '').trim()
+  if (!u) return null
+  if (u.startsWith('//')) u = `https:${u}`
+  u = u.replace(/^.*?\/jkokru\.php\?u=/i, 'https://ok.ru/videoembed/')
+  u = u.replace(/^.*?\/jkvmixdrop\.php\?u=/i, 'https://mixdrop.ag/e/')
+  u = u.replace(/^.*?\/jksw\.php\?u=/i, 'https://sfastwish.com/e/')
+  u = u.replace(/^.*?\/jk\.php\?u=/i, `${JKANIME_URL}/`)
+  return safeHttpUrl(u, baseUrl)
+}
+
+export function getJkEmbedCandidates(url) {
+  const raw = String(url || '').trim()
+  if (!raw) return []
+  const out = [raw]
+  const swapped = raw
+    .replace(/jkplayer\/um2\?/i, 'um2.php?')
+    .replace(/jkplayer\/umv\?/i, 'umv.php?')
+    .replace(/jkplayer\/um\?/i, 'um.php?')
+  if (swapped !== raw) out.unshift(swapped)
+  return out
+}
+
 export function parseJkAnimeEpisodeUrl(candidate, baseUrl = `${JKANIME_URL}/`) {
   const normalized = safeHttpUrl(candidate, baseUrl)
   if (!normalized) return null
   try {
     const url = new URL(normalized)
-    if (!/(^|\.)jkanime\.net$/i.test(url.hostname)) return null
+    if (!isJKAnimeHost(url.hostname)) return null
     const segments = url.pathname.split('/').filter(Boolean)
     const episodeText = segments.at(-1) || ''
     const epNum = Number(episodeText)
@@ -681,25 +726,28 @@ export function parseJkAnimeEpisodeUrl(candidate, baseUrl = `${JKANIME_URL}/`) {
   }
 }
 
-function extractVideoIframeUrls(html, baseUrl) {
-  const urls = []
-  const videoPattern = /video\[\d+\]\s*=\s*(['"])([\s\S]*?)\1/g
+function extractVideoIframeEntries(html, baseUrl) {
+  const byIndex = new Map()
+  const ordered = []
+  const videoPattern = /video\[(\d+)\]\s*=\s*(['"])([\s\S]*?)\2/g
   let match
   while ((match = videoPattern.exec(html))) {
-    const fragment = match[2].replace(/\\(["'])/g, '$1').replace(/\\\//g, '/')
+    const fragment = match[3].replace(/\\(["'])/g, '$1').replace(/\\\//g, '/')
     const srcMatch = fragment.match(/<iframe\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/i)
     if (!srcMatch) continue
-    const url = safeHttpUrl(srcMatch[2], baseUrl)
-    if (url && !urls.includes(url)) urls.push(url)
+    const url = normalizeJkEmbedUrl(srcMatch[2], baseUrl)
+    if (!url) continue
+    byIndex.set(match[1], url)
+    if (!ordered.includes(url)) ordered.push(url)
   }
-  return urls
+  return { byIndex, ordered }
 }
 
 function extractJkPlayerUrls(html, baseUrl) {
   const urls = []
-  const pattern = /https?:\/\/(?:www\.)?jkanime\.net\/jkplayer\/[a-z0-9]+\?[^"'<>\s]+/gi
+  const pattern = /https?:\/\/(?:www\.)?jkanime\.net\/(?:jkplayer\/[a-z0-9]+|um2?\.php|umv\.php|stream\/jkmedia)\?[^"'<>\s]+/gi
   for (const match of html.matchAll(pattern)) {
-    const url = safeHttpUrl(match[0], baseUrl)
+    const url = normalizeJkEmbedUrl(match[0], baseUrl)
     if (url && !urls.includes(url)) urls.push(url)
   }
   return urls
@@ -730,7 +778,7 @@ export function extractJkAnimeLinks(html, baseUrl) {
   const links = []
   const seen = new Set()
   const add = (url, server, kind, variant = null) => {
-    const normalized = safeHttpUrl(url, baseUrl)
+    const normalized = normalizeJkEmbedUrl(url, baseUrl)
     if (!normalized || seen.has(normalized)) return
     seen.add(normalized)
     links.push({ url: normalized, server: String(server || '').trim(), kind, variant })
@@ -759,7 +807,21 @@ export function extractJkAnimeLinks(html, baseUrl) {
     }
   }
 
-  for (const url of extractVideoIframeUrls(source, baseUrl)) add(url, 'jkplayer', 'player')
+  const { byIndex, ordered } = extractVideoIframeEntries(source, baseUrl)
+  if (byIndex.size && /bg-servers/i.test(source)) {
+    const $ = cheerio.load(source)
+    const langMap = { 1: 'sub', 3: 'lat', 4: 'chin' }
+    $('div.bg-servers a[data-id]').each((_, el) => {
+      const $a = $(el)
+      const url = byIndex.get($a.attr('data-id'))
+      if (!url) return
+      const lg = /lg_(\d+)/.exec($a.attr('class') || '')
+      const variant = (lg && langMap[lg[1]]) || null
+      add(url, $a.text().trim() || 'jkplayer', 'player', variant)
+    })
+  }
+
+  for (const url of ordered) add(url, 'jkplayer', 'player')
   for (const url of extractJkPlayerUrls(source, baseUrl)) add(url, 'jkplayer', 'player')
   return links
 }
@@ -831,19 +893,24 @@ async function fetchLatestEpisodesJK() {
 }
 
 export function detectarServNombre(url, hint = '') {
-  const u = `${String(url || '').toLowerCase()} ${String(hint || '').toLowerCase()}`
+  const rawUrl = String(url || '').toLowerCase()
+  const u = `${rawUrl} ${String(hint || '').toLowerCase()}`
   if (/mega\.(?:nz|co\.nz)|\bmega\b/.test(u)) return 'mega'
   if (/mediafire/.test(u)) return 'mediafire'
   if (/mp4upload/.test(u)) return 'mp4upload'
-  if (/jkanime\.net\/jkplayer\/|\bjkplayer\b|\bdesu\b|\bnozu\b|\bdesuka\b/.test(u)) return 'jkplayer'
-  if (/voe\d*\.sx|\bvoe\b|susanexpectcare|kathyinformationwhether|stevenfamilyedge|walterprettytheir|markstyleall|lukecomparetwo|jilliandescribecompany/.test(u)) return 'voe'
-  if (/filemoon|moonplayer/.test(u)) return 'filemoon'
-  if (/streamwish|wishembed|hgcloud|awish|dwish|mwish|sfastwish/.test(u)) return 'streamwish'
-  if (/vidhide|filelions|dhtpre|peytonepre/.test(u)) return 'vidhide'
-  if (/streamtape|strtape/.test(u)) return 'streamtape'
-  if (/dood|ds2play|d000d|d0000d|do0od/.test(u)) return 'doodstream'
+  if (/stream\/jkmedia|\bdesuka\b/.test(u)) return 'desuka'
+  if (/jkplayer\/um2\?|um2\.php|\bnozomi\b|\bnozu\b/.test(u)) return 'nozomi'
+  if (/jkplayer\/umv\?|umv\.php|\bmagi\b/.test(u)) return 'magi'
+  if (/jkplayer\/um\?|um\.php|\bdesu\b/.test(u)) return 'desu'
+  if (/\/jkplayer\/|\bjkplayer\b/.test(u)) return 'jkplayer'
+  if (/voe\d*\.sx|\bvoe\b|susanexpectcare|kathyinformationwhether|stevenfamilyedge|walterprettytheir|markstyleall|lukecomparetwo|jilliandescribecompany|metagnathtuggers|donaldlineelse|tubelessceliolymph|simpulumlamerop|urochsunloath|nathanfromsubject|\byip\./.test(u)) return 'voe'
   if (/ok\.ru|\bokru\b/.test(u)) return 'okru'
-  if (/mixdrop|mdy48tn97/.test(u)) return 'mixdrop'
+  if (/filemoon|moonplayer|moviesm4u|files\.im/.test(u)) return 'filemoon'
+  if (/streamwish|wishembed|strwish|hgcloud|awish|dwish|mwish|sfastwish|iplayerhls|streamgg|kswplayer|swhoi|multimovies|uqloads|neko-stream|swdyu/.test(u)) return 'streamwish'
+  if (/vidhide|filelions|dhtpre|peytonepre/.test(u)) return 'vidhide'
+  if (/streamtape|strtape|shavetape|\bstape\b/.test(u)) return 'streamtape'
+  if (/dood|ds2play|dsvplay|doostream|d-s\.io|d000d|d0000d|do0od/.test(u)) return 'doodstream'
+  if (/mixdrop|mxdrop|mdbekjwqa|mdy48tn97/.test(u)) return 'mixdrop'
   return 'embed'
 }
 
@@ -871,7 +938,7 @@ async function scrapeServidoresJK(epUrl) {
   const seenUrls = new Set()
 
   const addServer = (url, hint = '', kind = 'stream') => {
-    const normalizedUrl = safeHttpUrl(url, epUrl)
+    const normalizedUrl = normalizeJkEmbedUrl(url, epUrl)
     if (!normalizedUrl || seenUrls.has(normalizedUrl)) return
     const host = new URL(normalizedUrl).hostname.toLowerCase()
     if (BLOCKED_HOSTS_RE.test(host)) return
@@ -887,6 +954,25 @@ async function scrapeServidoresJK(epUrl) {
 
   for (const link of extractJkAnimeLinks(data, epUrl)) {
     addServer(link.url, link.server, link.kind)
+  }
+
+  // Si la página delega la lista de servidores en una URL `var remote = '...'` (`= remote+'`), se consulta.
+  if (!srvs.length && data.includes("= remote+'")) {
+    const remoteMatch = data.match(/\b(?:var|let|const)\s+remote\s*=\s*(['"])(.*?)\1/i)
+    const remoteRaw = remoteMatch?.[2] || ''
+    const remoteUrl = remoteRaw ? safeHttpUrl(decodeRemote(remoteRaw) || remoteRaw, epUrl) : null
+    if (remoteUrl) {
+      try {
+        const remoteRes = await httpRequest(remoteUrl, {
+          headers: { referer: `${JKANIME_URL}/` },
+          timeout: 12_000,
+          retries: 1,
+        })
+        for (const link of extractJkAnimeLinks(remoteRes.data, remoteUrl)) {
+          addServer(link.url, link.server, link.kind)
+        }
+      } catch (_) {}
+    }
   }
 
   let epId = null
@@ -953,18 +1039,54 @@ async function scrapeServidoresJK(epUrl) {
 
 export function jsUnpack(packed) {
   try {
-    const m = String(packed || '').match(/}\s*\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*?)'\.split\('\|'\)/)
+    const m = String(packed || '').match(/}\s*\('((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)/s)
     if (!m) return null
-    const payload = m[1].replace(/\\'/g, "'")
-    const radix = parseInt(m[2], 10) || 36
+    const payload = m[1].replace(/\\'/g, "'").replace(/\\\\/g, '\\')
+    const radix = Number(m[2]) || 36
+    const count = Number(m[3]) || 0
     const symtab = m[4].split('|')
-    return payload.replace(/\b[a-zA-Z0-9_]+\b/g, (word) => {
-      const idx = parseInt(word, radix)
-      return (Number.isInteger(idx) && symtab[idx]) ? symtab[idx] : word
-    })
+    const encode = (n) => {
+      const d = n % radix
+      const c = d > 35 ? String.fromCharCode(d + 29) : d.toString(36)
+      return (n < radix ? '' : encode(Math.floor(n / radix))) + c
+    }
+    const table = new Map()
+    for (let i = Math.max(count, symtab.length) - 1; i >= 0; i -= 1) {
+      const key = encode(i)
+      table.set(key, symtab[i] || key)
+    }
+    return payload.replace(/\b\w+\b/g, (word) => (table.has(word) ? table.get(word) : word))
   } catch (_) {
     return null
   }
+}
+
+export function extractDPlayerUrl(html) {
+  const source = String(html || '')
+  const idx = source.indexOf('new DPlayer({')
+  if (idx < 0) return null
+  const slice = source.slice(idx, idx + 4096).replace(/\\\//g, '/')
+  const m = slice.match(/\burl\s*:\s*['"](https?:\/\/[^'"\s]+)['"]/i)
+  return m?.[1] || null
+}
+
+export function extractOkruMedia(html) {
+  const $ = cheerio.load(String(html || ''))
+  const raw = $('div[data-options]').attr('data-options')
+  if (!raw) return null
+  try {
+    const opts = JSON.parse(raw)
+    const flash = opts?.flashvars || {}
+    const meta = typeof flash.metadata === 'string' ? JSON.parse(flash.metadata) : flash.metadata || {}
+    const rank = { ultra: 8, quad: 7, full: 6, hd: 5, sd: 4, low: 3, lowest: 2, mobile: 1 }
+    const videos = (Array.isArray(meta.videos) ? meta.videos : [])
+      .filter(v => v?.url && /^https?:\/\//i.test(v.url))
+      .sort((a, b) => (rank[String(b.name || '').toLowerCase()] || 0) - (rank[String(a.name || '').toLowerCase()] || 0))
+    if (videos[0]) return { url: videos[0].url, type: /\.m3u8(?:[?#]|$)/i.test(videos[0].url) ? 'hls' : 'mp4' }
+    const hls = meta.ondemandHls || meta.hlsManifestUrl
+    if (hls && /^https?:\/\//i.test(hls)) return { url: hls, type: 'hls' }
+  } catch (_) {}
+  return null
 }
 
 export function extraerUrlVideo(code) {
@@ -1261,32 +1383,167 @@ async function descargarMediaFire(mfUrl, outputDir, fileName) {
 }
 
 async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
-  const u = embedUrl.toLowerCase()
+  const tipo = detectarServNombre(embedUrl)
 
-  if (/jkanime\.net\/jkplayer\//i.test(u)) {
-    try {
-      const { data } = await httpRequest(embedUrl, {
-        headers: { referer: pageReferer },
-        timeout: HTTP_TIMEOUT_MS,
-        forceJk: true,
-      })
-      for (const candidate of extractJkAnimeM3u8Candidates(data)) {
-        try {
-          const manifest = await httpRequest(candidate, {
-            headers: { referer: embedUrl },
-            timeout: 12_000,
-            retries: 1,
-          })
-          if (String(manifest.data).includes('#EXTM3U')) {
-            return { url: candidate, type: 'hls', referer: embedUrl }
+  if (tipo === 'desuka') {
+    for (const candidate of getJkEmbedCandidates(embedUrl)) {
+      try {
+        const res = await rawFetch(candidate, {
+          headers: normalizeHeaders({ referer: `${JKANIME_URL}/` }, { forJk: true }),
+          timeout: HTTP_TIMEOUT_MS,
+          useJkSession: true,
+        })
+        if (!res.ok) { await cancelBodyQuietly(res); continue }
+        const ct = getHeader(res.headers, 'content-type').toLowerCase()
+        if (ct.startsWith('video/')) {
+          await cancelBodyQuietly(res)
+          return { url: res.url || candidate, type: 'mp4', referer: `${JKANIME_URL}/` }
+        }
+        const html = await res.text()
+        const dpUrl = extractDPlayerUrl(html) || extraerUrlVideo(html)
+        if (dpUrl) {
+          return {
+            url: dpUrl,
+            type: /\.m3u8(?:[?#]|$)/i.test(dpUrl) ? 'hls' : 'mp4',
+            referer: `${JKANIME_URL}/`,
           }
-        } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+
+  if (tipo === 'nozomi') {
+    for (const candidate of getJkEmbedCandidates(embedUrl)) {
+      try {
+        const { data } = await httpRequest(candidate, {
+          headers: { referer: `${JKANIME_URL}/` },
+          timeout: HTTP_TIMEOUT_MS,
+          forceJk: true,
+        })
+        const $ = cheerio.load(data)
+        const value = $('form input[value]').attr('value')
+        if (!value) continue
+        const formHeaders = {
+          'content-type': 'application/x-www-form-urlencoded',
+          referer: candidate,
+          origin: JKANIME_URL,
+        }
+        const r1 = await httpRequest(`${JKANIME_URL}/gsplay/redirect_post.php`, {
+          method: 'POST',
+          headers: formHeaders,
+          body: `data=${encodeURIComponent(value)}`,
+          timeout: HTTP_TIMEOUT_MS,
+          forceJk: true,
+          retries: 1,
+        })
+        const hashIdx = String(r1.url || '').indexOf('player.html#')
+        if (hashIdx < 0) continue
+        const id = r1.url.slice(hashIdx + 'player.html#'.length)
+        if (!id) continue
+        const r2 = await httpRequest(`${JKANIME_URL}/gsplay/api.php`, {
+          method: 'POST',
+          headers: formHeaders,
+          body: `v=${encodeURIComponent(id)}`,
+          timeout: HTTP_TIMEOUT_MS,
+          responseType: 'json',
+          forceJk: true,
+          retries: 1,
+        })
+        const fileUrl = r2.data?.file
+        if (fileUrl && /^https?:\/\//i.test(fileUrl)) {
+          return {
+            url: fileUrl,
+            type: /\.m3u8(?:[?#]|$)/i.test(fileUrl) ? 'hls' : 'mp4',
+            referer: `${JKANIME_URL}/`,
+          }
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+
+  if (tipo === 'magi') {
+    for (const candidate of getJkEmbedCandidates(embedUrl)) {
+      try {
+        const { data } = await httpRequest(candidate, {
+          headers: { referer: `${JKANIME_URL}/` },
+          timeout: HTTP_TIMEOUT_MS,
+          forceJk: true,
+        })
+        const $ = cheerio.load(data)
+        const src = $('source[src*=".m3u8"]').attr('src') || extractJkAnimeM3u8Candidates(data)[0]
+        if (src && /^https?:\/\//i.test(src)) {
+          return { url: src, type: 'hls', referer: `${JKANIME_URL}/` }
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+
+  if (tipo === 'desu' || tipo === 'jkplayer') {
+    for (const candidate of getJkEmbedCandidates(embedUrl)) {
+      try {
+        const { data } = await httpRequest(candidate, {
+          headers: { referer: pageReferer },
+          timeout: HTTP_TIMEOUT_MS,
+          forceJk: true,
+        })
+        const dpUrl = extractDPlayerUrl(data)
+        if (dpUrl) {
+          return {
+            url: dpUrl,
+            type: /\.m3u8(?:[?#]|$)/i.test(dpUrl) ? 'hls' : 'mp4',
+            referer: `${JKANIME_URL}/`,
+          }
+        }
+        for (const m3u8 of extractJkAnimeM3u8Candidates(data)) {
+          try {
+            const manifest = await httpRequest(m3u8, {
+              headers: { referer: candidate },
+              timeout: 12_000,
+              retries: 1,
+            })
+            if (String(manifest.data).includes('#EXTM3U')) {
+              return { url: m3u8, type: 'hls', referer: candidate }
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+
+  if (tipo === 'okru') {
+    try {
+      const { data, url: finalUrl } = await httpRequest(embedUrl, {
+        headers: { referer: 'https://ok.ru/' },
+        timeout: HTTP_TIMEOUT_MS,
+      })
+      const media = extractOkruMedia(data)
+      if (media) return { ...media, referer: finalUrl || 'https://ok.ru/' }
+    } catch (_) {}
+    return null
+  }
+
+  if (tipo === 'mixdrop') {
+    try {
+      const { data, url: finalUrl } = await httpRequest(embedUrl, {
+        headers: { referer: 'https://mixdrop.co/' },
+        timeout: HTTP_TIMEOUT_MS,
+      })
+      const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
+      const text = (packed ? jsUnpack(packed[0]) : null) || data
+      const m = text.match(/wurl\s*=\s*["']([^"']+)["']/i)
+      if (m?.[1]) {
+        const media = safeHttpUrl(m[1].startsWith('//') ? `https:${m[1]}` : m[1], finalUrl || embedUrl)
+        if (media) return { url: media, type: /\.m3u8(?:[?#]|$)/i.test(media) ? 'hls' : 'mp4', referer: 'https://mixdrop.co/' }
       }
     } catch (_) {}
     return null
   }
 
-  if (u.includes('mp4upload')) {
+  if (tipo === 'mp4upload') {
     const idMatch = embedUrl.match(/mp4upload\.com\/(?:embed-)?([A-Za-z0-9_-]+)/i)
     const pages = idMatch
       ? [`https://www.mp4upload.com/embed-${idMatch[1]}.html`, `https://www.mp4upload.com/${idMatch[1]}`]
@@ -1315,7 +1572,7 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
     return null
   }
 
-  if (/voe\d*\.sx|susanexpectcare|kathyinformationwhether|stevenfamilyedge|walterprettytheir|markstyleall|lukecomparetwo|jilliandescribecompany/.test(u)) {
+  if (tipo === 'voe') {
     try {
       let currentUrl = embedUrl
       for (let hop = 0; hop < 4; hop += 1) {
@@ -1346,7 +1603,7 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
     return null
   }
 
-  if (u.includes('dood') || u.includes('ds2play') || u.includes('d000d') || u.includes('d0000d')) {
+  if (tipo === 'doodstream') {
     try {
       const target = embedUrl.replace(/\/(d|watch)\//, '/e/')
       const res = await httpRequest(target, { headers: { referer: 'https://dood.wf/' }, timeout: HTTP_TIMEOUT_MS })
@@ -1365,7 +1622,7 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
     return null
   }
 
-  if (u.includes('streamtape') || u.includes('strtape')) {
+  if (tipo === 'streamtape') {
     try {
       const { data, url: finalUrl } = await httpRequest(embedUrl, {
         headers: { referer: embedUrl },
@@ -1375,6 +1632,7 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
       if (m) {
         let suffix = m[2]
         if (m[3]) suffix = suffix.substring(Number(m[3]))
+        else if (suffix.startsWith('xcd')) suffix = suffix.slice(3)
         if (m[4]) suffix = suffix.substring(Number(m[4]))
         const media = safeHttpUrl(`https:${m[1]}${suffix}&stream=1`, finalUrl || embedUrl)
         if (media) return { url: media, type: 'mp4', referer: finalUrl || embedUrl }
@@ -1383,20 +1641,21 @@ async function resolverEmbed(embedUrl, pageReferer = `${JKANIME_URL}/`) {
     return null
   }
 
-  if (/filemoon|moonplayer|streamwish|wishembed|hgcloud|vidhide|filelions|dhtpre|peytonepre/.test(u)) {
+  if (tipo === 'filemoon' || tipo === 'streamwish' || tipo === 'vidhide') {
     try {
       const { data, url: finalUrl } = await httpRequest(embedUrl, {
-        headers: { referer: embedUrl },
+        headers: { referer: `${JKANIME_URL}/` },
         timeout: HTTP_TIMEOUT_MS,
       })
       const packed = data.match(/eval\(function\(p,a,c,k,e[,\w]*\)[\s\S]+?\)\)/)
       const unpacked = packed ? jsUnpack(packed[0]) : null
       const src = (unpacked && extraerUrlVideo(unpacked)) || extraerUrlVideo(data)
       if (src) {
+        const origin = new URL(finalUrl || embedUrl).origin
         return {
           url: src,
           type: /\.m3u8(?:[?#]|$)/i.test(src) ? 'hls' : 'mp4',
-          referer: finalUrl || embedUrl,
+          referer: `${origin}/`,
         }
       }
     } catch (_) {}
@@ -1458,14 +1717,14 @@ async function descargarEmbed(embedUrl, outputDir, fileName, pageReferer) {
   const host = new URL(embedUrl).hostname.toLowerCase()
   if (BLOCKED_HOSTS_RE.test(host)) throw new Error(`Servidor sin soporte: ${host}`)
 
-  const isJkPlayer = /jkanime\.net\/jkplayer\//i.test(embedUrl)
+  const isNativeJk = isJKAnimeUrl(embedUrl) && /\/(?:jkplayer\/|um2?\.php|umv\.php|stream\/jkmedia)/i.test(embedUrl)
   const resolved = await resolverEmbed(embedUrl, pageReferer)
   let videoUrl = resolved?.url || embedUrl
   let videoType = resolved?.type || (/\.m3u8(?:[?#]|$)/i.test(videoUrl) ? 'hls' : 'unknown')
   let videoReferer = resolved?.referer || pageReferer
 
   if (!resolved) {
-    if (isJkPlayer) throw new Error('JKPlayer no expuso un manifest HLS accesible desde el servidor')
+    if (isNativeJk) throw new Error('El reproductor nativo de JKAnime no expuso un stream accesible')
     try {
       const { data } = await httpRequest(embedUrl, { headers: { referer: pageReferer }, timeout: 12_000, retries: 1 })
       const extracted = extraerUrlVideo(data)
@@ -2278,5 +2537,55 @@ if (IS_TEST_RUN) {
       await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
       await new Promise(resolve => server.close(resolve))
     }
+  })
+
+  test('normaliza embeds redirectores, candidatos um.php y mapea div.bg-servers', () => {
+    assert.equal(normalizeJkEmbedUrl('/jkokru.php?u=12345'), 'https://ok.ru/videoembed/12345')
+    assert.equal(normalizeJkEmbedUrl('/jkvmixdrop.php?u=abcde'), 'https://mixdrop.ag/e/abcde')
+    assert.equal(normalizeJkEmbedUrl('/jksw.php?u=xyz'), 'https://sfastwish.com/e/xyz')
+    assert.deepEqual(getJkEmbedCandidates('https://jkanime.net/jkplayer/um2?e=tok'), [
+      'https://jkanime.net/um2.php?e=tok',
+      'https://jkanime.net/jkplayer/um2?e=tok',
+    ])
+
+    const html = `
+      <div class="bg-servers">
+        <a data-id="0" class="servers lg_1">Desu</a>
+        <a data-id="1" class="servers lg_3">Okru</a>
+      </div>
+      <script>
+        video[0] = '<iframe src="/jkplayer/um?e=tok1"></iframe>';
+        video[1] = '<iframe src="/jkokru.php?u=998877"></iframe>';
+      </script>
+    `
+    const links = extractJkAnimeLinks(html, pageUrl)
+    assert.equal(links[0].url, 'https://jkanime.net/jkplayer/um?e=tok1')
+    assert.equal(links[0].server, 'Desu')
+    assert.equal(links[0].variant, 'sub')
+    assert.equal(links[1].url, 'https://ok.ru/videoembed/998877')
+    assert.equal(links[1].server, 'Okru')
+    assert.equal(links[1].variant, 'lat')
+    assert.equal(detectarServNombre(links[0].url), 'desu')
+    assert.equal(detectarServNombre('https://jkanime.net/stream/jkmedia?e=x'), 'desuka')
+    assert.equal(detectarServNombre('https://jkanime.net/jkplayer/um2?e=x'), 'nozomi')
+    assert.equal(detectarServNombre('https://jkanime.net/jkplayer/umv?e=x'), 'magi')
+  })
+
+  test('jsUnpack soporta radix 62, y extractDPlayerUrl / extractOkruMedia extraen video', () => {
+    const dict = Array.from({ length: 40 }, (_, i) => (i === 36 ? 'https' : i === 37 ? 'cdn' : '')).join('|')
+    const packed62 = `eval(function(p,a,c,k,e,d){return p}('A://B.test/v.mp4',62,40,'${dict}'.split('|'),0,{}))`
+    assert.equal(jsUnpack(packed62), 'https://cdn.test/v.mp4')
+
+    const dpHtml = "<script>new DPlayer({ video: { url: 'https://stream.example/master.m3u8' } })</script>"
+    assert.equal(extractDPlayerUrl(dpHtml), 'https://stream.example/master.m3u8')
+
+    const okMeta = JSON.stringify({
+      videos: [
+        { name: 'low', url: 'https://ok.example/360.mp4' },
+        { name: 'full', url: 'https://ok.example/1080.mp4' },
+      ],
+    })
+    const okHtml = `<div data-options='${JSON.stringify({ flashvars: { metadata: okMeta } })}'></div>`
+    assert.deepEqual(extractOkruMedia(okHtml), { url: 'https://ok.example/1080.mp4', type: 'mp4' })
   })
 }
