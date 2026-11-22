@@ -5,6 +5,8 @@
 import * as cheerio from 'cheerio'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import { createDecipheriv, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -23,7 +25,8 @@ const DOWNLOAD_TIMEOUT_MS = Math.max(60_000, Number(process.env.VIDHIDE_TIMEOUT_
 const IDLE_TIMEOUT_MS = 90_000
 const MIN_VALID_BYTES = 128 * 1024
 const MAX_VIDEO_BYTES = 2 * 1024 ** 3
-const HLS_CONCURRENCY = 2
+const HLS_CONCURRENCY = Math.min(20, Math.max(2, Number(process.env.VIDHIDE_CONCURRENCY) || 12))
+const HLS_WINDOW = HLS_CONCURRENCY * 2
 
 const VIDHIDE_HOST_RE = /(?:^|\.)(?:vidhide[a-z0-9]*\.|filelions\.|dhtpre\.|peytonepre\.|movearnpre\.|niikaplayerr\.|dinisglows\.|ryderjet\.|smoothpre\.|earnvids[a-z0-9]*\.|callistanise\.|morencius\.|seraphinapl\.|mivalyo\.|bingezove\.|premilkyway\.|dintezuvio\.|minochinos\.|taylorplayer\.|guccihide\.|ahvsh\.|streamhide\.)/i
 
@@ -460,35 +463,178 @@ async function readStreamBuffer(res, watchdog) {
   return Buffer.concat(chunks)
 }
 
-async function fetchSegmentBuffer(session, segUrl, referer, signal, watchdog) {
+function requestSegmentBuffer(url, headers, agents, signal, watchdog, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(createAbortError())
+    let parsed
+    try { parsed = new URL(url) } catch (_) {
+      return reject(new Error('URL de segmento inválida.'))
+    }
+    const isHttps = parsed.protocol === 'https:'
+    if (!isHttps && parsed.protocol !== 'http:') {
+      return reject(new Error(`Protocolo no soportado: ${parsed.protocol}`))
+    }
+    const mod = isHttps ? https : http
+    let settled = false
+    let req = null
+    let overallTimer = null
+
+    const cleanup = () => {
+      if (overallTimer) {
+        clearTimeout(overallTimer)
+        overallTimer = null
+      }
+      signal?.removeEventListener('abort', onAbort)
+    }
+
+    const finishOk = (buf) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(buf)
+    }
+
+    const finishErr = (err) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(err)
+    }
+
+    const onAbort = () => {
+      if (settled) return
+      const err = createAbortError()
+      try { req?.destroy(err) } catch (_) {}
+      finishErr(err)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    req = mod.request(parsed, {
+      method: 'GET',
+      agent: isHttps ? agents.httpsAgent : agents.httpAgent,
+      timeout: Math.min(45_000, SEGMENT_TIMEOUT_MS),
+      headers: {
+        'user-agent': activeUa,
+        connection: 'keep-alive',
+        ...headers,
+      },
+    }, (res) => {
+      const status = res.statusCode || 0
+      if (status >= 300 && status < 400 && res.headers.location && maxRedirects > 0) {
+        const nextUrl = safeHttpUrl(res.headers.location, url)
+        res.resume()
+        if (!nextUrl) return finishErr(new Error('Redirección de segmento inválida.'))
+        if (settled) return
+        settled = true
+        cleanup()
+        requestSegmentBuffer(nextUrl, headers, agents, signal, watchdog, maxRedirects - 1).then(resolve, reject)
+        return
+      }
+      if (status < 200 || status >= 300) {
+        res.resume()
+        const err = new Error(`Segmento HTTP ${status}`)
+        err.status = status
+        return finishErr(err)
+      }
+
+      const chunks = []
+      let total = 0
+      let ended = false
+      const expectedLen = !res.headers['content-encoding'] && res.headers['content-length']
+        ? Number(res.headers['content-length'])
+        : 0
+
+      res.on('data', (chunk) => {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        chunks.push(b)
+        total += b.length
+        watchdog?.ping()
+      })
+      res.once('end', () => {
+        ended = true
+        if (!res.complete) return finishErr(new Error('Segmento truncado (conexión incompleta).'))
+        if (expectedLen > 0 && total !== expectedLen) {
+          return finishErr(new Error(`Segmento incompleto (${total}/${expectedLen} bytes).`))
+        }
+        finishOk(Buffer.concat(chunks, total))
+      })
+      res.once('aborted', () => {
+        finishErr(new Error('Conexión abortada antes de completar el segmento.'))
+      })
+      res.once('close', () => {
+        if (!ended) finishErr(new Error('Conexión cerrada antes de completar el segmento.'))
+      })
+      res.once('error', finishErr)
+    })
+
+    overallTimer = setTimeout(() => {
+      if (settled) return
+      const err = new Error('Timeout total de segmento HLS.')
+      try { req.destroy(err) } catch (_) {}
+      finishErr(err)
+    }, SEGMENT_TIMEOUT_MS)
+    overallTimer.unref?.()
+
+    req.on('timeout', () => {
+      if (settled) return
+      const err = new Error('Timeout de inactividad en segmento HLS.')
+      try { req.destroy(err) } catch (_) {}
+      finishErr(err)
+    })
+    req.once('error', finishErr)
+    req.end()
+  })
+}
+
+async function fetchSegmentBuffer(session, segUrl, referer, signal, watchdog, agents) {
   const origin = referer ? referer.replace(/\/$/, '') : ''
-  const attempts = [
-    { headers: { accept: '*/*', ...(referer ? { referer, origin } : {}) }, useWreq: false },
-    { headers: { accept: '*/*' }, useWreq: false },
-    { headers: { accept: '*/*', ...(referer ? { referer, origin } : {}) }, useWreq: false },
-    { headers: { accept: '*/*', ...(referer ? { referer, origin } : {}) }, useWreq: true },
-  ]
+  const withRef = { accept: '*/*', ...(referer ? { referer, origin } : {}) }
+  const noRef = { accept: '*/*' }
+  const maxAttempts = 4
   let lastErr = null
-  for (let i = 0; i < attempts.length; i += 1) {
+  let lastStatus = 0
+
+  for (let i = 0; i < maxAttempts; i += 1) {
     if (signal?.aborted) throw createAbortError()
-    const { headers, useWreq } = attempts[i]
+    const useNoRef = (i === 1 && (lastStatus === 401 || lastStatus === 403)) || i === 2
+    const headers = useNoRef ? noRef : withRef
+    const useFallbackClient = i === maxAttempts - 1
+
     try {
-      const res = useWreq && session
-        ? await session.fetch(segUrl, { headers, timeout: SEGMENT_TIMEOUT_MS, redirect: 'follow', signal: combineSignal(signal, SEGMENT_TIMEOUT_MS) })
-        : await globalThis.fetch(segUrl, {
-          headers: { 'user-agent': activeUa, ...headers },
-          redirect: 'follow',
-          signal: combineSignal(signal, SEGMENT_TIMEOUT_MS),
-        })
-      if (!res.ok) { await cancelBody(res); lastErr = new Error(`Segmento HTTP ${res.status}`); continue }
-      const buf = await readStreamBuffer(res, watchdog)
+      let buf
+      if (!useFallbackClient && agents) {
+        buf = await requestSegmentBuffer(segUrl, headers, agents, signal, watchdog)
+      } else {
+        const res = session
+          ? await session.fetch(segUrl, { headers, timeout: SEGMENT_TIMEOUT_MS, redirect: 'follow', signal: combineSignal(signal, SEGMENT_TIMEOUT_MS) })
+          : await globalThis.fetch(segUrl, {
+            headers: { 'user-agent': activeUa, ...headers },
+            redirect: 'follow',
+            signal: combineSignal(signal, SEGMENT_TIMEOUT_MS),
+          })
+        if (!res.ok) {
+          await cancelBody(res)
+          const err = new Error(`Segmento HTTP ${res.status}`)
+          err.status = res.status
+          throw err
+        }
+        buf = await readStreamBuffer(res, watchdog)
+      }
       if (buf.length > 0) return buf
       lastErr = new Error('Segmento vacío')
+      lastStatus = 0
     } catch (err) {
       if (signal?.aborted) throw createAbortError()
       lastErr = err
+      lastStatus = Number(err?.status) || 0
     }
-    if (i + 1 < attempts.length) await sleep(600 * (i + 1), signal)
+
+    if (i + 1 < maxAttempts) {
+      const waitMs = (lastStatus === 429 || lastStatus === 503)
+        ? 1200 * (i + 1) + Math.floor(Math.random() * 600)
+        : 400 * (i + 1)
+      await sleep(waitMs, signal)
+    }
   }
   throw lastErr || new Error('No se pudo descargar un segmento HLS.')
 }
@@ -516,36 +662,117 @@ async function resolveHlsVariant(session, m3u8Url, referer, signal) {
 }
 
 async function downloadHlsNative(session, resolved, destPath, referer, signal, onProgress) {
-  const { segments, playlistUrl } = resolved
+  const { segments } = resolved
   if (!segments) throw new Error('Formato HLS no apto para descarga nativa.')
-  // CDNs como acek-cdn.com (?sp=500) penalizan múltiples conexiones simultáneas (~67 KB/s vs ~480 KB/s en 1 hilo).
-  const concurrency = /[?&]sp=\d+/i.test(String(playlistUrl || '')) ? 1 : HLS_CONCURRENCY
 
   const keyCache = new Map()
   const tsPath = `${destPath}.stream.ts`
+  const httpAgent = new http.Agent({ keepAlive: true, maxSockets: HLS_CONCURRENCY + 4, keepAliveMsecs: 15_000 })
+  const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: HLS_CONCURRENCY + 4, keepAliveMsecs: 15_000 })
+  const agents = { httpAgent, httpsAgent }
   const ctrl = new AbortController()
-  const onAbort = () => ctrl.abort(createAbortError())
+  const ready = new Map()
+  const waiters = []
+  let fatalErr = null
+
+  const wakeAll = () => {
+    while (waiters.length) waiters.shift()()
+  }
+  const waitForWindow = () => new Promise((resolve) => {
+    waiters.push(resolve)
+  })
+  const abortWith = (err) => {
+    if (!fatalErr) fatalErr = err
+    if (!ctrl.signal.aborted) ctrl.abort(err)
+    wakeAll()
+  }
+
+  const onAbort = () => abortWith(createAbortError())
   signal?.addEventListener('abort', onAbort, { once: true })
-  const watchdog = createIdleWatchdog(() => ctrl.abort(new Error('Descarga HLS sin datos durante 90s.')))
+  const watchdog = createIdleWatchdog(() => abortWith(new Error('Descarga HLS sin datos durante 90s.')))
 
   try {
     await fsp.rm(tsPath, { force: true }).catch(() => {})
     const fh = await fsp.open(tsPath, 'w')
+    const startedAt = Date.now()
+    const workerCount = Math.min(HLS_CONCURRENCY, segments.length)
+    let nextFetch = 0
+    let nextWrite = 0
     let totalBytes = 0
+    let downloadedBytes = 0
+    let downloadedSegs = 0
     let done = 0
-    let lastReport = 0
-    try {
-      for (let i = 0; i < segments.length; i += concurrency) {
-        if (ctrl.signal.aborted) throw createAbortError()
-        const batch = segments.slice(i, i + concurrency)
-        const buffers = await Promise.all(batch.map(async (seg) => {
-          let raw = await fetchSegmentBuffer(session, seg.url, referer, ctrl.signal, watchdog)
-          if (seg.key?.method === 'AES-128') {
-            let keyBuf = keyCache.get(seg.key.keyUrl)
-            if (!keyBuf) {
-              keyBuf = await fetchSegmentBuffer(session, seg.key.keyUrl, referer, ctrl.signal, watchdog)
-              keyCache.set(seg.key.keyUrl, keyBuf)
+    let lastReport = startedAt
+    let flushing = false
+    let flushPromise = null
+
+    const maybeReportProgress = (force = false) => {
+      if (!onProgress) return
+      const now = Date.now()
+      if (!force && now - lastReport < 8_000) return
+      lastReport = now
+      const elapsedSec = Math.max(0.2, (now - startedAt) / 1000)
+      const currentDone = force ? done : Math.min(downloadedSegs, segments.length)
+      const currentBytes = force ? totalBytes : downloadedBytes
+      onProgress({
+        done: currentDone,
+        total: segments.length,
+        bytes: currentBytes,
+        bytesPerSec: Math.round(currentBytes / elapsedSec),
+      })
+    }
+
+    const flushReady = () => {
+      if (flushing) return flushPromise
+      flushing = true
+      flushPromise = (async () => {
+        try {
+          while (!fatalErr && ready.has(nextWrite)) {
+            const chunk = ready.get(nextWrite)
+            ready.delete(nextWrite)
+            nextWrite += 1
+            totalBytes += chunk.length
+            done += 1
+            if (totalBytes > MAX_VIDEO_BYTES) {
+              throw new Error('El video supera el límite de 2 GB.')
             }
+            await fh.write(chunk)
+            wakeAll()
+            if (done === segments.length) maybeReportProgress(true)
+          }
+        } catch (err) {
+          abortWith(err)
+        } finally {
+          flushing = false
+          wakeAll()
+        }
+      })()
+      return flushPromise
+    }
+
+    const worker = async () => {
+      while (!fatalErr && !ctrl.signal.aborted) {
+        while (!fatalErr && !ctrl.signal.aborted && (nextFetch - nextWrite) >= HLS_WINDOW) {
+          await waitForWindow()
+        }
+        if (fatalErr || ctrl.signal.aborted) return
+        const idx = nextFetch
+        if (idx >= segments.length) return
+        nextFetch += 1
+        const seg = segments[idx]
+        try {
+          let raw = await fetchSegmentBuffer(session, seg.url, referer, ctrl.signal, watchdog, agents)
+          if (seg.key?.method === 'AES-128') {
+            let keyPromise = keyCache.get(seg.key.keyUrl)
+            if (!keyPromise) {
+              keyPromise = fetchSegmentBuffer(session, seg.key.keyUrl, referer, ctrl.signal, watchdog, agents)
+                .catch((err) => {
+                  keyCache.delete(seg.key.keyUrl)
+                  throw err
+                })
+              keyCache.set(seg.key.keyUrl, keyPromise)
+            }
+            const keyBuf = await keyPromise
             const iv = Buffer.alloc(16)
             if (seg.key.ivHex) {
               Buffer.from(seg.key.ivHex.padStart(32, '0').slice(-32), 'hex').copy(iv)
@@ -555,27 +782,44 @@ async function downloadHlsNative(session, resolved, destPath, referer, signal, o
             const decipher = createDecipheriv('aes-128-cbc', keyBuf, iv)
             raw = Buffer.concat([decipher.update(raw), decipher.final()])
           }
-          return stripDisguisedTsPrefix(raw)
-        }))
-        for (const chunk of buffers) {
-          totalBytes += chunk.length
-          done += 1
-          if (totalBytes > MAX_VIDEO_BYTES) throw new Error('El video supera el límite de 2 GB.')
-          await fh.write(chunk)
-        }
-        const now = Date.now()
-        if (onProgress && (now - lastReport >= 12_000 || done === segments.length)) {
-          lastReport = now
-          onProgress({ done, total: segments.length, bytes: totalBytes })
+          const cleaned = stripDisguisedTsPrefix(raw)
+          if (fatalErr || ctrl.signal.aborted) return
+          downloadedSegs += 1
+          downloadedBytes += cleaned.length
+          if (downloadedBytes > MAX_VIDEO_BYTES) {
+            abortWith(new Error('El video supera el límite de 2 GB.'))
+            return
+          }
+          ready.set(idx, cleaned)
+          if (idx === nextWrite) void flushReady()
+          if (downloadedSegs < segments.length) maybeReportProgress(false)
+        } catch (err) {
+          abortWith(signal?.aborted ? createAbortError() : err)
+          return
         }
       }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: workerCount }, () => worker()))
+      if (flushPromise) await flushPromise
+      if (!fatalErr && ready.has(nextWrite)) await flushReady()
+      ready.clear()
+      if (fatalErr) throw fatalErr
+      if (ctrl.signal.aborted) throw createAbortError()
+      if (nextWrite !== segments.length) {
+        throw new Error(`Descarga HLS incompleta (${nextWrite}/${segments.length} segmentos).`)
+      }
     } finally {
+      ready.clear()
       await fh.close()
     }
     return await remuxTsToMp4(tsPath, destPath, signal)
   } finally {
     watchdog.stop()
     signal?.removeEventListener('abort', onAbort)
+    httpAgent.destroy()
+    httpsAgent.destroy()
     await fsp.rm(tsPath, { force: true }).catch(() => {})
   }
 }
@@ -660,7 +904,10 @@ export async function downloadVidHideFile(inputUrl, outputPath, { signal, onProg
   try {
     let media = null
     let lastErr = null
+    const deadHosts = new Set()
     for (const candidate of parsed.candidates) {
+      const candidateHost = new URL(candidate).hostname.toLowerCase()
+      if (deadHosts.has(candidateHost)) continue
       try {
         let currentUrl = candidate
         let referer = `${new URL(candidate).origin}/`
@@ -683,6 +930,7 @@ export async function downloadVidHideFile(inputUrl, outputPath, { signal, onProg
       } catch (err) {
         if (signal?.aborted) throw createAbortError()
         lastErr = err
+        deadHosts.add(candidateHost)
       }
     }
     if (!media) throw lastErr || new Error('No se pudo extraer el video de VidHide.')
@@ -735,8 +983,9 @@ const handler = async (m, { conn, text, args, usedPrefix, command }) => {
     await update('⬇️ Descargando video desde *VidHide*…')
     const { fileSize } = await downloadVidHideFile(parsed.url, outputPath, {
       signal: controller.signal,
-      onProgress: ({ done, total, bytes }) => {
-        void update(`⬇️ Descargando *VidHide*… ${done}/${total} segs (${formatBytes(bytes)})`)
+      onProgress: ({ done, total, bytes, bytesPerSec }) => {
+        const speed = bytesPerSec ? ` · ${formatBytes(bytesPerSec)}/s` : ''
+        void update(`⬇️ Descargando *VidHide*… ${done}/${total} segs (${formatBytes(bytes)}${speed})`)
       },
     })
     let jpegThumbnail
