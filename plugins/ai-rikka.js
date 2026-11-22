@@ -193,6 +193,20 @@ function splitForWhatsApp(text, limit = WA_CHUNK_SIZE) {
   return parts;
 }
 
+const TYPING_REFRESH_MS = 8_000;
+
+/** Muestra "escribiendo..." y lo renueva mientras la API genera la respuesta. */
+function startTyping(conn, chatId) {
+  const send = (state) => conn.sendPresenceUpdate?.(state, chatId)?.catch?.(() => {});
+  send('composing');
+  const timer = setInterval(() => send('composing'), TYPING_REFRESH_MS);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    return send('paused');
+  };
+}
+
 const handler = async (m, { conn, text, usedPrefix, command }) => {
   const key = sessionKey(m);
   const input = (text || '').trim();
@@ -219,7 +233,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         : `Explica o responde a este mensaje:\n"""\n${quotedText}\n"""`)
     : input;
 
-  await conn.sendMessage(m.chat, { react: { text: '💭', key: m.key } }).catch(() => {});
+  const stopTyping = startTyping(conn, m.chat);
 
   try {
     const history = getHistory(key);
@@ -247,16 +261,15 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         i === 0 ? { quoted: m } : undefined,
       );
     }
-
-    await conn.sendMessage(m.chat, { react: { text: '✨', key: m.key } }).catch(() => {});
   } catch (error) {
-    await conn.sendMessage(m.chat, { react: { text: '❌', key: m.key } }).catch(() => {});
     const reason = error?.message || 'Error desconocido';
     await conn.sendMessage(
       m.chat,
       { text: `Uy, algo falló al intentar responderte…\n_${reason}_` },
       { quoted: m },
     );
+  } finally {
+    await stopTyping();
   }
 };
 
