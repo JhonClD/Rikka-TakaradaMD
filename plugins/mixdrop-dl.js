@@ -25,6 +25,9 @@ const PARALLEL_THREADS = 4
 const MIN_PARALLEL_BYTES = 5 * 1024 * 1024
 const MAX_CHUNK_RETRIES = 3
 const MAX_SEQ_RETRIES = 5
+const MIXDROP_PROXY_URL = String(
+  process.env.MIXDROP_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '',
+).trim()
 
 const MIXDROP_HOST_RE = /(?:^|\.)(?:mixdrop[a-z0-9]*\.|mxdrop\.|mixdrp\.|mixdroop\.|mdbekjwqa\.|mdy48tn97\.|mdfx9dc8n\.|mdzsmutpcvykb\.|md3b0j6hj\.)/i
 const ACTIVE_MIRRORS = ['mixdrop.ag', 'mxdrop.to', 'mixdrop.ps', 'mixdrop.my']
@@ -255,8 +258,9 @@ async function resilientFetch(session, url, {
     if (preferNative) transports.push(wreqEntry)
     else transports.unshift(wreqEntry)
   }
-  if (preferredTransport) {
-    const idx = transports.findIndex(t => t.name === preferredTransport)
+  const firstTransport = preferredTransport || (session && MIXDROP_PROXY_URL ? 'wreq' : null)
+  if (firstTransport) {
+    const idx = transports.findIndex(t => t.name === firstTransport)
     if (idx > 0) transports.unshift(...transports.splice(idx, 1))
   }
 
@@ -282,7 +286,12 @@ async function resilientFetch(session, url, {
   const prefix = blocked
     ? 'La CDN de MixDrop (mxcontent.net) rechazó todas las conexiones TCP/TLS desde la IP de este servidor'
     : 'Mixdrop CDN falló'
-  throw new Error(`${prefix} (${summary})`)
+  const recovery = !blocked
+    ? ''
+    : MIXDROP_PROXY_URL
+      ? ' Comprueba que el proxy configurado permita conexiones HTTPS mediante CONNECT.'
+      : ' Configura MIXDROP_PROXY_URL con un proxy HTTP/SOCKS o ejecuta el bot desde otra IP; más reintentos no resolverán el bloqueo.'
+  throw new Error(`${prefix} (${summary}).${recovery}`)
 }
 
 function toNodeReadable(res) {
@@ -577,6 +586,7 @@ export async function downloadMixdropFile(inputUrl, outputPath, { signal } = {})
       os: 'windows',
       timeout: PAGE_TIMEOUT_MS,
       defaultHeaders: { 'accept-language': 'es-419,es;q=0.9,en;q=0.8' },
+      ...(MIXDROP_PROXY_URL ? { proxy: MIXDROP_PROXY_URL } : {}),
     })
     : null
   try {
