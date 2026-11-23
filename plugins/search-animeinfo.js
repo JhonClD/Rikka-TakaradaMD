@@ -3,6 +3,7 @@ import https from 'https';
 import pkg from '@vitalets/google-translate-api';
 const { translate } = pkg;
 import fs from 'fs';
+import { chatCompletion, stripThinkingTags } from '../src/libraries/freellm.js';
 
 const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
 
@@ -10,11 +11,10 @@ const ANILIST_URL = 'https://graphql.anilist.co';
 const TRANSLATE_CACHE_MAX = 300;
 const TRANSLATE_MIN_GAP_MS = 250;
 const TRANSLATE_COOLDOWN_MS = 15 * 60 * 1000;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 const translateCache = new Map();
 let translateQueue = Promise.resolve();
 let lastTranslateRequestAt = 0;
-const translateCooldowns = { gemini: 0, google: 0, mymemory: 0 };
+const translateCooldowns = { ai: 0, google: 0, mymemory: 0 };
 
 function scheduleTranslateRequest(request) {
   const operation = translateQueue.then(async () => {
@@ -29,9 +29,9 @@ function scheduleTranslateRequest(request) {
 
 function isTranslationRateLimit(error) {
   const responseError = error?.response?.data?.error;
-  return error?.response?.status === 429 || error?.status === 429 ||
+  return Boolean(error?.isRateLimit) || error?.response?.status === 429 || error?.status === 429 ||
     responseError?.status === 'RESOURCE_EXHAUSTED' ||
-    /too many requests|rate.?limit|quota|resource.?exhausted/i.test(
+    /too many requests|rate.?limit|quota|resource.?exhausted|l[ií]mite diario/i.test(
       `${error?.message || ''} ${responseError?.message || ''}`
     );
 }
@@ -55,47 +55,32 @@ function truncateToLength(text, maxLength) {
   return `${clipped.trimEnd()}…`;
 }
 
-async function resumirSinopsisGemini(texto, maxCaracteres) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+async function resumirSinopsisAI(texto, maxCaracteres) {
   const sinopsis = String(texto || '').replace(/^>\s?/gm, '').trim();
-  if (!apiKey || !sinopsis || maxCaracteres < 40 || Date.now() < translateCooldowns.gemini) return null;
+  if (!sinopsis || maxCaracteres < 40 || Date.now() < translateCooldowns.ai) return null;
 
   try {
-    const response = await scheduleTranslateRequest(() => {
-      if (Date.now() < translateCooldowns.gemini) return null;
-      return axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+    const raw = await chatCompletion(
+      [
         {
-          systemInstruction: {
-            parts: [{
-              text: `Resume la sinopsis en español en un solo párrafo de máximo ${maxCaracteres} caracteres, contando espacios. Conserva el argumento principal y los datos importantes. No inventes información ni agregues introducciones, explicaciones o comillas; devuelve únicamente el resumen.`,
-            }],
-          },
-          contents: [{ role: 'user', parts: [{ text: sinopsis }] }],
-          generationConfig: { maxOutputTokens: 300 },
+          role: 'system',
+          content: `Resume la sinopsis en español en un solo párrafo de máximo ${maxCaracteres} caracteres, contando espacios. Conserva el argumento principal y los datos importantes. No inventes información ni agregues introducciones, explicaciones o comillas; devuelve únicamente el resumen.`,
         },
-        {
-          timeout: 15000,
-          headers: {
-            'x-goog-api-key': apiKey,
-            'Content-Type': 'application/json',
-          },
-        },
-      );
-    });
-    const resumen = response?.data?.candidates?.[0]?.content?.parts
-      ?.map(part => part?.text || '')
-      .join('')
+        { role: 'user', content: sinopsis },
+      ],
+      { maxTokens: 300, temperature: 0.2, timeoutMs: 25_000, maxRetries: 2 },
+    );
+    const resumen = stripThinkingTags(raw)
       .replace(/^\s*["'“”]+|["'“”]+\s*$/g, '')
       .replace(/\s+/g, ' ')
       .trim();
     return resumen || null;
   } catch (error) {
     if (isTranslationRateLimit(error)) {
-      translateCooldowns.gemini = Date.now() + TRANSLATE_COOLDOWN_MS;
-      console.info('[animeinfo] Gemini limitó el resumen; se usará un recorte local.');
+      translateCooldowns.ai = Date.now() + TRANSLATE_COOLDOWN_MS;
+      console.info('[animeinfo] APIsFreeLLM limitó el resumen; se usará un recorte local.');
     } else {
-      console.warn('[animeinfo] No se pudo resumir la sinopsis con Gemini:', error.message);
+      console.warn('[animeinfo] No se pudo resumir la sinopsis con APIsFreeLLM:', error.message);
     }
     return null;
   }
@@ -217,12 +202,12 @@ const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummar
     if (cleanDesc) {
       let resumenAniD = null;
       if (forceSynopsisSummary && cleanDesc.length > 420) {
-        console.info('[animeinfo] /aniD: intentando resumir la sinopsis larga con Gemini.');
-        resumenAniD = await resumirSinopsisGemini(cleanDesc, 420);
+        console.info('[animeinfo] /aniD: intentando resumir la sinopsis larga con APIsFreeLLM.');
+        resumenAniD = await resumirSinopsisAI(cleanDesc, 420);
         if (resumenAniD) {
           console.info(`[animeinfo] /aniD: sinopsis resumida a ${resumenAniD.length} caracteres.`);
         } else {
-          console.info('[animeinfo] /aniD: Gemini no resumió; se usará la traducción de respaldo.');
+          console.info('[animeinfo] /aniD: APIsFreeLLM no resumió; se usará la traducción de respaldo.');
         }
       }
 
@@ -348,7 +333,7 @@ ${sinopsisFormateada}`;
     if (captionText.length > MAX_CAPTION) {
       const synopsisPrefixLength = AnimeInfo.length - sinopsisFormateada.length;
       const synopsisBudget = MAX_CAPTION - synopsisPrefixLength - 2;
-      let synopsis = await resumirSinopsisGemini(sinopsisFormateada, synopsisBudget);
+      let synopsis = await resumirSinopsisAI(sinopsisFormateada, synopsisBudget);
       if (!synopsis) synopsis = sinopsisFormateada.replace(/^>\s?/gm, '').replace(/\s+/g, ' ').trim();
       synopsis = truncateToLength(synopsis, synopsisBudget);
       captionText = `${AnimeInfo.slice(0, synopsisPrefixLength)}${synopsis ? `> ${synopsis}` : ''}`;
@@ -731,40 +716,28 @@ async function traducirTexto(texto) {
 
     let resultado = null;
 
-    const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
-    if (geminiApiKey && Date.now() >= translateCooldowns.gemini) {
+    if (Date.now() >= translateCooldowns.ai) {
       try {
-        const res = await scheduleTranslateRequest(() => {
-          if (Date.now() < translateCooldowns.gemini) return null;
-          return axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+        const raw = await chatCompletion(
+          [
             {
-              systemInstruction: {
-                parts: [{ text: 'Traduce al español el texto recibido. Detecta automáticamente el idioma de origen. Devuelve únicamente la traducción, sin explicaciones, comillas ni texto adicional.' }]
-              },
-              contents: [{ role: 'user', parts: [{ text: fragmento }] }],
-              generationConfig: { maxOutputTokens: 1200 }
+              role: 'system',
+              content: 'Traduce al español el texto recibido. Detecta automáticamente el idioma de origen. Devuelve únicamente la traducción, sin explicaciones, comillas ni texto adicional.',
             },
-            {
-              timeout: 15000,
-              headers: {
-                'x-goog-api-key': geminiApiKey,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-        });
-        resultado = res?.data?.candidates?.[0]?.content?.parts
-          ?.map(part => part?.text || '')
-          .join('')
+            { role: 'user', content: fragmento },
+          ],
+          { maxTokens: 1200, temperature: 0.1, timeoutMs: 30_000, maxRetries: 2 },
+        );
+        resultado = stripThinkingTags(raw)
+          .replace(/^\s*["'“”]+|["'“”]+\s*$/g, '')
           .trim() || null;
-        if (!resultado && res) throw new Error('Gemini devolvió una respuesta vacía');
+        if (!resultado) throw new Error('APIsFreeLLM devolvió una respuesta vacía');
       } catch (err) {
         if (isTranslationRateLimit(err)) {
-          translateCooldowns.gemini = Date.now() + TRANSLATE_COOLDOWN_MS;
-          console.info('[animeinfo] Gemini limitó las consultas; se pausará temporalmente.');
+          translateCooldowns.ai = Date.now() + TRANSLATE_COOLDOWN_MS;
+          console.info('[animeinfo] APIsFreeLLM limitó las consultas; se pausará temporalmente.');
         } else {
-          console.warn('[animeinfo] Gemini falló:', err.message);
+          console.warn('[animeinfo] APIsFreeLLM falló:', err.message);
         }
       }
     }

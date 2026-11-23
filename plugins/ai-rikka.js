@@ -1,18 +1,11 @@
-import axios from 'axios';
+import { chatCompletion, stripThinkingTags } from '../src/libraries/freellm.js';
 
-const API_BASE_URL = 'https://api.apisfreellm.com/v1';
-const CHAT_ENDPOINT = `${API_BASE_URL}/chat/completions`;
-const MODEL_NAME = 'free-ai';
-
-const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_TOKENS = 2048;
-const MAX_RETRIES = 3;
-const MIN_GAP_MS = 1_100; // límite de la API: 1 req/s por IP
-
 const HISTORY_TTL_MS = 30 * 60 * 1000;
 const MAX_HISTORY_TURNS = 6; // 6 pares (12 mensajes)
 const MAX_SESSIONS = 200;
 const WA_CHUNK_SIZE = 3_800;
+const TYPING_REFRESH_MS = 8_000;
 
 const SYSTEM_PROMPT = [
   'Eres Rikka Takarada (de SSSS.GRIDMAN).',
@@ -25,8 +18,6 @@ const SYSTEM_PROMPT = [
 
 // Memoria de conversación en RAM por chat+usuario (la API es stateless).
 const sessions = new Map();
-let lastRequestAt = 0;
-let requestQueue = Promise.resolve();
 
 function sessionKey(m) {
   return `${m.chat || ''}:${m.sender || ''}`;
@@ -56,107 +47,9 @@ function saveHistory(key, messages) {
   sessions.set(key, { messages: trimmed, updatedAt: now });
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Respeta el límite de 1 req/s por IP de APIsFreeLLM encolando las salidas. */
-function scheduleRequest(task) {
-  const run = requestQueue.catch(() => {}).then(async () => {
-    const wait = MIN_GAP_MS - (Date.now() - lastRequestAt);
-    if (wait > 0) await sleep(wait);
-    lastRequestAt = Date.now();
-    return task();
-  });
-  requestQueue = run.catch(() => {});
-  return run;
-}
-
-function parseRetryAfterMs(headerValue) {
-  if (!headerValue) return null;
-  const seconds = Number(headerValue);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const dateMs = Date.parse(String(headerValue));
-  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
-  return null;
-}
-
-function isDailyLimitError(status, message) {
-  return status === 429 && /daily|per day|allowance|00:00\s*utc/i.test(String(message || ''));
-}
-
-async function askFreeLlm(messages) {
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const response = await scheduleRequest(() =>
-        axios.post(
-          CHAT_ENDPOINT,
-          {
-            model: MODEL_NAME,
-            messages,
-            max_tokens: MAX_TOKENS,
-            temperature: 0.7,
-          },
-          {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: REQUEST_TIMEOUT_MS,
-            validateStatus: () => true,
-          },
-        ),
-      );
-
-      const { status, data, headers } = response;
-      const apiError = data?.error?.message || (typeof data?.error === 'string' ? data.error : null);
-
-      if (status >= 200 && status < 300) {
-        const content = data?.choices?.[0]?.message?.content;
-        if (typeof content === 'string' && content.trim()) {
-          return content.trim();
-        }
-        throw new Error(apiError || 'La API respondió sin contenido.');
-      }
-
-      if (isDailyLimitError(status, apiError)) {
-        throw new Error('Se alcanzó el límite diario de la API (se reinicia a las 00:00 UTC).');
-      }
-
-      const retryable = status === 503 || status === 502 || status === 504 || status === 429;
-      if (retryable && attempt < MAX_RETRIES) {
-        const retryAfter = parseRetryAfterMs(headers?.['retry-after']);
-        // Solo espera Retry-After corto; si pide horas, no bloquea el bot.
-        if (retryAfter !== null && retryAfter > 30_000) {
-          throw new Error(apiError || `Límite de peticiones activo (intenta de nuevo en ${Math.ceil(retryAfter / 1000)}s).`);
-        }
-        const backoff = retryAfter ?? Math.min(2_000 * (2 ** (attempt - 1)), 8_000);
-        await sleep(backoff);
-        continue;
-      }
-
-      throw new Error(apiError || `La API devolvió HTTP ${status}.`);
-    } catch (error) {
-      lastError = error;
-      const isNetworkError = error?.code === 'ECONNRESET'
-        || error?.code === 'ETIMEDOUT'
-        || error?.code === 'ECONNABORTED'
-        || error?.code === 'EAI_AGAIN';
-      if (isNetworkError && attempt < MAX_RETRIES) {
-        await sleep(2_000 * attempt);
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  throw lastError || new Error('No se pudo obtener respuesta de APIsFreeLLM.');
-}
-
 /** Limpia etiquetas <think> y adapta negritas/encabezados Markdown a WhatsApp. */
 function formatForWhatsApp(raw) {
-  let cleaned = String(raw || '')
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .trim();
+  let cleaned = stripThinkingTags(raw);
 
   // Protege bloques de código ```...``` antes de tocar asteriscos o encabezados.
   const blocks = [];
@@ -192,8 +85,6 @@ function splitForWhatsApp(text, limit = WA_CHUNK_SIZE) {
   if (remaining) parts.push(remaining);
   return parts;
 }
-
-const TYPING_REFRESH_MS = 8_000;
 
 /** Muestra "escribiendo..." y lo renueva mientras la API genera la respuesta. */
 function startTyping(conn, chatId) {
@@ -243,7 +134,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       { role: 'user', content: userPrompt },
     ];
 
-    const rawReply = await askFreeLlm(messages);
+    const rawReply = await chatCompletion(messages, { maxTokens: MAX_TOKENS, temperature: 0.7 });
     const reply = formatForWhatsApp(rawReply);
     if (!reply) throw new Error('La respuesta llegó vacía.');
 
