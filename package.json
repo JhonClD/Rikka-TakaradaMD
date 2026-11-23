@@ -11,7 +11,7 @@
     "start": "FORCE_COLOR=2 node --expose-gc index.js",
     "qr": "FORCE_COLOR=2 node index.js qr",
     "code": "FORCE_COLOR=2 node index.js code",
-    "test": "node --test tests/*.test.js plugins/jk-notify.js",
+    "test": "node --test plugins/jk-notify.js plugins/dbs-notify.js plugins/downloader-transferit.js plugins/twitter-x.js plugins/lib/jkanime-episode-servers.js src/funcion/reconnect-policy.js src/funcion/session-health.js src/funcion/messageValidation.js src/funcion/download-registry.js src/funcion/paths.js scripts/check-ghost-identifiers.mjs",
     "test:one": "node --test plugins/jk-notify.js",
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",

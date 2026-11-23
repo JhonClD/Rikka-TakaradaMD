@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const PATTERNS = ['*.js', 'plugins/**/*.js', 'src/**/*.js', 'tests/**/*.js', 'scripts/**/*.mjs'];
+const PATTERNS = ['*.js', 'plugins/**/*.js', 'src/**/*.js', 'scripts/**/*.mjs'];
 
 // Globales reales de Node/DOM que no hace falta declarar. Está suelto porque el
 // filtro final solo mira escrituras; si falta alguno, simplemente no pasa nada.
@@ -116,7 +116,10 @@ export async function findGhostWrites({ cwd = ROOT } = {}) {
   return ghosts.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const IS_DIRECT_RUN = Boolean(process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+const IS_TEST_RUN = Boolean(process.env.NODE_TEST_CONTEXT && IS_DIRECT_RUN);
+
+if (IS_DIRECT_RUN && !IS_TEST_RUN) {
   const asJson = process.argv.includes('--json');
   const ghosts = await findGhostWrites();
   if (ghosts === null) {
@@ -134,3 +137,46 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   process.exit(ghosts.length ? 1 : 0);
 }
+
+// ─── Tests embebidos (solo al ejecutar `node --test scripts/check-ghost-identifiers.mjs`) ──
+
+if (IS_TEST_RUN) {
+  const { default: test } = await import('node:test');
+  const { default: assert } = await import('node:assert/strict');
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+
+  const ghosts = await findGhostWrites();
+
+  if (ghosts === null) {
+    test('el guardián de identificadores fantasma puede ejecutarse', {
+      skip: process.env.CI ? false : 'ESLint no está instalado (es devDependency)',
+    }, () => {
+      assert.fail('ESLint no se pudo importar: el guardián no está vigilando nada');
+    });
+  }
+
+  test('el proyecto no asigna identificadores sin declarar', { skip: ghosts === null }, () => {
+    assert.deepEqual(
+      ghosts,
+      [],
+      'asignaciones fantasma: ' + ghosts.map((g) => `${g.file}:${g.line} (${g.name})`).join(', '),
+    );
+  });
+
+  test('el detector no está vacío: encuentra una asignación fantasma sembrada', { skip: ghosts === null }, async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rikka-ghost-'));
+    try {
+      await fs.writeFile(
+        path.join(dir, 'sample.js'),
+        'export const handler = async () => {\n  isFirstConnection = true;\n};\n',
+      );
+      const found = await findGhostWrites({ cwd: dir });
+      assert.deepEqual(found.map((g) => g.name), ['isFirstConnection']);
+      assert.equal(found[0].file, 'sample.js');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+

@@ -25,6 +25,7 @@ import * as cheerio from 'cheerio'
 import fs from 'fs'
 import path from 'path'
 import https from 'https'
+import { fileURLToPath } from 'url'
 import { DATA_DIR, TEMP_VIDEOS_DIR } from '../src/funcion/paths.js'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
@@ -33,6 +34,13 @@ import jpegThumbnailLibrary from '../src/libraries/jpeg-thumbnail.cjs'
 import { compressDw4 } from '../src/libraries/dw4-compress.js'
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
+
+const MODULE_PATH = fileURLToPath(import.meta.url)
+const IS_TEST_RUN = Boolean(
+  process.env.NODE_TEST_CONTEXT &&
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === MODULE_PATH,
+)
 
 const ANIMEDBS_URL        = 'https://www.animedbs.online'
 const DBS_DIRECTORY_URL   = `${ANIMEDBS_URL}/anime/?status=&type=&order=update`
@@ -450,11 +458,6 @@ function describirFallo(url, error, bloqueo) {
 function esErrorDeBloqueo(error) {
   return error?.code === 'DBS_FORBIDDEN' || esBloqueo(error)
 }
-
-// Se exportan para que tests/dbs-notify.test.js pueda probar el cliente sin
-// otra copia del código. `main.js` registra `module.default || module`, así que
-// estos named exports no cambian cómo se carga el plugin en el bot.
-export { fetchDbs, esErrorDeBloqueo, DBS_HEADERS }
 
 
 // ─── Estado global ────────────────────────────────────────────────────────────
@@ -2142,3 +2145,123 @@ handler.tags = ['anime', 'notificaciones']
 handler.help = ['dbsstart [segundos]', 'dbsstop', 'dbsstatus', 'dbscheck', 'dbsqueue', 'dbsflush', 'dbsunblock', 'dbsinterval <segundos>', 'dbsexample [N]']
 handler.before = async (_m, { conn }) => { if (conn) global.dbsConn = conn }
 export default handler
+
+// ─── Tests embebidos (solo al ejecutar `node --test plugins/dbs-notify.js`) ───
+
+if (IS_TEST_RUN) {
+  const { default: test } = await import('node:test')
+  const { default: assert } = await import('node:assert/strict')
+  const { default: http } = await import('node:http')
+
+  function servidorWaf(comportamiento) {
+    const estado = { peticiones: [], intentos: 0 }
+    const server = http.createServer((req, res) => {
+      estado.peticiones.push({ url: req.url, ua: req.headers['user-agent'] || '' })
+      estado.intentos += 1
+      const respuesta = comportamiento(req, estado)
+      res.writeHead(respuesta.status, respuesta.headers || {})
+      res.end(respuesta.body || '')
+    })
+    return { server, estado }
+  }
+
+  async function conServidor(comportamiento, fn) {
+    const { server, estado } = servidorWaf(comportamiento)
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${server.address().port}`
+    try {
+      return await fn(base, estado)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  }
+
+  test('las cabeceras fingen navegación de un Chrome real', () => {
+    assert.match(DBS_HEADERS['User-Agent'], /Chrome\/\d+/)
+    assert.equal(DBS_HEADERS['Sec-Fetch-Mode'], 'navigate')
+    assert.equal(DBS_HEADERS['Upgrade-Insecure-Requests'], '1')
+  })
+
+  test('devuelve el cuerpo cuando el sitio responde 200', async () => {
+    await conServidor(
+      () => ({ status: 200, body: '<html>portada</html>' }),
+      async (base, estado) => {
+        const respuesta = await fetchDbs(`${base}/`)
+        assert.equal(respuesta.status, 200)
+        assert.match(String(respuesta.data), /portada/)
+        assert.ok(estado.peticiones.length >= 1)
+        assert.match(estado.peticiones[0].ua, /Chrome\/\d+/)
+      },
+    )
+  })
+
+  test('un 403 se convierte en un error accionable, no en el texto de axios', async () => {
+    await conServidor(
+      () => ({ status: 403, body: 'forbidden' }),
+      async base => {
+        const error = await fetchDbs(`${base}/ver/episodio-1`).then(
+          () => { throw new Error('debía fallar') },
+          err => err,
+        )
+        assert.equal(error.code, 'DBS_FORBIDDEN')
+        assert.equal(esErrorDeBloqueo(error), true)
+        assert.match(error.message, /403/)
+        assert.match(error.message, /DBS_PROXY_URL/)
+        assert.match(error.message, /DBS_FLARESOLVERR_URL/)
+        assert.doesNotMatch(error.message, /Request failed with status code/)
+      },
+    )
+  })
+
+  test('un 5xx se reintenta y termina devolviendo el contenido', async () => {
+    await conServidor(
+      (_req, estado) => estado.intentos < 2
+        ? { status: 503, body: 'ocupado' }
+        : { status: 200, body: 'recuperado' },
+      async base => {
+        const respuesta = await fetchDbs(`${base}/flaky`, { intentos: 3 })
+        assert.equal(respuesta.status, 200)
+        assert.equal(String(respuesta.data), 'recuperado')
+      },
+    )
+  })
+
+  test('un 404 no se reintenta: no se arregla esperando', async () => {
+    await conServidor(
+      () => ({ status: 404, body: 'no existe' }),
+      async (base, estado) => {
+        const error = await fetchDbs(`${base}/no-existe`).then(
+          () => { throw new Error('debía fallar') },
+          err => err,
+        )
+        assert.notEqual(error.code, 'DBS_FORBIDDEN')
+        assert.ok(estado.intentos <= 6, `demasiados intentos: ${estado.intentos}`)
+      },
+    )
+  })
+
+  test('las portadas viajan en binario y no se corrompen', async () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ])
+    await conServidor(
+      () => ({ status: 200, body: png, headers: { 'content-type': 'image/png' } }),
+      async base => {
+        const respuesta = await fetchDbs(`${base}/cover.png`, { documento: false, binario: true })
+        assert.ok(Buffer.isBuffer(respuesta.data), 'debe devolver un Buffer')
+        assert.deepEqual([...respuesta.data.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        assert.equal(respuesta.data.length, png.length)
+      },
+    )
+  })
+
+  test('esErrorDeBloqueo distingue bloqueo de error de red', () => {
+    assert.equal(esErrorDeBloqueo({ status: 403 }), true)
+    assert.equal(esErrorDeBloqueo({ code: 'DBS_FORBIDDEN' }), true)
+    assert.equal(esErrorDeBloqueo({ status: 500 }), false)
+    assert.equal(esErrorDeBloqueo(new Error('ECONNRESET')), false)
+    assert.equal(esErrorDeBloqueo(null), false)
+  })
+}
+
