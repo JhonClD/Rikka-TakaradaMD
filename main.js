@@ -19,6 +19,18 @@ import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
 import { dbFile, TMP_DIR } from './src/funcion/paths.js';
 import { RECONNECT, STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
+import {
+  CREDS_FILE,
+  DOWNTIME_PURGE_AGE_MS,
+  STALE_ROUTING_AGE_MS,
+  createDecryptFailureMonitor,
+  getCredsAgeMs,
+  isIgnorableDecryptFailure,
+  isPreKeyDecryptError,
+  isResettablePeerJid,
+  prepareAuthFolder,
+  wrapSafeSaveCreds,
+} from './src/funcion/session-health.js';
 
 const {
   Browsers,
@@ -36,16 +48,15 @@ const {
 
 // PHONENUMBER_MCC fue removido en itsliaaa/baileys — validación E.164 básica (7 a 15 dígitos sin cero inicial)
 const isValidPhoneNumber = (num) => /^[1-9]\d{6,14}$/.test(num);
-const CREDS_FILE = 'creds.json';
-const CREDS_BACKUP_FILE = 'creds.json.bak';
 
 let stopped = 'close';
 protoType();
 serialize();
-// stdTTL 0 en node-cache significa "no caduca nunca": con el bot varios días
-// encendido estos dos cachés de Baileys crecían sin límite.
-const msgRetryCounterCache = new NodeCache({ stdTTL: 10_000, checkperiod: 120 });
-const userDevicesCache = new NodeCache({ stdTTL: 30_000, checkperiod: 120 });
+// stdTTL en node-cache está en SEGUNDOS: 1 h para reintentos y 5 min para
+// listas de dispositivos (alineado con DEFAULT_CACHE_TTLS de Baileys) para no
+// retener dispositivos caducados durante horas tras un reinicio o cambio de sesión.
+const msgRetryCounterCache = new NodeCache({ stdTTL: 3600, checkperiod: 120 });
+const userDevicesCache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 // Nivel del logger interno de Baileys. 'silent' conserva el comportamiento
 // actual; LOG_LEVEL=debug permite ver el handshake sin tocar el código.
 const logLevel = process.env.LOG_LEVEL || 'silent';
@@ -63,6 +74,9 @@ let socketReloadInProgress = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let consecutiveBadSessions = 0;
+let pendingEphemeralPurge = false;
+let lastOpenedAt = 0;
+const decryptFailureMonitor = createDecryptFailureMonitor();
 // Vigilante del handshake: Baileys avisa con `close` casi siempre, pero hay
 // desconexiones que no emiten nada (un TCP que se apaga sin FIN) y sin
 // vigilancia el bot se queda con un socket que ni abre ni cierra.
@@ -242,86 +256,36 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
 
-// ── Integridad y respaldo atómico de la sesión ───────────────────────────────
-// Baileys escribe `creds.json` con `writeFile` directo (no atómico): un corte
-// de luz, OOM o `SIGKILL` a mitad de escritura puede truncarlo o dejar un
-// `session-*.json` roto. Mantenemos un respaldo atómico (`creds.json.bak`) y
-// reparamos archivos corruptos antes de abrir el socket.
-function isValidCredsJson(raw) {
-  if (!raw || !raw.trim()) return false;
-  try {
-    const parsed = JSON.parse(raw);
-    return Boolean(parsed && typeof parsed === 'object' && parsed.noiseKey && parsed.signedIdentityKey);
-  } catch {
-    return false;
-  }
-}
+// ── Integridad, respaldo atómico y auto-limpieza de sesión tras apagados ─────
+// Si el VPS estuvo apagado horas (típico en ciclos de 8 h), `creds.json` sigue
+// siendo válido, pero los archivos efímeros de Signal (`session-*`, `sender-key-*`,
+// `device-list-*`, `tctoken-*`) y `routingInfo` suelen quedar desfasados y hacen
+// que el bot deje de descifrar mensajes aunque se reinicie. Aquí se limpia solo
+// esa caché efímera conservando `creds.json`, `pre-key-*`, `app-state-sync-*` y `lid-mapping-*`.
+async function loadAuthState(authDir, { isStartup = false, purgeEphemeral = false, clearRouting = false } = {}) {
+  const credsAgeMs = getCredsAgeMs(authDir);
+  const longDowntime = isStartup && credsAgeMs >= DOWNTIME_PURGE_AGE_MS;
+  const shouldPurge = purgeEphemeral || longDowntime;
+  const shouldClearRouting = clearRouting || (isStartup && credsAgeMs >= STALE_ROUTING_AGE_MS);
 
-async function prepareAuthFolder(authDir) {
-  if (!existsSync(authDir)) return;
-  const credsPath = join(authDir, CREDS_FILE);
-  const backupPath = join(authDir, CREDS_BACKUP_FILE);
-
-  let credsValid = false;
-  try {
-    credsValid = isValidCredsJson(await fs.promises.readFile(credsPath, 'utf8'));
-  } catch {
-    credsValid = false;
+  if (longDowntime) {
+    const hours = (credsAgeMs / 3_600_000).toFixed(1);
+    console.log(chalk.yellow(`[Auth] Sesión inactiva ~${hours} h (apagado prolongado del VPS); regenerando sesiones Signal efímeras sin desvincular.`));
   }
 
-  if (!credsValid && existsSync(backupPath)) {
-    try {
-      const backupRaw = await fs.promises.readFile(backupPath, 'utf8');
-      if (isValidCredsJson(backupRaw)) {
-        const tmpRestore = `${credsPath}.restore-${process.pid}-${Date.now()}`;
-        await fs.promises.writeFile(tmpRestore, backupRaw, { mode: 0o600 });
-        await fs.promises.rename(tmpRestore, credsPath);
-        console.log(chalk.yellow('[ ⚠️ ] creds.json estaba dañado; restaurado automáticamente desde creds.json.bak.'));
-      }
-    } catch (error) {
-      console.warn('[Auth] No se pudo restaurar creds.json desde respaldo:', error?.message || error);
-    }
-  }
+  await prepareAuthFolder(authDir, {
+    repairAuthState,
+    purgeEphemeral: shouldPurge,
+    log: (msg) => console.log(chalk.yellow(msg)),
+    warn: (...args) => console.warn(...args),
+  });
 
-  if (typeof repairAuthState === 'function') {
-    try {
-      const report = await repairAuthState(authDir);
-      if (report?.quarantined?.length) {
-        const preview = report.quarantined.slice(0, 5).join(', ');
-        console.log(chalk.yellow(`[ ⚠️ ] Sesión reparada: se aislaron ${report.quarantined.length} archivo(s) corrupto(s) (${preview}).`));
-      }
-    } catch (error) {
-      console.warn('[Auth] No se pudo verificar integridad de sesión:', error?.message || error);
-    }
-  }
-}
-
-function wrapSafeSaveCreds(rawSaveCreds, authDir) {
-  let pending = Promise.resolve();
-  return () => {
-    pending = pending
-      .catch(() => {})
-      .then(async () => {
-        await rawSaveCreds();
-        const credsPath = join(authDir, CREDS_FILE);
-        const backupPath = join(authDir, CREDS_BACKUP_FILE);
-        try {
-          const raw = await fs.promises.readFile(credsPath, 'utf8');
-          if (!isValidCredsJson(raw)) return;
-          const tmpBak = `${backupPath}.tmp-${process.pid}-${Date.now()}`;
-          await fs.promises.writeFile(tmpBak, raw, { mode: 0o600 });
-          await fs.promises.rename(tmpBak, backupPath);
-        } catch {
-          // El guardado principal ya tuvo éxito; el respaldo se reintentará en el próximo creds.update.
-        }
-      });
-    return pending;
-  };
-}
-
-async function loadAuthState(authDir) {
-  await prepareAuthFolder(authDir);
   const auth = await useMultiFileAuthState(authDir);
+  if (shouldClearRouting && auth.state?.creds?.routingInfo) {
+    delete auth.state.creds.routingInfo;
+    console.log(chalk.gray('[Auth] routingInfo obsoleto descartado; WhatsApp asignará una ruta fresca al conectar.'));
+  }
+
   return {
     state: auth.state,
     saveCreds: wrapSafeSaveCreds(auth.saveCreds, authDir),
@@ -414,7 +378,7 @@ const pluginWatcher = watch(pluginFolder, (ev, filename) => {
 });
 
 // ── Sesión, versión y método de vinculación ──────────────────────────────────
-let { state, saveCreds } = await loadAuthState(global.authFilePath);
+let { state, saveCreds } = await loadAuthState(global.authFilePath, { isStartup: true });
 const FALLBACK_WA_VERSION = DEFAULT_CONNECTION_CONFIG?.version || [2, 3000, 1051627909];
 const versionFetcher = fetchBestWaVersion || fetchLatestBaileysVersion;
 const version = (await versionFetcher().catch(() => null))?.version || FALLBACK_WA_VERSION;
@@ -567,6 +531,55 @@ function shouldLogError(errorType) {
   return true;
 }
 
+function ensureBotJid(activeConn) {
+  if (activeConn?.user?.id && !activeConn.user.jid) {
+    activeConn.user.jid = activeConn.decodeJid(activeConn.user.id);
+  }
+}
+
+/**
+ * Auto-repara sesiones Signal desfasadas sin borrar `creds.json`:
+ *  - Si falta una pre-key en disco, sube un lote nuevo al servidor.
+ *  - Si un remitente falla repetidamente (Bad MAC / No session), borra solo su sesión Signal.
+ *  - Si hay una tormenta de fallos tras horas apagado, purga la caché efímera y reconecta.
+ */
+async function handleDecryptFailed(info) {
+  if (this && this !== global.conn) return;
+  if (isIgnorableDecryptFailure(info)) return;
+
+  const peerJid = info?.participant || info?.remoteJid || '';
+  const isPreKeyError = isPreKeyDecryptError(info);
+  const errorMessage = info?.errorMessage || 'sin detalle';
+  const verdict = decryptFailureMonitor.record({ peerJid, isPreKeyError });
+
+  if (shouldLogError(`decrypt_${peerJid || 'unknown'}`)) {
+    // Pasar `errorMessage` como segundo argumento evita que el filtro de ruido
+    // de `console.log` (que revisa solo `args[0]`) borre este aviso.
+    console.log(
+      chalk.yellow(`[ ⚠️ ] Fallo al descifrar mensaje (${peerJid || 'desconocido'}) [fallos=${verdict.globalCount}]:`),
+      errorMessage,
+    );
+  }
+
+  if (verdict.shouldUploadPreKeys && typeof global.conn?.uploadPreKeys === 'function') {
+    console.log(chalk.yellow('[Auth] Error de PreKey detectado; subiendo nuevas pre-keys a WhatsApp...'));
+    global.conn.uploadPreKeys().catch((err) => {
+      console.warn('[Auth] No se pudieron subir nuevas pre-keys:', err?.message || err);
+    });
+  }
+
+  if (verdict.shouldResetPeer && isResettablePeerJid(peerJid) && typeof global.conn?.signalRepository?.deleteSession === 'function') {
+    console.log(chalk.yellow(`[Auth] Reiniciando sesión Signal desincronizada con ${peerJid}...`));
+    global.conn.signalRepository.deleteSession([peerJid]).catch(() => {});
+  }
+
+  if (verdict.shouldPurgeAndReconnect && !terminalSession && !shutdownStarted) {
+    console.log(chalk.yellow('[Auth] Tormenta de fallos de descifrado; purgando caché efímera de RikkaSession (conservando creds.json) y reconectando...'));
+    pendingEphemeralPurge = true;
+    scheduleSocketReconnect('decrypt-storm');
+  }
+}
+
 async function connectionUpdate(update) {
   // Un socket viejo puede emitir eventos durante su cierre. Ignóralos para
   // evitar que vuelva a programar una reconexión después de crear el nuevo.
@@ -589,6 +602,9 @@ async function connectionUpdate(update) {
     reconnectAttempt = 0;
     consecutiveBadSessions = 0;
     terminalSession = false;
+    lastOpenedAt = Date.now();
+    decryptFailureMonitor.reset();
+    ensureBotJid(global.conn);
     for (const key of Object.keys(errorCounters)) delete errorCounters[key];
     clearPendingReconnect();
     if (recoveredAfter >= RECONNECT_POLICY.alertAfterAttempts) {
@@ -596,7 +612,7 @@ async function connectionUpdate(update) {
     }
     // ── FIX DOBLE MENSAJE: registrar timestamp exacto de conexión ──
     global.timestamp.connect = new Date();
-    console.log(chalk.yellow('[　ℹ️　　] Conectado correctamente.'));
+    console.log(chalk.yellow(`[　ℹ️　　] Conectado correctamente (${global.conn?.user?.jid || 'sesión activa'}).`));
     // Aquí había un `isFirstConnection = true;` sin declarar: en un módulo ES
     // (siempre estricto) lanzaba ReferenceError y cortaba la rama 'open' antes
     // del flush, de modo que los avisos acumulados durante la caída no se
@@ -619,52 +635,65 @@ async function connectionUpdate(update) {
     if (reason === DisconnectReason.badSession) {
       // En Baileys, 500 (`badSession`) también es el código por defecto ante
       // stream:error sin código o fallos temporales de servidor/WebSocket.
-      // Se reintenta reparando archivos corruptos antes de declarar la sesión
-      // muerta y dejar al bot sin responder comandos.
+      // Se reintenta reparando archivos corruptos (y purgando caché efímera en
+      // el segundo intento, sin tocar creds.json) antes de declarar la sesión muerta.
       const decision = classifyDisconnect(reason, DisconnectReason, { badSessionAttempts: consecutiveBadSessions });
       consecutiveBadSessions += 1;
       if (decision === RECONNECT) {
-        global.conn.logger.warn(
-          `[ ⚠️ ] Desconexión 500/badSession (intento ${consecutiveBadSessions}/${RECONNECT_POLICY.maxBadSessionRetries}): ${detail}. Reparando y reconectando...`,
-        );
+        if (consecutiveBadSessions >= 2) pendingEphemeralPurge = true;
+        const msg = `[ ⚠️ ] Desconexión 500/badSession (intento ${consecutiveBadSessions}/${RECONNECT_POLICY.maxBadSessionRetries}): ${detail}. Reparando y reconectando...`;
+        console.log(chalk.yellow(msg));
+        global.conn.logger.warn(msg);
         scheduleSocketReconnect('badSession');
       } else {
         if (shouldLogError('badSession')) {
-          global.conn.logger.error(
-            `[ ⚠️ ] Sesión incorrecta tras ${consecutiveBadSessions} intentos (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`,
-          );
+          const msg = `[ ⚠️ ] Sesión incorrecta tras ${consecutiveBadSessions} intentos (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`;
+          console.log(chalk.redBright(msg));
+          global.conn.logger.error(msg);
         }
         markTerminalSession(`sesión inválida tras ${consecutiveBadSessions} intentos (badSession: ${detail})`);
       }
     } else if (reason === DisconnectReason.connectionClosed) {
       if (shouldLogError('connectionClosed')) {
-        global.conn.logger.warn(`[ ⚠️ ] Conexión cerrada (${detail}), reconectando...`);
+        const msg = `[ ⚠️ ] Conexión cerrada (${detail}), reconectando...`;
+        console.log(chalk.yellow(msg));
+        global.conn.logger.warn(msg);
       }
       scheduleSocketReconnect('connectionClosed');
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogError('connectionLost')) {
-        global.conn.logger.warn(`[ ⚠️ ] Conexión perdida con el servidor (${detail}), reconectando...`);
+        const msg = `[ ⚠️ ] Conexión perdida con el servidor (${detail}), reconectando...`;
+        console.log(chalk.yellow(msg));
+        global.conn.logger.warn(msg);
       }
       scheduleSocketReconnect('connectionLost');
     } else if (reason === DisconnectReason.loggedOut) {
       if (shouldLogError('loggedOut')) {
-        global.conn.logger.error(`[ ⚠️ ] Conexión cerrada desde WhatsApp (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`);
+        const msg = `[ ⚠️ ] Conexión cerrada desde WhatsApp (${detail}). Elimina la carpeta ${global.authFile} y escanea nuevamente.`;
+        console.log(chalk.redBright(msg));
+        global.conn.logger.error(msg);
       }
       markTerminalSession('sesión cerrada desde el teléfono (loggedOut)');
     } else if (reason === DisconnectReason.restartRequired) {
       if (shouldLogError('restartRequired')) {
-        global.conn.logger.info(`[ ⚠️ ] Reinicio necesario (${detail}), reconectando...`);
+        const msg = `[ ⚠️ ] Reinicio necesario (${detail}), reconectando...`;
+        console.log(chalk.gray(msg));
+        global.conn.logger.info(msg);
       }
       scheduleSocketReconnect('restartRequired');
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogError('timedOut')) {
-        global.conn.logger.warn(`[ ⚠️ ] Tiempo de conexión agotado (${detail}), reconectando...`);
+        const msg = `[ ⚠️ ] Tiempo de conexión agotado (${detail}), reconectando...`;
+        console.log(chalk.yellow(msg));
+        global.conn.logger.warn(msg);
       }
       scheduleSocketReconnect('timedOut');
     } else {
       const unknownError = `unknown_${reason || ''}_${connection || ''}`;
       if (shouldLogError(unknownError)) {
-        global.conn.logger.warn(`[ ⚠️ ] Razón de desconexión desconocida (${reason || 'none'}: ${detail})`);
+        const msg = `[ ⚠️ ] Razón de desconexión desconocida (${reason || 'none'}: ${detail})`;
+        console.log(chalk.yellow(msg));
+        global.conn.logger.warn(msg);
       }
       // Motivo que no conocemos: se consulta la misma tabla que usan los
       // anteriores, porque WhatsApp inventa códigos nuevos de vez en cuando y
@@ -791,11 +820,13 @@ let isInit = true;
 
 /** Enlaza todos los eventos del socket de forma síncrona (sin ningún `await` intermedio). */
 function attachSocketHandlers(activeConn) {
+  ensureBotJid(activeConn);
   if (!isInit) {
     activeConn.ev.off('messages.upsert', activeConn.handler);
     activeConn.ev.off('group-participants.update', activeConn.participantsUpdate);
     activeConn.ev.off('groups.update', activeConn.groupsUpdate);
     activeConn.ev.off('message.delete', activeConn.onDelete);
+    activeConn.ev.off('messages.decrypt-failed', activeConn.onDecryptFailed);
     activeConn.ev.off('connection.update', activeConn.connectionUpdate);
     activeConn.ev.off('creds.update', activeConn.credsUpdate);
   }
@@ -804,13 +835,18 @@ function attachSocketHandlers(activeConn) {
   activeConn.participantsUpdate = handler.participantsUpdate.bind(activeConn);
   activeConn.groupsUpdate = handler.groupsUpdate.bind(activeConn);
   activeConn.onDelete = handler.deleteUpdate.bind(activeConn);
+  activeConn.onDecryptFailed = handleDecryptFailed.bind(activeConn);
   activeConn.connectionUpdate = connectionUpdate.bind(activeConn);
-  activeConn.credsUpdate = saveCreds.bind(activeConn);
+  activeConn.credsUpdate = () => {
+    ensureBotJid(activeConn);
+    return saveCreds();
+  };
 
   activeConn.ev.on('messages.upsert', activeConn.handler);
   activeConn.ev.on('group-participants.update', activeConn.participantsUpdate);
   activeConn.ev.on('groups.update', activeConn.groupsUpdate);
   activeConn.ev.on('message.delete', activeConn.onDelete);
+  activeConn.ev.on('messages.decrypt-failed', activeConn.onDecryptFailed);
   activeConn.ev.on('connection.update', activeConn.connectionUpdate);
   activeConn.ev.on('creds.update', activeConn.credsUpdate);
 
@@ -818,7 +854,16 @@ function attachSocketHandlers(activeConn) {
 }
 
 async function refreshAuthState() {
-  const freshAuth = await loadAuthState(global.authFilePath);
+  const purgeEphemeral = pendingEphemeralPurge;
+  pendingEphemeralPurge = false;
+  if (purgeEphemeral) {
+    msgRetryCounterCache.flushAll();
+    userDevicesCache.flushAll();
+  }
+  const freshAuth = await loadAuthState(global.authFilePath, {
+    purgeEphemeral,
+    clearRouting: true,
+  });
   state = freshAuth.state;
   saveCreds = freshAuth.saveCreds;
   connectionOptions.auth = {
@@ -862,8 +907,8 @@ global.reloadHandler = async function (restatConn) {
       // Recargar y reparar la sesión antes de crear el nuevo socket para no
       // reutilizar creds/keys obsoletos ni archivos JSON truncados.
       await refreshAuthState();
+      // `makeWASocket` en simple.js ya ejecuta `store.bind(sock)` internamente.
       global.conn = makeWASocket(connectionOptions);
-      store?.bind(global.conn);
       isInit = true;
     } finally {
       socketReloadInProgress = false;
@@ -875,8 +920,8 @@ global.reloadHandler = async function (restatConn) {
 };
 
 // ── Arranque del socket (plugins, DB y handler ya están listos) ──────────────
+// `makeWASocket` en simple.js ya enlaza `store.bind(sock)`.
 global.conn = makeWASocket(connectionOptions);
-store?.bind(global.conn);
 // Enlace síncrono inmediato: ni un solo `creds.update` ni `connection: 'open'`
 // inicial puede perderse antes de registrar los listeners.
 attachSocketHandlers(global.conn);
@@ -929,6 +974,23 @@ if (pairingPhoneNumber && !state.creds.registered) {
   pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
 }
 
+// Vigila sockets zombie (WS cerrado en silencio sin emitir `close`) y buffers
+// de eventos atascados tras una reconexión con mucha cola offline.
+const healthTimer = setInterval(() => {
+  if (shutdownStarted || terminalSession || socketReloadInProgress || stopped !== 'open') return;
+  if (global.conn?.ws && !global.conn.ws.isOpen) {
+    console.log(chalk.yellow('[Socket] WebSocket cerrado en silencio; reconectando automáticamente...'));
+    stopped = 'close';
+    scheduleSocketReconnect('zombie-ws');
+    return;
+  }
+  if (global.conn?.ev?.isBuffering?.() && lastOpenedAt > 0 && Date.now() - lastOpenedAt > 35_000) {
+    console.log(chalk.yellow('[Socket] Event buffer retenido >35s tras abrir; forzando flush para liberar mensajes.'));
+    try { global.conn.ev.flush(); } catch {}
+  }
+}, 60_000);
+healthTimer.unref?.();
+
 const tmpTimer = setInterval(() => {
   if (stopped === 'close' || !global.conn?.user) return;
   clearTmp();
@@ -958,6 +1020,7 @@ async function gracefulShutdown(signal) {
   terminalSession = true;
   clearPendingReconnect();
   if (dbWriteTimer) clearInterval(dbWriteTimer);
+  clearInterval(healthTimer);
   clearInterval(tmpTimer);
   clearInterval(bioTimer);
   for (const timer of pluginReloadTimers.values()) clearTimeout(timer);

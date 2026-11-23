@@ -199,29 +199,36 @@ function parseMessageTimestampMs(raw) {
 export async function handler(chatUpdate) {
   if (!chatUpdate?.messages?.length) return;
 
-  const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
-  chatUpdate.messages = chatUpdate.messages.filter(msg => {
-    const msgTs = parseMessageTimestampMs(msg?.messageTimestamp);
-    return msgTs === 0 || msgTs >= connectionTime - 60000;
-  });
-  if (!chatUpdate.messages.length) return;
+  // Baileys marca mensajes en tiempo real como `type === 'notify'` y la cola
+  // atrasada/historial como `'append'`. Solo filtramos por timestamp los no-live
+  // para que un desfase de reloj en un VPS nunca descarte comandos en vivo.
+  const isLive = chatUpdate.type === 'notify';
+  if (!isLive) {
+    const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
+    chatUpdate.messages = chatUpdate.messages.filter(msg => {
+      const msgTs = parseMessageTimestampMs(msg?.messageTimestamp);
+      return msgTs === 0 || msgTs >= connectionTime - 60000;
+    });
+    if (!chatUpdate.messages.length) return;
+  }
 
   this.pushMessage(chatUpdate.messages).catch(console.error);
   if (global.db.data == null) await global.loadDatabase();
 
   for (const rawMsg of chatUpdate.messages) {
-    await handleMessage.call(this, rawMsg, chatUpdate);
+    await handleMessage.call(this, rawMsg, chatUpdate, isLive);
   }
 }
 
-async function handleMessage(rawMsg, chatUpdate) {
+async function handleMessage(rawMsg, chatUpdate, isLive = false) {
   let m = rawMsg;
   if (!m) return;
 
-  if (!isValidMessage(m)) return;
+  if (!isValidMessage(m, { isLive })) return;
   const msgText = extractMessageText(m);
+  const botJid = this?.user?.jid || (this?.user?.id ? this.decodeJid?.(this.user.id) : '') || '';
   const rawSender = m.key?.fromMe
-    ? (this?.user?.jid || '')
+    ? botJid
     : (m.key?.participantAlt || m.key?.participantPN || m.key?.participant || m.key?.remoteJidAlt || m.key?.remoteJidPN || m.key?.remoteJid || '');
   if (isDuplicate(m.key?.id, rawSender, msgText, recentMessages, DUPLICATE_TIMEOUT, MAX_CACHE_SIZE)) return;
 
@@ -247,7 +254,7 @@ async function handleMessage(rawMsg, chatUpdate) {
       dbChat = ensureRecord(global.db.data.chats, m.chat);
       Object.assign(dbChat, { ...CHAT_DEFAULTS, ...dbChat });
 
-      settings = ensureRecord(global.db.data.settings, this.user.jid);
+      settings = ensureRecord(global.db.data.settings, botJid || this.user?.jid || 'default');
       Object.assign(settings, { ...SETTINGS_DEFAULTS, ...settings });
 
       // Aplicar prefijo guardado al conn

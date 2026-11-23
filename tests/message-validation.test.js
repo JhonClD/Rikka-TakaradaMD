@@ -28,7 +28,7 @@ test('isValidMessage descarta protocolMessage, emisiones y newsletters', () => {
   assert.equal(isValidMessage({ message: { audioMessage: {} }, key: { remoteJid: 'x@s.whatsapp.net' }, isBaileys: true }), true);
 });
 
-test('isValidMessage ignora mensajes anteriores a la conexión', () => {
+test('isValidMessage ignora mensajes anteriores a la conexión salvo mensajes en vivo (notify)', () => {
   global.timestamp = { connect: new Date() };
   const viejo = {
     message: { conversation: 'hola' },
@@ -36,6 +36,16 @@ test('isValidMessage ignora mensajes anteriores a la conexión', () => {
     key: { remoteJid: '51999@s.whatsapp.net' },
   };
   assert.equal(isValidMessage(viejo), false);
+  // Mensajes en tiempo real (`type === 'notify'`) no se descartan por desfase de reloj del VPS
+  assert.equal(isValidMessage(viejo, { isLive: true }), true);
+
+  // Protobuf Long con .toNumber() también se respeta para mensajes no-live
+  const viejoLong = {
+    ...viejo,
+    messageTimestamp: { toNumber: () => now() - 3600 },
+  };
+  assert.equal(isValidMessage(viejoLong), false);
+  assert.equal(isValidMessage(viejoLong, { isLive: true }), true);
 
   // sin timestamp de conexión no se puede filtrar: se deja pasar
   delete global.timestamp;

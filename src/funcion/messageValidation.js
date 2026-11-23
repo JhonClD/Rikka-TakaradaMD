@@ -1,4 +1,4 @@
-export function isValidMessage(m) {
+export function isValidMessage(m, { isLive = false } = {}) {
   if (!m || typeof m !== 'object') return false;
   if (!m.message) return false;
   if (m.message?.protocolMessage) return false;
@@ -12,13 +12,17 @@ export function isValidMessage(m) {
 
   if (m.isBaileys && !m.message?.audioMessage) return false;
 
-  const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
-  const msgTimestamp = (typeof m.messageTimestamp === 'number'
-    ? m.messageTimestamp
-    : m.messageTimestamp?.low || m.messageTimestamp?.high || 0) * 1000;
+  if (!isLive) {
+    const connectionTime = global.timestamp?.connect?.getTime() || Date.now();
+    const rawTs = m.messageTimestamp;
+    const seconds = typeof rawTs === 'number'
+      ? rawTs
+      : (typeof rawTs?.toNumber === 'function' ? rawTs.toNumber() : Number(rawTs?.low ?? rawTs?.high ?? 0));
+    const msgTimestamp = Number.isFinite(seconds) ? seconds * 1000 : 0;
 
-  if (msgTimestamp > 0 && msgTimestamp < connectionTime - 60000) {
-    return false;
+    if (msgTimestamp > 0 && msgTimestamp < connectionTime - 60000) {
+      return false;
+    }
   }
 
   return true;
