@@ -51,4 +51,8 @@ export default [
       'no-empty': ['warn', { allowEmptyCatch: true }],
     },
   },
+  {
+    files: ['tests/**/*.js'],
+    rules: { 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] },
+  },
 ];

@@ -164,7 +164,7 @@ npm start
 ## 🧪 Scripts de desarrollo
 
 ```bash
-npm test              # todos los tests embebidos en plugins y módulos (node --test)
+npm test              # todos los tests de tests/ (node --test)
 npm run lint          # ESLint (.  entero; los avisos cuentan como error)
 npm run lint:fix      # correcciones automáticas
 npm run check         # node --check sobre index/main/handler/config/api
@@ -177,23 +177,19 @@ ya está limpio, así que cualquier descuido nuevo rompe la integración). Se
 mantiene `no-undef` apagado (el bot se apoya en globales declarados en `main.js`)
 y `args: 'none'` por las firmas de callback impuestas por la API.
 
-Las pruebas viven embebidas en sus propios módulos y solo se ejecutan al correr `node --test` (sin costo en tiempo de ejecución del bot).
+Las pruebas y comprobaciones se ejecutan manualmente con los comandos anteriores.
 
-### Tests embebidos
+### Tests que ya cubren cosas delicadas
 
 | Archivo | Qué protege |
 |---|---|
-| `plugins/jk-notify.js` | extracción de enlaces JKAnime (sin evaluar JS remoto), parser de portada, MediaFire y cliente HTTP `wreq-js` (`npm run test:one`) |
-| `plugins/dbs-notify.js` | cliente HTTP anti-WAF de AnimeDBS, cabeceras Chrome, manejo de 403/5xx/404 y descarga binaria de portadas |
-| `plugins/downloader-transferit.js` | compatibilidad de streams `PassThrough` (`node-fetch`) y `ReadableStream` web y límites de tamaño |
-| `plugins/twitter-x.js` | extracción/resolución de URLs, parsers multi-API, álbumes y handler autocontenido en un solo archivo |
-| `plugins/lib/jkanime-episode-servers.js` | resolución de servidores externos, redirecciones `jkplayers.com/d/` y reproductores JKAnime |
-| `src/funcion/reconnect-policy.js` | retroceso de reconexión, `badSession` acotado, códigos de Baileys y cableado en `main.js` |
-| `src/funcion/session-health.js` | respaldo atómico de `creds.json`, purga segura de caché efímera tras apagados del VPS y monitor de descifrado |
-| `src/funcion/messageValidation.js` | filtrado de mensajes, inmunidad a desfase de reloj en `notify`, dedupe y respuestas interactivas |
-| `src/funcion/download-registry.js` | registro y cancelación única de descargas |
-| `src/funcion/paths.js` | rutas absolutas sin `process.cwd()`, estructura de plugins, aliases sin duplicados y protección owner |
-| `scripts/check-ghost-identifiers.mjs` | guardián contra asignaciones a identificadores no declarados (`npm run check:ghosts`) |
+| `plugins/jk-notify.js` | extracción de enlaces JKAnime (sin evaluar JS remoto), parser de portada, MediaFire y cliente HTTP `wreq-js` (tests embebidos con `npm run test:one`) |
+| `tests/download-registry.test.js` | cancelación única de descargas (`download-registry.js`) |
+| `tests/message-validation.test.js` | filtrado de mensajes, dedupe, texto de mensajes interactivos |
+| `tests/plugins-structure.test.js` | cada plugin exporta handler, declara comando o `.all`, ningún alias lo comparten dos plugins, y los archivos se llaman en kebab-case |
+| `tests/project-paths.test.js` | nada resuelve rutas contra `process.cwd()` y las imágenes del proyecto están donde dice `paths.js` |
+| `tests/ghost-identifiers.test.js` | nadie asigna a un identificador no declarado (`npm run check:ghosts`) |
+| `tests/reconnect-policy.test.js` | retroceso de reconexión, motivos que sí/no admiten reintento y que los códigos coincidan con los del fork de Baileys |
 
 ---
 
@@ -208,18 +204,19 @@ Rikka-TakaradaMD/
 ├── api.js                # Shim de globales heredado (axios/fetch/moment/cheerio)
 ├── eslint.config.js      # Reglas de análisis del código
 ├── .env.example          # Plantilla de variables
-├── .github/workflows/    # CI: check, lint y tests
+├── .github/workflows/  # CI: check, lint y tests
 ├── scripts/              # Herramientas de desarrollo (check-ghost-identifiers)
-├── plugins/              # Plugins autocontenidos, un archivo por función, en kebab-case
+├── tests/                # node --test
+├── plugins/              # 58 plugins, un archivo por función, en kebab-case
 └── src/
     ├── assets/           # Imágenes (imagen del menú)
-    ├── funcion/          # Funciones auxiliares (rutas, .env, validación, sesión, LID)
+    ├── funcion/          # Funciones auxiliares (rutas, .env, validación, LID)
     └── libraries/        # Librerías internas (Baileys simple, store, stickers…)
 ```
 
 Los nombres de archivo de `plugins/` van todos en minúsculas y con guiones
-(`tiktok-dl.js`, no `Tiktok-DL.js`), y `src/funcion/paths.js` lo vigila en
-`npm test`: con nombres que solo se distinguen en mayúsculas, un checkout en
+(`tiktok-dl.js`, no `Tiktok-DL.js`), y `tests/plugins-structure.test.js` lo
+vigila: con nombres que solo se distinguen en mayúsculas, un checkout en
 Windows/macOS puede acabar cargando el plugin equivocado.
 
 ---

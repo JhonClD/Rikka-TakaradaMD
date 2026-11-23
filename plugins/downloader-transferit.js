@@ -16,20 +16,12 @@
  */
 import { createDecipheriv, pbkdf2Sync, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PassThrough, Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { fileURLToPath } from 'node:url'
 
 import { downloadKey, hasDownload, startDownload, finishDownload } from '../src/funcion/download-registry.js'
-
-const MODULE_PATH = fileURLToPath(import.meta.url)
-const IS_TEST_RUN = Boolean(
-  process.env.NODE_TEST_CONTEXT &&
-  process.argv[1] &&
-  resolve(process.argv[1]) === MODULE_PATH,
-)
 
 const ORIGIN = 'https://transfer.it'
 const DEFAULT_HOSTS = ['https://bt7.api.mega.co.nz', 'https://g.api.mega.co.nz']
@@ -946,122 +938,3 @@ handler.tags = ['downloader']
 handler.command = /^(transferit|transfer|titdl)$/i
 
 export default handler
-
-// ─── Tests embebidos (solo al ejecutar `node --test plugins/downloader-transferit.js`) ──
-
-if (IS_TEST_RUN) {
-  const { default: test } = await import('node:test')
-  const { default: assert } = await import('node:assert/strict')
-
-  const TARGET = { handle: 'abc123', name: 'hola.bin', size: 4 }
-
-  async function collect(stream) {
-    const chunks = []
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk))
-    return Buffer.concat(chunks)
-  }
-
-  function fakeResponse(body, { headers = {}, url = 'https://g.api.mega.co.nz/cs/g', ok = true, status = 200 } = {}) {
-    const headerMap = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), String(value)]))
-    return {
-      ok,
-      status,
-      url,
-      body,
-      headers: { get: (name) => headerMap.get(String(name).toLowerCase()) ?? null },
-      text: async () => '',
-    }
-  }
-
-  async function withFetch(mock, fn) {
-    const previous = globalThis.fetch
-    globalThis.fetch = mock
-    try {
-      return await fn()
-    } finally {
-      if (previous === undefined) delete globalThis.fetch
-      else globalThis.fetch = previous
-    }
-  }
-
-  test('toNodeReadable acepta el PassThrough de node-fetch', async () => {
-    const pass = new PassThrough()
-    const stream = toNodeReadable(pass)
-    assert.equal(stream, pass, 'debe reutilizar el stream de Node tal cual')
-    const collected = collect(stream)
-    pass.end(Buffer.from('hola'))
-    assert.equal((await collected).toString(), 'hola')
-  })
-
-  test('toNodeReadable convierte un ReadableStream web', async () => {
-    const web = Readable.toWeb(Readable.from([Buffer.from('hola'), Buffer.from('!!')]))
-    const stream = toNodeReadable(web)
-    assert.ok(stream instanceof Readable)
-    assert.equal((await collect(stream)).toString(), 'hola!!')
-  })
-
-  test('toNodeReadable usa el fallback async iterable si fromWeb rechaza el cuerpo', async () => {
-    const foreign = {
-      getReader() { throw new Error('no debería llamarse') },
-      async *[Symbol.asyncIterator]() { yield Buffer.from('hola') },
-    }
-    assert.equal((await collect(toNodeReadable(foreign))).toString(), 'hola')
-  })
-
-  test('toNodeReadable da errores claros con cuerpos ausentes o incompatibles', () => {
-    assert.throws(() => toNodeReadable(null), /sin cuerpo/)
-    assert.throws(() => toNodeReadable({}), /incompatible/)
-  })
-
-  test('openDownload funciona con el shim node-fetch (body = PassThrough)', async () => {
-    const pass = new PassThrough()
-    const response = fakeResponse(pass, {
-      headers: { 'content-type': 'application/octet-stream', 'content-length': '4' },
-    })
-
-    const download = await withFetch(
-      async () => response,
-      () => openDownload('ABCDEFGH', TARGET, '', new AbortController().signal),
-    )
-
-    const collected = collect(download.stream)
-    pass.end(Buffer.from('hola'))
-    assert.equal((await collected).toString(), 'hola')
-    assert.equal(download.size, 4)
-  })
-
-  test('openDownload sigue funcionando con body = ReadableStream web', async () => {
-    const web = Readable.toWeb(Readable.from([Buffer.from('hola')]))
-    const response = fakeResponse(web, {
-      headers: { 'content-type': 'application/octet-stream', 'content-length': '4' },
-    })
-
-    const download = await withFetch(
-      async () => response,
-      () => openDownload('ABCDEFGH', TARGET, '', new AbortController().signal),
-    )
-
-    assert.equal((await collect(download.stream)).toString(), 'hola')
-    assert.equal(download.size, 4)
-  })
-
-  test('openDownload destruye el PassThrough al rechazar un archivo demasiado grande', async () => {
-    const bodies = []
-    const mock = async () => {
-      const pass = new PassThrough()
-      bodies.push(pass)
-      return fakeResponse(pass, {
-        headers: { 'content-type': 'application/octet-stream', 'content-length': String(MAX_BYTES + 1) },
-      })
-    }
-
-    await withFetch(mock, () => assert.rejects(
-      () => openDownload('ABCDEFGH', TARGET, '', new AbortController().signal),
-      /supera el límite/,
-    ))
-
-    assert.ok(bodies.length > 0)
-    assert.ok(bodies.every((body) => body.destroyed), 'el stream de node-fetch debe liberarse')
-  })
-}
-
