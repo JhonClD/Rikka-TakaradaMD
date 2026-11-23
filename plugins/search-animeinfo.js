@@ -68,7 +68,7 @@ async function resumirSinopsisAI(texto, maxCaracteres) {
         },
         { role: 'user', content: sinopsis },
       ],
-      { maxTokens: 300, temperature: 0.2, timeoutMs: 25_000, maxRetries: 2 },
+      { maxTokens: 600, temperature: 0.2, timeoutMs: 30_000, maxRetries: 2 },
     );
     const resumen = stripThinkingTags(raw)
       .replace(/^\s*["'“”]+|["'“”]+\s*$/g, '')
@@ -87,7 +87,7 @@ async function resumirSinopsisAI(texto, maxCaracteres) {
 }
 
 // ====================== HANDLER ======================
-const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummary = false, aniDMetadata = null }) => {
+const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = false, forceSynopsisSummary = false, aniDMetadata = null }) => {
   const datas = global;
   const idioma = datas.db?.data?.users?.[m.sender]?.language || global.defaultLenguaje || 'es';
 
@@ -103,12 +103,18 @@ const handler = async (m, { conn, text, usedPrefix, command, forceSynopsisSummar
     };
   }
 
-  if (!text) return m.reply(`*${tradutor.texto1}*`);
+  if (!text) {
+    if (!silentNotFound) await m.reply(`*${tradutor.texto1}*`);
+    return false;
+  }
 
   try {
     const result = await fetchFromAniList(text);
 
-    if (!result) return m.reply(`*${tradutor.texto3}*`);
+    if (!result) {
+      if (!silentNotFound) await m.reply(`*${tradutor.texto3}*`);
+      return false;
+    }
 
     const TRADUCCIONES = {
       estados: {
@@ -313,7 +319,8 @@ ${sinopsisFormateada}`;
     const imageUrl = result.images?.jpg?.large_image_url || result.images?.jpg?.image_url;
 
     if (!imageUrl) {
-      return conn.sendMessage(m.chat, { text: AnimeInfo }, { quoted: m });
+      await conn.sendMessage(m.chat, { text: AnimeInfo }, { quoted: m });
+      return true;
     }
 
     let imageBuffer;
@@ -321,11 +328,12 @@ ${sinopsisFormateada}`;
       imageBuffer = await downloadImage(imageUrl);
     } catch (imgErr) {
       console.warn('[animeinfo] Descarga de imagen falló:', imgErr.message);
-      return conn.sendMessage(
+      await conn.sendMessage(
         m.chat,
         { text: AnimeInfo + '\n\n⚠️ _No se pudo cargar la imagen._' },
         { quoted: m }
       );
+      return true;
     }
 
     const MAX_CAPTION = 950;
@@ -348,8 +356,14 @@ ${sinopsisFormateada}`;
       { image: imageBuffer, caption },
       { quoted: m }
     );
+    return true;
 
   } catch (e) {
+    if (silentNotFound) {
+      console.warn(`[animeinfo] Búsqueda silenciosa falló para "${text}":`, e?.message || e);
+      return false;
+    }
+
     let errorMsg = `*${tradutor.texto3}*`;
 
     if (e.message?.includes('timeout')) {
@@ -360,7 +374,8 @@ ${sinopsisFormateada}`;
       errorMsg += `\n\n📝 _Detalles: ${e.message || 'Error desconocido'}_`;
     }
 
-    m.reply(errorMsg);
+    await m.reply(errorMsg);
+    return false;
   }
 };
 
