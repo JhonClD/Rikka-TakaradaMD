@@ -253,6 +253,7 @@ async function buildStampedWebp(mediaBuffer, effectiveMime, mediaObj, { mode, pa
     isAnimated: isAnimatedWebp(webpBuffer),
     isWebpInput,
     isVideo,
+    isGif,
   };
 }
 
@@ -411,16 +412,17 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   if (/^(list|lista|help|ayuda)$/i.test(remaining)) {
     return m.reply(
       `✦ *Stickers & Stickers con Audio* ✦\n\n` +
-        `▸ *Normal:* ${usedPrefix}s [pack | autor]\n` +
-        `▸ *Con audio:* ${usedPrefix}saudio [pack | autor] _(o ${usedPrefix}s -audio)_\n` +
+        `▸ *Sticker (con o sin audio):* ${usedPrefix}s [pack | autor]\n` +
+        `▸ *Solo modo audio 2 pasos:* ${usedPrefix}saudio [pack | autor]\n` +
+        `▸ *Silenciar video:* ${usedPrefix}s -mute [pack | autor]\n` +
         `▸ *Cuadrado (1:1):* ${usedPrefix}scrop [pack | autor]\n` +
         `▸ *Circular:* ${usedPrefix}scircle [pack | autor]\n` +
         `▸ *Cambiar WM:* ${usedPrefix}wm [pack | autor]\n` +
         `▸ *Convertir:* ${usedPrefix}toimg • ${usedPrefix}tovid • ${usedPrefix}toaud\n\n` +
-        `*¿Cómo crear un sticker con audio?*\n` +
-        `1️⃣ *Desde video:* Envía o responde a un video con *${usedPrefix}saudio* (toma hasta ${MAX_ANIMATED_AUDIO_SECONDS}s de su audio).\n` +
-        `2️⃣ *Imagen + audio en 1 paso:* Cita un audio/nota de voz adjuntando una imagen o video con *${usedPrefix}s* o *${usedPrefix}saudio*.\n` +
-        `3️⃣ *Sticker + audio en 2 pasos:* Responde al sticker/imagen con *${usedPrefix}saudio* y luego responde al audio/nota de voz con *${usedPrefix}saudio*.`,
+        `*Stickers con audio usando ${usedPrefix}s:*\n` +
+        `1️⃣ *Desde video:* Envía o responde a un video con *${usedPrefix}s* (incluye hasta ${MAX_ANIMATED_AUDIO_SECONDS}s de su audio automáticamente).\n` +
+        `2️⃣ *Imagen + audio en 1 paso:* Cita un audio/nota de voz adjuntando una imagen o video con *${usedPrefix}s*.\n` +
+        `3️⃣ *Audio + sticker en 2 pasos:* Responde primero al audio/nota de voz con *${usedPrefix}s* y luego al sticker/imagen con *${usedPrefix}s*.`,
     );
   }
 
@@ -429,15 +431,15 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   const pendingSession = audioStickerSessions.get(sessionKey) || null;
 
   // Caso 1 paso: el usuario adjunta imagen/video en `m` mientras cita un audio/nota de voz en `m.quoted`
-  // (o adjunta imagen estática mientras cita un video con `-audio` / `.saudio`).
+  // o adjunta imagen estática mientras cita un video con sonido.
   const dualVisualWithQuotedAudio =
     selfInfo.isVisual &&
-    (quotedInfo.isAudio || (withAudio && !selfInfo.isVideo && quotedInfo.isVideo));
+    (quotedInfo.isAudio || (!selfInfo.isVideo && quotedInfo.isVideo));
 
   let visualTarget = null;
   let visualInfo = null;
   let audioTarget = null;
-  let wantsAudio = withAudio && !muteAudio;
+  let wantsAudio = (withAudio || Boolean(pendingSession?.audioBuffer)) && !muteAudio;
 
   if (dualVisualWithQuotedAudio && !muteAudio) {
     visualTarget = m;
@@ -449,10 +451,11 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     const activeInfo = selfInfo.hasMedia ? selfInfo : quotedInfo;
 
     if (activeInfo.isVisual) {
-      // Si ya había un sticker esperando audio y el usuario responde a un video con .saudio,
+      // Si ya había un sticker esperando audio y el usuario responde a un video con .s o .saudio,
       // usamos el audio de ese video sobre el sticker guardado.
-      if (wantsAudio && pendingSession?.webpBuffer && !pendingSession.audioBuffer && activeInfo.isVideo) {
+      if (!muteAudio && pendingSession?.webpBuffer && !pendingSession.audioBuffer && activeInfo.isVideo) {
         audioTarget = activeTarget;
+        wantsAudio = true;
       } else {
         visualTarget = activeTarget;
         visualInfo = activeInfo;
@@ -468,7 +471,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   const metaText = rawUrl ? remaining.replace(urlMatch[0], '').trim() : remaining;
 
   let downloadedUrlMedia = null;
-  if (rawUrl && (!visualTarget || (wantsAudio && !audioTarget))) {
+  if (rawUrl && (!visualTarget || (!muteAudio && !audioTarget))) {
     try {
       downloadedUrlMedia = await downloadFromUrl(rawUrl);
     } catch (error) {
@@ -477,14 +480,19 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     }
   }
 
-  // ── Emparejamiento en 2 pasos para .saudio (cuando falta audio o falta sticker) ──
+  const urlIsAudio =
+    Boolean(downloadedUrlMedia) &&
+    (downloadedUrlMedia.mime.startsWith('audio/') || downloadedUrlMedia.mime.includes('ogg'));
+  if (!muteAudio && urlIsAudio) {
+    wantsAudio = true;
+  }
+
+  // ── Emparejamiento en 2 pasos (funciona tanto con .s como con .saudio) ──
   if (wantsAudio) {
-    // Si tenemos solo audio (mensaje citado o URL de audio) y aún no hay sticker guardado:
-    const urlIsAudio = downloadedUrlMedia?.mime?.startsWith('audio/') || downloadedUrlMedia?.mime?.includes('ogg');
     const hasIncomingAudioOnly =
       !visualTarget &&
       (!downloadedUrlMedia || urlIsAudio) &&
-      (Boolean(audioTarget) || Boolean(urlIsAudio));
+      (Boolean(audioTarget) || urlIsAudio);
 
     if (hasIncomingAudioOnly && !pendingSession?.webpBuffer) {
       let rawAudioBuf;
@@ -511,7 +519,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
       return m.reply(
         `🎵 *Paso 1/2 listo:* Audio guardado.\n` +
-          `👉 Responde ahora a un *sticker, imagen o video* con *${usedPrefix + cmd}* para crear el sticker con sonido.\n` +
+          `👉 Responde o envía ahora un *sticker, imagen o video* con *${usedPrefix + cmd}* para crear el sticker con sonido.\n` +
           `_(Expira en 2 min • *${usedPrefix + cmd} cancelar* para anular)_`,
       );
     }
@@ -550,17 +558,16 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     }
   }
 
-  // Si el usuario citó solo un audio con `.s` normal sin sesión previa ni imagen:
   if (!visualTarget && !downloadedUrlMedia) {
     if (audioTarget) {
       return m.reply(
-        `✖ Cita también una imagen/sticker o usa *${usedPrefix}saudio* para combinar ese audio con un sticker.`,
+        `✖ El audio está silenciado con *-mute*. Quita *-mute* y usa *${usedPrefix + cmd}* para crear un sticker con ese audio.`,
       );
     }
     return m.reply(
       wantsAudio
         ? `✖ Adjunta o responde a un *video*, *sticker/imagen* o *audio* con *${usedPrefix + cmd}*.\nUsa *${usedPrefix + cmd} help* para ver ejemplos.`
-        : '✖ *Error:* Adjunta o cita una imagen/video/GIF.',
+        : `✖ *Error:* Adjunta o cita una imagen, video, GIF o audio con *${usedPrefix + cmd}*.`,
     );
   }
 
@@ -592,13 +599,21 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   const effectiveMeta = metaText || pendingSession?.rawMeta || '';
   const { packname, author } = await buildMetadata(m, conn, effectiveMeta);
 
+  const autoVideoAudio =
+    !muteAudio &&
+    !wantsAudio &&
+    effectiveMime.startsWith('video/') &&
+    !effectiveMediaObj?.gifPlayback &&
+    typeof conn?.waUploadToServer === 'function' &&
+    typeof conn?.relayMessage === 'function';
+
   let built;
   try {
     built = await buildStampedWebp(mediaBuffer, effectiveMime, effectiveMediaObj, {
       mode: effectiveMode,
       packname,
       author,
-      emojis: wantsAudio ? ['🔊'] : ['✨'],
+      emojis: wantsAudio || autoVideoAudio ? ['🔊'] : ['✨'],
     });
   } catch (error) {
     if (error?.code === 'UNSUPPORTED_VISUAL_FORMAT') {
@@ -608,12 +623,12 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return m.reply('❌ No se pudo convertir el archivo a sticker. Verifica que FFmpeg esté disponible.');
   }
 
-  const { webpBuffer, isAnimated, isWebpInput, isVideo } = built;
+  const { webpBuffer, isAnimated, isWebpInput, isVideo, isGif } = built;
   if (!Buffer.isBuffer(webpBuffer) || !webpBuffer.length) {
     return m.reply('❌ La conversión no produjo un sticker válido.');
   }
 
-  // ── Envío de Sticker CON Audio ────────────────────────────────
+  // ── Envío de Sticker CON Audio explícito o emparejado ─────────
   if (wantsAudio) {
     let rawAudioBuffer = null;
 
@@ -623,16 +638,14 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       } catch (error) {
         return m.reply(`❌ No se pudo descargar el audio citado.\n\`${error?.message || error}\``);
       }
-    } else if (visualTarget && downloadedUrlMedia) {
+    } else if (visualTarget && urlIsAudio) {
       rawAudioBuffer = downloadedUrlMedia.buffer;
     } else if (pendingSession?.audioBuffer) {
       rawAudioBuffer = pendingSession.audioBuffer;
       audioStickerSessions.delete(sessionKey);
     } else if (isVideo) {
-      // Un video contiene su propia pista de audio: se extrae directamente en 1 paso
       rawAudioBuffer = mediaBuffer;
     } else if (visualTarget && getStickerAudioDescriptor(visualTarget)) {
-      // Ya era un sticker con sonido: conservar su audio existente
       const preserved = getStickerAudioDescriptor(visualTarget);
       try {
         await sendAudioSticker(
@@ -649,7 +662,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
     }
 
-    // Si es imagen/sticker estático sin fuente de audio todavía → guardar Paso 1/2
+    // Si se usó .saudio / -audio sobre imagen/sticker estático sin fuente de audio todavía → guardar Paso 1/2
     if (!rawAudioBuffer) {
       audioStickerSessions.set(sessionKey, {
         webpBuffer,
@@ -686,8 +699,24 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     return;
   }
 
-  // ── Sticker estándar (.s): si re-estampamos un sticker que YA tenía audio, conservarlo salvo `-mute` ─
-  if (!muteAudio && isWebpInput && effectiveMode === 'default' && visualTarget) {
+  // ── Sticker con .s normal sobre un video: incluye su audio automáticamente (y cae a mudo si no tiene pista) ─
+  if (!muteAudio && isVideo && !isGif && typeof conn?.waUploadToServer === 'function' && typeof conn?.relayMessage === 'function') {
+    try {
+      const encodedAudio = await prepareStickerAudio(mediaBuffer, { isAnimated: true });
+      await sendAudioSticker(conn, m.chat, webpBuffer, encodedAudio, {
+        quoted: m,
+        isAnimated: true,
+      });
+      return;
+    } catch (error) {
+      if (error?.code !== 'NO_AUDIO_STREAM') {
+        console.warn('[sticker] Falló envío con audio en video (.s), enviando sticker animado normal:', error?.message || error);
+      }
+    }
+  }
+
+  // ── Sticker con .s / .scrop / .scircle sobre un sticker que YA tenía audio: conservarlo salvo `-mute` ─
+  if (!muteAudio && isWebpInput && visualTarget) {
     const existingAudio = getStickerAudioDescriptor(visualTarget);
     if (existingAudio) {
       try {
