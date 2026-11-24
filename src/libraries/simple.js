@@ -42,12 +42,77 @@ const {
     WA_DEFAULT_EPHEMERAL,
 } = _baileys;
 
+function extractNormalizedContent(content) {
+    let cur = content;
+    for (let i = 0; i < 5 && cur; i++) {
+        cur = extractMessageContent(cur) || cur;
+        if (cur?.audioStickerMessage?.message) {
+            cur = cur.audioStickerMessage.message;
+            continue;
+        }
+        break;
+    }
+    return cur;
+}
+
+function wrapOutgoingAudioSticker(msg) {
+    if (!msg || typeof msg !== "object") return msg;
+    if (
+        msg.deviceSentMessage?.message?.stickerMessage?.audioMessage &&
+        !msg.deviceSentMessage.message.audioStickerMessage
+    ) {
+        const inner = msg.deviceSentMessage.message;
+        const { stickerMessage, ...innerRest } = inner;
+        return proto.Message.create({
+            ...msg,
+            deviceSentMessage: {
+                ...msg.deviceSentMessage,
+                message: {
+                    ...innerRest,
+                    audioStickerMessage: {
+                        message: {
+                            stickerMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+    if (msg.stickerMessage?.audioMessage && !msg.audioStickerMessage) {
+        const { stickerMessage, ...rest } = msg;
+        return proto.Message.create({
+            ...rest,
+            audioStickerMessage: {
+                message: {
+                    stickerMessage,
+                },
+            },
+        });
+    }
+    return msg;
+}
+
 export function makeWASocket(connectionOptions, options = {}) {
+    const userPatch = connectionOptions?.patchMessageBeforeSending;
+    const effectiveConnectionOptions = {
+        ...connectionOptions,
+        patchMessageBeforeSending: async (message, recipientJids) => {
+            const next = userPatch ? await userPatch(message, recipientJids) : message;
+            if (Array.isArray(next)) {
+                return next.map((entry) =>
+                    entry?.message
+                        ? { ...entry, message: wrapOutgoingAudioSticker(entry.message) }
+                        : entry,
+                );
+            }
+            return wrapOutgoingAudioSticker(next);
+        },
+    };
     /**
      * @type {import("baileys").WASocket | import("baileys").WALegacySocket}
      */
     const conn = (global.opts["legacy"] ? makeWALegacySocket : _makeWaSocket)(
-        connectionOptions,
+        effectiveConnectionOptions,
     );
 
     const sock = Object.defineProperties(conn, {
@@ -2234,20 +2299,26 @@ export function serialize() {
                 try {
                     if (!this.message) return "";
                     const type = Object.keys(this.message);
+                    let resolved = type[type.length - 1];
 
                     if (
                         !["senderKeyDistributionMessage", "messageContextInfo"].includes(
                             type[0],
                         )
                     ) {
-                        return type[0];
+                        resolved = type[0];
+                    } else if (type.length >= 3 && type[1] !== "messageContextInfo") {
+                        resolved = type[1];
                     }
 
-                    if (type.length >= 3 && type[1] !== "messageContextInfo") {
-                        return type[1];
+                    if (
+                        resolved === "audioStickerMessage" &&
+                        this.message.audioStickerMessage?.message?.stickerMessage
+                    ) {
+                        return "stickerMessage";
                     }
 
-                    return type[type.length - 1];
+                    return resolved;
                 } catch (e) {
                     console.error("Error en mtype getter:", e);
                     return "";
@@ -2259,7 +2330,9 @@ export function serialize() {
             get() {
                 try {
                     if (!this.message) return null;
-                    return this.message[this.mtype] || null;
+                    if (this.message[this.mtype]) return this.message[this.mtype];
+                    const normalized = extractNormalizedContent(this.message);
+                    return normalized?.[this.mtype] || null;
                 } catch (e) {
                     console.error("Error en msg getter:", e);
                     return null;
@@ -2274,10 +2347,14 @@ export function serialize() {
 
                     const Message =
                         (this.msg?.url || this.msg?.directPath ?
-                            {
-                                ...this.message
-                            } :
-                            extractMessageContent(this.message)) || null;
+                            (this.message[this.mtype] ?
+                                {
+                                    ...this.message
+                                } :
+                                {
+                                    [this.mtype]: this.msg
+                                }) :
+                            extractNormalizedContent(this.message)) || null;
                     if (!Message) return null;
 
                     const mtype = Object.keys(Message)[0];
@@ -2509,13 +2586,41 @@ export function serialize() {
             get() {
                 try {
                     const self = this;
-                    const normalizedMessage = extractMessageContent(self.message) || self.message;
+                    const normalizedMessage = extractNormalizedContent(self.message) || self.message;
                     const msg = Object.values(normalizedMessage || {}).find(value => value?.contextInfo?.quotedMessage) || self.msg;
                     const contextInfo = msg?.contextInfo;
                     const rawQuoted = contextInfo?.quotedMessage;
-                    const quoted = rawQuoted ? (extractMessageContent(rawQuoted) || rawQuoted) : null;
+                    let quoted = rawQuoted ? (extractNormalizedContent(rawQuoted) || rawQuoted) : null;
 
                     if (!msg || !contextInfo || !quoted) return null;
+
+                    if (
+                        quoted.stickerMessage &&
+                        (!quoted.stickerMessage.audioMessage || (!quoted.stickerMessage.url && !quoted.stickerMessage.directPath)) &&
+                        contextInfo.stanzaId
+                    ) {
+                        const chatJid = contextInfo.remoteJid || self.chat || "";
+                        const stored =
+                            (chatJid && self.conn?.loadMessage?.(chatJid, contextInfo.stanzaId)) ||
+                            self.conn?.loadMessage?.(contextInfo.stanzaId);
+                        const storedNorm = stored?.message ? extractNormalizedContent(stored.message) : null;
+                        const storedSticker = storedNorm?.stickerMessage;
+                        if (storedSticker) {
+                            quoted = {
+                                ...quoted,
+                                stickerMessage: Object.assign(
+                                    Object.create(Object.getPrototypeOf(quoted.stickerMessage)),
+                                    storedSticker,
+                                    Object.fromEntries(
+                                        Object.entries(quoted.stickerMessage).filter(([, v]) => v != null && v !== ""),
+                                    ),
+                                    storedSticker.audioMessage && !quoted.stickerMessage.audioMessage
+                                        ? { audioMessage: storedSticker.audioMessage }
+                                        : {},
+                                ),
+                            };
+                        }
+                    }
 
                     const type = Object.keys(quoted)[0];
                     const q = quoted[type];
@@ -2540,7 +2645,7 @@ export function serialize() {
                                             {
                                                 ...quoted
                                             } :
-                                            extractMessageContent(quoted)) || null;
+                                            extractNormalizedContent(quoted)) || null;
                                     if (!Message) return null;
                                     const mtype = Object.keys(Message)[0];
                                     return MediaType.includes(mtype) ? Message : null;

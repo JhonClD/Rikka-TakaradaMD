@@ -5,6 +5,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import {
+  downloadContentFromMessage,
+  generateWAMessageFromContent,
+  prepareWAMessageMedia,
+  proto,
+} from 'baileys';
 import webp from 'node-webpmux';
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +18,9 @@ const execFileAsync = promisify(execFile);
 const MAX_ANIMATED_WEBP_BYTES = 500 * 1024; // Límite de WhatsApp para stickers animados (~500 KB)
 const MAX_STATIC_WEBP_BYTES = 500 * 1024;
 const MAX_VIDEO_SECONDS = 10;
+const MAX_STATIC_AUDIO_SECONDS = 10;
+const MAX_ANIMATED_AUDIO_SECONDS = 5;
+const STICKER_AUDIO_MIMETYPE = 'audio/ogg; codecs=opus';
 const FFMPEG_TIMEOUT_MS = 90_000;
 
 let resolvedFfmpegBin = null;
@@ -189,20 +198,341 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
   }
 }
 
+function isValidOgg(buffer) {
+  return (
+    Buffer.isBuffer(buffer) &&
+    buffer.length >= 4 &&
+    buffer.subarray(0, 4).toString('ascii') === 'OggS'
+  );
+}
+
+function parseFfmpegDurationSeconds(stderrText) {
+  const matches = [...String(stderrText || '').matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+  if (!matches.length) return null;
+  const last = matches[matches.length - 1];
+  const hours = Number(last[1]);
+  const minutes = Number(last[2]);
+  const seconds = Number(last[3]);
+  const total = hours * 3600 + minutes * 60 + seconds;
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+function isNoAudioStreamError(err) {
+  const text = `${err?.stderr || ''} ${err?.message || ''}`;
+  return /does not contain any stream|matches no streams|Audio:\s*none/i.test(text);
+}
+
 /**
- * Convierte un sticker WebP a PNG (si es estático) o MP4 (si es animado).
+ * Extrae y codifica audio en contenedor OGG Opus (`audio/ogg; codecs=opus`)
+ * compatible con la validación Kaleidoscope de WhatsApp para stickers con sonido.
+ */
+async function prepareStickerAudio(
+  mediaBuffer,
+  { isAnimated = false, maxSeconds = null } = {},
+) {
+  const input = toBuffer(mediaBuffer);
+  if (!input.length) throw new Error('Buffer de audio vacío');
+
+  const limitSeconds =
+    Number.isFinite(maxSeconds) && maxSeconds > 0
+      ? maxSeconds
+      : isAnimated
+        ? MAX_ANIMATED_AUDIO_SECONDS
+        : MAX_STATIC_AUDIO_SECONDS;
+
+  const tmpIn = uniqueTmpPath('stk_aud_in', 'bin');
+  const tmpOut = uniqueTmpPath('stk_aud_out', 'ogg');
+
+  try {
+    await fs.promises.writeFile(tmpIn, input);
+    const bin = await getFfmpegBin();
+    let stderr = '';
+    try {
+      const res = await execFileAsync(
+        bin,
+        [
+          '-y',
+          '-i', tmpIn,
+          '-vn',
+          '-t', String(limitSeconds),
+          '-f', 'ogg',
+          '-c:a', 'libopus',
+          '-b:a', '48k',
+          '-vbr', 'on',
+          '-ar', '48000',
+          '-ac', '1',
+          '-compression_level', '10',
+          '-application', 'audio',
+          tmpOut,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      );
+      stderr = res?.stderr || '';
+    } catch (err) {
+      if (isNoAudioStreamError(err)) {
+        const noAudioErr = new Error('El archivo no contiene pista de audio');
+        noAudioErr.code = 'NO_AUDIO_STREAM';
+        throw noAudioErr;
+      }
+      throw err;
+    }
+
+    const out = await fs.promises.readFile(tmpOut);
+    if (!isValidOgg(out)) {
+      throw new Error('FFmpeg no produjo un audio OGG Opus válido');
+    }
+
+    const parsedSec = parseFfmpegDurationSeconds(stderr);
+    const seconds = Math.max(1, Math.min(limitSeconds, Math.ceil(parsedSec || 1)));
+    return {
+      buffer: out,
+      mimetype: STICKER_AUDIO_MIMETYPE,
+      seconds,
+    };
+  } finally {
+    await cleanUp(tmpIn, tmpOut);
+  }
+}
+
+/**
+ * Convierte el audio de un sticker con sonido o video a MP3 (`audio/mpeg`).
+ */
+async function extractAudioToMp3(mediaBuffer, { maxSeconds = 60 } = {}) {
+  const input = toBuffer(mediaBuffer);
+  if (!input.length) throw new Error('Buffer de entrada vacío');
+
+  const tmpIn = uniqueTmpPath('stk_mp3_in', 'bin');
+  const tmpOut = uniqueTmpPath('stk_mp3_out', 'mp3');
+
+  try {
+    await fs.promises.writeFile(tmpIn, input);
+    const bin = await getFfmpegBin();
+    try {
+      await execFileAsync(
+        bin,
+        [
+          '-y',
+          '-i', tmpIn,
+          '-vn',
+          '-t', String(maxSeconds),
+          '-c:a', 'libmp3lame',
+          '-b:a', '128k',
+          '-ar', '44100',
+          tmpOut,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      );
+    } catch (err) {
+      if (isNoAudioStreamError(err)) {
+        const noAudioErr = new Error('El archivo no contiene pista de audio');
+        noAudioErr.code = 'NO_AUDIO_STREAM';
+        throw noAudioErr;
+      }
+      throw err;
+    }
+
+    const mp3 = await fs.promises.readFile(tmpOut);
+    if (!mp3.length) throw new Error('FFmpeg no produjo un MP3 válido');
+    return { buffer: mp3, mimetype: 'audio/mpeg' };
+  } finally {
+    await cleanUp(tmpIn, tmpOut);
+  }
+}
+
+function normalizeBytesField(value) {
+  if (!value) return null;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (typeof value === 'string') return Buffer.from(value, 'base64');
+  if (value.type === 'Buffer' && Array.isArray(value.data)) return Buffer.from(value.data);
+  if (typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length && keys.every((k) => /^\d+$/.test(k))) {
+      return Buffer.from(keys.sort((a, b) => Number(a) - Number(b)).map((k) => value[k]));
+    }
+  }
+  return null;
+}
+
+/**
+ * Obtiene y normaliza el descriptor `AudioMessage` incrustado en un sticker con audio.
+ */
+function getStickerAudioDescriptor(target) {
+  const raw =
+    target?.mediaMessage?.stickerMessage?.audioMessage ||
+    target?.msg?.audioMessage ||
+    (target?.mtype === 'stickerMessage' ? target?.audioMessage : null) ||
+    null;
+
+  if (!raw || typeof raw !== 'object') return null;
+
+  const mediaKey = normalizeBytesField(raw.mediaKey);
+  const fileSha256 = normalizeBytesField(raw.fileSha256);
+  const fileEncSha256 = normalizeBytesField(raw.fileEncSha256);
+  const directPath = typeof raw.directPath === 'string' && raw.directPath ? raw.directPath : undefined;
+  const url = typeof raw.url === 'string' && raw.url ? raw.url : undefined;
+
+  if (!mediaKey || mediaKey.length !== 32 || (!directPath && !url)) {
+    return null;
+  }
+
+  return proto.Message.AudioMessage.fromObject({
+    ...raw,
+    url,
+    directPath,
+    mediaKey,
+    ...(fileSha256 ? { fileSha256 } : {}),
+    ...(fileEncSha256 ? { fileEncSha256 } : {}),
+    mimetype: raw.mimetype || STICKER_AUDIO_MIMETYPE,
+  });
+}
+
+/**
+ * Descarga el audio incrustado de un sticker con sonido, o devuelve `null` si no tiene.
+ */
+async function downloadStickerAudio(target) {
+  const audioMessage = getStickerAudioDescriptor(target);
+  if (!audioMessage) return null;
+
+  const stream = await downloadContentFromMessage(audioMessage, 'audio');
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+  if (!buffer.length) return null;
+
+  return {
+    buffer,
+    audioMessage,
+    mimetype: audioMessage.mimetype || STICKER_AUDIO_MIMETYPE,
+  };
+}
+
+/**
+ * Envía un sticker con sonido usando el sobre oficial `audioStickerMessage` de WhatsApp.
+ */
+async function sendAudioSticker(
+  conn,
+  jid,
+  webpBuffer,
+  audioSource,
+  { quoted = null, isAnimated = null } = {},
+) {
+  const stickerBuf = toBuffer(webpBuffer);
+  if (!isValidWebp(stickerBuf)) {
+    throw new Error('sendAudioSticker: webpBuffer no es un WebP válido');
+  }
+
+  const animated = isAnimated ?? isAnimatedWebp(stickerBuf);
+
+  let audioMessage = audioSource?.audioMessage
+    ? getStickerAudioDescriptor({ audioMessage: audioSource.audioMessage, mtype: 'stickerMessage' })
+    : null;
+
+  const [stickerMedia, uploadedAudio] = await Promise.all([
+    prepareWAMessageMedia(
+      { sticker: stickerBuf, isAnimated: animated },
+      { upload: conn.waUploadToServer },
+    ),
+    audioMessage
+      ? Promise.resolve(null)
+      : prepareWAMessageMedia(
+          {
+            audio: toBuffer(audioSource?.buffer ?? audioSource),
+            mimetype: audioSource?.mimetype || STICKER_AUDIO_MIMETYPE,
+            ptt: false,
+            ...(audioSource?.seconds ? { seconds: audioSource.seconds } : {}),
+          },
+          { upload: conn.waUploadToServer },
+        ),
+  ]);
+
+  if (!stickerMedia?.stickerMessage) {
+    throw new Error('No se pudo subir el sticker a WhatsApp');
+  }
+
+  if (!audioMessage) {
+    audioMessage = uploadedAudio?.audioMessage;
+  }
+  if (!audioMessage) {
+    throw new Error('No se pudo preparar el audio del sticker en WhatsApp');
+  }
+
+  const stickerMessage = proto.Message.StickerMessage.fromObject({
+    ...stickerMedia.stickerMessage,
+    isAnimated: animated,
+    stickerSentTs: Date.now(),
+    emojis: stickerMedia.stickerMessage.emojis || '🔊',
+    contextInfo: {
+      ...(stickerMedia.stickerMessage.contextInfo || {}),
+      experienceIds: [13007],
+    },
+    audioMessage,
+  });
+
+  const validQuoted = quoted?.key?.id && quoted?.message ? quoted : null;
+  const prep = generateWAMessageFromContent(
+    jid,
+    { stickerMessage },
+    {
+      userJid: conn.user?.jid || conn.user?.id,
+      ...(validQuoted ? { quoted: validQuoted } : {}),
+    },
+  );
+
+  if (prep.message?.stickerMessage) {
+    prep.message.stickerMessage.audioMessage = audioMessage;
+    prep.message.stickerMessage.contextInfo = {
+      ...(prep.message.stickerMessage.contextInfo || {}),
+      experienceIds: [13007],
+    };
+  }
+  prep.message.messageContextInfo = {
+    ...(prep.message.messageContextInfo || {}),
+    messageSecret: prep.message.messageContextInfo?.messageSecret || crypto.randomBytes(32),
+  };
+
+  const msgId = await conn.relayMessage(jid, prep.message, {
+    messageId: prep.key.id,
+  });
+
+  try {
+    const storedMsg = proto.WebMessageInfo.fromObject({
+      ...prep,
+      message: {
+        audioStickerMessage: {
+          message: {
+            stickerMessage: prep.message.stickerMessage,
+          },
+        },
+      },
+    });
+    conn.ev?.emit?.('messages.upsert', {
+      messages: [storedMsg],
+      type: 'append',
+    });
+  } catch {}
+
+  return msgId;
+}
+
+/**
+ * Convierte un sticker WebP a PNG (si es estático) o MP4 (si es animado o tiene `audioBuffer`).
  * FFmpeg no decodifica WebP animados (chunks ANIM/ANMF) de forma nativa, así que
  * para stickers animados primero extraemos los frames con `node-webpmux`.
  */
-async function stickerToMedia(webpBuffer, { forceVideo = false } = {}) {
+async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = null } = {}) {
   const input = toBuffer(webpBuffer);
   if (!isValidWebp(input)) throw new Error('El archivo no es un sticker WebP válido');
 
+  const hasAudio = Buffer.isBuffer(audioBuffer) && audioBuffer.length > 0;
   const animated = isAnimatedWebp(input);
   const bin = await getFfmpegBin();
 
   if (!animated) {
     const tmpIn = uniqueTmpPath('stk_rev_in', 'webp');
+    const tmpAudio = hasAudio ? uniqueTmpPath('stk_rev_aud', 'ogg') : null;
     const outExt = forceVideo ? 'mp4' : 'png';
     const tmpOut = uniqueTmpPath('stk_rev_out', outExt);
     try {
@@ -211,27 +541,54 @@ async function stickerToMedia(webpBuffer, { forceVideo = false } = {}) {
         const png = await runFfmpegConvert(tmpIn, tmpOut, ['-vframes', '1']);
         return { kind: 'image', buffer: png, mimetype: 'image/png' };
       }
-      await execFileAsync(
-        bin,
-        [
-          '-y',
-          '-loop', '1',
-          '-i', tmpIn,
-          '-t', '2',
-          '-movflags', '+faststart',
-          '-pix_fmt', 'yuv420p',
-          '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-          '-c:v', 'libx264',
-          '-preset', 'fast',
-          '-crf', '22',
-          tmpOut,
-        ],
-        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-      );
+
+      if (tmpAudio) {
+        await fs.promises.writeFile(tmpAudio, audioBuffer);
+        await execFileAsync(
+          bin,
+          [
+            '-y',
+            '-loop', '1',
+            '-i', tmpIn,
+            '-i', tmpAudio,
+            '-shortest',
+            '-t', '15',
+            '-movflags', '+faststart',
+            '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-c:v', 'libx264',
+            '-tune', 'stillimage',
+            '-preset', 'fast',
+            '-crf', '22',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            tmpOut,
+          ],
+          { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+        );
+      } else {
+        await execFileAsync(
+          bin,
+          [
+            '-y',
+            '-loop', '1',
+            '-i', tmpIn,
+            '-t', '2',
+            '-movflags', '+faststart',
+            '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '22',
+            tmpOut,
+          ],
+          { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+        );
+      }
       const mp4 = await fs.promises.readFile(tmpOut);
       return { kind: 'video', buffer: mp4, mimetype: 'video/mp4' };
     } finally {
-      await cleanUp(tmpIn, tmpOut);
+      await cleanUp(tmpIn, tmpAudio, tmpOut);
     }
   }
 
@@ -240,6 +597,7 @@ async function stickerToMedia(webpBuffer, { forceVideo = false } = {}) {
     os.tmpdir(),
     `stk_frames_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
   );
+  const tmpAudio = hasAudio ? uniqueTmpPath('stk_rev_aud', 'ogg') : null;
   const tmpOut = uniqueTmpPath('stk_rev_out', 'mp4');
 
   try {
@@ -273,29 +631,60 @@ async function stickerToMedia(webpBuffer, { forceVideo = false } = {}) {
     const listPath = path.join(frameDir, 'list.txt');
     await fs.promises.writeFile(listPath, concatLines.join('\n'), 'utf8');
 
-    await execFileAsync(
-      bin,
-      [
-        '-y',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', listPath,
-        '-vsync', 'vfr',
-        '-movflags', '+faststart',
-        '-pix_fmt', 'yuv420p',
-        '-vf', `scale=${canvasW}:${canvasH}:force_original_aspect_ratio=decrease,pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=black`,
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '22',
-        tmpOut,
-      ],
-      { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const scalePad = `scale=${canvasW}:${canvasH}:force_original_aspect_ratio=decrease,pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=black`;
+    if (tmpAudio) {
+      await fs.promises.writeFile(tmpAudio, audioBuffer);
+      await execFileAsync(
+        bin,
+        [
+          '-y',
+          '-stream_loop', '-1',
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', listPath,
+          '-i', tmpAudio,
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-shortest',
+          '-t', '15',
+          '-vsync', 'vfr',
+          '-movflags', '+faststart',
+          '-pix_fmt', 'yuv420p',
+          '-vf', scalePad,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '22',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          tmpOut,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      );
+    } else {
+      await execFileAsync(
+        bin,
+        [
+          '-y',
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', listPath,
+          '-vsync', 'vfr',
+          '-movflags', '+faststart',
+          '-pix_fmt', 'yuv420p',
+          '-vf', scalePad,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '22',
+          tmpOut,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      );
+    }
 
     const mp4 = await fs.promises.readFile(tmpOut);
     return { kind: 'video', buffer: mp4, mimetype: 'video/mp4' };
   } finally {
-    await cleanUp(tmpOut);
+    await cleanUp(tmpAudio, tmpOut);
     await fs.promises.rm(frameDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -386,10 +775,19 @@ const support = {
 global.support = support;
 
 export {
+  MAX_ANIMATED_AUDIO_SECONDS,
+  MAX_STATIC_AUDIO_SECONDS,
+  STICKER_AUDIO_MIMETYPE,
   addExif,
   createSticker,
+  downloadStickerAudio,
+  extractAudioToMp3,
+  getStickerAudioDescriptor,
   isAnimatedWebp,
+  isValidOgg,
   isValidWebp,
+  prepareStickerAudio,
+  sendAudioSticker,
   sticker,
   sticker4,
   sticker5,

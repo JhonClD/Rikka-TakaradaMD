@@ -108,7 +108,11 @@ export function getMessageType(m) {
   if (!m?.message) return null;
   const types = Object.keys(m.message);
   const skip = ['senderKeyDistributionMessage', 'messageContextInfo'];
-  return types.find(t => !skip.includes(t)) || types[types.length - 1] || null;
+  const primary = types.find(t => !skip.includes(t)) || types[types.length - 1] || null;
+  if (primary === 'audioStickerMessage' && m.message.audioStickerMessage?.message?.stickerMessage) {
+    return 'stickerMessage';
+  }
+  return primary;
 }
 
 export function isMediaMessage(m) {

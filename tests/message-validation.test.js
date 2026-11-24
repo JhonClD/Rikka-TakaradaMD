@@ -111,4 +111,20 @@ test('getMessageType saltea metadatos y reconoce multimedia y view-once', () => 
     isViewOnceMessage({ message: { viewOnceMessageV2: {}, messageContextInfo: {} } }),
     true,
   );
+
+  const audioSticker = {
+    message: {
+      messageContextInfo: {},
+      audioStickerMessage: {
+        message: {
+          stickerMessage: {
+            mimetype: 'image/webp',
+            audioMessage: { mimetype: 'audio/ogg; codecs=opus' },
+          },
+        },
+      },
+    },
+  };
+  assert.equal(getMessageType(audioSticker), 'stickerMessage');
+  assert.equal(isMediaMessage(audioSticker), true);
 });

@@ -143,7 +143,7 @@ ${readMore}
 ╰━━━━━━━━━━━━━━━━━━━━━━⬣
 
 ╭━━━〔 🛠️ *HERRAMIENTAS & CONVERTIDORES* 〕━━━⬣
-┃ ⟡ *${command('s')}* | *${command('sticker')}* | *${command('st')}*
+┃ ⟡ *${command('s')}* | *${command('saudio')}* | *${command('wm')}* | _toimg • tovid • toaud_
 ┃ ⟡ *${command('tourl')}* | *${prefix}tourl[1-13]* | *${command('tourllist')}*
 ┃ ⟡ *${command('translate')}* _<idioma> <texto/imagen>_ | _traducir • trad_
 ┃ ⟡ *${command('ss')}* | *${command('ssweb')}* _<url>_
