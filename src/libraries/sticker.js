@@ -19,7 +19,7 @@ const MAX_ANIMATED_WEBP_BYTES = 500 * 1024; // Límite de WhatsApp para stickers
 const MAX_STATIC_WEBP_BYTES = 500 * 1024;
 const MAX_VIDEO_SECONDS = 10;
 const MAX_STATIC_AUDIO_SECONDS = 10;
-const MAX_ANIMATED_AUDIO_SECONDS = 5;
+const MAX_ANIMATED_AUDIO_SECONDS = 10;
 const STICKER_AUDIO_MIMETYPE = 'audio/ogg; codecs=opus';
 const FFMPEG_TIMEOUT_MS = 90_000;
 
@@ -165,12 +165,13 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
       throw new Error('FFmpeg no produjo un WebP estático válido');
     }
 
-    // Stickers animados: adaptación progresiva para cumplir el límite de 500 KB de WhatsApp
+    // Stickers animados: adaptación progresiva manteniendo la duración completa (10s) bajo 500 KB
     const animatedPresets = [
       { size: 320, fps: 15, q: 70, dur: maxSeconds },
       { size: 320, fps: 12, q: 52, dur: maxSeconds },
-      { size: 256, fps: 10, q: 38, dur: Math.min(maxSeconds, 8) },
-      { size: 200, fps: 8, q: 28, dur: Math.min(maxSeconds, 6) },
+      { size: 256, fps: 10, q: 40, dur: maxSeconds },
+      { size: 224, fps: 8, q: 30, dur: maxSeconds },
+      { size: 192, fps: 7, q: 24, dur: Math.min(maxSeconds, 8) },
     ];
 
     let smallest = null;
