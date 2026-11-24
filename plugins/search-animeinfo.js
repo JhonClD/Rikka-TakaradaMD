@@ -478,6 +478,82 @@ async function fetchAniListDetail(best) {
   }
 }
 
+async function fetchFromJikan(queryText, { strictMatch = false } = {}) {
+  const queries = normalizeSearchQueries(queryText).slice(0, 2);
+  const byId = new Map();
+  let bestPick = null;
+
+  for (const q of queries) {
+    try {
+      const { data } = await axios.get('https://api.jikan.moe/v4/anime', {
+        params: { q, limit: 10 },
+        timeout: 15000,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        httpsAgent,
+      });
+      const items = Array.isArray(data?.data) ? data.data : [];
+      for (const item of items) {
+        if (!item?.mal_id || byId.has(item.mal_id)) continue;
+        byId.set(item.mal_id, {
+          id: item.mal_id,
+          title: {
+            romaji: item.title,
+            english: item.title_english,
+            native: item.title_japanese,
+            userPreferred: item.title,
+          },
+          synonyms: [
+            ...(Array.isArray(item.title_synonyms) ? item.title_synonyms : []),
+            ...(Array.isArray(item.titles) ? item.titles.map(t => t?.title).filter(Boolean) : []),
+          ],
+          format: String(item.type || '').toUpperCase() || null,
+          status: item.airing ? 'RELEASING' : (item.status === 'Not yet aired' ? 'NOT_YET_RELEASED' : 'FINISHED'),
+          popularity: Number(item.members) || 0,
+          favourites: Number(item.favorites) || 0,
+          season: item.season ? String(item.season).toUpperCase() : null,
+          seasonYear: item.year || item.aired?.prop?.from?.year || null,
+          episodes: item.episodes || null,
+          duration: parseInt(String(item.duration || ''), 10) || null,
+          averageScore: item.score ? Math.round(item.score * 10) : null,
+          description: item.synopsis || null,
+          genres: Array.isArray(item.genres) ? item.genres.map(g => g?.name).filter(Boolean) : [],
+          studios: Array.isArray(item.studios) ? item.studios.map(s => ({ name: s?.name })).filter(s => s.name) : [],
+          images: {
+            jpg: {
+              large_image_url: item.images?.jpg?.large_image_url || item.images?.jpg?.image_url,
+              image_url: item.images?.jpg?.image_url,
+            },
+          },
+        });
+      }
+      bestPick = pickBestAnimeMatch([...byId.values()], queryText);
+      if (bestPick?.isStrongMatch) break;
+    } catch (error) {
+      console.warn(`[animeinfo] Jikan falló para "${q}":`, error.message);
+    }
+  }
+
+  if (!bestPick?.media || !bestPick.hasTitleMatch) return null;
+  if (strictMatch && !bestPick.hasTitleMatch) return null;
+
+  const m = bestPick.media;
+  return {
+    title: { romaji: m.title.romaji, english: m.title.english, native: m.title.native },
+    description: m.description,
+    episodes: m.episodes,
+    duration: m.duration,
+    status: m.status,
+    season: m.season,
+    seasonYear: m.seasonYear,
+    seasonNumber: resolveSeasonNumber({ title: m.title, format: m.format, relations: { edges: [] } }),
+    averageScore: m.averageScore,
+    genres: m.genres,
+    studios: m.studios,
+    format: m.format,
+    images: m.images,
+  };
+}
+
 async function fetchFromAniList(queryText, { strictMatch = false } = {}) {
   const queries = normalizeSearchQueries(queryText);
   const byId = new Map();
@@ -497,15 +573,19 @@ async function fetchFromAniList(queryText, { strictMatch = false } = {}) {
     if (bestPick?.isStrongMatch) break;
   }
 
+  // Si AniList no devolvió una coincidencia real de título, consultar Jikan/MAL
+  // antes de rendirse o aceptar un resultado flojo.
+  if (!bestPick?.hasTitleMatch) {
+    const jikanResult = await fetchFromJikan(queryText, { strictMatch });
+    if (jikanResult) return jikanResult;
+  }
+
   if (!bestPick?.media?.id) return null;
 
   if (strictMatch && !bestPick.hasTitleMatch) {
     return null;
   }
 
-  // Si ningún título ni sinónimo coincidió en texto con la búsqueda (p. ej. alias
-  // en español no registrado en `synonyms`), respetar el #1 que devolvió AniList
-  // por SEARCH_MATCH en lugar del anime más popular al azar.
   const chosen = bestPick.titleScore > 0
     ? bestPick.media
     : (firstAniListResult || bestPick.media);
@@ -546,6 +626,9 @@ export function normalizeSearchQueries(raw) {
     .replace(/[★☆♥♡♪♫✦✧❖◆◇•・×✕✖✚✪✩✯✰⭐✨～]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  const swappedStar = base.includes('★')
+    ? base.replace(/★/g, '☆')
+    : (base.includes('☆') ? base.replace(/☆/g, '★') : '');
 
   const list = [];
   const push = (val) => {
@@ -555,6 +638,7 @@ export function normalizeSearchQueries(raw) {
 
   if (DECORATIVE_SYMBOL_RE.test(base) && withoutSymbols && withoutSymbols !== base) {
     push(withoutSymbols);
+    if (swappedStar) push(swappedStar);
     push(base);
   } else {
     push(base);

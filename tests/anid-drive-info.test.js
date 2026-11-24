@@ -119,9 +119,23 @@ test('isPlausibleAiTitle acepta expansiones oficiales, palabras pegadas y siglas
     isPlausibleAiTitle('One Piece', { files: [{ fileName: 'Solo Leveling - 01 [1080p].mkv' }] }),
     false,
   )
-  // Regresión real: "magica" dentro de "magical" no debe validar Mahou Shoujo para Magical★Explorer
+  // Regresión real: ni "magica" dentro de "magical" ni etiquetas S01E01 deben validar Mahou Shoujo para Magical★Explorer
   assert.equal(
     isPlausibleAiTitle('Mahou Shoujo Madoka★Magica', { files: [{ fileName: 'Magical★Explorer - 01 [1080p].mkv' }] }),
+    false,
+  )
+  assert.equal(
+    isPlausibleAiTitle('Mahou Shoujo ni Akogarete', {
+      folderTitle: 'Magical★Explorer',
+      files: [{ fileName: 'Magical★Explorer S01E01 1080p.mkv' }],
+    }),
+    false,
+  )
+  assert.equal(
+    isPlausibleAiTitle('Magical Girl Site', {
+      folderTitle: 'Magical★Explorer',
+      files: [{ fileName: 'Magical★Explorer - 01 [1080p].mkv' }],
+    }),
     false,
   )
   assert.equal(
