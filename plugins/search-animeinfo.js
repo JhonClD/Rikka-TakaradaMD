@@ -109,7 +109,7 @@ const handler = async (m, { conn, text, usedPrefix, command, silentNotFound = fa
   }
 
   try {
-    const result = await fetchFromAniList(text);
+    const result = await fetchFromAniList(text, { strictMatch: Boolean(aniDMetadata || silentNotFound) });
 
     if (!result) {
       if (!silentNotFound) await m.reply(`*${tradutor.texto3}*`);
@@ -381,45 +381,14 @@ ${sinopsisFormateada}`;
 
 // ====================== BÚSQUEDA ======================
 
-// Genera variantes de la query por si la original no encuentra nada
-function normalizeQueries(raw) {
-  const base = raw.trim();
-  const list = [base];
+const ANILIST_HEADERS = {
+  'Content-Type': 'application/json',
+  'Accept': 'application/json',
+  'User-Agent': 'Mozilla/5.0'
+};
 
-  const sinTipo = base
-    .replace(/\b(anime|manga|serie|series|pelicula|película|movie)\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (sinTipo && sinTipo !== base) list.push(sinTipo);
-
-  const sinAnio = sinTipo.replace(/[\(\[]?\b(19|20)\d{2}\b[\)\]]?/g, '').replace(/\s+/g, ' ').trim();
-  if (sinAnio && !list.includes(sinAnio)) list.push(sinAnio);
-
-  const limpia = sinAnio.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-  if (limpia && !list.includes(limpia)) list.push(limpia);
-
-  return [...new Set(list)].filter(Boolean);
-}
-
-async function fetchFromAniList(queryText) {
-  const queries = normalizeQueries(queryText);
-
-  for (const q of queries) {
-    const result = await trySearchAniList(q);
-    if (result) return result;
-  }
-  return null;
-}
-
-async function trySearchAniList(query) {
-  const headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'User-Agent': 'Mozilla/5.0'
-  };
-
+async function searchAniListCandidates(query) {
   try {
-    // ---------- FASE 1: búsqueda ligera ----------
     const searchResponse = await axios.post(
       ANILIST_URL,
       {
@@ -429,9 +398,11 @@ async function trySearchAniList(query) {
               media(search: $search, type: ANIME) {
                 id
                 title { romaji english native userPreferred }
+                synonyms
                 format
                 status
                 popularity
+                favourites
                 seasonYear
               }
             }
@@ -439,16 +410,21 @@ async function trySearchAniList(query) {
         `,
         variables: { search: query }
       },
-      { timeout: 25000, headers, httpsAgent }
+      { timeout: 25000, headers: ANILIST_HEADERS, httpsAgent }
     );
 
-    const mediaList = searchResponse.data?.data?.Page?.media || [];
-    if (!mediaList.length) return null;
+    return searchResponse.data?.data?.Page?.media || [];
+  } catch (error) {
+    console.warn(`[animeinfo] AniList falló para "${query}":`, error.message);
+    if (error.response?.data) {
+      console.warn('[animeinfo] AniList error:', JSON.stringify(error.response.data));
+    }
+    return [];
+  }
+}
 
-    const best = pickBestMatch(mediaList, query);
-    if (!best?.id) return null;
-
-    // ---------- FASE 2: detalle completo por ID ----------
+async function fetchAniListDetail(best) {
+  try {
     const detailResponse = await axios.post(
       ANILIST_URL,
       {
@@ -491,68 +467,257 @@ async function trySearchAniList(query) {
         `,
         variables: { id: best.id }
       },
-      { timeout: 25000, headers, httpsAgent }
+      { timeout: 25000, headers: ANILIST_HEADERS, httpsAgent }
     );
 
     const media = detailResponse.data?.data?.Media;
-    if (!media) {
-      // Fallback: al menos devolvemos lo de la fase 1
-      return formatAniListResult(best);
+    return formatAniListResult(media || best);
+  } catch (error) {
+    console.warn(`[animeinfo] AniList detalle falló para ID ${best.id}:`, error.message);
+    return formatAniListResult(best);
+  }
+}
+
+async function fetchFromAniList(queryText, { strictMatch = false } = {}) {
+  const queries = normalizeSearchQueries(queryText);
+  const byId = new Map();
+  let firstAniListResult = null;
+  let bestPick = null;
+
+  for (const q of queries) {
+    const mediaList = await searchAniListCandidates(q);
+    if (!mediaList.length) continue;
+
+    if (!firstAniListResult) firstAniListResult = mediaList[0];
+    for (const item of mediaList) {
+      if (item?.id && !byId.has(item.id)) byId.set(item.id, item);
     }
 
-    return formatAniListResult(media);
-  } catch (error) {
-    console.warn(`[animeinfo] AniList falló para "${query}":`, error.message);
-    if (error.response?.data) {
-      console.warn('[animeinfo] AniList error:', JSON.stringify(error.response.data));
-    }
+    bestPick = pickBestAnimeMatch([...byId.values()], queryText);
+    if (bestPick?.isStrongMatch) break;
+  }
+
+  if (!bestPick?.media?.id) return null;
+
+  if (strictMatch && !bestPick.hasTitleMatch) {
     return null;
   }
+
+  // Si ningún título ni sinónimo coincidió en texto con la búsqueda (p. ej. alias
+  // en español no registrado en `synonyms`), respetar el #1 que devolvió AniList
+  // por SEARCH_MATCH en lugar del anime más popular al azar.
+  const chosen = bestPick.titleScore > 0
+    ? bestPick.media
+    : (firstAniListResult || bestPick.media);
+
+  return fetchAniListDetail(chosen);
 }
 
-function scoreMatch(media, query) {
-  const q = query.toLowerCase().trim();
-  const titles = [
-    media.title?.romaji,
-    media.title?.english,
-    media.title?.native,
-    media.title?.userPreferred
-  ].filter(Boolean).map(t => t.toLowerCase());
+const DECORATIVE_SYMBOL_RE = /[★☆♥♡♪♫✦✧❖◆◇•・×✕✖✚✪✩✯✰⭐✨～]/u;
+const ROMAN_SEASONS = { ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10 };
 
-  let score = 0;
-
-  if (titles.some(t => t === q)) score += 100000;
-  if (titles.some(t => t.startsWith(q))) score += 5000;
-  if (titles.some(t => t.includes(q))) score += 1000;
-  if (titles.some(t => t.length > 3 && q.includes(t))) score += 500;
-
-  score += Math.min(media.popularity || 0, 2000000) / 100;
-  score += (media.favourites || 0) / 50;
-
-  if (media.format === 'TV') score += 600;
-  else if (media.format === 'TV_SHORT') score += 150;
-  else if (media.format === 'MOVIE') score += 100;
-  else if (media.format === 'ONA' || media.format === 'OVA') score += 50;
-
-  if (media.status === 'FINISHED' || media.status === 'RELEASING') score += 300;
-  else if (media.status === 'NOT_YET_RELEASED') score -= 100;
-
-  if (media.description) score += 20;
-
-  return score;
+function normalizeTitleForMatch(value) {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function pickBestMatch(mediaList, query) {
-  let best = mediaList[0];
-  let bestScore = -Infinity;
-  for (const media of mediaList) {
-    const s = scoreMatch(media, query);
-    if (s > bestScore) {
-      bestScore = s;
-      best = media;
+function extractExplicitSeasonNumber(value) {
+  const text = String(value ?? '');
+  let match;
+  if ((match = text.match(/\b(\d{1,2})(?:st|nd|rd|th|[ªº])?\s+season\b/i))) return Number(match[1]);
+  if ((match = text.match(/\b(?:season|temporada|temp\.?)\s*0*(\d{1,2})\b/i))) return Number(match[1]);
+  if ((match = text.match(/\bS0*(\d{1,2})(?:\b|E\d)/i))) return Number(match[1]);
+  if ((match = text.match(/\b(II|III|IV|V|VI|VII|VIII|IX|X)\b/))) {
+    return ROMAN_SEASONS[match[1].toLowerCase()] || null;
+  }
+  return null;
+}
+
+export function normalizeSearchQueries(raw) {
+  const base = String(raw ?? '').trim();
+  if (!base) return [];
+
+  const withoutSymbols = base
+    .replace(/[★☆♥♡♪♫✦✧❖◆◇•・×✕✖✚✪✩✯✰⭐✨～]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const list = [];
+  const push = (val) => {
+    const clean = String(val || '').replace(/\s+/g, ' ').trim();
+    if (clean && !list.includes(clean)) list.push(clean);
+  };
+
+  if (DECORATIVE_SYMBOL_RE.test(base) && withoutSymbols && withoutSymbols !== base) {
+    push(withoutSymbols);
+    push(base);
+  } else {
+    push(base);
+    if (withoutSymbols && withoutSymbols !== base) push(withoutSymbols);
+  }
+
+  const sinTipo = (withoutSymbols || base)
+    .replace(/\b(anime|manga|serie|series|pelicula|película|movie)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  push(sinTipo);
+
+  const sinAnio = sinTipo
+    .replace(/[([\s]*\b(19|20)\d{2}\b[\])\s]*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  push(sinAnio);
+
+  push(normalizeTitleForMatch(sinAnio));
+
+  const beforeColon = (withoutSymbols || base).split(/\s*[:—–]\s*/)[0]?.trim();
+  if (beforeColon && beforeColon.length >= 4 && beforeColon !== base) {
+    push(beforeColon);
+  }
+
+  return list.slice(0, 5);
+}
+
+function scoreSingleTitle(candidateTitle, queryInfo, { isSynonym = false } = {}) {
+  const tNorm = normalizeTitleForMatch(candidateTitle);
+  if (!tNorm) return 0;
+  const tCompact = tNorm.replace(/\s+/g, '');
+  const tTokens = tNorm.split(' ').filter(Boolean);
+
+  const { qNorm, qCompact, qTokens } = queryInfo;
+  if (!qNorm) return 0;
+
+  const penalty = isSynonym ? 0.92 : 1;
+
+  if (tNorm === qNorm || (qCompact.length >= 3 && tCompact === qCompact)) {
+    return Math.round(100_000 * penalty);
+  }
+  if (tNorm.startsWith(`${qNorm} `)) {
+    const lengthBonus = Math.round((qNorm.length / tNorm.length) * 5_000);
+    return Math.round((60_000 + lengthBonus) * penalty);
+  }
+  if (qCompact.length >= 5 && tCompact.startsWith(qCompact)) {
+    return Math.round(52_000 * penalty);
+  }
+  if (qNorm.length >= 4 && (` ${tNorm} `).includes(` ${qNorm} `)) {
+    return Math.round(40_000 * penalty);
+  }
+  if (qCompact.length >= 6 && tCompact.includes(qCompact)) {
+    return Math.round(32_000 * penalty);
+  }
+  if (tNorm.length >= 4 && (` ${qNorm} `).includes(` ${tNorm} `)) {
+    const coverage = tTokens.length / Math.max(1, qTokens.length);
+    return Math.round((24_000 + coverage * 12_000) * penalty);
+  }
+
+  const tSet = new Set(tTokens);
+  let exactMatches = 0;
+  let prefixMatches = 0;
+  for (const qt of qTokens) {
+    if (tSet.has(qt)) {
+      exactMatches += 1;
+    } else if (qt.length >= 5 && tTokens.some(tt => tt.length >= 5 && (tt.startsWith(qt) || qt.startsWith(tt)))) {
+      prefixMatches += 0.7;
     }
   }
-  return best;
+  const effectiveMatches = exactMatches + prefixMatches;
+  if (effectiveMatches <= 0) return 0;
+
+  const coverage = effectiveMatches / qTokens.length;
+  const precision = effectiveMatches / Math.max(1, tTokens.length);
+
+  if (exactMatches === qTokens.length) {
+    return Math.round((35_000 + precision * 10_000) * penalty);
+  }
+  if (coverage >= 0.75) {
+    return Math.round((22_000 * coverage + precision * 4_000) * penalty);
+  }
+  if (qTokens.length >= 2 && exactMatches === 1 && coverage <= 0.5) {
+    return Math.round((3_000 + precision * 1_500) * penalty);
+  }
+  return Math.round((12_000 * coverage + precision * 2_000) * penalty);
+}
+
+export function scoreAnimeMatch(media, query) {
+  const qNorm = normalizeTitleForMatch(query);
+  const qCompact = qNorm.replace(/\s+/g, '');
+  const qTokens = qNorm ? qNorm.split(' ').filter(Boolean) : [];
+  const queryInfo = { qNorm, qCompact, qTokens };
+
+  const primaryTitles = [
+    media?.title?.romaji,
+    media?.title?.english,
+    media?.title?.native,
+    media?.title?.userPreferred,
+  ].filter(Boolean);
+  const synonyms = Array.isArray(media?.synonyms) ? media.synonyms.filter(Boolean) : [];
+
+  let titleScore = 0;
+  for (const t of primaryTitles) {
+    const s = scoreSingleTitle(t, queryInfo, { isSynonym: false });
+    if (s > titleScore) titleScore = s;
+  }
+  for (const t of synonyms) {
+    const s = scoreSingleTitle(t, queryInfo, { isSynonym: true });
+    if (s > titleScore) titleScore = s;
+  }
+
+  const querySeason = extractExplicitSeasonNumber(query);
+  const mediaSeasons = [...primaryTitles, ...synonyms]
+    .map(extractExplicitSeasonNumber)
+    .filter(n => Number.isInteger(n) && n > 0);
+  const mediaSeason = mediaSeasons[0] || null;
+
+  let seasonAdjust = 0;
+  if (titleScore > 0) {
+    if (querySeason && querySeason >= 2) {
+      if (mediaSeason === querySeason) seasonAdjust += 10_000;
+      else if (mediaSeason !== querySeason) seasonAdjust -= 5_000;
+    } else if (!querySeason && mediaSeason && mediaSeason >= 2) {
+      seasonAdjust -= 2_000;
+    }
+  }
+
+  const popularityTieBreak = Math.round(Math.log10(Math.max(1, Number(media?.popularity) || 1)) * 120);
+  const favouritesTieBreak = Math.round(Math.log10(Math.max(1, Number(media?.favourites) || 1)) * 30);
+
+  let formatTieBreak = 0;
+  if (media?.format === 'TV') formatTieBreak = 120;
+  else if (media?.format === 'MOVIE') formatTieBreak = 90;
+  else if (media?.format === 'ONA' || media?.format === 'OVA') formatTieBreak = 60;
+  else if (media?.format === 'TV_SHORT') formatTieBreak = 50;
+
+  let statusTieBreak = 0;
+  if (media?.status === 'FINISHED' || media?.status === 'RELEASING') statusTieBreak = 80;
+  else if (media?.status === 'NOT_YET_RELEASED') statusTieBreak = 20;
+
+  const score = titleScore + seasonAdjust + popularityTieBreak + favouritesTieBreak + formatTieBreak + statusTieBreak;
+
+  return {
+    score,
+    titleScore,
+    isStrongMatch: titleScore >= 30_000,
+    hasTitleMatch: titleScore >= 10_000,
+  };
+}
+
+export function pickBestAnimeMatch(mediaList, query) {
+  if (!Array.isArray(mediaList) || !mediaList.length) return null;
+  let bestMedia = null;
+  let bestMetrics = null;
+  for (const media of mediaList) {
+    const metrics = scoreAnimeMatch(media, query);
+    if (!bestMetrics || metrics.score > bestMetrics.score) {
+      bestMetrics = metrics;
+      bestMedia = media;
+    }
+  }
+  return bestMedia ? { media: bestMedia, ...bestMetrics } : null;
 }
 
 function formatAniListResult(media) {

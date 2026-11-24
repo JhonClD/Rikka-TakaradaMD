@@ -119,6 +119,15 @@ test('isPlausibleAiTitle acepta expansiones oficiales, palabras pegadas y siglas
     isPlausibleAiTitle('One Piece', { files: [{ fileName: 'Solo Leveling - 01 [1080p].mkv' }] }),
     false,
   )
+  // Regresión real: "magica" dentro de "magical" no debe validar Mahou Shoujo para Magical★Explorer
+  assert.equal(
+    isPlausibleAiTitle('Mahou Shoujo Madoka★Magica', { files: [{ fileName: 'Magical★Explorer - 01 [1080p].mkv' }] }),
+    false,
+  )
+  assert.equal(
+    isPlausibleAiTitle('Magical☆Explorer: Eroge no Yuujin Chara ni Tensei Shitakedo', { files: [{ fileName: 'Magical★Explorer - 01 [1080p].mkv' }] }),
+    true,
+  )
 })
 
 test('resolveAniDAnimeTitles funciona para carpetas y archivos individuales con APIsFreeLLM y respaldo', async () => {
@@ -204,3 +213,94 @@ test('buildAniDDriveMetadata extrae capítulos, temporada, audio y resolución t
   assert.deepEqual(single.audio, ['🇲🇽 Español Latino'])
   assert.equal(single.resolution, '1080p')
 })
+
+test('anime-search-match elige Magical☆Explorer sobre Mahou Shoujo aunque Madoka tenga 50x más popularidad', async () => {
+  const { normalizeSearchQueries, pickBestAnimeMatch } = await import('../plugins/search-animeinfo.js')
+
+  // Símbolos decorativos (★, ×) priorizan primero la variante limpia con espacio
+  assert.equal(normalizeSearchQueries('Magical★Explorer')[0], 'Magical Explorer')
+  assert.equal(normalizeSearchQueries('SPY×FAMILY')[0], 'SPY FAMILY')
+
+  const madoka = {
+    id: 9756,
+    title: { romaji: 'Mahou Shoujo Madoka★Magica', english: 'Puella Magi Madoka Magica' },
+    synonyms: ['Magical Girl Madoka Magica'],
+    format: 'TV',
+    status: 'FINISHED',
+    popularity: 750_000,
+    favourites: 45_000,
+  }
+  const akogarete = {
+    id: 162780,
+    title: { romaji: 'Mahou Shoujo ni Akogarete', english: 'Gushing over Magical Girls' },
+    synonyms: [],
+    format: 'TV',
+    status: 'FINISHED',
+    popularity: 120_000,
+    favourites: 5_000,
+  }
+  const magicalExplorer = {
+    id: 169581,
+    title: {
+      romaji: 'Magical☆Explorer: Eroge no Yuujin Chara ni Tensei Shitakedo, Game Chishiki Tsukatte Jiyuu ni Ikiru',
+      english: 'Magical Explorer',
+    },
+    synonyms: ['Magiero'],
+    format: 'TV',
+    status: 'RELEASING',
+    popularity: 12_000,
+    favourites: 250,
+  }
+
+  // Con título inglés + romaji con estrella hueca ☆
+  const pick1 = pickBestAnimeMatch([madoka, akogarete, magicalExplorer], 'Magical★Explorer')
+  assert.equal(pick1.media.id, 169581)
+  assert.equal(pick1.isStrongMatch, true)
+
+  // Incluso sin título inglés (solo romaji con ☆) debe ganar sobre Madoka/Akogarete
+  const romajiOnly = { ...magicalExplorer, title: { romaji: magicalExplorer.title.romaji } }
+  const pick2 = pickBestAnimeMatch([madoka, akogarete, romajiOnly], 'Magical★Explorer')
+  assert.equal(pick2.media.id, 169581)
+  assert.equal(pick2.isStrongMatch, true)
+
+  // Si AniList devolviera SOLO Mahou Shoujo para Magical★Explorer, hasTitleMatch debe ser false
+  const wrongOnly = pickBestAnimeMatch([madoka, akogarete], 'Magical★Explorer')
+  assert.equal(wrongOnly.hasTitleMatch, false)
+})
+
+test('anime-search-match respeta temporadas explícitas y sinónimos en español', async () => {
+  const { pickBestAnimeMatch } = await import('../plugins/search-animeinfo.js')
+
+  const jjk1 = {
+    id: 113415,
+    title: { romaji: 'Jujutsu Kaisen', english: 'JUJUTSU KAISEN' },
+    synonyms: [],
+    format: 'TV',
+    status: 'FINISHED',
+    popularity: 850_000,
+  }
+  const jjk2 = {
+    id: 145064,
+    title: { romaji: 'Jujutsu Kaisen 2nd Season', english: 'JUJUTSU KAISEN Season 2' },
+    synonyms: [],
+    format: 'TV',
+    status: 'FINISHED',
+    popularity: 500_000,
+  }
+  assert.equal(pickBestAnimeMatch([jjk1, jjk2], 'Jujutsu Kaisen 2nd Season').media.id, 145064)
+  assert.equal(pickBestAnimeMatch([jjk1, jjk2], 'Jujutsu Kaisen Temporada 2').media.id, 145064)
+  assert.equal(pickBestAnimeMatch([jjk1, jjk2], 'Jujutsu Kaisen').media.id, 113415)
+
+  const snk = {
+    id: 16498,
+    title: { romaji: 'Shingeki no Kyojin', english: 'Attack on Titan' },
+    synonyms: ['Ataque a los Titanes'],
+    format: 'TV',
+    status: 'FINISHED',
+    popularity: 900_000,
+  }
+  const bySynonym = pickBestAnimeMatch([jjk1, snk], 'Ataque a los Titanes')
+  assert.equal(bySynonym.media.id, 16498)
+  assert.equal(bySynonym.isStrongMatch, true)
+})
+

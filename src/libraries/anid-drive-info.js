@@ -282,11 +282,15 @@ export function isPlausibleAiTitle(suggestion, { files = [], folderTitle = '', l
   // 2) Coincidencia de palabras pegadas / prefijos (p. ej. "ChainsawMan", "BokuNoHero", "ReZero", "Konosuba")
   const sourceGlued = normalizeLabel(sourceText).replace(/[^a-z0-9]/g, '')
   const suggestedGlued = normalizeLabel(clean).replace(/[^a-z0-9]/g, '')
-  if (suggestedTokens.some(token => token.length >= 3 && sourceGlued.includes(token))) return true
-  if (sourceTokens.some(token => token.length >= 4 && suggestedGlued.includes(token))) return true
-  if (suggestedTokens.some(token => token.length >= 4 && sourceGlued.includes(token.slice(0, 4)) && sourceTokens.some(s => s.includes(token.slice(0, 4))))) {
+  const gluedHits = suggestedTokens.filter(token => token.length >= 3 && sourceGlued.includes(token))
+  if (gluedHits.length >= 2 || (gluedHits.length === 1 && gluedHits[0].length >= 6 && suggestedTokens.length <= 2)) {
     return true
   }
+  if (sourceTokens.some(token => token.length >= 4 && suggestedGlued.includes(token))) return true
+  const prefixHits = suggestedTokens.filter(
+    token => token.length >= 4 && sourceTokens.some(s => s.length >= 6 && s.includes(token.slice(0, 4))),
+  )
+  if (prefixHits.length >= 2) return true
 
   // 3) Siglas / abreviaturas de anime (SNK, JJK, OPM, SAO, BNHA, MHA, AOT, KNY, CSM, FMAB, Re0)
   const initialsList = buildInitials(clean)
