@@ -28,7 +28,7 @@ import {
 } from '../src/libraries/sticker.js';
 
 const MAX_INPUT_BYTES = 30 * 1024 * 1024;
-const MAX_VIDEO_SECONDS = 10;
+const MAX_VIDEO_SECONDS = 60;
 const MAX_METADATA_LENGTH = 180;
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS = 100;

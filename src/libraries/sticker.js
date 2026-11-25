@@ -17,9 +17,9 @@ const execFileAsync = promisify(execFile);
 
 const MAX_ANIMATED_WEBP_BYTES = 500 * 1024; // Límite de WhatsApp para stickers animados (~500 KB)
 const MAX_STATIC_WEBP_BYTES = 500 * 1024;
-const MAX_VIDEO_SECONDS = 10;
-const MAX_STATIC_AUDIO_SECONDS = 10;
-const MAX_ANIMATED_AUDIO_SECONDS = 10;
+const MAX_VIDEO_SECONDS = 60;
+const MAX_STATIC_AUDIO_SECONDS = 60;
+const MAX_ANIMATED_AUDIO_SECONDS = 60;
 const STICKER_AUDIO_MIMETYPE = 'audio/ogg; codecs=opus';
 const FFMPEG_TIMEOUT_MS = 90_000;
 
@@ -127,7 +127,7 @@ async function runFfmpegConvert(inputPath, outputPath, args) {
 /**
  * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
  * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
- * - Animado: recorta a 10s máx y ajusta automáticamente calidad/fps para no superar 500 KB.
+ * - Animado: recorta a 60s máx y ajusta automáticamente calidad/fps para no superar 500 KB.
  */
 async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
   const input = toBuffer(mediaBuffer);
@@ -165,13 +165,14 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
       throw new Error('FFmpeg no produjo un WebP estático válido');
     }
 
-    // Stickers animados: adaptación progresiva manteniendo la duración completa (10s) bajo 500 KB
+    // Stickers animados: adaptación progresiva manteniendo la duración completa (60s) bajo 500 KB
     const animatedPresets = [
       { size: 320, fps: 15, q: 70, dur: maxSeconds },
       { size: 320, fps: 12, q: 52, dur: maxSeconds },
       { size: 256, fps: 10, q: 40, dur: maxSeconds },
       { size: 224, fps: 8, q: 30, dur: maxSeconds },
-      { size: 192, fps: 7, q: 24, dur: Math.min(maxSeconds, 8) },
+      { size: 192, fps: 7, q: 24, dur: maxSeconds },
+      { size: 160, fps: 6, q: 20, dur: maxSeconds },
     ];
 
     let smallest = null;
