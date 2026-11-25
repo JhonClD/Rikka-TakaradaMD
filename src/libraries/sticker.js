@@ -157,46 +157,39 @@ async function getMediaDurationSeconds(inputPath) {
 }
 
 /**
- * Elige los presets según la duración detectada, para no bajarle la
+ * Elige los presets según la duración detectada, un nivel por cada 10s:
+ * cada 10 segundos extra baja un escalón de calidad, para no bajarle la
  * calidad a los videos cortos por culpa de los largos:
- * - <=10s: calidad alta (320px, 15 fps)
- * - <=30s: calidad media (256px, 10 fps)
- * - >30s: calidad baja (224px, 8 fps hacia abajo)
+ * - 0-10s: 320px, 15 fps, q70
+ * - 10-20s: 320px, 12 fps, q52
+ * - 20-30s: 256px, 10 fps, q40
+ * - 30-40s: 224px, 8 fps, q30
+ * - 40-50s: 192px, 7 fps, q24
+ * - 50-60s: 160px, 6 fps, q20
  * Dentro de cada nivel se sigue probando de mayor a menor calidad hasta
  * entrar en los 500 KB de WhatsApp.
  */
 function pickAnimatedPresets(durationSec) {
-  const dur = durationSec;
-  if (dur <= 10) {
-    return [
-      { size: 320, fps: 15, q: 70, dur },
-      { size: 320, fps: 12, q: 52, dur },
-      { size: 256, fps: 10, q: 40, dur },
-      { size: 224, fps: 8, q: 30, dur },
-      { size: 192, fps: 7, q: 24, dur: Math.min(dur, 8) },
-    ];
-  }
-  if (dur <= 30) {
-    return [
-      { size: 256, fps: 10, q: 40, dur },
-      { size: 224, fps: 8, q: 30, dur },
-      { size: 192, fps: 7, q: 24, dur },
-      { size: 160, fps: 6, q: 20, dur },
-    ];
-  }
-  return [
-    { size: 224, fps: 8, q: 30, dur },
-    { size: 192, fps: 7, q: 24, dur },
-    { size: 160, fps: 6, q: 20, dur },
-    { size: 128, fps: 5, q: 18, dur },
+  const levels = [
+    { size: 320, fps: 15, q: 70 },
+    { size: 320, fps: 12, q: 52 },
+    { size: 256, fps: 10, q: 40 },
+    { size: 224, fps: 8, q: 30 },
+    { size: 192, fps: 7, q: 24 },
+    { size: 160, fps: 6, q: 20 },
+    { size: 128, fps: 5, q: 18 },
   ];
+  // Un escalón por cada 10s: 0-10s empieza en el nivel 0, 10-20s en el 1, etc.
+  const start = Math.min(levels.length - 2, Math.max(0, Math.ceil(durationSec / 10) - 1));
+  return levels.slice(start).map((level) => ({ ...level, dur: durationSec }));
 }
 
 /**
  * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
  * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
- * - Animado: detecta la duración (máx 60s) y varía calidad/fps según dure,
- *   para no superar los 500 KB de WhatsApp sin castigar a los videos cortos.
+ * - Animado: detecta la duración (máx 60s) y varía calidad/fps un nivel
+ *   por cada 10s, para no superar los 500 KB de WhatsApp sin castigar
+ *   a los videos cortos.
  */
 async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
   const input = toBuffer(mediaBuffer);
