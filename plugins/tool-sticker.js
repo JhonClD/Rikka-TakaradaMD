@@ -13,6 +13,7 @@ import { Buffer } from 'node:buffer';
 import {
   MAX_ANIMATED_AUDIO_SECONDS,
   MAX_STATIC_AUDIO_SECONDS,
+  MAX_VIDEO_SECONDS,
   addExif,
   createSticker,
   downloadStickerAudio,
@@ -27,8 +28,7 @@ import {
   toBuffer,
 } from '../src/libraries/sticker.js';
 
-const MAX_INPUT_BYTES = 30 * 1024 * 1024;
-const MAX_VIDEO_SECONDS = 10;
+const MAX_INPUT_BYTES = 60 * 1024 * 1024;
 const MAX_METADATA_LENGTH = 180;
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS = 100;
@@ -83,6 +83,57 @@ const cleanMetadata = (value, fallback) => {
 
 const getMediaMessage = (message) => message?.msg || message || {};
 
+function inferMimeFromFileName(fileName = '') {
+  const ext = String(fileName).toLowerCase().split('.').pop();
+  switch (ext) {
+    case 'webp':
+      return 'image/webp';
+    case 'gif':
+      return 'image/gif';
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+    case 'bmp':
+    case 'avif':
+      return 'image/jpeg';
+    case 'mp4':
+    case 'mov':
+    case 'mkv':
+    case 'webm':
+    case 'avi':
+    case 'm4v':
+      return 'video/mp4';
+    case 'mp3':
+    case 'ogg':
+    case 'opus':
+    case 'm4a':
+    case 'wav':
+    case 'aac':
+    case 'flac':
+      return 'audio/mpeg';
+    default:
+      return '';
+  }
+}
+
+function inferMimeFromMagicBytes(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return '';
+  if (isValidWebp(buffer)) return 'image/webp';
+  if (buffer.subarray(0, 4).toString('ascii') === 'GIF8') return 'image/gif';
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return 'image/png';
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') return 'video/mp4';
+  if (buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+    return 'video/webm';
+  }
+  return '';
+}
+
 function inspectTarget(target) {
   if (!target || typeof target.download !== 'function') {
     return {
@@ -97,7 +148,11 @@ function inspectTarget(target) {
     };
   }
   const media = getMediaMessage(target);
-  const mime = String(media.mimetype || '').toLowerCase();
+  const rawMime = String(media.mimetype || '').toLowerCase();
+  const mime =
+    !rawMime || rawMime === 'application/octet-stream'
+      ? inferMimeFromFileName(media.fileName) || rawMime
+      : rawMime;
   const mtype = String(target.mtype || target.mediaType || '');
   const isSticker = mtype === 'stickerMessage' || mime.includes('webp');
   const isGif = mime === 'image/gif' || Boolean(media.gifPlayback);
@@ -188,13 +243,13 @@ async function downloadFromUrl(url) {
 
   const contentLength = Number(res.headers.get('content-length') || 0);
   if (contentLength > MAX_INPUT_BYTES) {
-    throw new Error('El archivo en la URL supera los 30 MB.');
+    throw new Error('El archivo en la URL supera los 60 MB.');
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
   if (!buffer.length) throw new Error('La URL devolvió un archivo vacío.');
   if (buffer.length > MAX_INPUT_BYTES) {
-    throw new Error('El archivo en la URL supera los 30 MB.');
+    throw new Error('El archivo en la URL supera los 60 MB.');
   }
 
   const contentType = String(res.headers.get('content-type') || '').toLowerCase();
@@ -202,7 +257,13 @@ async function downloadFromUrl(url) {
     throw new Error('La URL apunta a una página web, no a un archivo multimedia directo.');
   }
 
-  return { buffer, mime: contentType.split(';')[0].trim() };
+  const headerMime = contentType.split(';')[0].trim();
+  const mime =
+    !headerMime || headerMime === 'application/octet-stream'
+      ? inferMimeFromMagicBytes(buffer) || inferMimeFromFileName(url.split('?')[0]) || headerMime
+      : headerMime;
+
+  return { buffer, mime };
 }
 
 async function convertToWebp(mediaBuffer, { isAnimated, mode, packname, author }) {
@@ -217,16 +278,21 @@ async function convertToWebp(mediaBuffer, { isAnimated, mode, packname, author }
     return toBuffer(
       await sticker5(mediaBuffer, null, packname, author, ['✨'], {
         type: mode === 'crop' ? 'crop' : mode === 'circle' ? 'circle' : 'default',
+        quality: isAnimated ? 80 : 100,
       }),
     );
   }
 }
 
 async function buildStampedWebp(mediaBuffer, effectiveMime, mediaObj, { mode, packname, author, emojis = ['✨'] }) {
-  const isWebpInput = effectiveMime.includes('webp') || isValidWebp(mediaBuffer);
-  const isImage = effectiveMime.startsWith('image/') || isWebpInput;
-  const isVideo = effectiveMime.startsWith('video/');
-  const isGif = effectiveMime === 'image/gif' || Boolean(mediaObj?.gifPlayback);
+  const resolvedMime =
+    !effectiveMime || effectiveMime === 'application/octet-stream'
+      ? inferMimeFromMagicBytes(mediaBuffer) || effectiveMime
+      : effectiveMime;
+  const isWebpInput = resolvedMime.includes('webp') || isValidWebp(mediaBuffer);
+  const isImage = resolvedMime.startsWith('image/') || isWebpInput;
+  const isVideo = resolvedMime.startsWith('video/');
+  const isGif = resolvedMime === 'image/gif' || Boolean(mediaObj?.gifPlayback);
   const isAnimated = isVideo || isGif || (isWebpInput && isAnimatedWebp(mediaBuffer));
 
   if (!isImage && !isVideo && !isGif) {
@@ -390,7 +456,11 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
         }
       }
 
-      await conn.sendMessage(m.chat, { sticker: stamped }, { quoted: m });
+      await conn.sendMessage(
+        m.chat,
+        { sticker: stamped, isAnimated: isAnimatedWebp(stamped) },
+        { quoted: m },
+      );
     } catch (error) {
       console.error(`[${cmd}] Error:`, error?.message || error);
       return m.reply('❌ No se pudo actualizar el pack/autor del sticker.');
@@ -505,7 +575,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
       }
       if (!rawAudioBuf?.length) return m.reply('❌ El audio está vacío.');
       if (rawAudioBuf.length > MAX_INPUT_BYTES) {
-        return m.reply('❌ El audio supera el límite máximo de 30 MB.');
+        return m.reply('❌ El audio supera el límite máximo de 60 MB.');
       }
 
       audioStickerSessions.set(sessionKey, {
@@ -592,7 +662,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
 
   if (!mediaBuffer?.length) return m.reply('❌ El archivo está vacío.');
   if (mediaBuffer.length > MAX_INPUT_BYTES) {
-    return m.reply('❌ El archivo supera el límite máximo de 30 MB.');
+    return m.reply('❌ El archivo supera el límite máximo de 60 MB.');
   }
 
   const effectiveMode = mode !== 'default' ? mode : pendingSession?.mode || 'default';
@@ -733,7 +803,7 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   }
 
   try {
-    await conn.sendMessage(m.chat, { sticker: webpBuffer }, { quoted: m });
+    await conn.sendMessage(m.chat, { sticker: webpBuffer, isAnimated }, { quoted: m });
   } catch (error) {
     console.error('[sticker] Error al enviar:', error?.message || error);
     return m.reply('❌ El sticker se generó, pero no se pudo enviar.');

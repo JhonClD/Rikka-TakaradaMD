@@ -15,15 +15,17 @@ import webp from 'node-webpmux';
 
 const execFileAsync = promisify(execFile);
 
-const MAX_ANIMATED_WEBP_BYTES = 500 * 1024; // Límite de WhatsApp para stickers animados (~500 KB)
-const MAX_STATIC_WEBP_BYTES = 500 * 1024;
-const MAX_VIDEO_SECONDS = 10;
-const MAX_STATIC_AUDIO_SECONDS = 10;
-const MAX_ANIMATED_AUDIO_SECONDS = 10;
+const MAX_ANIMATED_WEBP_BYTES = 1020 * 1024; // ~1 MB límite en WhatsApp/Baileys dejando margen para EXIF
+const MAX_STATIC_WEBP_BYTES = 1020 * 1024;
+const MAX_VIDEO_SECONDS = 60;
+const MAX_STATIC_AUDIO_SECONDS = 60;
+const MAX_ANIMATED_AUDIO_SECONDS = 60;
 const STICKER_AUDIO_MIMETYPE = 'audio/ogg; codecs=opus';
-const FFMPEG_TIMEOUT_MS = 90_000;
+const FFMPEG_TIMEOUT_MS = 180_000;
+const SCALE_FLAGS = 'lanczos+accurate_rnd+full_chroma_int+full_chroma_inp';
 
 let resolvedFfmpegBin = null;
+let resolvedAnimWebpCodec = null;
 async function getFfmpegBin() {
   if (resolvedFfmpegBin) return resolvedFfmpegBin;
   try {
@@ -42,6 +44,20 @@ async function getFfmpegBin() {
 
   resolvedFfmpegBin = 'ffmpeg';
   return resolvedFfmpegBin;
+}
+
+async function getAnimatedWebpCodec() {
+  if (resolvedAnimWebpCodec) return resolvedAnimWebpCodec;
+  try {
+    const bin = await getFfmpegBin();
+    const { stdout = '' } = await execFileAsync(bin, ['-hide_banner', '-encoders'], {
+      timeout: 5_000,
+    });
+    resolvedAnimWebpCodec = /\blibwebp_anim\b/.test(stdout) ? 'libwebp_anim' : 'libwebp';
+  } catch {
+    resolvedAnimWebpCodec = 'libwebp';
+  }
+  return resolvedAnimWebpCodec;
 }
 
 function toBuffer(input) {
@@ -85,78 +101,227 @@ async function cleanUp(...files) {
   }
 }
 
-function buildVideoFilter(size, mode, fps = null) {
+function buildVideoFilter(
+  size,
+  mode,
+  { fps = null, pixelFormat = 'yuva420p', sharpen = 0.35, denoise = false } = {},
+) {
   const filters = [];
   if (fps) filters.push(`fps=${fps}`);
+  if (denoise) filters.push('hqdn3d=1.2:0.9:2.5:1.8');
+
+  const sharpenFilter =
+    sharpen > 0 ? `unsharp=3:3:${sharpen.toFixed(2)}:3:3:0.0` : null;
 
   if (mode === 'crop') {
     filters.push(
-      `scale=${size}:${size}:flags=lanczos:force_original_aspect_ratio=increase`,
+      `scale=${size}:${size}:flags=${SCALE_FLAGS}:force_original_aspect_ratio=increase`,
       `crop=${size}:${size}`,
-      'format=rgba',
     );
+    if (sharpenFilter) filters.push(sharpenFilter);
+    filters.push(`format=${pixelFormat}`);
   } else if (mode === 'circle') {
     filters.push(
-      `scale=${size}:${size}:flags=lanczos:force_original_aspect_ratio=increase`,
+      `scale=${size}:${size}:flags=${SCALE_FLAGS}:force_original_aspect_ratio=increase`,
       `crop=${size}:${size}`,
+    );
+    if (sharpenFilter) filters.push(sharpenFilter);
+    filters.push(
       'format=rgba',
-      `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(pow(X-W/2,2)+pow(Y-H/2,2),pow(min(W,H)/2-1,2)),alpha(X,Y),0)'`,
+      `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*clip(min(W,H)/2-hypot(X-W/2,Y-H/2),0,1)'`,
+      `format=${pixelFormat}`,
     );
   } else {
     filters.push(
-      `scale=${size}:${size}:flags=lanczos:force_original_aspect_ratio=decrease`,
-      'format=rgba',
-      `pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=#00000000`,
+      `scale=${size}:${size}:flags=${SCALE_FLAGS}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
     );
+    if (sharpenFilter) filters.push(sharpenFilter);
+    if (pixelFormat === 'yuva420p') {
+      filters.push(
+        'format=yuva420p',
+        `pad=${size}:${size}:trunc((ow-iw)/4)*2:trunc((oh-ih)/4)*2:color=black@0`,
+      );
+    } else {
+      filters.push(
+        `format=${pixelFormat}`,
+        `pad=${size}:${size}:trunc((ow-iw)/4)*2:trunc((oh-ih)/4)*2:color=#00000000`,
+      );
+    }
   }
 
   filters.push('setsar=1');
-  if (fps) filters.push('format=yuva420p');
   return filters.join(',');
 }
 
-async function runFfmpegConvert(inputPath, outputPath, args) {
+async function runFfmpegConvert(inputPath, outputPath, args, inputArgs = []) {
   const bin = await getFfmpegBin();
-  await execFileAsync(bin, ['-y', '-i', inputPath, ...args, outputPath], {
+  await execFileAsync(bin, ['-y', ...inputArgs, '-i', inputPath, ...args, outputPath], {
     timeout: FFMPEG_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
   });
   return fs.promises.readFile(outputPath);
 }
 
+function parseDurationText(text) {
+  const match = String(text || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const total = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+async function getMediaDurationSeconds(inputPath) {
+  try {
+    const res = await execFileAsync(
+      'ffprobe',
+      [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        inputPath,
+      ],
+      { timeout: 10_000 },
+    );
+    const seconds = Number(String(res?.stdout || '').trim());
+    if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  } catch {}
+
+  try {
+    const bin = await getFfmpegBin();
+    await execFileAsync(bin, ['-i', inputPath], { timeout: 10_000 });
+  } catch (err) {
+    return parseDurationText(err?.stderr || err?.stdout || '');
+  }
+  return null;
+}
+
+async function demuxWebpFrames(webpBuffer) {
+  const frameDir = path.join(
+    os.tmpdir(),
+    `stk_frames_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+  );
+  await fs.promises.mkdir(frameDir, { recursive: true });
+  const img = new webp.Image();
+  await img.load(webpBuffer);
+  await img.demux({ path: frameDir, prefix: 'f_' });
+
+  const files = (await fs.promises.readdir(frameDir))
+    .filter((f) => f.endsWith('.webp'))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  if (!files.length) {
+    await fs.promises.rm(frameDir, { recursive: true, force: true }).catch(() => {});
+    throw new Error('No se pudieron extraer frames del sticker animado');
+  }
+
+  const frameMeta = Array.isArray(img.frames) ? img.frames : [];
+  const concatLines = [];
+  let totalDurationSec = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const filePath = path.join(frameDir, files[i]).replace(/'/g, "'\\''");
+    const delayMs = Number(frameMeta[i]?.delay);
+    const durationSec = (Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 67) / 1000;
+    totalDurationSec += durationSec;
+    concatLines.push(`file '${filePath}'`);
+    concatLines.push(`duration ${durationSec.toFixed(4)}`);
+  }
+  // El demuxer concat requiere repetir la última entrada para respetar su duración
+  const lastFilePath = path.join(frameDir, files[files.length - 1]).replace(/'/g, "'\\''");
+  concatLines.push(`file '${lastFilePath}'`);
+
+  const listPath = path.join(frameDir, 'list.txt');
+  await fs.promises.writeFile(listPath, concatLines.join('\n'), 'utf8');
+
+  return {
+    frameDir,
+    listPath,
+    width: img.width || 512,
+    height: img.height || 512,
+    durationSec: totalDurationSec > 0 ? totalDurationSec : null,
+  };
+}
+
+// Escalera progresiva priorizando resolución espacial (512px) y nitidez de bordes
+// antes de reducir dimensiones, con peso relativo estimado para saltar directo al
+// escalón óptimo cuando un video largo de alto movimiento supera ~1 MB.
+const ANIMATED_QUALITY_LADDER = [
+  { size: 512, fps: 18, q: 82, cr: 0,  sharpen: 0.35, denoise: false, weight: 1.00 },
+  { size: 512, fps: 15, q: 76, cr: 4,  sharpen: 0.35, denoise: false, weight: 0.72 },
+  { size: 512, fps: 12, q: 68, cr: 6,  sharpen: 0.38, denoise: false, weight: 0.50 },
+  { size: 512, fps: 10, q: 58, cr: 8,  sharpen: 0.40, denoise: false, weight: 0.36 },
+  { size: 512, fps: 8,  q: 50, cr: 10, sharpen: 0.42, denoise: true,  weight: 0.25 },
+  { size: 448, fps: 8,  q: 46, cr: 12, sharpen: 0.45, denoise: true,  weight: 0.19 },
+  { size: 384, fps: 8,  q: 44, cr: 12, sharpen: 0.45, denoise: true,  weight: 0.145 },
+  { size: 384, fps: 7,  q: 38, cr: 14, sharpen: 0.48, denoise: true,  weight: 0.115 },
+  { size: 320, fps: 7,  q: 38, cr: 14, sharpen: 0.48, denoise: true,  weight: 0.085 },
+  { size: 320, fps: 6,  q: 32, cr: 16, sharpen: 0.50, denoise: true,  weight: 0.065 },
+  { size: 256, fps: 6,  q: 30, cr: 18, sharpen: 0.50, denoise: true,  weight: 0.042 },
+  { size: 224, fps: 5,  q: 26, cr: 18, sharpen: 0.50, denoise: true,  weight: 0.028 },
+];
+
+function pickInitialAnimatedIndex(durationSec) {
+  if (durationSec <= 6) return 0;
+  if (durationSec <= 12) return 1;
+  if (durationSec <= 22) return 2;
+  if (durationSec <= 35) return 3;
+  return 4;
+}
+
 /**
- * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
- * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
- * - Animado: recorta a 10s máx y ajusta automáticamente calidad/fps para no superar 500 KB.
+ * Convierte imagen, GIF o video a WebP de alta nitidez optimizado para WhatsApp.
+ * - Estático: 512x512 WebP sin pérdida (VP8L RGB 4:4:4) primero, con respaldo lossy de alta calidad
+ *   manteniendo siempre 512x512 (soporta modos: default, crop, circle).
+ * - Animado: hasta 60s máx usando `libwebp_anim` + preset `picture`, priorizando 512x512 y nitidez
+ *   con salto adaptativo guiado por peso para mantenerse bajo ~1 MB.
  */
-async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
+async function createSticker(
+  mediaBuffer,
+  { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {},
+) {
   const input = toBuffer(mediaBuffer);
   if (!input.length) throw new Error('Buffer de entrada vacío');
 
   const tmpIn = uniqueTmpPath('stk_in', 'bin');
   const tmpOut = uniqueTmpPath('stk_out', 'webp');
+  let demuxed = null;
 
   try {
-    await fs.promises.writeFile(tmpIn, input);
-
     if (!isAnimated) {
-      const presets = [
-        { size: 512, q: 88 },
-        { size: 512, q: 70 },
-        { size: 384, q: 55 },
+      await fs.promises.writeFile(tmpIn, input);
+      const staticPresets = [
+        { size: 512, lossless: true, q: 100, sharpen: 0.30, pixelFormat: 'bgra' },
+        { size: 512, lossless: false, q: 95, sharpen: 0.35, pixelFormat: 'yuva420p' },
+        { size: 512, lossless: false, q: 86, sharpen: 0.35, pixelFormat: 'yuva420p' },
+        { size: 512, lossless: false, q: 76, sharpen: 0.35, pixelFormat: 'yuva420p' },
       ];
 
       let best = null;
-      for (const preset of presets) {
-        const vf = buildVideoFilter(preset.size, mode, null);
-        const out = await runFfmpegConvert(tmpIn, tmpOut, [
-          '-vframes', '1',
-          '-vcodec', 'libwebp',
-          '-lossless', '0',
-          '-compression_level', '6',
-          '-q:v', String(preset.q),
-          '-vf', vf,
-        ]);
+      for (const preset of staticPresets) {
+        const vf = buildVideoFilter(preset.size, mode, {
+          fps: null,
+          pixelFormat: preset.pixelFormat,
+          sharpen: preset.sharpen,
+          denoise: false,
+        });
+        const args = preset.lossless
+          ? [
+              '-frames:v', '1',
+              '-c:v', 'libwebp',
+              '-lossless', '1',
+              '-compression_level', '6',
+              '-quality', String(preset.q),
+              '-vf', vf,
+            ]
+          : [
+              '-frames:v', '1',
+              '-c:v', 'libwebp',
+              '-lossless', '0',
+              '-preset', 'picture',
+              '-compression_level', '6',
+              '-quality', String(preset.q),
+              '-vf', vf,
+            ];
+        const out = await runFfmpegConvert(tmpIn, tmpOut, args);
         if (!isValidWebp(out)) continue;
         best = out;
         if (out.length <= MAX_STATIC_WEBP_BYTES) return out;
@@ -165,37 +330,80 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
       throw new Error('FFmpeg no produjo un WebP estático válido');
     }
 
-    // Stickers animados: adaptación progresiva manteniendo la duración completa (10s) bajo 500 KB
-    const animatedPresets = [
-      { size: 320, fps: 15, q: 70, dur: maxSeconds },
-      { size: 320, fps: 12, q: 52, dur: maxSeconds },
-      { size: 256, fps: 10, q: 40, dur: maxSeconds },
-      { size: 224, fps: 8, q: 30, dur: maxSeconds },
-      { size: 192, fps: 7, q: 24, dur: Math.min(maxSeconds, 8) },
-    ];
+    let ffmpegInput = tmpIn;
+    let inputArgs = [];
+    let detectedSeconds = null;
 
+    if (isAnimatedWebp(input)) {
+      demuxed = await demuxWebpFrames(input);
+      ffmpegInput = demuxed.listPath;
+      inputArgs = ['-f', 'concat', '-safe', '0'];
+      detectedSeconds = demuxed.durationSec;
+    } else {
+      await fs.promises.writeFile(tmpIn, input);
+      detectedSeconds = await getMediaDurationSeconds(tmpIn).catch(() => null);
+    }
+
+    const effectiveSeconds = Math.min(
+      maxSeconds,
+      Math.max(0.5, detectedSeconds || maxSeconds),
+    );
+    const animCodec = await getAnimatedWebpCodec();
+
+    let idx = pickInitialAnimatedIndex(effectiveSeconds);
     let smallest = null;
-    for (const preset of animatedPresets) {
-      const vf = buildVideoFilter(preset.size, mode, preset.fps);
-      const out = await runFfmpegConvert(tmpIn, tmpOut, [
-        '-t', String(preset.dur),
-        '-an',
-        '-vcodec', 'libwebp',
-        '-loop', '0',
-        '-preset', 'default',
-        '-compression_level', '4',
-        '-q:v', String(preset.q),
-        '-vf', vf,
-      ]);
-      if (!isValidWebp(out)) continue;
-      if (!smallest || out.length < smallest.length) smallest = out;
-      if (out.length <= MAX_ANIMATED_WEBP_BYTES) return out;
+
+    while (idx < ANIMATED_QUALITY_LADDER.length) {
+      const preset = ANIMATED_QUALITY_LADDER[idx];
+      const vf = buildVideoFilter(preset.size, mode, {
+        fps: preset.fps,
+        pixelFormat: 'yuva420p',
+        sharpen: preset.sharpen,
+        denoise: preset.denoise,
+      });
+      const out = await runFfmpegConvert(
+        ffmpegInput,
+        tmpOut,
+        [
+          '-t', String(effectiveSeconds),
+          '-an',
+          '-c:v', animCodec,
+          '-loop', '0',
+          '-preset', 'picture',
+          '-compression_level', '4',
+          ...(preset.cr > 0 ? ['-cr_threshold', String(preset.cr), '-cr_size', '16'] : []),
+          '-quality', String(preset.q),
+          '-vf', vf,
+        ],
+        inputArgs,
+      );
+
+      if (isValidWebp(out)) {
+        if (!smallest || out.length < smallest.length) smallest = out;
+        if (out.length <= MAX_ANIMATED_WEBP_BYTES) return out;
+
+        const overshoot = out.length / MAX_ANIMATED_WEBP_BYTES;
+        const targetWeight = preset.weight / (overshoot * 1.06);
+        let nextIdx = idx + 1;
+        while (
+          nextIdx < ANIMATED_QUALITY_LADDER.length - 1 &&
+          ANIMATED_QUALITY_LADDER[nextIdx].weight > targetWeight
+        ) {
+          nextIdx++;
+        }
+        idx = nextIdx;
+      } else {
+        idx++;
+      }
     }
 
     if (smallest) return smallest;
     throw new Error('FFmpeg no produjo un WebP animado válido');
   } finally {
     await cleanUp(tmpIn, tmpOut);
+    if (demuxed?.frameDir) {
+      await fs.promises.rm(demuxed.frameDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -553,14 +761,14 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
             '-i', tmpIn,
             '-i', tmpAudio,
             '-shortest',
-            '-t', '15',
+            '-t', String(MAX_STATIC_AUDIO_SECONDS + 5),
             '-movflags', '+faststart',
             '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-vf', `scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=${SCALE_FLAGS}`,
             '-c:v', 'libx264',
             '-tune', 'stillimage',
             '-preset', 'fast',
-            '-crf', '22',
+            '-crf', '18',
             '-c:a', 'aac',
             '-b:a', '128k',
             tmpOut,
@@ -577,10 +785,10 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
             '-t', '2',
             '-movflags', '+faststart',
             '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-vf', `scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=${SCALE_FLAGS}`,
             '-c:v', 'libx264',
             '-preset', 'fast',
-            '-crf', '22',
+            '-crf', '18',
             tmpOut,
           ],
           { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
@@ -594,45 +802,16 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
   }
 
   // Sticker animado: demux de frames con node-webpmux → concat en FFmpeg → MP4
-  const frameDir = path.join(
-    os.tmpdir(),
-    `stk_frames_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-  );
   const tmpAudio = hasAudio ? uniqueTmpPath('stk_rev_aud', 'ogg') : null;
   const tmpOut = uniqueTmpPath('stk_rev_out', 'mp4');
+  let demuxed = null;
 
   try {
-    await fs.promises.mkdir(frameDir, { recursive: true });
-    const img = new webp.Image();
-    await img.load(input);
-    await img.demux({ path: frameDir, prefix: 'f_' });
+    demuxed = await demuxWebpFrames(input);
+    const canvasW = Math.max(2, Math.floor(demuxed.width / 2) * 2);
+    const canvasH = Math.max(2, Math.floor(demuxed.height / 2) * 2);
 
-    const files = (await fs.promises.readdir(frameDir))
-      .filter((f) => f.endsWith('.webp'))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-
-    if (!files.length) throw new Error('No se pudieron extraer frames del sticker animado');
-
-    const canvasW = Math.max(2, Math.floor((img.width || 512) / 2) * 2);
-    const canvasH = Math.max(2, Math.floor((img.height || 512) / 2) * 2);
-    const frameMeta = Array.isArray(img.frames) ? img.frames : [];
-
-    const concatLines = [];
-    for (let i = 0; i < files.length; i++) {
-      const filePath = path.join(frameDir, files[i]).replace(/'/g, "'\\''");
-      const delayMs = Number(frameMeta[i]?.delay);
-      const durationSec = (Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 67) / 1000;
-      concatLines.push(`file '${filePath}'`);
-      concatLines.push(`duration ${durationSec.toFixed(4)}`);
-    }
-    // El demuxer concat requiere repetir la última entrada para respetar su duración
-    const lastFilePath = path.join(frameDir, files[files.length - 1]).replace(/'/g, "'\\''");
-    concatLines.push(`file '${lastFilePath}'`);
-
-    const listPath = path.join(frameDir, 'list.txt');
-    await fs.promises.writeFile(listPath, concatLines.join('\n'), 'utf8');
-
-    const scalePad = `scale=${canvasW}:${canvasH}:force_original_aspect_ratio=decrease,pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=black`;
+    const scalePad = `scale=${canvasW}:${canvasH}:flags=${SCALE_FLAGS}:force_original_aspect_ratio=decrease,pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=black`;
     if (tmpAudio) {
       await fs.promises.writeFile(tmpAudio, audioBuffer);
       await execFileAsync(
@@ -642,19 +821,19 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
           '-stream_loop', '-1',
           '-f', 'concat',
           '-safe', '0',
-          '-i', listPath,
+          '-i', demuxed.listPath,
           '-i', tmpAudio,
           '-map', '0:v:0',
           '-map', '1:a:0',
           '-shortest',
-          '-t', '15',
+          '-t', String(MAX_ANIMATED_AUDIO_SECONDS + 5),
           '-vsync', 'vfr',
           '-movflags', '+faststart',
           '-pix_fmt', 'yuv420p',
           '-vf', scalePad,
           '-c:v', 'libx264',
           '-preset', 'fast',
-          '-crf', '22',
+          '-crf', '18',
           '-c:a', 'aac',
           '-b:a', '128k',
           tmpOut,
@@ -668,14 +847,14 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
           '-y',
           '-f', 'concat',
           '-safe', '0',
-          '-i', listPath,
+          '-i', demuxed.listPath,
           '-vsync', 'vfr',
           '-movflags', '+faststart',
           '-pix_fmt', 'yuv420p',
           '-vf', scalePad,
           '-c:v', 'libx264',
           '-preset', 'fast',
-          '-crf', '22',
+          '-crf', '18',
           tmpOut,
         ],
         { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
@@ -686,7 +865,9 @@ async function stickerToMedia(webpBuffer, { forceVideo = false, audioBuffer = nu
     return { kind: 'video', buffer: mp4, mimetype: 'video/mp4' };
   } finally {
     await cleanUp(tmpAudio, tmpOut);
-    await fs.promises.rm(frameDir, { recursive: true, force: true }).catch(() => {});
+    if (demuxed?.frameDir) {
+      await fs.promises.rm(demuxed.frameDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -747,7 +928,7 @@ async function sticker4(img, url) {
 
 async function sticker5(img, url, packname, author, categories = ['✨'], extra = {}) {
   const { Sticker } = await import('wa-sticker-formatter');
-  const metadata = { type: 'default', pack: packname, author, categories, ...extra };
+  const metadata = { quality: 100, type: 'default', pack: packname, author, categories, ...extra };
   const buf = await new Sticker(img ?? url, metadata).toBuffer();
   return toBuffer(buf);
 }
@@ -778,6 +959,7 @@ global.support = support;
 export {
   MAX_ANIMATED_AUDIO_SECONDS,
   MAX_STATIC_AUDIO_SECONDS,
+  MAX_VIDEO_SECONDS,
   STICKER_AUDIO_MIMETYPE,
   addExif,
   createSticker,
