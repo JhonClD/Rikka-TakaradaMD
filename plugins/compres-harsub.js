@@ -123,41 +123,6 @@ let handler = async (m, { conn, text, command, args }) => {
         return Math.max(100, Math.floor(videoBits / durationSec / 1000));
     };
 
-    // ✅ WebP (stickers): ffprobe no sabe leer WebP animado — devuelve
-    // 0x0, sin duración y peso NaN ("piped webp sequence"). Se parsea con
-    // node-webpmux (ancho/alto reales + delay de cada frame = duración)
-    // y, si falla, con el chunk VP8X del propio archivo.
-    const parseWebpMeta = async (buffer) => {
-        const isWebp = Buffer.isBuffer(buffer) && buffer.length >= 12
-            && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
-            && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
-        if (!isWebp) return null;
-        let width = 0, height = 0, frames = 0, durationSec = 0;
-        try {
-            const { default: webp } = await import('node-webpmux');
-            const img = new webp.Image();
-            await img.load(buffer);
-            width = img.width || 0;
-            height = img.height || 0;
-            const delays = Array.isArray(img.frames) ? img.frames.map(f => Number(f?.delay) || 0) : [];
-            frames = delays.length;
-            durationSec = delays.reduce((a, b) => a + b, 0) / 1000;
-        } catch {}
-        // Fallback: canvas del chunk VP8X (offset 12: 'VP8X', tamaño, flags,
-        // ancho-1 y alto-1 en 3 bytes little-endian cada uno).
-        if ((!width || !height) && buffer.length >= 30 && buffer.subarray(12, 16).toString('ascii') === 'VP8X') {
-            width = width || (buffer.readUIntLE(24, 3) + 1);
-            height = height || (buffer.readUIntLE(27, 3) + 1);
-        }
-        const isAnimated = frames > 1 || buffer.includes(Buffer.from('ANIM')) || buffer.includes(Buffer.from('ANMF'));
-        return { width, height, frames, durationSec, isAnimated };
-    };
-
-    const formatDuration = (durationSec) => {
-        if (!Number.isFinite(durationSec) || durationSec <= 0) return '00:00:00';
-        return new Date(durationSec * 1000).toISOString().substr(11, 8);
-    };
-
     // ✅ Frames + duración real del vídeo con ffprobe — ahora vía spawnSync con array
     // de argumentos (sin pasar por el shell) en vez de execSync con template string.
     const getVideoMeta = (filePath) => {
@@ -302,34 +267,6 @@ let handler = async (m, { conn, text, command, args }) => {
                 if (!media || !media.mediaKey) return reply('Error: No se encontró el medio.');
                 const stream  = await downloadContentFromMessage(media, type.replace('Message', ''));
 
-                // ── Sticker WebP: ffprobe no lo sabe leer (devuelve 0x0, sin
-                // duración y peso NaN), así que se descarga completo — un sticker
-                // pesa poco — y se parsea con node-webpmux (ver parseWebpMeta).
-                const mime = String(media.mimetype || '').toLowerCase();
-                if (type === 'stickerMessage' || mime.includes('webp')) {
-                    const chunks = [];
-                    for await (const chunk of stream) chunks.push(chunk);
-                    const buffer = Buffer.concat(chunks);
-                    if (!buffer.length) return reply('Error: El sticker llegó vacío.');
-                    const meta = await parseWebpMeta(buffer);
-                    if (!meta) return reply('Error: No se pudo leer el sticker WebP.');
-                    const fps = meta.durationSec > 0 && meta.frames > 0
-                        ? (meta.frames / meta.durationSec).toFixed(1) : null;
-                    let r = '> *Información del sticker*\n\n';
-                    r += `> Formato: \`WebP ${meta.isAnimated ? 'animado' : 'estático'}\`\n`;
-                    r += `> Resolución: \`${meta.width && meta.height ? `${meta.width}x${meta.height}` : 'Desconocida'}\`\n`;
-                    r += `> Duración: \`${meta.isAnimated ? formatDuration(meta.durationSec) : '— (estático)'}\`\n`;
-                    if (meta.isAnimated) r += `> Frames: \`${meta.frames}\`${fps ? ` (~${fps} fps)` : ''}\n`;
-                    r += `> Peso: \`${(buffer.length / 1024 / 1024).toFixed(2)} MB\`\n\n`;
-                    r += '> *Audios disponibles*\n';
-                    r += media.audioMessage
-                        ? '- Integrado: `opus` 🔊 (audio del sticker)\n'
-                        : '- `Ninguno`\n';
-                    r += '\n> *Subtítulos disponibles*\n- `Ninguno`\n';
-                    r += '\n_*.dw2 [res] (doc)*_\n_*.dw3 [res] [audio] [sub] (doc)*_\n_*.dw4 (doc)*_\n_*.mi [res] [pesoMB] (doc)*_';
-                    return reply(r);
-                }
-
                 // -v error: suprime advertencias innecesarias
                 // probesize/analyzeduration bajos → lectura de metadata instantánea
                 const ffprobe = spawn('ffprobe', [
@@ -353,20 +290,16 @@ let handler = async (m, { conn, text, command, args }) => {
                     if (code !== 0 || !stdoutData) return reply('Error al analizar en tiempo real.');
                     const data        = JSON.parse(stdoutData);
                     const vStream     = data.streams.find(s => s.codec_type === 'video');
-                    // Guardas: ffprobe devuelve 0x0 / sin duración / sin peso en
-                    // formatos que no entiende (p. ej. WebP) — mejor "Desconocida"
-                    // que un 0x0 / 00:00:00 / NaN MB engañoso.
-                    const resolution  = vStream?.width && vStream?.height ? `${vStream.width}x${vStream.height}` : 'Desconocida';
+                    const resolution  = vStream ? `${vStream.width}x${vStream.height}` : 'Desconocida';
                     const durationSec = parseFloat(data.format.duration || 0);
-                    const duration    = Number.isFinite(durationSec) && durationSec > 0 ? formatDuration(durationSec) : 'Desconocida';
+                    const duration    = new Date(durationSec * 1000).toISOString().substr(11, 8);
                     const formatName  = data.format.format_long_name ? data.format.format_long_name.split(' / ')[0] : 'Desconocido';
-                    const sizeMB      = Number(data.format.size) / 1024 / 1024;
 
                     let r = '> *Información del video*\n\n';
                     r += `> Formato: \`${formatName}\`\n`;
                     r += `> Resolución: \`${resolution}\`\n`;
                     r += `> Duración: \`${duration}\`\n`;
-                    r += `> Peso: \`${Number.isFinite(sizeMB) ? `${sizeMB.toFixed(2)} MB` : 'Desconocido'}\`\n\n`;
+                    r += `> Peso: \`${(data.format.size / 1024 / 1024).toFixed(2)} MB\`\n\n`;
                     const audios = data.streams.filter(s => s.codec_type === 'audio');
                     r += '> *Audios disponibles*\n';
                     const audiosSinBandera = [];

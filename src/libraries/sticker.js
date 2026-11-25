@@ -15,11 +15,11 @@ import webp from 'node-webpmux';
 
 const execFileAsync = promisify(execFile);
 
-const MAX_ANIMATED_WEBP_BYTES = 1024 * 1024; // Límite final con Baileys: 1 MB (1.8 y 2 MB no pasaron; WhatsApp oficial pide ~500 KB)
-const MAX_STATIC_WEBP_BYTES = 1024 * 1024;
-const MAX_VIDEO_SECONDS = 60;
-const MAX_STATIC_AUDIO_SECONDS = 60;
-const MAX_ANIMATED_AUDIO_SECONDS = 60;
+const MAX_ANIMATED_WEBP_BYTES = 500 * 1024; // Límite de WhatsApp para stickers animados (~500 KB)
+const MAX_STATIC_WEBP_BYTES = 500 * 1024;
+const MAX_VIDEO_SECONDS = 10;
+const MAX_STATIC_AUDIO_SECONDS = 10;
+const MAX_ANIMATED_AUDIO_SECONDS = 10;
 const STICKER_AUDIO_MIMETYPE = 'audio/ogg; codecs=opus';
 const FFMPEG_TIMEOUT_MS = 90_000;
 
@@ -124,72 +124,10 @@ async function runFfmpegConvert(inputPath, outputPath, args) {
   return fs.promises.readFile(outputPath);
 }
 
-function parseDurationText(text) {
-  const match = String(text || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-  if (!match) return null;
-  const total = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-  return Number.isFinite(total) && total > 0 ? total : null;
-}
-
-/**
- * Detecta la duración real del video/GIF en segundos.
- * Usa ffprobe si está disponible, si no, lee la línea `Duration:` de ffmpeg.
- * Devuelve null si no se puede detectar.
- */
-async function getMediaDurationSeconds(inputPath) {
-  try {
-    const res = await execFileAsync(
-      'ffprobe',
-      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', inputPath],
-      { timeout: 10_000 },
-    );
-    const seconds = Number(String(res?.stdout || '').trim());
-    if (Number.isFinite(seconds) && seconds > 0) return seconds;
-  } catch {}
-
-  try {
-    const bin = await getFfmpegBin();
-    await execFileAsync(bin, ['-i', inputPath], { timeout: 10_000 });
-  } catch (err) {
-    return parseDurationText(err?.stderr || err?.stdout || '');
-  }
-  return null;
-}
-
-/**
- * Elige los presets según la duración detectada, un nivel por cada 10s:
- * cada 10 segundos extra baja un escalón de calidad, para no bajarle la
- * calidad a los videos cortos por culpa de los largos:
- * - 0-10s: 320px, 15 fps, q70
- * - 10-20s: 320px, 12 fps, q52
- * - 20-30s: 256px, 10 fps, q40
- * - 30-40s: 224px, 8 fps, q30
- * - 40-50s: 192px, 7 fps, q24
- * - 50-60s: 160px, 6 fps, q20
- * Dentro de cada nivel se sigue probando de mayor a menor calidad hasta
- * entrar en 1 MB (límite con Baileys).
- */
-function pickAnimatedPresets(durationSec) {
-  const levels = [
-    { size: 320, fps: 15, q: 70 },
-    { size: 320, fps: 12, q: 52 },
-    { size: 256, fps: 10, q: 40 },
-    { size: 224, fps: 8, q: 30 },
-    { size: 192, fps: 7, q: 24 },
-    { size: 160, fps: 6, q: 20 },
-    { size: 128, fps: 5, q: 18 },
-  ];
-  // Un escalón por cada 10s: 0-10s empieza en el nivel 0, 10-20s en el 1, etc.
-  const start = Math.min(levels.length - 2, Math.max(0, Math.ceil(durationSec / 10) - 1));
-  return levels.slice(start).map((level) => ({ ...level, dur: durationSec }));
-}
-
 /**
  * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
  * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
- * - Animado: detecta la duración (máx 60s) y varía calidad/fps un nivel
- *   por cada 10s, para no superar 1 MB sin castigar
- *   a los videos cortos.
+ * - Animado: recorta a 10s máx y ajusta automáticamente calidad/fps para no superar 500 KB.
  */
 async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
   const input = toBuffer(mediaBuffer);
@@ -227,11 +165,14 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
       throw new Error('FFmpeg no produjo un WebP estático válido');
     }
 
-    // Stickers animados: se detecta la duración y la calidad varía según dure,
-    // manteniendo la duración completa bajo 1 MB
-    const detectedSeconds = await getMediaDurationSeconds(tmpIn).catch(() => null);
-    const effectiveSeconds = Math.min(maxSeconds, detectedSeconds || maxSeconds);
-    const animatedPresets = pickAnimatedPresets(effectiveSeconds);
+    // Stickers animados: adaptación progresiva manteniendo la duración completa (10s) bajo 500 KB
+    const animatedPresets = [
+      { size: 320, fps: 15, q: 70, dur: maxSeconds },
+      { size: 320, fps: 12, q: 52, dur: maxSeconds },
+      { size: 256, fps: 10, q: 40, dur: maxSeconds },
+      { size: 224, fps: 8, q: 30, dur: maxSeconds },
+      { size: 192, fps: 7, q: 24, dur: Math.min(maxSeconds, 8) },
+    ];
 
     let smallest = null;
     for (const preset of animatedPresets) {
