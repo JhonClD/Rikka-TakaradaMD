@@ -169,29 +169,89 @@ function parseDurationText(text) {
   return Number.isFinite(total) && total > 0 ? total : null;
 }
 
-async function getMediaDurationSeconds(inputPath) {
+function parseFpsFraction(rateText) {
+  const parts = String(rateText || '').trim().split('/');
+  if (parts.length === 2) {
+    const num = Number(parts[0]);
+    const den = Number(parts[1]);
+    if (Number.isFinite(num) && Number.isFinite(den) && den > 0 && num > 0) {
+      return num / den;
+    }
+  }
+  const direct = Number(rateText);
+  return Number.isFinite(direct) && direct > 0 ? direct : null;
+}
+
+function parseFpsFromStderr(text) {
+  const match = String(text || '').match(/(\d+(?:\.\d+)?)\s*fps\b/i);
+  if (!match) return null;
+  const fps = Number(match[1]);
+  return Number.isFinite(fps) && fps > 0 ? fps : null;
+}
+
+async function getMediaVideoMeta(inputPath) {
   try {
     const res = await execFileAsync(
       'ffprobe',
       [
         '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=avg_frame_rate,r_frame_rate:format=duration',
+        '-of', 'json',
         inputPath,
       ],
       { timeout: 10_000 },
     );
-    const seconds = Number(String(res?.stdout || '').trim());
-    if (Number.isFinite(seconds) && seconds > 0) return seconds;
+    const parsed = JSON.parse(String(res?.stdout || '{}'));
+    const durationSec = Number(parsed?.format?.duration);
+    const stream = parsed?.streams?.[0] || {};
+    const fps =
+      parseFpsFraction(stream.avg_frame_rate) || parseFpsFraction(stream.r_frame_rate);
+    if ((Number.isFinite(durationSec) && durationSec > 0) || fps) {
+      return {
+        durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : null,
+        fps: fps || null,
+      };
+    }
   } catch {}
 
   try {
     const bin = await getFfmpegBin();
     await execFileAsync(bin, ['-i', inputPath], { timeout: 10_000 });
   } catch (err) {
-    return parseDurationText(err?.stderr || err?.stdout || '');
+    const info = `${err?.stderr || ''}\n${err?.stdout || ''}`;
+    return {
+      durationSec: parseDurationText(info),
+      fps: parseFpsFromStderr(info),
+    };
   }
-  return null;
+  return { durationSec: null, fps: null };
+}
+
+function resolveSmoothFps(targetFps, sourceFps) {
+  if (!Number.isFinite(sourceFps) || sourceFps <= 1) return targetFps;
+  if (sourceFps <= targetFps + 0.5) {
+    return Math.max(6, Math.round(sourceFps));
+  }
+  // Fuentes ~24 fps (anime/cine): divisores exactos 24 o 12 fps evitan saltos de cadencia
+  if (sourceFps >= 23.5 && sourceFps <= 24.5) {
+    return targetFps >= 18 ? 24 : 12;
+  }
+  // Fuentes ~30 fps: 30, 15 (/2), 12 o 10 (/3) evitan tirones por descarte desigual de cuadros
+  if (sourceFps >= 29 && sourceFps <= 31) {
+    if (targetFps >= 24) return 30;
+    if (targetFps >= 14) return 15;
+    if (targetFps >= 12) return 12;
+    return 10;
+  }
+  // Fuentes ~60 fps: 20 (/3), 15 (/4), 12 (/5) y 10 (/6) son divisores exactos
+  if (sourceFps >= 58 && sourceFps <= 62) {
+    if (targetFps >= 18) return 20;
+    if (targetFps >= 14) return 15;
+    if (targetFps >= 12) return 12;
+    return 10;
+  }
+  return targetFps;
 }
 
 async function demuxWebpFrames(webpBuffer) {
@@ -238,41 +298,42 @@ async function demuxWebpFrames(webpBuffer) {
     width: img.width || 512,
     height: img.height || 512,
     durationSec: totalDurationSec > 0 ? totalDurationSec : null,
+    fps: totalDurationSec > 0 ? files.length / totalDurationSec : null,
   };
 }
 
-// Escalera progresiva priorizando resolución espacial (512px) y nitidez de bordes
-// antes de reducir dimensiones, con peso relativo estimado para saltar directo al
-// escalón óptimo cuando un video largo de alto movimiento supera ~1 MB.
+// Escalera progresiva equilibrando fluidez (12-24 fps reales sin saltos) y nitidez,
+// sin usar `cr_threshold` (que corrompe bloques estáticos con transparencia en libwebp_anim).
 const ANIMATED_QUALITY_LADDER = [
-  { size: 512, fps: 18, q: 82, cr: 0,  sharpen: 0.35, denoise: false, weight: 1.00 },
-  { size: 512, fps: 15, q: 76, cr: 4,  sharpen: 0.35, denoise: false, weight: 0.72 },
-  { size: 512, fps: 12, q: 68, cr: 6,  sharpen: 0.38, denoise: false, weight: 0.50 },
-  { size: 512, fps: 10, q: 58, cr: 8,  sharpen: 0.40, denoise: false, weight: 0.36 },
-  { size: 512, fps: 8,  q: 50, cr: 10, sharpen: 0.42, denoise: true,  weight: 0.25 },
-  { size: 448, fps: 8,  q: 46, cr: 12, sharpen: 0.45, denoise: true,  weight: 0.19 },
-  { size: 384, fps: 8,  q: 44, cr: 12, sharpen: 0.45, denoise: true,  weight: 0.145 },
-  { size: 384, fps: 7,  q: 38, cr: 14, sharpen: 0.48, denoise: true,  weight: 0.115 },
-  { size: 320, fps: 7,  q: 38, cr: 14, sharpen: 0.48, denoise: true,  weight: 0.085 },
-  { size: 320, fps: 6,  q: 32, cr: 16, sharpen: 0.50, denoise: true,  weight: 0.065 },
-  { size: 256, fps: 6,  q: 30, cr: 18, sharpen: 0.50, denoise: true,  weight: 0.042 },
-  { size: 224, fps: 5,  q: 26, cr: 18, sharpen: 0.50, denoise: true,  weight: 0.028 },
+  { size: 512, fps: 24, q: 80, sharpen: 0.32, denoise: false, weight: 1.15 },
+  { size: 512, fps: 20, q: 76, sharpen: 0.34, denoise: false, weight: 0.90 },
+  { size: 512, fps: 15, q: 72, sharpen: 0.35, denoise: false, weight: 0.65 },
+  { size: 448, fps: 15, q: 66, sharpen: 0.36, denoise: false, weight: 0.48 },
+  { size: 384, fps: 15, q: 60, sharpen: 0.36, denoise: true,  weight: 0.35 },
+  { size: 384, fps: 15, q: 50, sharpen: 0.38, denoise: true,  weight: 0.27 },
+  { size: 352, fps: 15, q: 44, sharpen: 0.38, denoise: true,  weight: 0.21 },
+  { size: 320, fps: 15, q: 40, sharpen: 0.40, denoise: true,  weight: 0.165 },
+  { size: 288, fps: 12, q: 36, sharpen: 0.40, denoise: true,  weight: 0.120 },
+  { size: 256, fps: 12, q: 32, sharpen: 0.40, denoise: true,  weight: 0.090 },
+  { size: 240, fps: 12, q: 28, sharpen: 0.40, denoise: true,  weight: 0.070 },
+  { size: 224, fps: 10, q: 24, sharpen: 0.40, denoise: true,  weight: 0.050 },
 ];
 
 function pickInitialAnimatedIndex(durationSec) {
-  if (durationSec <= 6) return 0;
-  if (durationSec <= 12) return 1;
-  if (durationSec <= 22) return 2;
-  if (durationSec <= 35) return 3;
-  return 4;
+  if (durationSec <= 4) return 0;
+  if (durationSec <= 8) return 1;
+  if (durationSec <= 14) return 2;
+  if (durationSec <= 22) return 3;
+  if (durationSec <= 35) return 5;
+  return 6;
 }
 
 /**
- * Convierte imagen, GIF o video a WebP de alta nitidez optimizado para WhatsApp.
+ * Convierte imagen, GIF o video a WebP fluido y de alta nitidez optimizado para WhatsApp.
  * - Estático: 512x512 WebP sin pérdida (VP8L RGB 4:4:4) primero, con respaldo lossy de alta calidad
  *   manteniendo siempre 512x512 (soporta modos: default, crop, circle).
- * - Animado: hasta 60s máx usando `libwebp_anim` + preset `picture`, priorizando 512x512 y nitidez
- *   con salto adaptativo guiado por peso para mantenerse bajo ~1 MB.
+ * - Animado: hasta 60s máx usando `libwebp_anim` + preset `picture` con cadencia fluida (12-24 fps)
+ *   alineada al FPS original y salto adaptativo guiado por peso bajo ~1 MB.
  */
 async function createSticker(
   mediaBuffer,
@@ -333,15 +394,22 @@ async function createSticker(
     let ffmpegInput = tmpIn;
     let inputArgs = [];
     let detectedSeconds = null;
+    let sourceFps = null;
 
     if (isAnimatedWebp(input)) {
       demuxed = await demuxWebpFrames(input);
       ffmpegInput = demuxed.listPath;
       inputArgs = ['-f', 'concat', '-safe', '0'];
       detectedSeconds = demuxed.durationSec;
+      sourceFps = demuxed.fps;
     } else {
       await fs.promises.writeFile(tmpIn, input);
-      detectedSeconds = await getMediaDurationSeconds(tmpIn).catch(() => null);
+      const meta = await getMediaVideoMeta(tmpIn).catch(() => ({
+        durationSec: null,
+        fps: null,
+      }));
+      detectedSeconds = meta.durationSec;
+      sourceFps = meta.fps;
     }
 
     const effectiveSeconds = Math.min(
@@ -355,8 +423,9 @@ async function createSticker(
 
     while (idx < ANIMATED_QUALITY_LADDER.length) {
       const preset = ANIMATED_QUALITY_LADDER[idx];
+      const effectiveFps = resolveSmoothFps(preset.fps, sourceFps);
       const vf = buildVideoFilter(preset.size, mode, {
-        fps: preset.fps,
+        fps: effectiveFps,
         pixelFormat: 'yuva420p',
         sharpen: preset.sharpen,
         denoise: preset.denoise,
@@ -371,7 +440,6 @@ async function createSticker(
           '-loop', '0',
           '-preset', 'picture',
           '-compression_level', '4',
-          ...(preset.cr > 0 ? ['-cr_threshold', String(preset.cr), '-cr_size', '16'] : []),
           '-quality', String(preset.q),
           '-vf', vf,
         ],
