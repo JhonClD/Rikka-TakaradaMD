@@ -15,8 +15,8 @@ import webp from 'node-webpmux';
 
 const execFileAsync = promisify(execFile);
 
-const MAX_ANIMATED_WEBP_BYTES = 2 * 1024 * 1024; // Límite de prueba con Baileys: 2 MB (1 MB ya pasó en el bot; WhatsApp oficial pide ~500 KB)
-const MAX_STATIC_WEBP_BYTES = 2 * 1024 * 1024;
+const MAX_ANIMATED_WEBP_BYTES = 1.8 * 1024 * 1024; // Límite de prueba con Baileys: 1.8 MB (2 MB no pasó; WhatsApp oficial pide ~500 KB)
+const MAX_STATIC_WEBP_BYTES = 1.8 * 1024 * 1024;
 const MAX_VIDEO_SECONDS = 60;
 const MAX_STATIC_AUDIO_SECONDS = 60;
 const MAX_ANIMATED_AUDIO_SECONDS = 60;
@@ -167,7 +167,7 @@ async function getMediaDurationSeconds(inputPath) {
  * - 40-50s: 192px, 7 fps, q24
  * - 50-60s: 160px, 6 fps, q20
  * Dentro de cada nivel se sigue probando de mayor a menor calidad hasta
- * entrar en 2 MB (límite de prueba con Baileys).
+ * entrar en 1.8 MB (límite de prueba con Baileys).
  */
 function pickAnimatedPresets(durationSec) {
   const levels = [
@@ -188,7 +188,7 @@ function pickAnimatedPresets(durationSec) {
  * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
  * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
  * - Animado: detecta la duración (máx 60s) y varía calidad/fps un nivel
- *   por cada 10s, para no superar 2 MB sin castigar
+ *   por cada 10s, para no superar 1.8 MB sin castigar
  *   a los videos cortos.
  */
 async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
@@ -228,7 +228,7 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
     }
 
     // Stickers animados: se detecta la duración y la calidad varía según dure,
-    // manteniendo la duración completa bajo 2 MB
+    // manteniendo la duración completa bajo 1.8 MB
     const detectedSeconds = await getMediaDurationSeconds(tmpIn).catch(() => null);
     const effectiveSeconds = Math.min(maxSeconds, detectedSeconds || maxSeconds);
     const animatedPresets = pickAnimatedPresets(effectiveSeconds);
