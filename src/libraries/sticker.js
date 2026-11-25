@@ -124,10 +124,79 @@ async function runFfmpegConvert(inputPath, outputPath, args) {
   return fs.promises.readFile(outputPath);
 }
 
+function parseDurationText(text) {
+  const match = String(text || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const total = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+/**
+ * Detecta la duración real del video/GIF en segundos.
+ * Usa ffprobe si está disponible, si no, lee la línea `Duration:` de ffmpeg.
+ * Devuelve null si no se puede detectar.
+ */
+async function getMediaDurationSeconds(inputPath) {
+  try {
+    const res = await execFileAsync(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', inputPath],
+      { timeout: 10_000 },
+    );
+    const seconds = Number(String(res?.stdout || '').trim());
+    if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  } catch {}
+
+  try {
+    const bin = await getFfmpegBin();
+    await execFileAsync(bin, ['-i', inputPath], { timeout: 10_000 });
+  } catch (err) {
+    return parseDurationText(err?.stderr || err?.stdout || '');
+  }
+  return null;
+}
+
+/**
+ * Elige los presets según la duración detectada, para no bajarle la
+ * calidad a los videos cortos por culpa de los largos:
+ * - <=10s: calidad alta (320px, 15 fps)
+ * - <=30s: calidad media (256px, 10 fps)
+ * - >30s: calidad baja (224px, 8 fps hacia abajo)
+ * Dentro de cada nivel se sigue probando de mayor a menor calidad hasta
+ * entrar en los 500 KB de WhatsApp.
+ */
+function pickAnimatedPresets(durationSec) {
+  const dur = durationSec;
+  if (dur <= 10) {
+    return [
+      { size: 320, fps: 15, q: 70, dur },
+      { size: 320, fps: 12, q: 52, dur },
+      { size: 256, fps: 10, q: 40, dur },
+      { size: 224, fps: 8, q: 30, dur },
+      { size: 192, fps: 7, q: 24, dur: Math.min(dur, 8) },
+    ];
+  }
+  if (dur <= 30) {
+    return [
+      { size: 256, fps: 10, q: 40, dur },
+      { size: 224, fps: 8, q: 30, dur },
+      { size: 192, fps: 7, q: 24, dur },
+      { size: 160, fps: 6, q: 20, dur },
+    ];
+  }
+  return [
+    { size: 224, fps: 8, q: 30, dur },
+    { size: 192, fps: 7, q: 24, dur },
+    { size: 160, fps: 6, q: 20, dur },
+    { size: 128, fps: 5, q: 18, dur },
+  ];
+}
+
 /**
  * Convierte imagen, GIF o video a WebP optimizado para WhatsApp.
  * - Estático: 512x512 WebP de alta nitidez (soporta modos: default, crop, circle).
- * - Animado: recorta a 60s máx y ajusta automáticamente calidad/fps para no superar 500 KB.
+ * - Animado: detecta la duración (máx 60s) y varía calidad/fps según dure,
+ *   para no superar los 500 KB de WhatsApp sin castigar a los videos cortos.
  */
 async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default', maxSeconds = MAX_VIDEO_SECONDS } = {}) {
   const input = toBuffer(mediaBuffer);
@@ -165,15 +234,11 @@ async function createSticker(mediaBuffer, { isAnimated = false, mode = 'default'
       throw new Error('FFmpeg no produjo un WebP estático válido');
     }
 
-    // Stickers animados: adaptación progresiva manteniendo la duración completa (60s) bajo 500 KB
-    const animatedPresets = [
-      { size: 320, fps: 15, q: 70, dur: maxSeconds },
-      { size: 320, fps: 12, q: 52, dur: maxSeconds },
-      { size: 256, fps: 10, q: 40, dur: maxSeconds },
-      { size: 224, fps: 8, q: 30, dur: maxSeconds },
-      { size: 192, fps: 7, q: 24, dur: maxSeconds },
-      { size: 160, fps: 6, q: 20, dur: maxSeconds },
-    ];
+    // Stickers animados: se detecta la duración y la calidad varía según dure,
+    // manteniendo la duración completa bajo 500 KB
+    const detectedSeconds = await getMediaDurationSeconds(tmpIn).catch(() => null);
+    const effectiveSeconds = Math.min(maxSeconds, detectedSeconds || maxSeconds);
+    const animatedPresets = pickAnimatedPresets(effectiveSeconds);
 
     let smallest = null;
     for (const preset of animatedPresets) {
