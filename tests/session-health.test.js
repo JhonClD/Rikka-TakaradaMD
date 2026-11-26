@@ -11,6 +11,8 @@ import {
   STALE_ROUTING_AGE_MS,
   createDecryptFailureMonitor,
   getCredsAgeMs,
+  hasRegisteredCredentials,
+  isAuthenticatedCreds,
   isEphemeralSessionFile,
   isIgnorableDecryptFailure,
   isPreKeyDecryptError,
@@ -222,3 +224,97 @@ test('cableado en main.js y handler.js protege sesiones tras apagados prolongado
   assert.match(handlerSrc, /const isLive = chatUpdate\.type === 'notify'/);
   assert.match(handlerSrc, /isValidMessage\(m,\s*\{\s*isLive\s*\}\)/);
 });
+
+test('isAuthenticatedCreds y hasRegisteredCredentials distinguen sesiones vinculadas de intentos de código fallidos', (t) => {
+  const unpaired = {
+    noiseKey: { private: 'a', public: 'b' },
+    signedIdentityKey: { private: 'c', public: 'd' },
+    registered: false,
+    pairingCode: 'ABCD1234',
+    me: { id: '51925092348@s.whatsapp.net', name: '~' },
+  };
+  const qrPairedLegacy = {
+    noiseKey: { private: 'a', public: 'b' },
+    signedIdentityKey: { private: 'c', public: 'd' },
+    registered: false,
+    account: { details: 'signed' },
+    me: { id: '51925092348:4@s.whatsapp.net' },
+  };
+  const codePaired = {
+    noiseKey: { private: 'a', public: 'b' },
+    signedIdentityKey: { private: 'c', public: 'd' },
+    registered: true,
+    me: { id: '51925092348:1@s.whatsapp.net' },
+  };
+
+  assert.equal(isAuthenticatedCreds(unpaired), false);
+  assert.equal(isAuthenticatedCreds(qrPairedLegacy), true);
+  assert.equal(isAuthenticatedCreds(codePaired), true);
+  assert.equal(isAuthenticatedCreds(null), false);
+
+  const dir = makeTempAuthDir(t);
+  assert.equal(hasRegisteredCredentials(dir), false);
+
+  fs.writeFileSync(path.join(dir, CREDS_FILE), JSON.stringify(unpaired));
+  assert.equal(hasRegisteredCredentials(dir), false);
+
+  fs.writeFileSync(path.join(dir, CREDS_FILE), JSON.stringify(qrPairedLegacy));
+  assert.equal(hasRegisteredCredentials(dir), true);
+});
+
+test('prepareAuthFolder con cleanUnpaired limpia restos de vinculación fallida pero conserva sesiones vinculadas', async (t) => {
+  const unpairedDir = makeTempAuthDir(t);
+  fs.writeFileSync(
+    path.join(unpairedDir, CREDS_FILE),
+    JSON.stringify({
+      noiseKey: { private: 'a', public: 'b' },
+      signedIdentityKey: { private: 'c', public: 'd' },
+      registered: false,
+      pairingCode: 'ABCD1234',
+      me: { id: '51925092348@s.whatsapp.net', name: '~' },
+    }),
+  );
+  fs.writeFileSync(path.join(unpairedDir, CREDS_BACKUP_FILE), fs.readFileSync(path.join(unpairedDir, CREDS_FILE)));
+
+  const r1 = await prepareAuthFolder(unpairedDir, {
+    cleanUnpaired: true,
+    log: () => {},
+    warn: () => {},
+  });
+  assert.equal(r1.cleanedUnpaired, true);
+  assert.deepEqual(fs.readdirSync(unpairedDir), []);
+
+  // Si creds.json se truncó pero creds.json.bak sí estaba vinculado, primero restaura y NO borra nada.
+  const pairedDir = makeTempAuthDir(t);
+  fs.writeFileSync(path.join(pairedDir, CREDS_FILE), '{"noiseKey":');
+  fs.writeFileSync(path.join(pairedDir, CREDS_BACKUP_FILE), VALID_CREDS);
+  fs.writeFileSync(path.join(pairedDir, 'pre-key-1.json'), '{"id":1}');
+
+  const r2 = await prepareAuthFolder(pairedDir, {
+    cleanUnpaired: true,
+    log: () => {},
+    warn: () => {},
+  });
+  assert.equal(r2.restoredFromBackup, true);
+  assert.equal(r2.cleanedUnpaired, false);
+  assert.equal(hasRegisteredCredentials(pairedDir), true);
+  assert.equal(fs.existsSync(path.join(pairedDir, 'pre-key-1.json')), true);
+});
+
+test('wrapSafeSaveCreds.flush espera a que termine una escritura en vuelo antes de reconectar tras 515', async (t) => {
+  const dir = makeTempAuthDir(t);
+  const credsPath = path.join(dir, CREDS_FILE);
+  let finished = false;
+  const safeSave = wrapSafeSaveCreds(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    fs.writeFileSync(credsPath, VALID_CREDS);
+    finished = true;
+  }, dir);
+
+  void safeSave();
+  assert.equal(finished, false);
+  await safeSave.flush();
+  assert.equal(finished, true);
+  assert.equal(hasRegisteredCredentials(dir), true);
+});
+

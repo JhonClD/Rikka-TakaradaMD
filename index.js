@@ -5,6 +5,7 @@ import cfonts from 'cfonts';
 import chalk from 'chalk';
 import fs from 'node:fs';
 import './config.js';
+import { hasRegisteredCredentials } from './src/funcion/session-health.js';
 
 const { say } = cfonts;
 const instanceLock = join(tmpdir(), 'rikka-takarada-md.lock');
@@ -90,7 +91,7 @@ function printBanner() {
 
 function hasCredentials() {
   if (!global.authFilePath) return false;
-  return fs.existsSync(join(global.authFilePath, 'creds.json'));
+  return hasRegisteredCredentials(global.authFilePath);
 }
 
 function normalizePhone(value) {

@@ -19,18 +19,22 @@ import { JSONFile } from 'lowdb/node';
 import store from './src/libraries/store.js';
 import { dbFile, TMP_DIR } from './src/funcion/paths.js';
 import { RECONNECT, STOP, classifyDisconnect, nextReconnectDelay, shouldAlertOwner, DEFAULT_POLICY as RECONNECT_POLICY } from './src/funcion/reconnect-policy.js';
+import { patchBaileysSourceFiles } from './src/funcion/baileys-pairing-fix.js';
 import {
-  CREDS_FILE,
   DOWNTIME_PURGE_AGE_MS,
   STALE_ROUTING_AGE_MS,
   createDecryptFailureMonitor,
   getCredsAgeMs,
+  hasRegisteredCredentials,
+  isAuthenticatedCreds,
   isIgnorableDecryptFailure,
   isPreKeyDecryptError,
   isResettablePeerJid,
   prepareAuthFolder,
   wrapSafeSaveCreds,
 } from './src/funcion/session-health.js';
+
+patchBaileysSourceFiles();
 
 const {
   Browsers,
@@ -42,7 +46,7 @@ const {
   makeCacheableSignalKeyStore,
   jidNormalizedUser,
   repairAuthState,
-  withPairingGuard,
+  isRateLimitError,
   createQRGuard,
 } = await import('baileys');
 
@@ -263,8 +267,9 @@ process.on('uncaughtException', (err) => {
 // que el bot deje de descifrar mensajes aunque se reinicie. Aquí se limpia solo
 // esa caché efímera conservando `creds.json`, `pre-key-*`, `app-state-sync-*` y `lid-mapping-*`.
 async function loadAuthState(authDir, { isStartup = false, purgeEphemeral = false, clearRouting = false } = {}) {
-  const credsAgeMs = getCredsAgeMs(authDir);
-  const longDowntime = isStartup && credsAgeMs >= DOWNTIME_PURGE_AGE_MS;
+  const alreadyPaired = hasRegisteredCredentials(authDir);
+  const credsAgeMs = alreadyPaired ? getCredsAgeMs(authDir) : 0;
+  const longDowntime = isStartup && alreadyPaired && credsAgeMs >= DOWNTIME_PURGE_AGE_MS;
   const shouldPurge = purgeEphemeral || longDowntime;
   const shouldClearRouting = clearRouting || (isStartup && credsAgeMs >= STALE_ROUTING_AGE_MS);
 
@@ -276,6 +281,7 @@ async function loadAuthState(authDir, { isStartup = false, purgeEphemeral = fals
   await prepareAuthFolder(authDir, {
     repairAuthState,
     purgeEphemeral: shouldPurge,
+    cleanUnpaired: isStartup,
     log: (msg) => console.log(chalk.yellow(msg)),
     warn: (...args) => console.warn(...args),
   });
@@ -404,17 +410,19 @@ let pairingPhoneNumber = null;
 let pairingCodeDone = false;
 let pairingAttemptCount = 0;
 let pairingRequestTimer = null;
+let pairingRateLimited = false;
+let pendingNewLogin = false;
 if (methodCodeQR) opcion = '1';
-if (!methodCodeQR && !methodCode && !state.creds?.registered && !fs.existsSync(join(global.authFilePath, CREDS_FILE))) {
+if (!methodCodeQR && !methodCode && !isAuthenticatedCreds(state.creds)) {
   do {
     opcion = await question('[ ℹ️ ] Seleccione una opción:\n1. Con código QR\n2. Con código de texto de 8 dígitos\n---> ');
     if (!/^[1-2]$/.test(opcion)) {
       console.log('[ ⚠️ ] Por favor, seleccione solo 1 o 2.\n');
     }
-  } while (opcion !== '1' && opcion !== '2' && !fs.existsSync(join(global.authFilePath, CREDS_FILE)));
+  } while (opcion !== '1' && opcion !== '2' && !hasRegisteredCredentials(global.authFilePath));
 }
 
-if (!state.creds?.registered && (opcion === '2' || methodCode)) {
+if (!isAuthenticatedCreds(state.creds) && (opcion === '2' || methodCode)) {
   opcion = '2';
   let numeroTelefono;
   if (phoneNumber) {
@@ -431,9 +439,9 @@ if (!state.creds?.registered && (opcion === '2' || methodCode)) {
       console.log(chalk.bgBlack(chalk.bold.redBright('Por favor, escriba su número de WhatsApp.\nEjemplo: +5219992095479.\n')));
     }
   }
-  // El código se pide una vez creado el socket (ver requestPairingCodeOnce).
+  // El código se pide en cuanto WhatsApp habilita pair-device en el socket.
   pairingPhoneNumber = numeroTelefono;
-  console.log(chalk.cyan(`[ ℹ️ ] Número guardado: ${pairingPhoneNumber} — esperando conexión WS...`));
+  console.log(chalk.cyan(`[ ℹ️ ] Número guardado: +${pairingPhoneNumber} — conectando con WhatsApp...`));
 }
 
 // Se mantiene el mismo perfil de navegador entre vinculación y reinicios para
@@ -452,6 +460,7 @@ const connectionOptions = {
   markOnlineOnConnect: false,
   generateHighQualityLinkPreview: false,
   syncFullHistory: false,
+  qrTimeout: pairingPhoneNumber ? 60_000 : undefined,
   getMessage: async (key) => {
     try {
       const jid = jidNormalizedUser(key.remoteJid);
@@ -591,6 +600,15 @@ async function connectionUpdate(update) {
   if (connection) stopped = connection;
 
   if (global.db.data == null) void global.loadDatabase();
+  if (update.isNewLogin) {
+    pendingNewLogin = true;
+    pairingCodeDone = true;
+    if (pairingRequestTimer) {
+      clearTimeout(pairingRequestTimer);
+      pairingRequestTimer = null;
+    }
+    console.log(chalk.green('[ ✅ ] Código aceptado por WhatsApp; finalizando vinculación...'));
+  }
   if (update.qr && (opcion == '1' || methodCodeQR) && qrGuard.handle(update.qr)) {
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       console.log(qr);
@@ -602,6 +620,9 @@ async function connectionUpdate(update) {
     reconnectAttempt = 0;
     consecutiveBadSessions = 0;
     terminalSession = false;
+    pendingNewLogin = false;
+    pairingPhoneNumber = null;
+    pairingCodeDone = true;
     lastOpenedAt = Date.now();
     decryptFailureMonitor.reset();
     ensureBotJid(global.conn);
@@ -631,6 +652,14 @@ async function connectionUpdate(update) {
     return;
   }
   if (connection === 'close') {
+    // Si el socket se cerró antes de completar el vínculo, el código de 8 dígitos
+    // anterior caducó junto con el socket: permitir pedir uno nuevo al reconectar.
+    if (pairingPhoneNumber && !isAuthenticatedCreds(state.creds) && !pendingNewLogin && pairingCodeDone) {
+      pairingCodeDone = false;
+      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS && !pairingRateLimited) {
+        console.log(chalk.yellow('[ ⚠️ ] La conexión se cerró antes de completar el vínculo; se generará un código nuevo al reconectar.'));
+      }
+    }
     const detail = describeDisconnectError(lastDisconnect);
     if (reason === DisconnectReason.badSession) {
       // En Baileys, 500 (`badSession`) también es el código por defecto ante
@@ -659,7 +688,7 @@ async function connectionUpdate(update) {
         console.log(chalk.yellow(msg));
         global.conn.logger.warn(msg);
       }
-      scheduleSocketReconnect('connectionClosed');
+      scheduleSocketReconnect('connectionClosed', { immediate: pendingNewLogin });
     } else if (reason === DisconnectReason.connectionLost) {
       if (shouldLogError('connectionLost')) {
         const msg = `[ ⚠️ ] Conexión perdida con el servidor (${detail}), reconectando...`;
@@ -680,7 +709,9 @@ async function connectionUpdate(update) {
         console.log(chalk.gray(msg));
         global.conn.logger.info(msg);
       }
-      scheduleSocketReconnect('restartRequired');
+      // Tras aceptar el código de 8 dígitos / QR, WhatsApp envía 515 para que
+      // el cliente reconecte enseguida con las credenciales recién firmadas.
+      scheduleSocketReconnect('restartRequired', { immediate: true });
     } else if (reason === DisconnectReason.timedOut) {
       if (shouldLogError('timedOut')) {
         const msg = `[ ⚠️ ] Tiempo de conexión agotado (${detail}), reconectando...`;
@@ -756,10 +787,9 @@ function armConnectWatchdog(reason) {
     // Si ya hay otro intento en cola (llegó un `close` mientras tanto), no hay
     // nada que duplicar: ese temporizador hace su trabajo mejor cronometrado.
     if (terminalSession || reconnectTimer || socketReloadInProgress || stopped === 'open') return;
-    // Si no hay credenciales registradas hace falta escanear el QR: reintentar
-    // en bucle solo volvería a imprimir códigos que nadie va a usar.
-    if (!global.conn?.authState?.creds?.registered) {
-      console.log(chalk.gray('[ ℹ️ ] Sin sesión registrada; se espera el QR en lugar de reintentar.'));
+    // Si no hay credenciales registradas hace falta escanear el QR / meter el código.
+    if (!isAuthenticatedCreds(global.conn?.authState?.creds)) {
+      console.log(chalk.gray('[ ℹ️ ] Sin sesión vinculada; se espera la vinculación en lugar de reintentar.'));
       return;
     }
     console.log(chalk.gray(`[ ℹ️ ] El socket no llegó a abrir tras "${reason}"; se reintenta.`));
@@ -779,15 +809,17 @@ function notifyReconnectTrouble(attempt) {
   );
 }
 
-function scheduleSocketReconnect(reason) {
+function scheduleSocketReconnect(reason, { immediate = false } = {}) {
   // `shutdownStarted` importa: durante el apagado llegaba a crearse un socket
   // nuevo justo después de cerrar el viejo, porque el `close` del cierre
   // programado reentraba aquí.
   if (terminalSession || reconnectTimer || shutdownStarted) return;
-  const delay = nextReconnectDelay(reconnectAttempt, RECONNECT_POLICY);
-  reconnectAttempt += 1;
+  const delay = immediate ? 250 : nextReconnectDelay(reconnectAttempt, RECONNECT_POLICY);
+  if (!immediate) reconnectAttempt += 1;
   console.log(chalk.gray(
-    `[ ℹ️ ] Reconexión programada en ${Math.ceil(delay / 1000)}s (${reason}), intento ${reconnectAttempt}.`,
+    immediate
+      ? `[ ℹ️ ] Reconexión inmediata (${reason}) para completar sesión.`
+      : `[ ℹ️ ] Reconexión programada en ${Math.ceil(delay / 1000)}s (${reason}), intento ${reconnectAttempt}.`,
   ));
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
@@ -811,7 +843,7 @@ function scheduleSocketReconnect(reason) {
     }
     if (stopped !== 'open') {
       armConnectWatchdog(reason);
-      notifyReconnectTrouble(reconnectAttempt);
+      if (!immediate) notifyReconnectTrouble(reconnectAttempt);
     }
   }, delay);
 }
@@ -854,6 +886,11 @@ function attachSocketHandlers(activeConn) {
 }
 
 async function refreshAuthState() {
+  // Esperar a que termine cualquier escritura en curso de `creds.update` (p. ej.
+  // `pair-success` justo antes del cierre 515) para no releer un creds.json viejo.
+  try {
+    await saveCreds?.flush?.();
+  } catch {}
   const purgeEphemeral = pendingEphemeralPurge;
   pendingEphemeralPurge = false;
   if (purgeEphemeral) {
@@ -870,6 +907,7 @@ async function refreshAuthState() {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }).child({ level: 'fatal' })),
   };
+  connectionOptions.qrTimeout = pairingPhoneNumber && !isAuthenticatedCreds(state.creds) ? 60_000 : undefined;
 }
 
 global.reloadHandler = async function (restatConn) {
@@ -916,6 +954,9 @@ global.reloadHandler = async function (restatConn) {
   }
 
   attachSocketHandlers(global.conn);
+  if (restatConn && pairingPhoneNumber && !isAuthenticatedCreds(state.creds) && !pairingCodeDone && !pairingRateLimited) {
+    requestPairingCodeOnce();
+  }
   return true;
 };
 
@@ -929,49 +970,50 @@ attachSocketHandlers(global.conn);
 // El primer handshake también va vigilado: con credenciales válidas pero una
 // red que no termina de conectar, no llegaba ni un `close` y había que
 // reiniciar a mano. Con sesión sin registrar no se arma, que ahí lo que falta
-// es un QR, no un reintento.
-if (state.creds?.registered) armConnectWatchdog('arranque');
+// es un QR o código de 8 dígitos, no un reintento.
+if (isAuthenticatedCreds(state.creds)) armConnectWatchdog('arranque');
 
-if (methodCode && !state.creds.registered) {
-  withPairingGuard(global.conn, {
-    maxPerHour: 3,
-    globalMaxPerHour: 6,
-    minIntervalMs: 60_000,
-    logger: baileysLogger(),
-  });
-}
-
-// Solicitar el código después de crear el socket. Hacerlo desde
-// connection.update puede repetir la solicitud durante el handshake y provocar
-// que WhatsApp reemplace la conexión anterior. Se limita el número de intentos
-// para no martillear el endpoint de pairing cuando WhatsApp devuelve un código
-// inválido (rate limit).
+// `global.conn.requestPairingCode` ya espera internamente el evento `pair-device`
+// de WhatsApp y verifica la respuesta IQ antes de devolver el código.
 const MAX_PAIRING_ATTEMPTS = 3;
-const PAIRING_RETRY_DELAY_MS = 5_000;
+const PAIRING_RETRY_DELAY_MS = 6_000;
 
 function requestPairingCodeOnce() {
-  if (pairingCodeDone || pairingAttemptCount >= MAX_PAIRING_ATTEMPTS) return;
+  if (pairingCodeDone || pairingRateLimited || pairingAttemptCount >= MAX_PAIRING_ATTEMPTS) return;
+  if (pairingRequestTimer) {
+    clearTimeout(pairingRequestTimer);
+    pairingRequestTimer = null;
+  }
+  const targetConn = global.conn;
   pairingAttemptCount += 1;
+  const attempt = pairingAttemptCount;
   void (async () => {
     try {
-      if (state.creds.registered || !global.conn?.requestPairingCode) return;
-      const raw = await global.conn.requestPairingCode(pairingPhoneNumber);
-      const codigo = String(raw || '').replace(/[^A-Za-z0-9]/g, '');
+      if (isAuthenticatedCreds(state.creds) || !targetConn?.requestPairingCode || targetConn !== global.conn) return;
+      const raw = await targetConn.requestPairingCode(pairingPhoneNumber);
+      if (targetConn !== global.conn) return;
+      const codigo = String(raw || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
       if (codigo.length !== 8) throw new Error(`WhatsApp devolvió un código inválido (${codigo.length} caracteres)`);
       pairingCodeDone = true;
-      console.log(chalk.yellow('[ ℹ️ ] Introduce el código de emparejamiento en WhatsApp.'));
-      console.log(chalk.black(chalk.bgGreen('Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)));
+      console.log(chalk.yellow('\n[ ℹ️ ] En WhatsApp ve a: Dispositivos vinculados > Vincular un dispositivo > Vincular con el número de teléfono.'));
+      console.log(chalk.black(chalk.bgGreen(' Su código de emparejamiento: ')), chalk.black(chalk.bgWhite(` ${codigo.slice(0, 4)}-${codigo.slice(4)} `)), '\n');
     } catch (err) {
-      console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${pairingAttemptCount}/${MAX_PAIRING_ATTEMPTS}): ${err.message}`));
-      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS) {
+      if (targetConn !== global.conn || shutdownStarted) return;
+      if (typeof isRateLimitError === 'function' && isRateLimitError(err)) {
+        pairingRateLimited = true;
+        console.log(chalk.redBright('[ ⚠️ ] WhatsApp limitó temporalmente las solicitudes de código para este número (429). Espera unos minutos antes de volver a intentarlo.'));
+        return;
+      }
+      console.log(chalk.red(`[ ⚠️ ] Error al obtener código (intento ${attempt}/${MAX_PAIRING_ATTEMPTS}): ${err.message}`));
+      if (pairingAttemptCount < MAX_PAIRING_ATTEMPTS && !isAuthenticatedCreds(state.creds)) {
         pairingRequestTimer = setTimeout(requestPairingCodeOnce, PAIRING_RETRY_DELAY_MS);
       }
     }
   })();
 }
 
-if (pairingPhoneNumber && !state.creds.registered) {
-  pairingRequestTimer = setTimeout(requestPairingCodeOnce, 3000);
+if (pairingPhoneNumber && !isAuthenticatedCreds(state.creds)) {
+  requestPairingCodeOnce();
 }
 
 // Vigila sockets zombie (WS cerrado en silencio sin emitir `close`) y buffers

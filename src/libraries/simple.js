@@ -19,8 +19,11 @@ import {
     fileURLToPath
 } from "url";
 import store from "./store.js";
+import { enhanceSocketForPairing, patchBaileysSourceFiles } from "../funcion/baileys-pairing-fix.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+patchBaileysSourceFiles();
 
 /**
  * @type {import("baileys")}
@@ -114,6 +117,10 @@ export function makeWASocket(connectionOptions, options = {}) {
     const conn = (global.opts["legacy"] ? makeWALegacySocket : _makeWaSocket)(
         effectiveConnectionOptions,
     );
+    enhanceSocketForPairing(conn, {
+        browser: effectiveConnectionOptions.browser,
+        baileys: _baileys,
+    });
 
     const sock = Object.defineProperties(conn, {
         chats: {

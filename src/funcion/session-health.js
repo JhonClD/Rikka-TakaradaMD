@@ -57,6 +57,36 @@ export function isValidCredsJson(raw) {
   }
 }
 
+/**
+ * Distingue una sesión realmente vinculada (`registered: true` o `account`
+ * firmada tras `pair-success`) de un `creds.json` a medio emparejar creado
+ * cuando `requestPairingCode` guardó `creds.me` antes de completar el vínculo.
+ */
+export function isAuthenticatedCreds(creds) {
+  if (!creds || typeof creds !== 'object') return false;
+  if (!creds.noiseKey || !creds.signedIdentityKey) return false;
+  return Boolean(creds.registered === true || creds.account);
+}
+
+/**
+ * Comprueba en disco si `authDir` contiene credenciales ya vinculadas (en
+ * `creds.json` o en su respaldo `creds.json.bak`). Devuelve `false` cuando la
+ * carpeta solo guarda restos de un intento de código de 8 dígitos fallido.
+ */
+export function hasRegisteredCredentials(authDir) {
+  if (!authDir || !fs.existsSync(authDir)) return false;
+  for (const filename of [CREDS_FILE, CREDS_BACKUP_FILE]) {
+    try {
+      const raw = fs.readFileSync(join(authDir, filename), 'utf8');
+      if (!isValidCredsJson(raw)) continue;
+      if (isAuthenticatedCreds(JSON.parse(raw))) return true;
+    } catch {
+      // Probar el siguiente candidato.
+    }
+  }
+  return false;
+}
+
 /** Edad en ms desde la última modificación de `creds.json`, o 0 si no existe. */
 export function getCredsAgeMs(authDir, now = Date.now()) {
   try {
@@ -104,15 +134,18 @@ export async function purgeEphemeralSessionFiles(authDir) {
 /**
  * Repara `authDir` antes de abrir el socket:
  *  1. Restaura `creds.json` desde `creds.json.bak` si quedó truncado/corrupto.
- *  2. Ejecuta `repairAuthState` (si se provee) para aislar JSON corruptos.
- *  3. Opcionalmente purga archivos efímeros (tras apagado prolongado o tormenta
+ *  2. Si `cleanUnpaired` está activo y la carpeta solo tiene restos de una
+ *     vinculación incompleta (`!registered && !account`), limpia esos archivos
+ *     para que Baileys genere claves efímeras limpias al pedir un código nuevo.
+ *  3. Ejecuta `repairAuthState` (si se provee) para aislar JSON corruptos.
+ *  4. Opcionalmente purga archivos efímeros (tras apagado prolongado o tormenta
  *     de fallos de descifrado / `badSession`).
  */
 export async function prepareAuthFolder(
   authDir,
-  { repairAuthState, purgeEphemeral = false, log = console.log, warn = console.warn } = {},
+  { repairAuthState, purgeEphemeral = false, cleanUnpaired = false, log = console.log, warn = console.warn } = {},
 ) {
-  const result = { restoredFromBackup: false, quarantined: [], purged: 0 };
+  const result = { restoredFromBackup: false, cleanedUnpaired: false, quarantined: [], purged: 0 };
   if (!fs.existsSync(authDir)) return result;
 
   const credsPath = join(authDir, CREDS_FILE);
@@ -138,6 +171,26 @@ export async function prepareAuthFolder(
     } catch (error) {
       warn('[Auth] No se pudo restaurar creds.json desde respaldo:', error?.message || error);
     }
+  }
+
+  if (cleanUnpaired && !hasRegisteredCredentials(authDir)) {
+    try {
+      const entries = await fs.promises.readdir(authDir);
+      if (entries.length > 0) {
+        await Promise.all(
+          entries.map(async (name) => {
+            try {
+              await fs.promises.rm(join(authDir, name), { recursive: true, force: true });
+            } catch {}
+          }),
+        );
+        result.cleanedUnpaired = true;
+        log('[Auth] Sesión previa sin completar vinculación detectada; limpiando estado parcial para generar claves nuevas.');
+      }
+    } catch (error) {
+      warn('[Auth] No se pudo limpiar el estado parcial de sesión:', error?.message || error);
+    }
+    return result;
   }
 
   if (typeof repairAuthState === 'function') {
@@ -167,10 +220,11 @@ export async function prepareAuthFolder(
 /**
  * Envuelve `saveCreds` para serializar escrituras concurrentes y mantener un
  * respaldo atómico (`creds.json.bak`) inmune a cortes de energía o SIGKILL.
+ * Expone `.flush()` para esperar escrituras en vuelo antes de reconectar tras `515`.
  */
 export function wrapSafeSaveCreds(rawSaveCreds, authDir) {
   let pending = Promise.resolve();
-  return () => {
+  const safeSave = () => {
     pending = pending
       .catch(() => {})
       .then(async () => {
@@ -189,6 +243,8 @@ export function wrapSafeSaveCreds(rawSaveCreds, authDir) {
       });
     return pending;
   };
+  safeSave.flush = () => pending.catch(() => {});
+  return safeSave;
 }
 
 /**
