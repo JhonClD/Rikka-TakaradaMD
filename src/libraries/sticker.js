@@ -108,7 +108,7 @@ function buildVideoFilter(
 ) {
   const filters = [];
   if (fps) filters.push(`fps=${fps}`);
-  if (denoise) filters.push('hqdn3d=1.2:0.9:2.5:1.8');
+  if (denoise) filters.push('hqdn3d=1.0:0.7:2.0:1.5');
 
   const sharpenFilter =
     sharpen > 0 ? `unsharp=3:3:${sharpen.toFixed(2)}:3:3:0.0` : null;
@@ -302,38 +302,108 @@ async function demuxWebpFrames(webpBuffer) {
   };
 }
 
-// Escalera progresiva equilibrando fluidez (12-24 fps reales sin saltos) y nitidez,
-// sin usar `cr_threshold` (que corrompe bloques estáticos con transparencia en libwebp_anim).
+// Escalera de alta definición que agota primero múltiples niveles en 512px, 448px y 384px
+// antes de reducir resolución. En q < 68 usa preset `default` (deblocking VP8 completo)
+// y desactiva `unsharp` para evitar macrobloques cuadrados / efecto pixeleado.
 const ANIMATED_QUALITY_LADDER = [
-  { size: 512, fps: 24, q: 80, sharpen: 0.32, denoise: false, weight: 1.15 },
-  { size: 512, fps: 20, q: 76, sharpen: 0.34, denoise: false, weight: 0.90 },
-  { size: 512, fps: 15, q: 72, sharpen: 0.35, denoise: false, weight: 0.65 },
-  { size: 448, fps: 15, q: 66, sharpen: 0.36, denoise: false, weight: 0.48 },
-  { size: 384, fps: 15, q: 60, sharpen: 0.36, denoise: true,  weight: 0.35 },
-  { size: 384, fps: 15, q: 50, sharpen: 0.38, denoise: true,  weight: 0.27 },
-  { size: 352, fps: 15, q: 44, sharpen: 0.38, denoise: true,  weight: 0.21 },
-  { size: 320, fps: 15, q: 40, sharpen: 0.40, denoise: true,  weight: 0.165 },
-  { size: 288, fps: 12, q: 36, sharpen: 0.40, denoise: true,  weight: 0.120 },
-  { size: 256, fps: 12, q: 32, sharpen: 0.40, denoise: true,  weight: 0.090 },
-  { size: 240, fps: 12, q: 28, sharpen: 0.40, denoise: true,  weight: 0.070 },
-  { size: 224, fps: 10, q: 24, sharpen: 0.40, denoise: true,  weight: 0.050 },
+  { size: 512, fps: 24, q: 82, preset: 'picture', sharpen: 0.25, denoise: false, weight: 1.30 },
+  { size: 512, fps: 20, q: 78, preset: 'picture', sharpen: 0.25, denoise: false, weight: 1.00 },
+  { size: 512, fps: 15, q: 74, preset: 'picture', sharpen: 0.22, denoise: false, weight: 0.74 },
+  { size: 512, fps: 15, q: 64, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.56 },
+  { size: 512, fps: 12, q: 56, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.42 },
+  { size: 512, fps: 12, q: 46, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.34 },
+  { size: 448, fps: 15, q: 56, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.31 },
+  { size: 448, fps: 12, q: 48, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.26 },
+  { size: 448, fps: 12, q: 40, preset: 'default', sharpen: 0.00, denoise: false, weight: 0.22 },
+  { size: 416, fps: 12, q: 42, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.19 },
+  { size: 384, fps: 12, q: 44, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.165 },
+  { size: 384, fps: 12, q: 36, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.140 },
+  { size: 352, fps: 12, q: 36, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.118 },
+  { size: 320, fps: 12, q: 34, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.098 },
+  { size: 288, fps: 11, q: 30, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.075 },
+  { size: 256, fps: 10, q: 26, preset: 'default', sharpen: 0.00, denoise: true,  weight: 0.052 },
 ];
 
-function pickInitialAnimatedIndex(durationSec) {
+const PROBE_REFERENCE_INDEX = 3; // 512px @ 15fps q=64 (weight 0.56)
+
+function fallbackStartIndex(durationSec) {
   if (durationSec <= 4) return 0;
-  if (durationSec <= 8) return 1;
-  if (durationSec <= 14) return 2;
-  if (durationSec <= 22) return 3;
-  if (durationSec <= 35) return 5;
+  if (durationSec <= 7) return 1;
+  if (durationSec <= 12) return 2;
+  if (durationSec <= 20) return 3;
+  if (durationSec <= 35) return 4;
   return 6;
+}
+
+/**
+ * Mide en ~0.3s la complejidad visual real de un fragmento representativo del video
+ * para arrancar directamente en la máxima resolución (`512px` / `448px` / `384px`)
+ * que aproveche el presupuesto de ~1 MB sin degradar videos limpios/anime.
+ */
+async function probeAnimatedStartIndex(
+  inputPath,
+  effectiveSeconds,
+  mode,
+  sourceFps,
+  animCodec,
+) {
+  if (effectiveSeconds <= 10) return fallbackStartIndex(effectiveSeconds);
+
+  const probeOut = uniqueTmpPath('stk_probe', 'webp');
+  try {
+    const refPreset = ANIMATED_QUALITY_LADDER[PROBE_REFERENCE_INDEX];
+    const probeDur = Math.min(3, Math.max(1.5, effectiveSeconds * 0.2));
+    const probeStart = Math.max(0, effectiveSeconds * 0.35);
+    const vf = buildVideoFilter(refPreset.size, mode, {
+      fps: resolveSmoothFps(refPreset.fps, sourceFps),
+      pixelFormat: 'yuva420p',
+      sharpen: 0,
+      denoise: false,
+    });
+    const sample = await runFfmpegConvert(
+      inputPath,
+      probeOut,
+      [
+        '-t', probeDur.toFixed(2),
+        '-an',
+        '-c:v', animCodec,
+        '-loop', '0',
+        '-preset', 'default',
+        '-compression_level', '4',
+        '-quality', String(refPreset.q),
+        '-vf', vf,
+      ],
+      ['-ss', probeStart.toFixed(2)],
+    );
+    if (!isValidWebp(sample) || !sample.length) {
+      return fallbackStartIndex(effectiveSeconds);
+    }
+
+    const estimatedFullBytes = sample.length * (effectiveSeconds / probeDur);
+    const neededWeight =
+      refPreset.weight / Math.max(0.25, estimatedFullBytes / MAX_ANIMATED_WEBP_BYTES);
+
+    let start = 2;
+    while (
+      start < ANIMATED_QUALITY_LADDER.length - 1 &&
+      ANIMATED_QUALITY_LADDER[start].weight > neededWeight * 1.06
+    ) {
+      start++;
+    }
+    return start;
+  } catch {
+    return fallbackStartIndex(effectiveSeconds);
+  } finally {
+    await cleanUp(probeOut);
+  }
 }
 
 /**
  * Convierte imagen, GIF o video a WebP fluido y de alta nitidez optimizado para WhatsApp.
  * - Estático: 512x512 WebP sin pérdida (VP8L RGB 4:4:4) primero, con respaldo lossy de alta calidad
  *   manteniendo siempre 512x512 (soporta modos: default, crop, circle).
- * - Animado: hasta 60s máx usando `libwebp_anim` + preset `picture` con cadencia fluida (12-24 fps)
- *   alineada al FPS original y salto adaptativo guiado por peso bajo ~1 MB.
+ * - Animado: hasta 60s máx con sondeo rápido de complejidad, priorizando 512x512 / 448x448 / 384x384,
+ *   cadencia fluida (11-24 fps) y deblocking limpio sin pixelado bajo ~1 MB.
  */
 async function createSticker(
   mediaBuffer,
@@ -350,10 +420,10 @@ async function createSticker(
     if (!isAnimated) {
       await fs.promises.writeFile(tmpIn, input);
       const staticPresets = [
-        { size: 512, lossless: true, q: 100, sharpen: 0.30, pixelFormat: 'bgra' },
-        { size: 512, lossless: false, q: 95, sharpen: 0.35, pixelFormat: 'yuva420p' },
-        { size: 512, lossless: false, q: 86, sharpen: 0.35, pixelFormat: 'yuva420p' },
-        { size: 512, lossless: false, q: 76, sharpen: 0.35, pixelFormat: 'yuva420p' },
+        { size: 512, lossless: true, q: 100, sharpen: 0.22, pixelFormat: 'bgra' },
+        { size: 512, lossless: false, q: 95, sharpen: 0.25, pixelFormat: 'yuva420p' },
+        { size: 512, lossless: false, q: 86, sharpen: 0.25, pixelFormat: 'yuva420p' },
+        { size: 512, lossless: false, q: 76, sharpen: 0.25, pixelFormat: 'yuva420p' },
       ];
 
       let best = null;
@@ -418,11 +488,8 @@ async function createSticker(
     );
     const animCodec = await getAnimatedWebpCodec();
 
-    let idx = pickInitialAnimatedIndex(effectiveSeconds);
-    let smallest = null;
-
-    while (idx < ANIMATED_QUALITY_LADDER.length) {
-      const preset = ANIMATED_QUALITY_LADDER[idx];
+    const encodeAtIndex = async (tierIdx) => {
+      const preset = ANIMATED_QUALITY_LADDER[tierIdx];
       const effectiveFps = resolveSmoothFps(preset.fps, sourceFps);
       const vf = buildVideoFilter(preset.size, mode, {
         fps: effectiveFps,
@@ -430,7 +497,7 @@ async function createSticker(
         sharpen: preset.sharpen,
         denoise: preset.denoise,
       });
-      const out = await runFfmpegConvert(
+      return runFfmpegConvert(
         ffmpegInput,
         tmpOut,
         [
@@ -438,20 +505,59 @@ async function createSticker(
           '-an',
           '-c:v', animCodec,
           '-loop', '0',
-          '-preset', 'picture',
-          '-compression_level', '4',
+          '-preset', preset.preset,
+          '-compression_level', '5',
           '-quality', String(preset.q),
           '-vf', vf,
         ],
         inputArgs,
       );
+    };
+
+    let idx = demuxed
+      ? fallbackStartIndex(effectiveSeconds)
+      : await probeAnimatedStartIndex(
+          ffmpegInput,
+          effectiveSeconds,
+          mode,
+          sourceFps,
+          animCodec,
+        );
+    let smallest = null;
+    let firstAttempt = true;
+
+    while (idx < ANIMATED_QUALITY_LADDER.length) {
+      const preset = ANIMATED_QUALITY_LADDER[idx];
+      const out = await encodeAtIndex(idx);
 
       if (isValidWebp(out)) {
         if (!smallest || out.length < smallest.length) smallest = out;
-        if (out.length <= MAX_ANIMATED_WEBP_BYTES) return out;
 
+        if (out.length <= MAX_ANIMATED_WEBP_BYTES) {
+          // Si el primer intento sobró mucho presupuesto (<62% de ~1 MB) y hay un escalón
+          // de mayor resolución/calidad arriba, probamos subir para no perder nitidez.
+          if (firstAttempt && idx > 2 && out.length < MAX_ANIMATED_WEBP_BYTES * 0.62) {
+            const headroom = MAX_ANIMATED_WEBP_BYTES / Math.max(1, out.length);
+            const boostWeight = preset.weight * headroom * 0.90;
+            let upIdx = idx;
+            while (upIdx > 2 && ANIMATED_QUALITY_LADDER[upIdx - 1].weight <= boostWeight) {
+              upIdx--;
+            }
+            if (upIdx < idx) {
+              try {
+                const upgraded = await encodeAtIndex(upIdx);
+                if (isValidWebp(upgraded) && upgraded.length <= MAX_ANIMATED_WEBP_BYTES) {
+                  return upgraded;
+                }
+              } catch {}
+            }
+          }
+          return out;
+        }
+
+        firstAttempt = false;
         const overshoot = out.length / MAX_ANIMATED_WEBP_BYTES;
-        const targetWeight = preset.weight / (overshoot * 1.06);
+        const targetWeight = preset.weight / (overshoot * 1.03);
         let nextIdx = idx + 1;
         while (
           nextIdx < ANIMATED_QUALITY_LADDER.length - 1 &&
@@ -461,6 +567,7 @@ async function createSticker(
         }
         idx = nextIdx;
       } else {
+        firstAttempt = false;
         idx++;
       }
     }
