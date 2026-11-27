@@ -612,8 +612,8 @@ export function buildCommand(executable, targetOrEpisodeId, options) {
     command.push('--srz', target.id, '-e', opts.episodeSelection)
     if (dubList.length > 1) command.push('--dlVideoOnce')
   } else {
-    // AniDL usa -e para object IDs modernos (9 caracteres, p. ej. G123ABC45) y --extid para IDs legacy más largos.
-    const idFlag = target.id.length > 9 ? '--extid' : '-e'
+    // Usar siempre -e: --extid no seleccionaba los episodios.
+    const idFlag = '-e'
     command.push(idFlag, target.id)
   }
 
