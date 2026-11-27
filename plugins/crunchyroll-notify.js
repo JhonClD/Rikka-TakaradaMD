@@ -601,7 +601,7 @@ let cronRunning = false
 function stopCron() {
   if (cronTimer) { clearInterval(cronTimer); cronTimer = null }
 }
-function getConn() { return storedConn || global.conn || null }
+function getConn() { return global.conn || storedConn || null }
 
 function startHealthCheck() {
   if (healthTimer) return

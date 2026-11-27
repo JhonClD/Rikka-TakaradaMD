@@ -99,6 +99,20 @@ global.tioSourceStatus    = global.tioSourceStatus    || {
   latanime: { status: 'pendiente', count: 0, at: 0, error: null },
 }
 
+// Socket vivo: main.js guarda el socket actual en global.conn y lo reemplaza
+// por uno nuevo en cada reconexión. global.tioConn es solo un respaldo que se
+// actualiza cuando llega un mensaje o arranca el sondeo, así que tras una
+// reconexión silenciosa puede seguir apuntando al socket viejo ya cerrado:
+// el bot se ve "conectado" pero cada envío de tioanime falla con
+// "Connection Closed" (27 nov 2026). Resolver el socket en cada envío.
+function socketVivo() {
+  const actual = global.conn
+  if (actual && typeof actual.sendMessage === 'function') return actual
+  const respaldo = global.tioConn
+  if (respaldo && typeof respaldo.sendMessage === 'function') return respaldo
+  return null
+}
+
 async function reportTioError(conn, context, error) {
   const message = error instanceof Error ? error.message : String(error || 'Error desconocido')
   const stack = error instanceof Error && error.stack
@@ -110,7 +124,7 @@ async function reportTioError(conn, context, error) {
     `💬 *Mensaje:* ${message}`,
     stack && `\n\`\`\`\n${stack}\n\`\`\``,
   ].filter(Boolean).join('\n')
-  const target = conn || global.tioConn
+  const target = socketVivo() || conn || global.tioConn
   if (!target?.sendMessage) {
     console.error(`[tioanime-notify] ${context}: ${message}`)
     return
@@ -1602,7 +1616,7 @@ async function procesarCola() {
 
       while (intentos < MAX_REINTENTOS && !exito) {
         intentos++
-        const connActivo = global.tioConn
+        const connActivo = socketVivo()
         if (!connActivo) {
           // Sin conexión no se puede trabajar: pausar la cola y reanudar en 5 min
           // (el ítem queda en cabeza) en lugar de girar en falso para siempre.
@@ -1671,7 +1685,7 @@ async function procesarCola() {
             if (!manual) registrarFalloEpisodio(ep.id)
             if (!err.tioRecipientNoticeSent) {
               try {
-                const connErr = global.tioConn
+                const connErr = socketVivo()
                 for (const recipient of recipients) {
                   if (connErr) await connErr.sendMessage(recipient, { text: `❌ Error enviando *${ep.titulo}* ep *${zeroPad(ep.epNum)}*:\n${err.message}` })
                 }
@@ -1774,9 +1788,10 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
   // chats creaba y destruía N veces seguidas el sondeo en cada arranque.
   const cambioIntervalo = global.tioCentralTimerInterval !== intervalSec
   if (global.tioCentralTimer && !cambioIntervalo) {
-    if (checkNow && global.tioConn) {
-      checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
-        void reportTioError(global.tioConn, 'Sondeo inicial central', err)
+    const connSondeo = socketVivo()
+    if (checkNow && connSondeo) {
+      checkNuevosEpisodios(CENTRAL_CHAT_ID, connSondeo).catch(err => {
+        void reportTioError(connSondeo, 'Sondeo inicial central', err)
       })
     }
     return
@@ -1784,15 +1799,17 @@ function iniciarSondeoCentral(conn, intervalSec, checkNow = true) {
   if (global.tioCentralTimer) clearInterval(global.tioCentralTimer)
   global.tioCentralTimer = setInterval(() => {
     global.tioNextCheckAt = Date.now() + intervalSec * 1000
-    if (global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
-      void reportTioError(global.tioConn, 'Sondeo automático central', err)
+    const connSondeo = socketVivo()
+    if (connSondeo) checkNuevosEpisodios(CENTRAL_CHAT_ID, connSondeo).catch(err => {
+      void reportTioError(connSondeo, 'Sondeo automático central', err)
     })
   }, intervalSec * 1000)
   if (typeof global.tioCentralTimer.unref === 'function') global.tioCentralTimer.unref()
   global.tioCentralTimerInterval = intervalSec
   global.tioNextCheckAt = Date.now() + intervalSec * 1000
-  if (checkNow && global.tioConn) checkNuevosEpisodios(CENTRAL_CHAT_ID, global.tioConn).catch(err => {
-    void reportTioError(global.tioConn, 'Sondeo inicial central', err)
+  const connSondeo = socketVivo()
+  if (checkNow && connSondeo) checkNuevosEpisodios(CENTRAL_CHAT_ID, connSondeo).catch(err => {
+    void reportTioError(connSondeo, 'Sondeo inicial central', err)
   })
 }
 
@@ -1873,7 +1890,7 @@ function restaurarNotificadores(conn) {
 
 if (!global.tioWatchdog) {
   global.tioWatchdog = setInterval(() => {
-    const conn = global.tioConn
+    const conn = socketVivo()
     if (!conn) return
     const state = loadState()
     for (const chatId of Object.keys(state)) {

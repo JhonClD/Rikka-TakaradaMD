@@ -36,6 +36,33 @@ import {
 
 patchBaileysSourceFiles();
 
+// ─── Log a archivo ────────────────────────────────────────────────────────────
+// La salida del terminal del panel se pierde al reiniciar: sin un log guardado
+// la caída del 27 nov 2026 solo se pudo reconstruir desde el scrollback.
+// Se guarda en logs/bot.log (máx. ~5 MB, luego rota a bot.log.1).
+const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024;
+const LOG_FILE = join(process.cwd(), 'logs', 'bot.log');
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+function appendBotLog(line) {
+  try {
+    const dir = join(process.cwd(), 'logs');
+    if (!existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_FILE_MAX_BYTES) {
+      try { fs.renameSync(LOG_FILE, `${LOG_FILE}.1`); } catch { /* seguir sin rotar */ }
+    }
+    fs.appendFileSync(LOG_FILE, `${line}\n`);
+  } catch { /* el log nunca debe tumbar el bot */ }
+}
+for (const method of ['log', 'info', 'warn', 'error']) {
+  const original = console[method].bind(console);
+  console[method] = (...args) => {
+    original(...args);
+    try {
+      appendBotLog(`[${new Date().toISOString()}] ${format(...args).replace(ANSI_RE, '')}`);
+    } catch { /* ignorar */ }
+  };
+}
+
 const {
   Browsers,
   DEFAULT_CONNECTION_CONFIG,
@@ -626,6 +653,16 @@ async function connectionUpdate(update) {
     lastOpenedAt = Date.now();
     decryptFailureMonitor.reset();
     ensureBotJid(global.conn);
+    // Refrescar las referencias de socket que guardan los plugins
+    // (tioanime-notify, dbs-notify, jk-notify): tras una reconexión
+    // global.conn es un socket nuevo y el viejo queda cerrado; sin esto los
+    // sondeos seguían enviando por el socket viejo con "Connection Closed"
+    // aunque el bot ya estaba reconectado (27 nov 2026).
+    if (global.conn) {
+      global.tioConn = global.conn;
+      global.dbsConn = global.conn;
+      global.jkConn = global.conn;
+    }
     for (const key of Object.keys(errorCounters)) delete errorCounters[key];
     clearPendingReconnect();
     if (recoveredAfter >= RECONNECT_POLICY.alertAfterAttempts) {
