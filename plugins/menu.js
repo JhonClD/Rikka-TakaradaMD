@@ -92,6 +92,7 @@ ${readMore}
 ┃ ⟡ *${command('animev1ep')}* | *${command('animev1dl')}* _<ep> [sub|dub]_
 ┃ ⟡ *${command('animev1help')}* | *${command('latexample')}* _[N]_
 ┃ ⟡ *${command('nidl')}* _<nombre> [ep] [SUB|DUB] [T2]_
+┃ ⟡ *${command('ani')}* | *${command('anidl')}* _<url Crunchyroll> [opciones]_
 ┃ ⟡ *${command('crlogin')}* _<email> <pass>_ | *${command('crlogout')}*
 ┃ ⟡ *${command('crset')}* | *${command('crrem')}* | *${command('crstatus')}*
 ┃ ⟡ *${command('crlist')}* | *${command('crnotify')}*

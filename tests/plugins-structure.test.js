@@ -84,7 +84,7 @@ test('ningún alias de comando lo reclaman dos plugins', () => {
 });
 
 test('los plugins que ejecutan comandos del sistema están reservados al owner', () => {
-  const sensibles = ['exec.js', 'npm-install.js', 'owner-update.js', 'deps-check.js'];
+  const sensibles = ['exec.js', 'npm-install.js', 'owner-update.js', 'deps-check.js', 'anidl.js'];
   for (const file of sensibles) {
     const source = fs.readFileSync(path.join(PLUGINS, file), 'utf8');
     const gated = /handler\.(owner|rowner)\s*=\s*true/.test(source) || /isOwner/.test(source);
