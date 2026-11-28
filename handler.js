@@ -197,6 +197,13 @@ function parseMessageTimestampMs(raw) {
 }
 
 export async function handler(chatUpdate) {
+  // DIAG TEMPORAL (27 nov 2026): los comandos no llegan al handler; registrar
+  // cada upsert que emita Baileys para ver si el problema es recepción o filtro.
+  try {
+    const first = chatUpdate?.messages?.[0];
+    const texto = String(first?.message?.conversation || first?.message?.extendedTextMessage?.text || '').slice(0, 60);
+    console.log(`[debug-upsert] type=${chatUpdate?.type} n=${chatUpdate?.messages?.length || 0} de=${first?.key?.remoteJid || ''} id=${first?.key?.id || ''} texto=${texto}`);
+  } catch {}
   if (!chatUpdate?.messages?.length) return;
 
   // Baileys marca mensajes en tiempo real como `type === 'notify'` y la cola
@@ -209,7 +216,11 @@ export async function handler(chatUpdate) {
       const msgTs = parseMessageTimestampMs(msg?.messageTimestamp);
       return msgTs === 0 || msgTs >= connectionTime - 60000;
     });
-    if (!chatUpdate.messages.length) return;
+    if (!chatUpdate.messages.length) {
+      // DIAG TEMPORAL: ver si los mensajes llegan como 'append' y se descartan por viejos.
+      console.log('[debug-upsert] upsert no-live descartado entero por antigüedad');
+      return;
+    }
   }
 
   this.pushMessage(chatUpdate.messages).catch(console.error);
@@ -224,7 +235,11 @@ async function handleMessage(rawMsg, chatUpdate, isLive = false) {
   let m = rawMsg;
   if (!m) return;
 
-  if (!isValidMessage(m, { isLive })) return;
+  if (!isValidMessage(m, { isLive })) {
+    // DIAG TEMPORAL: ver si los mensajes llegan pero isValidMessage los rechaza.
+    console.log(`[debug-upsert] mensaje rechazado por isValidMessage de=${m.key?.remoteJid || ''} id=${m.key?.id || ''} live=${isLive} baileys=${!!m.isBaileys}`);
+    return;
+  }
   const msgText = extractMessageText(m);
   const botJid = this?.user?.jid || (this?.user?.id ? this.decodeJid?.(this.user.id) : '') || '';
   const rawSender = m.key?.fromMe
